@@ -1,10 +1,9 @@
-#stripped version for makepad with its libc dependency removed
 [package]
 name = "makepad-objc-sys"
 version = "0.1.0"
-authors = ["Steven Sheldon"]
+authors = ["Makepad <info@makepad.nl>", "Steven Sheldon"]
 description = "Objective-C Runtime bindings and wrapper for Rust."
 keywords = ["objective-c", "osx", "ios", "cocoa", "uikit"]
 license = "MIT"
 repository = "http://github.com/SSheldon/rust-objc"
-
+metadata.makepad-auto-version = "x"

@@ -1,12 +1,11 @@
 [package]
-name = "makepad-miniz"
+name = "makepad-toml-parser"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad fork of miniz-oxide with no deps"
+description = "Makepad TOML parser"
 license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "x"
 
-[features] 
-
 [dependencies]
+

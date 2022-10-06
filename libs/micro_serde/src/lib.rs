@@ -8,6 +8,3 @@ pub use crate::serde_json::*;
 
 mod serde_ron;
 pub use crate::serde_ron::*;
-
-mod toml;
-pub use crate::toml::*;

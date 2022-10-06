@@ -1,11 +1,12 @@
 [package]
 name = "makepad-micro-serde"
 version = "0.1.0"
-authors = ["makepad <info@makepad.nl>"]
-license = "MIT OR Apache-2.0"
-description = "microserde."
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad micro replacement for serde"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "x"
 
 [dependencies]
-makepad-micro-serde-derive = { path = "derive", version = "0.1" }
+makepad-micro-serde-derive = { path = "derive", version = "0.1.0" }
 

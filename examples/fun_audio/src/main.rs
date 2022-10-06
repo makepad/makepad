@@ -1538,7 +1538,7 @@ impl App {
             let nodes = iron_fish.settings.live_read();
             let data = nodes.to_cbor(0).unwrap();
             let data = makepad_miniz::compress_to_vec(&data, 10);
-            let data = makepad_miniz::base64_encode(&data, &makepad_miniz::BASE64_URL_SAFE);
+            let data = makepad_base64::base64_encode(&data, &makepad_base64::BASE64_URL_SAFE);
             log!("Saving preset {}", file_name);
             let mut file = File::create(&file_name).unwrap();
             file.write_all(&data).unwrap();
@@ -1547,7 +1547,7 @@ impl App {
             log!("Loading preset {}", file_name);
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
-            if let Ok(data) = makepad_miniz::base64_decode(&data){
+            if let Ok(data) = makepad_base64::base64_decode(&data){
                 if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
                     let mut nodes = Vec::new();
                     nodes.from_cbor(&data).unwrap();
