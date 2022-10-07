@@ -1,22 +1,23 @@
-[workspace]
-
-members = [
-    "code_editor/range_set",
+workspace.exclude = [
     "code_editor/regex",
+    "code_editor/range_set",
     "code_editor/rope",
     "code_editor/segment",
-    "code_editor/varint",
+    "code_editor/regex",
     "code_editor/ucd",
+    "code_editor/varint"
+]
+
+workspace.members = [
     "examples/numbers", 
     "examples/fractal_zoom", 
     "examples/cmdline_example",
-    "examples/iron_fish",
+    "examples/ironfish",
     "examples/shader",
     "libs/wasm_bridge/test",
     "studio",
     "tools/auto_version",
     "tools/web_server",
     "tools/wasm_strip",
-    "tools/brotli_check",
 ]
 

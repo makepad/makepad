@@ -1,9 +1,9 @@
 [package]
-name = "makepad-example-iron-fish"
+name = "makepad-example-ironfish"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad iron fish example"
+description = "Makepad ironfish example"
 license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "VIAnc08AynpSRwJKkSvBcF1JWy8="
 
@@ -12,7 +12,7 @@ makepad-component = { path = "../../component", version = "0.1.0" }
 makepad-media = { path = "../../media", version = "0.1.0" }
 makepad-miniz = { path = "../../libs/miniz", version = "0.1.0" }
 makepad-base64 = { path = "../../libs/base64", version = "0.1.0" }
-
+makepad-varint = {path = "../../code_editor/varint", version = "0.1.0"} 
 [features]
 nightly = ["makepad-component/nightly", "makepad-media/nightly"]
 
