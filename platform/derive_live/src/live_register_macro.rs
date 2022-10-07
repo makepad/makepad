@@ -6,7 +6,7 @@ use {
         Span,
         Delimiter,
     },
-    makepad_macro_lib::{TokenBuilder, TokenParser},
+    makepad_micro_proc_macro::{TokenBuilder, TokenParser},
     std::fmt::Write
 };
 
