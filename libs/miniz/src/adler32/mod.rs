@@ -42,7 +42,7 @@ use std::io::{self, BufRead};
 /// Basic, piecewise checksum calculation:
 ///
 /// ```
-/// use adler::Adler32;
+/// use makepad_miniz::adler32::Adler32;
 ///
 /// let mut adler = Adler32::new();
 ///
@@ -56,7 +56,7 @@ use std::io::{self, BufRead};
 ///
 /// ```
 /// use std::hash::Hash;
-/// use adler::Adler32;
+/// use makepad_miniz::adler32::Adler32;
 ///
 /// #[derive(Hash)]
 /// struct Data {
@@ -104,12 +104,12 @@ impl Adler32 {
     /// # Example
     ///
     /// ```
-    /// # use adler::Adler32;
+    /// # use makepad_miniz::adler32::Adler32;
     /// let parts = [
     ///     "rust",
     ///     "acean",
     /// ];
-    /// let whole = adler::adler32_slice(b"rustacean");
+    /// let whole = makepad_miniz::adler32::adler32_slice(b"rustacean");
     ///
     /// let mut sum = Adler32::new();
     /// sum.write_slice(parts[0].as_bytes());
@@ -150,8 +150,8 @@ impl Default for Adler32 {
         Adler32 { a: 1, b: 0 }
     }
 }
-/*
-impl Hasher for Adler32 {
+
+impl std::hash::Hasher for Adler32 {
     #[inline]
     fn finish(&self) -> u64 {
         u64::from(self.checksum())
@@ -160,7 +160,7 @@ impl Hasher for Adler32 {
     fn write(&mut self, bytes: &[u8]) {
         self.write_slice(bytes);
     }
-}*/
+}
 
 /// Calculates the Adler-32 checksum of a byte slice.
 ///

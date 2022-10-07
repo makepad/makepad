@@ -173,11 +173,11 @@ pub struct DrawShaderInput {
 }
 
 
-#[cfg(any(target_os = "linux", target_arch = "wasm32", test))]
+#[cfg(any(target_os = "linux", target_arch = "wasm32"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL;
 #[cfg(any(target_os = "macos", test))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
 
 impl DrawShaderInputs {

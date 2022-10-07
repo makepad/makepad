@@ -15,11 +15,11 @@ pub mod swizzle;
 pub mod util;
 pub mod generate;
 
-#[cfg(any(target_os = "linux", target_arch = "wasm32", test))]
+//#[cfg(any(target_os = "linux", target_arch = "wasm32", test))]
 pub mod generate_glsl;
-#[cfg(any(target_os = "macos", test))]
+//#[cfg(any(target_os = "macos", test))]
 pub mod generate_metal;
-#[cfg(any(target_os = "windows", test))]
+//#[cfg(any(target_os = "windows", test))]
 pub mod generate_hlsl;
 
 pub use makepad_live_compiler;

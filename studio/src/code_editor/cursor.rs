@@ -61,7 +61,8 @@ impl Cursor {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, Position};
+    /// use makepad_studio::code_editor::{Cursor};
+    /// use makepad_editor_core::{Position};
     /// 
     /// let cursor = Cursor {
     ///     head: Position { line: 2, column: 2 },
@@ -81,7 +82,8 @@ impl Cursor {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, Position};
+    /// use makepad_studio::code_editor::{Cursor};
+    /// use makepad_editor_core::{Position};
     /// 
     /// let cursor = Cursor {
     ///     head: Position { line: 2, column: 2 },
@@ -109,7 +111,8 @@ impl Cursor {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, Position, Text};
+    /// use makepad_studio::code_editor::{Cursor};
+    /// use makepad_editor_core::{Position, Text};
     /// 
     /// let text = Text::from("abc");
     /// let mut cursor = Cursor {
@@ -158,7 +161,8 @@ impl Cursor {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, Position, Text};
+    /// use makepad_studio::code_editor::{Cursor};
+    /// use makepad_editor_core::{Position, Text};
     /// 
     /// let text = Text::from("abc");
     /// let mut cursor = Cursor {
@@ -205,7 +209,8 @@ impl Cursor {
     /// `tail` is set to the same position as the `head`.
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, Position, Text};
+    /// use makepad_studio::code_editor::{Cursor};
+    /// use makepad_editor_core::{Position, Text};
     /// 
     /// let text = Text::from("abc\ndef\nghi");
     /// let mut cursor = Cursor {
@@ -249,7 +254,8 @@ impl Cursor {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, Position, Text};
+    /// use makepad_studio::code_editor::{Cursor};
+    /// use makepad_editor_core::{Position, Text};
     /// 
     /// let text = Text::from("abc\ndef\nghi");
     /// let mut cursor = Cursor {
@@ -289,7 +295,8 @@ impl Cursor {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, Position};
+    /// use makepad_studio::code_editor::{Cursor};
+    /// use makepad_editor_core::{Position};
     /// 
     /// let mut cursor = Cursor {
     ///     head: Position::origin(),
@@ -323,7 +330,8 @@ impl Cursor {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{delta, Cursor, Delta, Position, Size, Text};
+    /// use makepad_studio::code_editor::{Cursor};
+    /// use makepad_editor_core::{delta, Delta, Position, Size, Text};
     /// 
     /// let mut cursor = Cursor {
     ///     head: Position { line: 1, column: 1 },
