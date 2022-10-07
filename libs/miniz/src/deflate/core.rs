@@ -395,13 +395,13 @@ fn memset<T: Copy>(slice: &mut [T], val: T) {
         *x = val
     }
 }
-
+/*
 #[cfg(test)]
 #[inline]
 fn write_u16_le(val: u16, slice: &mut [u8], pos: usize) {
     slice[pos] = val as u8;
     slice[pos + 1] = (val >> 8) as u8;
-}
+}*/
 
 // Read the two bytes starting at pos and interpret them as an u16.
 #[inline]

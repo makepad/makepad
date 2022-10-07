@@ -69,7 +69,8 @@ impl CursorSet {
     /// # Examples
     ///
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, CursorSet, Position};
+    /// use makepad_studio::code_editor::{Cursor, CursorSet};
+    /// use makepad_editor_core::{Position};
     ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
@@ -98,7 +99,8 @@ impl CursorSet {
     /// # Examples
     ///
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, CursorSet, Position};
+    /// use makepad_studio::code_editor::{Cursor, CursorSet};
+    /// use makepad_editor_core::{Position};
     ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
@@ -124,7 +126,8 @@ impl CursorSet {
     /// # Examples
     ///
     /// ```
-    /// use makepad_studio::code_editor::{range_set::Span, CursorSet, Position, Size, Text};
+    /// use makepad_studio::code_editor::{CursorSet};
+    /// use makepad_editor_core::{range_set::Span, Position, Size, Text};
     ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
@@ -170,7 +173,8 @@ impl CursorSet {
     /// # Examples
     ///
     /// ```
-    /// use makepad_studio::code_editor::{CursorSet, Position, Size};
+    /// use makepad_studio::code_editor::{CursorSet};
+    /// use makepad_editor_core::{Position, Size};
     ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
@@ -194,7 +198,8 @@ impl CursorSet {
     /// # Examples
     ///
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, CursorSet, Position, Text};
+    /// use makepad_studio::code_editor::{Cursor, CursorSet};
+    /// use makepad_editor_core::{Position, Text};
     ///
     /// let mut cursors = CursorSet::new();
     /// let text = Text::from("abc\ndef");
@@ -234,7 +239,8 @@ impl CursorSet {
     /// # Examples
     ///
     /// ```
-    /// use makepad_studio::code_editor::{Cursor, CursorSet, Position};
+    /// use makepad_studio::code_editor::{Cursor, CursorSet};
+    /// use makepad_editor_core::{Position};
     ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
