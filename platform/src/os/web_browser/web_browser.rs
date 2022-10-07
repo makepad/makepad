@@ -630,3 +630,6 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
     msg.push_str(&out);
     msg.release_ownership()
 }
+
+#[no_mangle]
+pub static mut BASE_ADDR: usize = 10;

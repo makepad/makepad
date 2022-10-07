@@ -1,6 +1,6 @@
  
 use proc_macro::{TokenStream};
-use makepad_macro_lib::*;
+use makepad_micro_proc_macro::*;
 
 pub fn derive_ser_ron_impl(input: TokenStream) -> TokenStream {
 

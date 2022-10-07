@@ -1,6 +1,6 @@
 use proc_macro::{TokenStream};
 
-use makepad_macro_lib::{TokenBuilder, TokenParser};
+use makepad_micro_proc_macro::{TokenBuilder, TokenParser};
 
 pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
     
