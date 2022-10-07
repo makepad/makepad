@@ -43,8 +43,6 @@ const SOURCE: &'static str = r#"
     }
 "#;
 
-
-
 const GLSL_OUTPUT: &'static str = r#"
     VERTEXSHADER
     // Uniform block user
@@ -313,10 +311,10 @@ const HLSL_OUTPUT: &'static str = r#"
 "#;
 
 use makepad_live_parser::*;
-use makepad_shader_compiler::shaderregistry::ShaderRegistry;
-use makepad_shader_compiler::shaderast::DrawShaderPtr;
-use makepad_shader_compiler::shaderast::DrawShaderConstTable;
-use makepad_shader_compiler::shaderast::Ty;
+use makepad_shader_compiler::shader_registry::ShaderRegistry;
+use makepad_shader_compiler::shader_ast::DrawShaderPtr;
+use makepad_shader_compiler::shader_ast::DrawShaderConstTable;
+use makepad_shader_compiler::shader_ast::Ty;
 use makepad_shader_compiler::generate_glsl;
 use makepad_shader_compiler::generate_hlsl;
 use makepad_shader_compiler::generate_metal;
