@@ -492,6 +492,28 @@ impl<'a> LiveParser<'a> {
                     value: LiveValue::Bool(val)
                 });
             },
+            LiveToken::Punct(id!(-))=>{
+                self.skip_token();
+                match self.peek_token() {
+                    LiveToken::Int(val) => {
+                        self.skip_token();
+                        ld.nodes.push(LiveNode {
+                            origin,
+                            id: prop_id,
+                            value: LiveValue::Int64(-val)
+                        });
+                    },
+                    LiveToken::Float(val) => {
+                        self.skip_token();
+                        ld.nodes.push(LiveNode {
+                            origin,
+                            id: prop_id,
+                            value: LiveValue::Float64(-val)
+                        });
+                    },
+                    _=>return Err(self.error(format!("Expected int or float after -"), live_error_origin!()))
+                }
+            }
             LiveToken::Int(val) => {
                 self.skip_token();
                 ld.nodes.push(LiveNode {

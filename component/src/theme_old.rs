@@ -6,14 +6,14 @@ live_register!{
     FONT_DATA:{
         font_size: 9.0,
         font:{
-            path: "resources/IBMPlexSans-Text.ttf"
+            path: d"resources/IBMPlexSans-Text.ttf"
         }
     }
     
     FONT_LABEL:{
         font_size: 8.5,
         font:{
-            path: "resources/IBMPlexSans-Text.ttf"
+            path: d"resources/IBMPlexSans-Text.ttf"
         }
     }
     
@@ -21,13 +21,13 @@ live_register!{
         font_size: 9.0,
         top_drop: 1.2,
         font:{
-            path: "resources/Ubuntu-R.ttf"
+            path: d"resources/Ubuntu-R.ttf"
         }
     }
     
     FONT_CODE:{
         font: {
-            path: "resources/LiberationMono-Regular.ttf"
+            path: d"resources/LiberationMono-Regular.ttf"
         }
         brightness: 1.1
         font_size: 8.0
