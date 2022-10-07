@@ -10,7 +10,7 @@ members = [
     "examples/numbers", 
     "examples/fractal_zoom", 
     "examples/cmdline_example",
-    "examples/fun_audio",
+    "examples/iron_fish",
     "examples/shader",
     "libs/wasm_bridge/test",
     "studio",
