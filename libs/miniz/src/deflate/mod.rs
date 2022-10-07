@@ -5,7 +5,7 @@
 
 mod buffer;
 pub mod core;
-pub mod stream;
+//pub mod stream;
 use self::core::*;
 
 /// How much processing the compressor should do to compress the data.
