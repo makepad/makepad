@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 
-use makepad_macro_lib::{TokenBuilder, TokenParser, error};
+use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
 
 pub fn generate_ref_cast_api_impl(input:TokenStream)->TokenStream{
 

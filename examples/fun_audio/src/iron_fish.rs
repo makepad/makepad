@@ -916,7 +916,7 @@ impl Default for EnvelopeState {
 impl EnvelopeState {
     fn get_n(&mut self, settings: &EnvelopeSettings, samplerate: f32, total: usize) -> f32 {
         let mut res = 0.0;
-        for i in 0..total{
+        for _ in 0..total{
             res = self.get(settings, samplerate);
         }
         return res;
@@ -1212,7 +1212,7 @@ impl IronFishVoice {
         self.update_note(settings, h, sps_detune_tab, false);
     }
     
-    pub fn compute_one(&mut self, state: &IronFishGlobalVoiceState, settings: &IronFishSettings, touch: f32, lfo: f32, osc1_gain: f32, osc2_gain: f32, mod_envelope: f32) -> f32 {
+    pub fn compute_one(&mut self, state: &IronFishGlobalVoiceState, settings: &IronFishSettings, _touch: f32, lfo: f32, osc1_gain: f32, osc2_gain: f32, mod_envelope: f32) -> f32 {
         // update phases (all are free running, more or lesss)
         self.subosc.tick();
         self.osc1.tick(&state.hypersaw1);
@@ -1242,7 +1242,7 @@ impl IronFishVoice {
     pub fn updatenote(&mut self, frame_count: usize, settings: &IronFishSettings, h: &IronFishGlobalVoiceState, sps_detune_tab: &[f32; 1024]){
         if self.notetime >0.0 {
         self.notetime -=frame_count as f32;
-        if (self.notetime < 0.0) {self.notetime = 0.0};
+        if self.notetime < 0.0 {self.notetime = 0.0};
         let d = self.notetime / self.notetimetotal;
         self.current_notefreq = self.tonote + (self.fromnote-self.tonote) * d;
         //log!("up - {}", self.current_notefreq);
@@ -1289,8 +1289,8 @@ impl IronFishVoice {
         }
         else
         {
-            let mut remaining = frame_count;
-            let mut startidxmut = startidx;
+            let remaining = frame_count;
+            let startidxmut = startidx;
             while remaining > 0
             {
                     let proc = remaining.min(8);

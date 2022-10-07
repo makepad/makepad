@@ -1,6 +1,6 @@
 use proc_macro::{TokenStream};
 
-use makepad_macro_lib::{TokenBuilder, TokenParser, error};
+use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
 
 use crate::live_id::*;
 #[path = "../../src/live_id.rs"]
