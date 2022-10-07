@@ -1,4 +1,5 @@
 #![allow(unused)]
+#![cfg(target_arch = "wasm32")]
 use makepad_wasm_bridge::*;
 
 #[derive(Debug, FromWasm, ToWasm, PartialEq)]
