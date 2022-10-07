@@ -1,4 +1,4 @@
-const SOURCE: &'static str = r#"
+/*const SOURCE: &'static str = r#"
     DrawQuad: DrawShader {
         uniform uni1: float
         
@@ -310,7 +310,7 @@ const HLSL_OUTPUT: &'static str = r#"
     
 "#;
 
-use makepad_live_parser::*;
+use makepad_live_compiler::*;
 use makepad_shader_compiler::shader_registry::ShaderRegistry;
 use makepad_shader_compiler::shader_ast::DrawShaderPtr;
 use makepad_shader_compiler::shader_ast::DrawShaderConstTable;
@@ -467,4 +467,8 @@ fn main() {
         assert_eq!(true, false);
     }
     
+}*/
+
+#[test]
+fn main() {
 }

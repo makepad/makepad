@@ -41,7 +41,7 @@ impl Delta {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Delta, Text};
+    /// use makepad_editor_core::{Delta, Text};
     /// 
     /// let mut text = Text::new();
     /// let delta = Delta::identity();
@@ -69,7 +69,7 @@ impl Delta {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{delta, Delta, Position, OperationRange, Range, Size, Text};
+    /// use makepad_editor_core::{delta, Delta, Position, OperationRange, Range, Size, Text};
     /// 
     /// let mut builder = delta::Builder::new();
     /// builder.retain(Size { line: 1, column: 1 });
@@ -105,7 +105,7 @@ impl Delta {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{delta, Delta, Size, Text};
+    /// use makepad_editor_core::{delta, Delta, Size, Text};
     /// 
     /// let mut builder = delta::Builder::new();
     /// builder.retain(Size { line: 0, column: 3 });
@@ -152,7 +152,7 @@ impl Delta {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{delta, Delta, Size, Text};
+    /// use makepad_editor_core::{delta, Delta, Size, Text};
     /// 
     /// let mut builder = delta::Builder::new();
     /// builder.retain(Size { line: 0, column: 3 });
@@ -297,7 +297,7 @@ impl Delta {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{delta, Delta, Size, Text};
+    /// use makepad_editor_core::{delta, Delta, Size, Text};
     /// 
     /// let mut builder = delta::Builder::new();
     /// builder.retain(Size { line: 0, column: 3 });
@@ -540,7 +540,7 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::delta;
+    /// use makepad_editor_core::delta;
     /// 
     /// let builder = delta::Builder::new();
     /// ```
@@ -557,7 +557,7 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{delta, Size};
+    /// use makepad_editor_core::{delta, Size};
     /// 
     /// let mut builder = delta::Builder::new();
     /// builder.retain(Size { line: 1, column: 1 });
@@ -581,7 +581,7 @@ impl Builder {
     /// of the same kind never appear next to each other.
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{delta, Text};
+    /// use makepad_editor_core::{delta, Text};
     /// 
     /// let mut builder = delta::Builder::new();
     /// builder.insert(Text::from("abc"));
@@ -610,7 +610,7 @@ impl Builder {
     /// appear next to each other.
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{delta, Size};
+    /// use makepad_editor_core::{delta, Size};
     /// 
     /// let mut builder = delta::Builder::new();
     /// builder.delete(Size { line: 1, column: 1 });
@@ -639,7 +639,7 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::delta;
+    /// use makepad_editor_core::delta;
     /// 
     /// let mut builder = delta::Builder::new();
     /// let delta = builder.build();

@@ -10,9 +10,9 @@ The following example demonstrates declaring a class named `MyNumber` that has
 one ivar, a `u32` named `_number` and a `number` method that returns it:
 
 ``` no_run
-# #[macro_use] extern crate objc;
-# use objc::declare::ClassDecl;
-# use objc::runtime::{Class, Object, Sel};
+# #[macro_use] extern crate makepad_objc_sys;
+# use makepad_objc_sys::declare::ClassDecl;
+# use makepad_objc_sys::runtime::{Class, Object, Sel};
 # fn main() {
 let superclass = class!(NSObject);
 let mut decl = ClassDecl::new("MyNumber", superclass).unwrap();
