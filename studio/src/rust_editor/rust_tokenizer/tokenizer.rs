@@ -45,7 +45,7 @@ impl State {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{
+    /// use makepad_studio::rust_editor::rust_tokenizer::{
     ///     full_token::{FullToken, TokenWithLen},
     ///     tokenizer::{Cursor, InitialState, State}
     /// };
@@ -559,7 +559,7 @@ impl<'a> Cursor<'a> {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::tokenizer::Cursor;
+    /// use makepad_studio::rust_editor::rust_tokenizer::tokenizer::Cursor;
     /// 
     /// let mut scratch = String::new();
     /// let cursor = Cursor::new(&['1', '2', '3'], &mut scratch);

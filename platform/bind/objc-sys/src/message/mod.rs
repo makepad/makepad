@@ -83,9 +83,9 @@ pub unsafe trait Message {
 
     # Example
     ``` no_run
-    # #[macro_use] extern crate objc;
-    # use objc::runtime::{BOOL, Class, Object};
-    # use objc::Message;
+    # #[macro_use] extern crate makepad_objc_sys;
+    # use makepad_objc_sys::runtime::{BOOL, Class, Object};
+    # use makepad_objc_sys::Message;
     # fn main() {
     let obj: &Object;
     # obj = unsafe { msg_send![class!(NSObject), new] };

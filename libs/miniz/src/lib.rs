@@ -8,8 +8,8 @@
 //! ## Simple compression/decompression:
 //! ``` rust
 //!
-//! use miniz_oxide::inflate::decompress_to_vec;
-//! use miniz_oxide::deflate::compress_to_vec;
+//! use makepad_miniz::inflate::decompress_to_vec;
+//! use makepad_miniz::deflate::compress_to_vec;
 //!
 //! fn roundtrip(data: &[u8]) {
 //!     let compressed = compress_to_vec(data, 6);

@@ -197,6 +197,7 @@ pub enum NumberGridAction {
 }
 
 pub enum NumberBoxAction {
+    //None
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
@@ -289,7 +290,7 @@ impl NumberGrid{
         
         for (_node_id, action) in actions {
             match action {
-                NumberBoxAction::None=>()
+                //NumberBoxAction::None=>()
             }
         }
     }
