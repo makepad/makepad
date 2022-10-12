@@ -13,6 +13,7 @@ mod sequencer;
 mod display_audio;
 mod piano;
 mod ironfish;
+mod waveguide;
 
 use crate::ironfish::*;
 use crate::piano::*;
@@ -686,8 +687,8 @@ live_register!{
         }        
     }
 
-    FXPanel: FishPanel {
-        label = {bg: {color: (COLOR_FX)}, label = {text: "Effects",}}
+    DelayFXPanel: FishPanel {
+        label = {bg: {color: (COLOR_FX)}, label = {text: "Delay",}}
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
@@ -731,6 +732,63 @@ live_register!{
             }
         }
     }
+
+    ChorusFXPanel: FishPanel {
+        label = {bg: {color: (COLOR_FX)}, label = {text: "Chorus",}}
+        body = {
+            layout: {flow: Right}
+            walk: {width: Fill, height: Fit}
+            chorusmix = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "chorus.mix"
+                    min: 0.0
+                    max: 1.0
+                    label: "Mix"
+                }
+            }
+            chorusdelay = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "chorus.mindelay"
+                    min: 0.0
+                    max: 1.0
+                    label: "Pre"
+
+                }
+            }
+            chorusmod = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "chorus.moddepth"
+                    min: 0.0
+                    max: 1.0
+                    label: "Depth"
+                }
+            }
+            chorusrate = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "chorus.rate"
+                    min: 0.0
+                    max: 1.0
+                    label: "Rate"
+
+                }
+            }
+            chorusphase = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "chorus.phasediff"
+                    min: 0.0
+                    max: 1.0
+                    label: "Phasing"
+
+                }
+            }
+        }
+    }
+
     LFOPanel: FishPanel {
         label = {bg: {color: (COLOR_LFO)}, label = {text: "LFO"}}
         body = {
@@ -1173,7 +1231,8 @@ live_register!{
                 }
                 Frame {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    FXPanel {}
+                    DelayFXPanel {}
+                    ChorusFXPanel {}
                     SequencerPanel {}
                 }
             }
