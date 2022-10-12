@@ -791,8 +791,8 @@ live_register!{
                 slider = {
                     slider: {line_color: (COLOR_FX)}
                     bind: "chorus.feedback"
-                    min: -1.0
-                    max: 1.0
+                    min: -0.9999
+                    max: 0.9999
                     label: "Feedback"
 
                 }
