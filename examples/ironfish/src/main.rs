@@ -786,6 +786,17 @@ live_register!{
 
                 }
             }
+
+            chorusfeedback = InstrumentBipolarSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "chorus.feedback"
+                    min: -1.0
+                    max: 1.0
+                    label: "Feedback"
+
+                }
+            }
         }
     }
 
