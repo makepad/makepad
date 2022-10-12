@@ -12,9 +12,9 @@ use makepad_media::audio_graph::*;
 mod sequencer;
 mod display_audio;
 mod piano;
-mod iron_fish;
+mod ironfish;
 
-use crate::iron_fish::*;
+use crate::ironfish::*;
 use crate::piano::*;
 use crate::sequencer::*;
 use crate::display_audio::*;
@@ -1278,7 +1278,7 @@ impl App {
         makepad_component::live_register(cx);
         makepad_media::live_register(cx);
         crate::display_audio::live_register(cx);
-        crate::iron_fish::live_register(cx);
+        crate::ironfish::live_register(cx);
         crate::piano::live_register(cx);
         crate::sequencer::live_register(cx);
     }
@@ -1295,8 +1295,8 @@ impl App {
         
         if ui.on_construct() {
             ui.cx.start_midi_input();
-            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-            ui.bind_read(&iron_fish.settings.live_read());
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+            ui.bind_read(&ironfish.settings.live_read());
             ui.piano(ids!(piano)).set_key_focus(ui.cx);
         }
         
@@ -1375,8 +1375,8 @@ impl App {
                     }
                 }
             }
-            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-            iron_fish.settings.apply_over(ui.cx, &delta);
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+            ironfish.settings.apply_over(ui.cx, &delta);
             ui.bind_read(&delta);
         }
         
@@ -1428,8 +1428,8 @@ impl App {
                         data1: (3 + ring)as u8,
                         data2: (((bind.value - bind.min) / (bind.max - bind.min)) * 127.0) as u8
                     });
-                    let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-                    iron_fish.settings.apply_over(ui.cx, &delta);
+                    let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+                    ironfish.settings.apply_over(ui.cx, &delta);
                 }
             }
             self.audio_graph.send_midi_1_data(inp.data);
@@ -1451,12 +1451,12 @@ impl App {
         let sequencer = ui.sequencer(ids!(sequencer));
         
         for (btn_x,btn_y,active) in sequencer.on_buttons(){
-            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-            let _s = iron_fish.settings.clone();
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+            let _s = ironfish.settings.clone();
             let bit = 1<<btn_y;
             let act = if active{bit} else{0};
-            let step = iron_fish.settings.sequencer.get_step(btn_x);
-            iron_fish.settings.sequencer.set_step(btn_x, step^bit|act);
+            let step = ironfish.settings.sequencer.get_step(btn_x);
+            ironfish.settings.sequencer.set_step(btn_x, step^bit|act);
         }
         
         if ui.button(ids!(panic)).was_clicked() {
@@ -1465,27 +1465,27 @@ impl App {
         
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.button(ids!(clear_grid)).was_clicked() {
-            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
-                iron_fish.settings.sequencer.set_step(j, 0);
+                ironfish.settings.sequencer.set_step(j, 0);
             }
             sequencer.clear_buttons(ui.cx);
         } 
         
         if ui.button(ids!(grid_down)).was_clicked() {
-            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 //let bv = 1<<j;
-                let step = iron_fish.settings.sequencer.get_step(j);
+                let step = ironfish.settings.sequencer.get_step(j);
                 let mut modstep = step << 1;
                 
                 if (modstep & 1<<16) == 1<<16 { modstep += 1; modstep -= 1<<16};
                 
-                iron_fish.settings.sequencer.set_step(j, modstep);
+                ironfish.settings.sequencer.set_step(j, modstep);
             }                
             
             for j in 0..16 {
-                let val = iron_fish.settings.sequencer.get_step(j);
+                let val = ironfish.settings.sequencer.get_step(j);
                 for i in 0..16 {
                     let bv = 1<<i;                
                     sequencer.update_button(ui.cx,j,i, if val & bv == bv {true} else {false});
@@ -1496,14 +1496,14 @@ impl App {
         let mut reload_sequencer = false;
         
         if ui.button(ids!(grid_up)).was_clicked() {
-            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 //let bv = 1<<j;
-                let step = iron_fish.settings.sequencer.get_step(j);
+                let step = ironfish.settings.sequencer.get_step(j);
                 let mut modstep = step >> 1;
                 if (step & 1) == 1 { modstep += 1<<15;}                                
                 
-                iron_fish.settings.sequencer.set_step(j, modstep);
+                ironfish.settings.sequencer.set_step(j, modstep);
                 
             }                
             reload_sequencer = true;
@@ -1519,9 +1519,9 @@ impl App {
         if ui.button(ids!(save8)).was_clicked() {self.preset(ui.cx, 8, shift);reload_sequencer = true;}
         
         if reload_sequencer{
-            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
-                let val = iron_fish.settings.sequencer.get_step(j);
+                let val = ironfish.settings.sequencer.get_step(j);
                 for i in 0..16 {
                     let bv = 1<<i;                
                     sequencer.update_button(ui.cx,j,i, if val & bv == bv {true} else {false});
@@ -1532,10 +1532,10 @@ impl App {
     }
     
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
-        let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
         let file_name = format!("preset_{}.txt", index);
         if save {
-            let nodes = iron_fish.settings.live_read();
+            let nodes = ironfish.settings.live_read();
             let data = nodes.to_cbor(0).unwrap();
             let data = makepad_miniz::compress_to_vec(&data, 10);
             let data = makepad_base64::base64_encode(&data, &makepad_base64::BASE64_URL_SAFE);
@@ -1551,7 +1551,7 @@ impl App {
                 if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
                     let mut nodes = Vec::new();
                     nodes.from_cbor(&data).unwrap();
-                    iron_fish.settings.apply_over(cx, &nodes);
+                    ironfish.settings.apply_over(cx, &nodes);
                     self.imgui.root_frame().bind_read(cx, &nodes);
                 }
                 else {
