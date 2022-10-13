@@ -8,8 +8,8 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "DgrOnLN-Md60p06NyrswctujVm0="
 
 [dependencies]
-makepad-component = { path = "../../component", version = "0.1.0" }
+makepad-widgets = { path = "../../widgets", version = "0.1.0" }
  
 [features]
-nightly = ["makepad-component/nightly"]
+nightly = ["makepad-widgets/nightly"]
 

@@ -3,15 +3,15 @@ use {
     crate::{
         makepad_draw_2d::*,
         makepad_math::complex::*,
-        makepad_component::*,
+        makepad_widgets::*,
         makepad_media::*,
-        makepad_component::imgui::*
+        makepad_widgets::imgui::*
     }
 };
 
 live_register!{
     import makepad_draw_2d::shader::std::*;
-    import makepad_component::theme::*;
+    import makepad_widgets::theme::*;
     
     DrawFFT: {{DrawFFT}} {
         texture wave_texture: texture2d
@@ -77,8 +77,8 @@ struct DrawFFT {
     layer: f32
 }
 
-#[derive(Live, FrameComponent)]
-#[live_register(frame_component!(DisplayAudio))]
+#[derive(Live, Widget)]
+#[live_register(widget!(DisplayAudio))]
 pub struct DisplayAudio {
     //view: View,
     walk: Walk,
@@ -205,7 +205,7 @@ impl DisplayAudioLayer {
 }
 
 
-#[derive(Clone, FrameAction)]
+#[derive(Clone, WidgetAction)]
 pub enum DisplayAudioAction {
     None
 }

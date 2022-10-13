@@ -8,7 +8,7 @@ use {
 };
 
 live_register!{
-    import makepad_component::theme::*;
+    import makepad_widgets::theme::*;
     App: {{App}} {
         const FS_ROOT: ""
         inner: {
@@ -33,7 +33,7 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
-        makepad_component::live_register(cx);
+        makepad_widgets::live_register(cx);
         crate::build::build_manager::live_register(cx);
         crate::collab_client::live_register(cx);
         crate::rust_editor::live_register(cx);

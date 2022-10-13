@@ -1,0 +1,16 @@
+[package]
+name = "makepad-widgets"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad widgets"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "HZS5tRlkeh20V19o8VQsa_0G-us="
+
+[dependencies]
+makepad-draw-2d = { path = "../draw_2d", version = "0.1.0" }
+makepad-derive-widget = {path = "./derive_widget", version="0.1.0"}
+
+[features]
+nightly = ["makepad-draw-2d/nightly"]
+
