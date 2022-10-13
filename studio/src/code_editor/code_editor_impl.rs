@@ -11,7 +11,7 @@ use {
             range_set::{RangeSet, Span},
         },
         makepad_draw_2d::*,
-        makepad_component::{
+        makepad_widgets::{
             ScrollBars,
             ScrollShadow
         },
@@ -39,7 +39,7 @@ use {
 
 live_register!{
     import makepad_draw_2d::shader::std::*;
-    import makepad_component::theme::*;
+    import makepad_widgets::theme::*;
     
     DrawSelection: {{DrawSelection}} {
         const GLOOPINESS: 8.

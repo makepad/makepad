@@ -2,14 +2,14 @@
 use {
     crate::{
         makepad_draw_2d::*,
-        makepad_component::*,
-        makepad_component::imgui::*
+        makepad_widgets::*,
+        makepad_widgets::imgui::*
     }
 };
 
 live_register!{
     import makepad_draw_2d::shader::std::*;
-    import makepad_component::theme::*;
+    import makepad_widgets::theme::*;
     
     DrawKey: {{DrawKey}} {
         
@@ -134,8 +134,8 @@ pub struct PianoKey {
     state: State,
 }
 
-#[derive(Live, FrameComponent)]
-#[live_register(frame_component!(Piano))]
+#[derive(Live, Widget)]
+#[live_register(widget!(Piano))]
 pub struct Piano {
     #[rust] area: Area,
     walk: Walk,
@@ -175,7 +175,7 @@ pub struct PianoNote {
     pub velocity: u8
 }
 
-#[derive(Clone, FrameAction)]
+#[derive(Clone, WidgetAction)]
 pub enum PianoAction {
     Note(PianoNote),
     None
@@ -242,7 +242,6 @@ impl PianoKey {
         }
     }
 }
-
 
 impl Piano {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
@@ -456,6 +455,7 @@ impl PianoImGUI {
         let mut notes = Vec::new();
         for item in self.0.actions.0.iter() {
             if item.uid() == self.0.uid {
+                
                 if let PianoAction::Note(note) = item.action() {
                     notes.push(note)
                 }

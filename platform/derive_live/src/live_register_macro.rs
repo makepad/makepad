@@ -18,6 +18,7 @@ pub fn live_register_impl(input: TokenStream) -> TokenStream {
         //tb.ident(&cx);
         tb.add("pub fn live_register(cx:&mut Cx) {");
         tb.add("    let live_body = LiveBody {");
+        tb.add("        cargo_manifest_path: env!(").string("CARGO_MANIFEST_DIR").add(").to_string(),");
         tb.add("        module_path :").ident_with_span("module_path", span).add("!().to_string(),");
         tb.add("        file:").ident_with_span("file", span).add("!().to_string().replace(").string("\\").add(",").string("/").add("),");
         tb.add("        line:").unsuf_usize(span.start().line - 1).add(",");

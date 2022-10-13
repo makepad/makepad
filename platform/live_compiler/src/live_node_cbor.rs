@@ -14,7 +14,6 @@ pub trait LiveNodeVecFromCbor {
     fn from_cbor(&mut self, buf: &[u8]) -> Result<(), LiveNodeFromCborError>;
 }
 
-
 //0x00..0x17	unsigned integer 0x00..0x17 (0..23)
 const CBOR_UINT_START: u8 = 0x00;
 const CBOR_UINT_END: u8 = 0x17;

@@ -8,11 +8,11 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "7XSNO-tpDarsOh7AhuRDVrlc8tg="
 
 [dependencies]
-makepad-component = {path="../component" , version="0.1.0"}
+makepad-widgets = {path="../widgets" , version="0.1.0"}
 makepad-editor-core = {path="./editor_core", version="0.1.0"}
 makepad-collab-protocol = {path="./collab_protocol", version="0.1.0"}
 makepad-collab-server = {path="./collab_server", version="0.1.0"}
 
 [features]
-nightly = ["makepad-component/nightly"]
+nightly = ["makepad-widgets/nightly"]
 

@@ -1,11 +1,11 @@
-use makepad_component;
-use makepad_component::*;
+use makepad_widgets;
+use makepad_widgets::*;
 use makepad_draw_2d::*;
-use makepad_component::imgui::*;
+use makepad_widgets::imgui::*;
 
 live_register!{
-    import makepad_component::frame::*;
-    registry FrameComponent::*;
+    import makepad_widgets::frame::*;
+    registry Widget::*;
     App: {{App}} {imgui: {Frame {
         walk: {width: Fill, height: Fill},
         bg: {
@@ -32,7 +32,7 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
-        makepad_component::live_register(cx);
+        makepad_widgets::live_register(cx);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
