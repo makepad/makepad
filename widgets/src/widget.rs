@@ -198,7 +198,7 @@ pub trait WidgetDrawApi{
     fn not_done(arg:WidgetUid)->WidgetDraw{Result::Err(arg)}
     fn is_done(&self)->bool;
     fn is_not_done(&self)->bool;
-    fn into_not_done(&self)->Option<WidgetUid>;
+    fn as_not_done(&self)->Option<WidgetUid>;
 }
 
 impl WidgetDrawApi for WidgetDraw {
@@ -214,7 +214,7 @@ impl WidgetDrawApi for WidgetDraw {
             Result::Err(_) => true
         }
     }
-    fn into_not_done(&self)->Option<WidgetUid>{
+    fn as_not_done(&self)->Option<WidgetUid>{
         match *self {
             Result::Ok(_) => None,
             Result::Err(uid) => Some(uid)
