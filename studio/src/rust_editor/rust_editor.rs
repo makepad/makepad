@@ -29,7 +29,7 @@ use {
 
 live_register!{
     import makepad_draw_2d::shader::std::*;
-    import makepad_component::fold_button::FoldButton;
+    import makepad_widgets::fold_button::FoldButton;
     
     RustEditor: {{RustEditor}} {
         

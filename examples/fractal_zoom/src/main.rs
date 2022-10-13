@@ -1,7 +1,7 @@
 #![cfg_attr(feature = "nightly", feature(portable_simd))]
 
-pub use makepad_component;
-use makepad_component::*;
+pub use makepad_widgets;
+use makepad_widgets::*;
 use makepad_draw_2d::*;
 mod mandelbrot;
 
@@ -9,8 +9,8 @@ mod mandelbrot;
 mod mandelbrot_simd;
 
 live_register!{
-    import makepad_component::frame::*;
-    registry FrameComponent::*;
+    import makepad_widgets::frame::*;
+    registry Widget::*;
     App: {{App}} {
         frame: {
             walk:{width: Fill, height: Fill},
@@ -38,7 +38,7 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
-        makepad_component::live_register(cx);
+        makepad_widgets::live_register(cx);
         mandelbrot::live_register(cx);
     }
     

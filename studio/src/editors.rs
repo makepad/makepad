@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_component::{
+        makepad_widgets::{
             ComponentMap,
             tab_bar::TabId,
         },

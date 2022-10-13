@@ -25,6 +25,7 @@ use {
 
 pub struct LiveBody {
     pub file: String,
+    pub cargo_manifest_path: String,
     pub module_path: String,
     pub line: usize,
     pub column: usize,
@@ -167,6 +168,11 @@ impl Cx {
                     LiveValue::Dependency {string_start, string_count} => {
                         let mut path = String::new();
                         file.original.get_string(*string_start, *string_count, &mut path);
+                        //if path.starts_with("crate://"){
+                            
+                        //}
+                        // ok so. lets see if we start with crate://
+                        // ifso we need to get the crate root of the original file
                         self.dependencies.insert(path, CxDependency {
                             data: None
                         });

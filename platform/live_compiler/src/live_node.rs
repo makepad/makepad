@@ -417,7 +417,8 @@ pub enum LiveUnOp {
 #[derive(Debug)]
 pub struct FittedString {
     buffer: *mut u8,
-    length: usize,
+    length: u32,
+    capacity: u32
 }
 
 impl PartialEq for FittedString {
@@ -431,30 +432,26 @@ impl PartialEq for FittedString {
 }
 
 impl FittedString {
-    pub fn from_string(mut inp: String) -> Self {
-        inp.shrink_to_fit();
+    pub fn from_string(inp: String) -> Self {
         let mut s = std::mem::ManuallyDrop::new(inp);
         let buffer = s.as_mut_ptr();
         let length = s.len();
         let capacity = s.capacity();
-        if length != capacity {
-            panic!()
-        }
-        FittedString {buffer, length}
+        FittedString {buffer, length: length as u32, capacity: capacity as u32}
     }
     
     pub fn to_string(self) -> String {
-        unsafe {String::from_raw_parts(self.buffer, self.length, self.length)}
+        unsafe {String::from_raw_parts(self.buffer, self.length as usize, self.capacity as usize)}
     }
     
     pub fn as_str<'a>(&'a self) -> &'a str {
-        unsafe {std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer, self.length))}
+        unsafe {std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer, self.length as usize))}
     }
 }
 
 impl Drop for FittedString {
     fn drop(&mut self) {
-        unsafe {String::from_raw_parts(self.buffer, self.length, self.length)};
+        unsafe {String::from_raw_parts(self.buffer, self.length as usize, self.capacity as usize)};
     }
 }
 

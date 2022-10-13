@@ -455,7 +455,7 @@ Third-party licenses which may be part of the Desktop UI code:
 @lhci/cli@0.6.1
 @lhci/utils@0.6.1
 @loadable/babel-plugin@5.13.2
-@loadable/component@5.14.1
+@loadable/widgets@5.14.1
 @loadable/server@5.14.2
 @loadable/webpack-plugin@5.14.2
 @newrelic/aws-sdk@3.1.0

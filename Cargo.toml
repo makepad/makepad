@@ -13,6 +13,7 @@ workspace.members = [
     "examples/fractal_zoom", 
     "examples/cmdline_example",
     "examples/ironfish",
+    "examples/basic",
     "examples/shader",
     "libs/wasm_bridge/test",
     "studio",

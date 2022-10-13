@@ -292,7 +292,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             return Some(parent_index + 1) // our first child
         }
-        panic!()
+        panic!("first_child called on non tree node")
     }
     
     fn next_child(&self, child_index: usize) -> Option<usize> {

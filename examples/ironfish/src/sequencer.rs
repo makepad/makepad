@@ -2,14 +2,14 @@
 use {
     crate::{
         makepad_draw_2d::*,
-        makepad_component::*,
-        makepad_component::imgui::*
+        makepad_widgets::*,
+        makepad_widgets::imgui::*
     }
 };
 
 live_register!{
     import makepad_draw_2d::shader::std::*;
-    import makepad_component::theme::*;
+    import makepad_widgets::theme::*;
     
     DrawButton: {{DrawButton}} {
         
@@ -94,8 +94,8 @@ pub struct SeqButton {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct SeqButtonId(pub LiveId);
 
-#[derive(Live, FrameComponent)]
-#[live_register(frame_component!(Sequencer))]
+#[derive(Live, Widget)]
+#[live_register(widget!(Sequencer))]
 pub struct Sequencer {
     #[rust] area: Area,
     walk: Walk,
@@ -120,13 +120,13 @@ impl LiveHook for Sequencer {
     }
 }
 
-#[derive(Clone, FrameAction)]
+#[derive(Clone, WidgetAction)]
 pub enum SeqButtonAction {
     Change(bool),
     None
 }
 
-#[derive(Clone, FrameAction)]
+#[derive(Clone, WidgetAction)]
 pub enum SequencerAction {
     Change(usize, usize, bool),
     None

@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_draw_2d::*,
-        makepad_component::{
+        makepad_widgets::{
             splitter::{SplitterAlign},
             DesktopWindow,
             dock::{Dock, DockAction, DragPosition, PanelId},
