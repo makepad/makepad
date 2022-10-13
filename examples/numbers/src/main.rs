@@ -1,12 +1,12 @@
-use makepad_component;
-use makepad_component::*;
+use makepad_widgets;
+use makepad_widgets::*;
 use makepad_draw_2d::*;
 mod number_grid;
-use makepad_component::imgui::*;
+use makepad_widgets::imgui::*;
 
 live_register!{
-    import makepad_component::frame::*;
-    registry FrameComponent::*;
+    import makepad_widgets::frame::*;
+    registry Widget::*;
     App: {{App}} {
         imgui:{
             ScrollY{
@@ -27,7 +27,7 @@ pub struct App {
 
 impl App {  
     pub fn live_register(cx: &mut Cx) {
-        makepad_component::live_register(cx);
+        makepad_widgets::live_register(cx);
         number_grid::live_register(cx);
     }
     

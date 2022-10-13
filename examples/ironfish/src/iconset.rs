@@ -3,7 +3,7 @@ use crate::makepad_draw_2d::*;
 
 live_register!{
     import makepad_draw_2d::shader::std::*;
-    import makepad_component::theme::*;
+    import makepad_widgets::theme::*;
     
     DrawLogIconQuad: {{DrawLogIconQuad}} {
         fn pixel(self) -> vec4 {

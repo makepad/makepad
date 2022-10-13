@@ -1,10 +1,10 @@
-pub use makepad_component;
-pub use makepad_component::makepad_platform;
+pub use makepad_widgets;
+pub use makepad_widgets::makepad_platform;
 pub use makepad_platform::makepad_math;
 pub use makepad_media;
 
-use makepad_component::*;
-use makepad_component::imgui::*;
+use makepad_widgets::*;
+use makepad_widgets::imgui::*;
 use makepad_draw_2d::*;
 use makepad_media::*;
 use makepad_media::audio_graph::*;
@@ -26,9 +26,9 @@ use std::io::prelude::*;
 
 live_register!{
     registry AudioComponent::*;
-    registry FrameComponent::*;
-    import makepad_component::theme::*;
-    import makepad_component::frame::*;
+    registry Widget::*;
+    import makepad_widgets::theme::*;
+    import makepad_widgets::frame::*;
     import makepad_draw_2d::shader::std::*;
 
     const SPACING_PANELS : 10.0
@@ -1345,7 +1345,7 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
-        makepad_component::live_register(cx);
+        makepad_widgets::live_register(cx);
         makepad_media::live_register(cx);
         crate::display_audio::live_register(cx);
         crate::ironfish::live_register(cx);
@@ -1529,12 +1529,12 @@ impl App {
             ironfish.settings.sequencer.set_step(btn_x, step^bit|act);
         }
         
-        if ui.button(ids!(panic)).was_clicked() {
+        if ui.button(ids!(panic)).clicked() {
             self.audio_graph.all_notes_off();
         }
         
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
-        if ui.button(ids!(clear_grid)).was_clicked() {
+        if ui.button(ids!(clear_grid)).clicked() {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 ironfish.settings.sequencer.set_step(j, 0);
@@ -1542,7 +1542,7 @@ impl App {
             sequencer.clear_buttons(ui.cx);
         } 
         
-        if ui.button(ids!(grid_down)).was_clicked() {
+        if ui.button(ids!(grid_down)).clicked() {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 //let bv = 1<<j;
@@ -1565,7 +1565,7 @@ impl App {
 
         let mut reload_sequencer = false;
         
-        if ui.button(ids!(grid_up)).was_clicked() {
+        if ui.button(ids!(grid_up)).clicked() {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 //let bv = 1<<j;
@@ -1579,14 +1579,14 @@ impl App {
             reload_sequencer = true;
         }
 
-        if ui.button(ids!(save1)).was_clicked() {self.preset(ui.cx, 1, shift);reload_sequencer = true;}
-        if ui.button(ids!(save2)).was_clicked() {self.preset(ui.cx, 2, shift);reload_sequencer = true;}
-        if ui.button(ids!(save3)).was_clicked() {self.preset(ui.cx, 3, shift);reload_sequencer = true;}
-        if ui.button(ids!(save4)).was_clicked() {self.preset(ui.cx, 4, shift);reload_sequencer = true;}
-        if ui.button(ids!(save5)).was_clicked() {self.preset(ui.cx, 5, shift);reload_sequencer = true;}
-        if ui.button(ids!(save6)).was_clicked() {self.preset(ui.cx, 6, shift);reload_sequencer = true;}
-        if ui.button(ids!(save7)).was_clicked() {self.preset(ui.cx, 7, shift);reload_sequencer = true;}
-        if ui.button(ids!(save8)).was_clicked() {self.preset(ui.cx, 8, shift);reload_sequencer = true;}
+        if ui.button(ids!(save1)).clicked() {self.preset(ui.cx, 1, shift);reload_sequencer = true;}
+        if ui.button(ids!(save2)).clicked() {self.preset(ui.cx, 2, shift);reload_sequencer = true;}
+        if ui.button(ids!(save3)).clicked() {self.preset(ui.cx, 3, shift);reload_sequencer = true;}
+        if ui.button(ids!(save4)).clicked() {self.preset(ui.cx, 4, shift);reload_sequencer = true;}
+        if ui.button(ids!(save5)).clicked() {self.preset(ui.cx, 5, shift);reload_sequencer = true;}
+        if ui.button(ids!(save6)).clicked() {self.preset(ui.cx, 6, shift);reload_sequencer = true;}
+        if ui.button(ids!(save7)).clicked() {self.preset(ui.cx, 7, shift);reload_sequencer = true;}
+        if ui.button(ids!(save8)).clicked() {self.preset(ui.cx, 8, shift);reload_sequencer = true;}
         
         if reload_sequencer{
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();

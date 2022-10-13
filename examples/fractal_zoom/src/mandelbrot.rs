@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_draw_2d::*,
-        makepad_component::*,
+        makepad_widgets::*,
         makepad_platform::thread::*
     }
 };
@@ -403,8 +403,8 @@ impl FractalSpace {
 }
 
 
-#[derive(Live, FrameComponent)]
-#[live_register(frame_component!(Mandelbrot))]
+#[derive(Live, Widget)]
+#[live_register(widget!(Mandelbrot))]
 pub struct Mandelbrot {
     // DSL accessible
     draw_tile: DrawTile,
@@ -449,7 +449,7 @@ impl LiveHook for Mandelbrot {
     }
 }
 
-#[derive(Clone, FrameAction)]
+#[derive(Clone, WidgetAction)]
 pub enum MandelbrotAction {
     None
 }

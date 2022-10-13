@@ -9,7 +9,7 @@ use {
                 BuildMsgLevel
             }
         },
-        makepad_component::{
+        makepad_widgets::{
             log_icon::LogIconType,
             log_list::{LogList, LogListAction}
         },

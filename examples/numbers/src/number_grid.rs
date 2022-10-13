@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_draw_2d::*,
-        makepad_component::*,
+        makepad_widgets::*,
     },
     std::fmt::Write,
 };
@@ -142,8 +142,8 @@ pub struct NumberBox {
     label_align: Align,
 }
 
-#[derive(Live, FrameComponent)]
-#[live_register(frame_component!(NumberGrid))]
+#[derive(Live, Widget)]
+#[live_register(widget!(NumberGrid))]
 pub struct NumberGrid {
     scroll_bars: ScrollBars,
     walk: Walk,
@@ -191,7 +191,7 @@ impl NumberBox {
     }
 }
 
-#[derive(Clone, FrameAction)]
+#[derive(Clone, WidgetAction)]
 pub enum NumberGridAction {
     None
 }
