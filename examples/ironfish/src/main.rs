@@ -1491,8 +1491,6 @@ impl App {
         }
 
         if ui.button(ids!(save1)).clicked() {self.preset(ui.cx, 1, shift); reload_sequencer = true;}
-        
-        if ui.button(ids!(save1)).clicked() {self.preset(ui.cx, 1, shift); reload_sequencer = true;}
         if ui.button(ids!(save2)).clicked() {self.preset(ui.cx, 2, shift); reload_sequencer = true;}
         if ui.button(ids!(save3)).clicked() {self.preset(ui.cx, 3, shift); reload_sequencer = true;}
         if ui.button(ids!(save4)).clicked() {self.preset(ui.cx, 4, shift); reload_sequencer = true;}
