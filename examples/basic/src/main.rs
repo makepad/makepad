@@ -61,7 +61,7 @@ impl App {
         self.window.handle_event(cx, event);
         
         // call handle event on the frame and return a framewrap with all the result actions
-        let mut fw = self.frame.handle_event_wrap(cx, event);
+        let fw = self.frame.handle_event_wrap(cx, event);
         
         // the framewrap can be queried for components and events polled 
         if fw.button(path!(button1)).clicked() {
