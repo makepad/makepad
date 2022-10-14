@@ -11,7 +11,7 @@ live_register!{
     registry Widget::*;
 
     App: {{App}} {
-        frame: {
+        ui: {
             layout: {padding: 30}
             walk: {width: Fill, height: Fill, flow: Down},
             bg: {
@@ -39,7 +39,7 @@ main_app!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     window: BareWindow,
-    frame: FrameRef,
+    ui: FrameRef,
     #[rust] counter: usize
 }
 
@@ -51,7 +51,7 @@ impl App {
     
     // event message pump entry point
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let frame = self.frame.clone();
+        let ui = self.ui.clone();
 
         // draw events need to be handled with a draw context
         if let Event::Draw(event) = event {
@@ -61,14 +61,14 @@ impl App {
         // give the window time to do things
         self.window.handle_event(cx, event);
         
-        // call handle event on the frame and return a framewrap with all the result actions
+        // call handle event on the frame and return a vec of all actions
         let a = frame.handle_event_vec(cx, event);
         
         // the framewrap can be queried for components and events polled 
-        if frame.get_button(ids!(button1)).clicked(&a){
+        if ui.get_button(ids!(button1)).clicked(&a){
             self.counter += 1;
             // overwrite our UI structure with an updated value
-            frame.apply_over(cx, live!{
+            ui.apply_over(cx, live!{
                 label1 = {text: (format!("Counter: {}", self.counter))}
             });
             // cause a redraw to happen
