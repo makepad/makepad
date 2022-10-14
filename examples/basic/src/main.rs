@@ -39,7 +39,7 @@ main_app!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     window: BareWindow,
-    frame: Frame,
+    frame: FrameRef,
     #[rust] counter: usize
 }
 
@@ -51,6 +51,7 @@ impl App {
     
     // event message pump entry point
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let frame = self.frame.clone();
 
         // draw events need to be handled with a draw context
         if let Event::Draw(event) = event {
@@ -61,13 +62,13 @@ impl App {
         self.window.handle_event(cx, event);
         
         // call handle event on the frame and return a framewrap with all the result actions
-        let fw = self.frame.handle_event_wrap(cx, event);
+        let a = frame.handle_event_vec(cx, event);
         
         // the framewrap can be queried for components and events polled 
-        if fw.button(path!(button1)).clicked() {
+        if frame.get_button(ids!(button1)).clicked(&a){
             self.counter += 1;
             // overwrite our UI structure with an updated value
-            self.frame.apply_over(cx, live!{
+            frame.apply_over(cx, live!{
                 label1 = {text: (format!("Counter: {}", self.counter))}
             });
             // cause a redraw to happen
@@ -83,6 +84,8 @@ impl App {
         
         // iterate over any user-draw items in the frame
         while let Some(_) = self.frame.draw(cx).as_not_done() {
+            // ok so what if this is a piano.. how do we know this
+            
         };
         
         self.window.end(cx);
