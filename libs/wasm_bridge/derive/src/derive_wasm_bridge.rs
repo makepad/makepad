@@ -25,7 +25,7 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
             tb.add("{");
             
             tb.add("    fn type_name()->&'static str{").string(&name).add("}");
-            tb.add("    fn live_id()->LiveId{id!(").ident(&name).add(")}");
+            tb.add("    fn live_id()->LiveId{live_id!(").ident(&name).add(")}");
             
             tb.add("    fn from_wasm_inner(self ,out:&mut FromWasmMsg){");
             
@@ -240,7 +240,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             tb.add("{");
             
             tb.add("    fn type_name()->&'static str{").string(&name).add("}");
-            tb.add("    fn live_id()->LiveId{id!(").ident(&name).add(")}");
+            tb.add("    fn live_id()->LiveId{live_id!(").ident(&name).add(")}");
             
             let mut js = TokenBuilder::new();
             let mut sz = TokenBuilder::new();

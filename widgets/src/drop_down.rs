@@ -245,26 +245,26 @@ impl DropDown {
             if let Event::FingerDown(fd) = event {
                 if !menu.menu_contains_pos(cx, fd.abs) {
                     self.set_closed(cx);
-                    self.animate_state(cx, ids!(hover.off));
+                    self.animate_state(cx, id!(hover.off));
                 }
             }
             if let Event::FingerUp(fd) = event {
                 if !menu.menu_contains_pos(cx, fd.abs) {
                     self.set_closed(cx);
-                    self.animate_state(cx, ids!(hover.off));
+                    self.animate_state(cx, id!(hover.off));
                 }
             }
         }
         
         match event.hits(cx, self.bg.area()) {
             Hit::KeyFocusLost(_) => {
-                self.animate_state(cx, ids!(focus.off));
+                self.animate_state(cx, id!(focus.off));
                 self.set_closed(cx);
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
                 self.bg.redraw(cx);
             }
             Hit::KeyFocus(_) => {
-                self.animate_state(cx, ids!(focus.on));
+                self.animate_state(cx, id!(focus.on));
             }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::ArrowUp => {
@@ -288,23 +288,23 @@ impl DropDown {
             Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.bg.area());
                 self.set_open(cx);
-                self.animate_state(cx, ids!(hover.pressed));
+                self.animate_state(cx, id!(hover.pressed));
             },
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => {
                 if fe.is_over {
                     if fe.digit.has_hovers() {
-                        self.animate_state(cx, ids!(hover.on));
+                        self.animate_state(cx, id!(hover.on));
                     }
                 }
                 else {
-                    self.animate_state(cx, ids!(hover.off));
+                    self.animate_state(cx, id!(hover.off));
                 }
             }
             _ => ()

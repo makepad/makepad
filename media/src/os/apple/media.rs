@@ -30,7 +30,7 @@ impl CxMediaApi for Cx{
     
     fn handle_midi_received(&mut self, event:&Event)->Vec<MidiInputData>{
         if let Event::Signal(se) = event{
-            if se.signals.contains(&id!(CoreMidiInputData).into()) {
+            if se.signals.contains(&live_id!(CoreMidiInputData).into()) {
                 let media = self.get_global::<CxMediaApple>();
                 let out_data = if let Ok(data) = media.midi_input_data.lock() {
                     let mut data = data.borrow_mut();
@@ -49,7 +49,7 @@ impl CxMediaApi for Cx{
     
     fn handle_midi_inputs(&mut self, event:&Event)->Vec<MidiInputInfo>{
         if let Event::Signal(se) = event{
-            if se.signals.contains(&id!(CoreMidiInputsChanged).into()) {
+            if se.signals.contains(&live_id!(CoreMidiInputsChanged).into()) {
                 let media = self.get_global::<CxMediaApple>();
                 let inputs = media.midi_access.as_ref().unwrap().connect_all_inputs();
                 media.midi_access.as_mut().unwrap().update_destinations();
@@ -68,18 +68,18 @@ impl CxMediaApi for Cx{
                     if let Ok(midi_input_data) = midi_input_data.lock() {
                         let mut midi_input_data = midi_input_data.borrow_mut();
                         midi_input_data.extend_from_slice(&datas);
-                        Cx::post_signal(id!(CoreMidiInputData).into());
+                        Cx::post_signal(live_id!(CoreMidiInputData).into());
                     }
                 },
                 move || {
-                    Cx::post_signal(id!(CoreMidiInputsChanged).into());
+                    Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
                 }
             ) {
                 media.midi_access = Some(ma);
             }
             self.set_global(media);
         }
-        Cx::post_signal(id!(CoreMidiInputsChanged).into());
+        Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
     }
     
     fn start_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static {

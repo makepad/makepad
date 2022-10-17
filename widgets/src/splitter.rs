@@ -256,26 +256,26 @@ impl Splitter {
                 Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                 Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
-            self.animate_state(cx, ids!(hover.on));
+            self.animate_state(cx, id!(hover.on));
         }
         Hit::FingerHoverOut(_) => {
-            self.animate_state(cx, ids!(hover.off));
+            self.animate_state(cx, id!(hover.off));
         },
         Hit::FingerDown(_) => {
             match self.axis {
                 Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                 Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
-            self.animate_state(cx, ids!(hover.pressed));
+            self.animate_state(cx, id!(hover.pressed));
             self.drag_start_align = Some(self.align);
         }
         Hit::FingerUp(f) => {
             self.drag_start_align = None;
             if f.is_over && f.digit.has_hovers() {
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             else {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             }
         }
         Hit::FingerMove(f) => {

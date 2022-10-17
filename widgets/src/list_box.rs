@@ -155,7 +155,7 @@ pub struct ListBox {
 
 impl LiveHook for ListBox {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(list_item).as_field()) {
+        if let Some(index) = nodes.child_by_name(index, live_id!(list_item).as_field()) {
             for (_, item) in self.list_items.iter_mut() {
                 item.apply(cx, from, index, nodes);
             }
@@ -199,7 +199,7 @@ impl ListBoxItem{
     }
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
-        self.toggle_state(cx, is_selected, animate, ids!(select.on), ids!(select.off))
+        self.toggle_state(cx, is_selected, animate, id!(select.on), id!(select.off))
     }
     
     pub fn handle_event(
@@ -214,10 +214,10 @@ impl ListBoxItem{
         
         match event.hits(cx, self.bg_quad.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
@@ -225,7 +225,7 @@ impl ListBoxItem{
                 }
             }
             Hit::FingerDown(_) => {
-                self.animate_state(cx, ids!(select.on));
+                self.animate_state(cx, id!(select.on));
                 dispatch_action(cx, ListBoxNodeAction::WasClicked);
             }
             _ => {}
