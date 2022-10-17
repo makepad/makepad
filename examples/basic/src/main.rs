@@ -69,12 +69,13 @@ impl App {
         // the framewrap can be queried for components and events polled
         if ui.get_button(ids!(button1)).clicked(&actions) {
             self.counter += 1;
+            
             // overwrite our UI structure with an updated value
-            ui.apply_over(cx, live!{
-                label1 = {text: (format!("Counter: {}", self.counter))}
-            });
+            let label = ui.get_label(ids!(label1));
+            
+            label.set_text(&format!("Counter: {}", self.counter));
             // cause a redraw to happen
-            ui.redraw(cx);
+            label.redraw(cx);
         }
     }
     
