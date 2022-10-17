@@ -34,7 +34,7 @@ impl LiveHook for GeometryQuad2D {
 
 impl GeometryFields for GeometryQuad2D {
     fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
-        fields.push(GeometryField {id: id!(geom_pos), ty: ShaderTy::Vec2});
+        fields.push(GeometryField {id: live_id!(geom_pos), ty: ShaderTy::Vec2});
     }
     
     fn get_geometry_id(&self) -> Option<GeometryId> {

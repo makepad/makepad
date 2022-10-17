@@ -443,13 +443,13 @@ impl TextInput {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.bg.area()) {
             Hit::KeyFocusLost(_) => {
-                self.animate_state(cx, ids!(focus.off));
+                self.animate_state(cx, id!(focus.off));
                 dispatch_action(cx, TextInputAction::Return(self.text.clone()));
                 dispatch_action(cx, TextInputAction::KeyFocusLost);
             }
             Hit::KeyFocus(_) => {
                 self.undo_id += 1;
-                self.animate_state(cx, ids!(focus.on));
+                self.animate_state(cx, id!(focus.on));
                 // select all
                 self.select_all();
                 self.bg.redraw(cx);
@@ -560,10 +560,10 @@ impl TextInput {
             }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Text);
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(fe) => {
                 cx.set_cursor(MouseCursor::Text);
@@ -591,10 +591,10 @@ impl TextInput {
             Hit::FingerUp(fe) => {
                 self.double_tap_start = None;
                 if fe.is_over && fe.digit.has_hovers() {
-                    self.animate_state(cx, ids!(hover.on));
+                    self.animate_state(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, ids!(hover.off));
+                    self.animate_state(cx, id!(hover.off));
                 }
             }
             Hit::FingerMove(fe) => {

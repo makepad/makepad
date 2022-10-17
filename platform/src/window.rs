@@ -86,7 +86,7 @@ impl LiveApply for Window {
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(View));
+            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, live_id!(View));
             return nodes.skip_node(start_index);
         }
         
@@ -97,15 +97,15 @@ impl LiveApply for Window {
                 break;
             }
             match nodes[index].id {
-                id!(inner_size) => {
+                live_id!(inner_size) => {
                     let v:Vec2 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
                     cx.windows[self.window_id()].create_inner_size = Some(v.into());
                 },
-                id!(title) => {
+                live_id!(title) => {
                     let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
                     cx.windows[self.window_id()].create_title = v;
                 }
-                id!(position) => {
+                live_id!(position) => {
                     let v:Vec2 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
                     cx.windows[self.window_id()].create_position = Some(v.into());
                 }

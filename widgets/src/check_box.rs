@@ -175,18 +175,18 @@ impl CheckBox {
         match event.hits(cx, self.check_box.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
-                if self.state.is_in_state(cx, ids!(selected.on)) {
-                    self.animate_state(cx, ids!(selected.off));
+                if self.state.is_in_state(cx, id!(selected.on)) {
+                    self.animate_state(cx, id!(selected.off));
                     dispatch_action(cx, self, CheckBoxAction::Change(false));
                 }
                 else {
-                    self.animate_state(cx, ids!(selected.on));
+                    self.animate_state(cx, id!(selected.on));
                     dispatch_action(cx, self, CheckBoxAction::Change(true));
                 }
             },
@@ -211,7 +211,7 @@ impl Widget for CheckBox {
     fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         if let Some(value) = nodes.read_path(&self.bind) {
             if let Some(value) = value.as_bool(){
-                self.toggle_state(cx, value, Animate::Yes, ids!(selected.on), ids!(selected.off));
+                self.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
             }
         }
     }

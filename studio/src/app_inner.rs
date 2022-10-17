@@ -57,7 +57,7 @@ impl AppInner {
     pub fn draw(&mut self, cx: &mut Cx2d, state: &AppState) {
         if self.window.begin(cx, None).is_redrawing() {
             self.dock.begin(cx);
-            self.draw_panel(cx, state, id!(root).into());
+            self.draw_panel(cx, state, live_id!(root).into());
             self.dock.end(cx);
             self.window.end(cx);
         }
@@ -99,7 +99,7 @@ impl AppInner {
                             }
                             TabKind::FileTree => {
                                 self.file_tree.begin(cx);
-                                self.draw_file_node(cx, state, id!(root).into());
+                                self.draw_file_node(cx, state, live_id!(root).into());
                                 self.file_tree.end(cx);
                             }
                             TabKind::CodeEditor {..} => {
@@ -145,7 +145,7 @@ impl AppInner {
                 self.create_code_editor_tab(
                     cx,
                     state,
-                    id!(content1).into(),
+                    live_id!(content1).into(),
                     None,
                     state.file_path_join(&["examples/numbers/src/main.rs"]),
                     true
@@ -153,7 +153,7 @@ impl AppInner {
                 self.create_code_editor_tab(
                     cx,
                     state,
-                    id!(content1).into(),
+                    live_id!(content1).into(),
                     None,
                     state.file_path_join(&["examples/fractal_zoom/src/mandelbrot.rs"]),
                     true
@@ -161,7 +161,7 @@ impl AppInner {
                 self.create_code_editor_tab(
                     cx,
                     state,
-                    id!(content1).into(),
+                    live_id!(content1).into(),
                     None,
                     state.file_path_join(&["examples/fractal_zoom/src/mandelbrot_simd.rs"]),
                     true
@@ -260,7 +260,7 @@ impl AppInner {
             }
         }
         
-        let mut panel_id_stack = vec![id!(root).into()];
+        let mut panel_id_stack = vec![live_id!(root).into()];
         while let Some(panel_id) = panel_id_stack.pop() {
             let panel = &state.panels[panel_id];
             match panel {
@@ -290,7 +290,7 @@ impl AppInner {
                 CollabClientAction::Response(response) => match response {
                     CollabResponse::LoadFileTree(response) => {
                         self.load_file_tree(cx, state, response.unwrap());
-                        self.select_tab(cx, state, id!(file_tree).into(), id!(file_tree).into(), Animate::No);
+                        self.select_tab(cx, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
                     response=>{
                         self.build_manager.handle_collab_response(cx, state, &response);
@@ -328,7 +328,7 @@ impl AppInner {
     fn load_file_tree(&mut self, cx: &mut Cx, state: &mut AppState, file_tree_data: FileTreeData) {
         self.file_tree.forget();
         state.load_file_tree(file_tree_data);
-        self.file_tree.set_folder_is_open(cx, id!(root).into(), true, Animate::No);
+        self.file_tree.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
         self.file_tree.redraw(cx);
     }
     

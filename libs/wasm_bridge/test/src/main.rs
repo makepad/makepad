@@ -81,11 +81,11 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
         let id = LiveId(to_wasm.read_u64());
         let skip = to_wasm.read_block_skip();
         match id {
-            id!(RunTest) => {
+            live_id!(RunTest) => {
                 let test = create_test();
                 test.write_from_wasm(&mut from_wasm);
             },
-            id!(BridgeTest) => {
+            live_id!(BridgeTest) => {
                 let test1 = create_test();
                 let test2 = BridgeTest::read_to_wasm(&mut to_wasm);
                 if test1 == test2 {

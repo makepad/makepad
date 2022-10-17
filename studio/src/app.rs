@@ -46,7 +46,7 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.handle_live_edit_event(cx, event, id!(App));
+        self.handle_live_edit_event(cx, event, live_id!(App));
         self.inner.handle_event(cx, event, &mut self.app_state);
     }
 }
