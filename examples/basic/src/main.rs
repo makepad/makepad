@@ -11,7 +11,7 @@ live_register!{
     
     App: {{App}} {
         ui: {
-            layout: {flow: Down}
+            layout: {flow: Down, spacing: 20, align:{x:0.5,y:0.5}}
             walk: {width: Fill, height: Fill},
             bg: {
                 shape: Solid
@@ -22,12 +22,12 @@ live_register!{
             }
             // named button to click
             button1 = Button {
-                walk: {margin: {left: 100, top: 100}}
+                //walk: {margin: {left: 100, top: 100}}
                 text: "Click to count"
             }
             // label to show the counter
             label1 = Label {
-                walk: {margin: {left: 114, top: 20}}
+                //walk: {margin: {left: 114, top: 20}}
                 label: {color: #f},
                 text: "Counter: 0"
             }
