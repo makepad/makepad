@@ -242,7 +242,7 @@ impl AudioUnitClone {
         }
     }
     
-    pub fn handle_midi_1_data(&self, event: Midi1Data) {
+    pub fn handle_midi_data(&self, event: MidiData) {
         match self.unit_type {
             AudioUnitType::MusicDevice => (),
             _ => panic!("send_midi_1_event not supported on this device")

@@ -47,9 +47,9 @@ pub struct CoreMidiAccess {
 
 impl CoreMidiAccess {
     
-    pub fn new_midi_1_input<F, G>(data_callback: F, notify_callback: G) -> Result<Self,
+    pub fn new_midi_input<F, G>(data_callback: F, notify_callback: G) -> Result<Self,
     OSError> where
-    F: Fn(Vec<Midi1InputData>) + Send + 'static,
+    F: Fn(Vec<MidiInputData>) + Send + 'static,
     G: Fn() + Send + 'static
     {
         let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
@@ -69,9 +69,9 @@ impl CoreMidiAccess {
                     let data1 = ((ump >> 8) & 0xff) as u8;
                     let data2 = (ump & 0xff) as u8;
                     if ty == 0x02 { // midi 1.0 channel voice
-                        datas.push(Midi1InputData {
+                        datas.push(MidiInputData {
                             input_id: user_data as usize,
-                            data: Midi1Data {
+                            data: MidiData {
                                 data0,
                                 data1,
                                 data2
@@ -117,7 +117,7 @@ impl CoreMidiAccess {
         })
     }
     
-    pub fn send_midi_1_data(&self, d:Midi1Data){
+    pub fn send_midi_1_data(&self, d:MidiData){
         let mut words = [0u32;64];
         words[0] = (0x20000000)|((d.data0 as u32)<<16)|((d.data1 as u32)<<8)|d.data2 as u32;
         let event_list = MIDIEventList{

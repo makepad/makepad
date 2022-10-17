@@ -53,9 +53,9 @@ impl AudioGraphNode for Node {
         }
     }
 
-    fn handle_midi_1_data(&mut self, data: Midi1Data) {
+    fn handle_midi_data(&mut self, data: MidiData) {
         for input in &mut self.inputs {
-            input.handle_midi_1_data(data);
+            input.handle_midi_data(data);
         }
     }
     

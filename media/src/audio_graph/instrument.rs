@@ -41,9 +41,9 @@ impl AudioGraphNode for Node {
             step.graph_node.all_notes_off();
         }
     }
-    fn handle_midi_1_data(&mut self, data: Midi1Data) {
+    fn handle_midi_data(&mut self, data: MidiData) {
         for step in &mut self.steps {
-            step.graph_node.handle_midi_1_data(data);
+            step.graph_node.handle_midi_data(data);
         }
     }
     

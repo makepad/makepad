@@ -382,8 +382,8 @@ impl Widget for DropDown {
     }
     
     fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        self.handle_event(cx, event, &mut | cx, drop_down, action | {
-            let mut delta = Vec::new();
+        self.handle_event(cx, event, &mut | cx, _drop_down, action | {
+            /*let mut delta = Vec::new();
             match &action {
                 DropDownAction::Select(v) => {
                     if drop_down.bind.len()>0 {
@@ -393,14 +393,14 @@ impl Widget for DropDown {
                     }
                 },
                 _ => ()
-            };
-            dispatch_action(cx, WidgetActionItem::new(action.into()).bind_delta(delta))
+            };*/
+            dispatch_action(cx, WidgetActionItem::new(action.into()))
         });
     }
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: WidgetUid) -> WidgetDraw {
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }

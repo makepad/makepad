@@ -21,7 +21,7 @@ live_register!{
 
 pub enum FromUI {
     AllNotesOff,
-    Midi1Data(Midi1Data),
+    MidiData(MidiData),
     NewRoot(Box<dyn AudioGraphNode + Send>),
     DisplayAudio(AudioBuffer),
 }
@@ -71,8 +71,8 @@ impl AudioGraph {
         None
     }
     
-    pub fn send_midi_1_data(&self, data: Midi1Data) {
-        self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
+    pub fn send_midi_data(&self, data: MidiData) {
+        self.from_ui.send(FromUI::MidiData(data)).unwrap();
     }
     
     
@@ -91,10 +91,10 @@ impl AudioGraph {
                 FromUI::NewRoot(new_root) => {
                     node.root = Some(new_root);
                 }
-                FromUI::Midi1Data(data) => {
+                FromUI::MidiData(data) => {
                     //if data.channel() == 0{
                     if let Some(root) = node.root.as_mut() {
-                        root.handle_midi_1_data(data);
+                        root.handle_midi_data(data);
                     }
                     // }
                 }
@@ -168,15 +168,6 @@ impl AudioGraph {
                 }
             }
         }
-        /*
-        match event {
-            Event::Midi1InputData(inputs) => {
-                for input in inputs {
-                    self.from_ui.send(FromUI::Midi1Data(input.data)).unwrap();
-                }
-            }
-            _ => ()
-        }*/
     }
 }
 

@@ -1,11 +1,11 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Midi1InputData {
+pub struct MidiInputData {
     pub input_id: usize,
-    pub data: Midi1Data,
+    pub data: MidiData,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Midi1Data {
+pub struct MidiData {
     pub data0: u8,
     pub data1: u8,
     pub data2: u8
@@ -19,7 +19,7 @@ pub struct MidiInputInfo {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Midi1Note {
+pub struct MidiNote {
     pub is_on: bool,
     pub channel: u8,
     pub note_number: u8,
@@ -28,13 +28,13 @@ pub struct Midi1Note {
 
 
 #[derive(Clone, Copy, Debug)]
-pub enum Midi1Event {
-    Note(Midi1Note),
+pub enum MidiEvent {
+    Note(MidiNote),
     Unknown
 }
 
-impl Midi1Event {
-    pub fn on_note(&self) -> Option<Midi1Note> {
+impl MidiEvent {
+    pub fn on_note(&self) -> Option<MidiNote> {
         match self {
             Self::Note(note) => Some(*note),
             Self::Unknown => None
@@ -42,9 +42,9 @@ impl Midi1Event {
     }
 }
 
-impl Into<Midi1Data> for Midi1Note {
-    fn into(self) -> Midi1Data {
-        Midi1Data {
+impl Into<MidiData> for MidiNote {
+    fn into(self) -> MidiData {
+        MidiData {
             data0: (if self.is_on {0x9}else {0x8} << 4) | self.channel,
             data1: self.note_number,
             data2: self.velocity
@@ -52,7 +52,7 @@ impl Into<Midi1Data> for Midi1Note {
     }
 }
 
-impl Midi1Data {
+impl MidiData {
     pub fn status(&self) -> u8 {
         self.data0 >> 4
     }
@@ -60,12 +60,12 @@ impl Midi1Data {
         self.data0 & 0xf
     }
     
-    pub fn decode(&self) -> Midi1Event {
+    pub fn decode(&self) -> MidiEvent {
         let status = self.status();
         let channel = self.channel();
         match status {
-            0x8 | 0x9 => Midi1Event::Note(Midi1Note {is_on: status == 0x9, channel, note_number: self.data1, velocity: self.data2}),
-            _ => Midi1Event::Unknown
+            0x8 | 0x9 => MidiEvent::Note(MidiNote {is_on: status == 0x9, channel, note_number: self.data1, velocity: self.data2}),
+            _ => MidiEvent::Unknown
         }
     }
 }
