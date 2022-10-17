@@ -193,10 +193,10 @@ impl Slider {
         for action in self.text_input.handle_event_vec(cx, event) {
             match action {
                 TextInputAction::KeyFocus => {
-                    self.animate_state(cx, ids!(focus.on));
+                    self.animate_state(cx, id!(focus.on));
                 }
                 TextInputAction::KeyFocusLost => {
-                    self.animate_state(cx, ids!(focus.off));
+                    self.animate_state(cx, id!(focus.off));
                 }
                 TextInputAction::Return(value) => {
                     if let Ok(v) = value.parse::<f64>() {
@@ -214,10 +214,10 @@ impl Slider {
         match event.hits(cx, self.slider.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
                 // cx.set_key_focus(self.slider.area());
@@ -226,7 +226,7 @@ impl Slider {
                 self.text_input.select_all();
                 self.text_input.redraw(cx);
                 
-                self.animate_state(cx, ids!(drag.on));
+                self.animate_state(cx, id!(drag.on));
                 self.dragging = Some(self.value);
                 dispatch_action(cx, self, SliderAction::StartSlide);
             },
@@ -234,12 +234,12 @@ impl Slider {
                 self.text_input.read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.create_external_undo();
-                self.animate_state(cx, ids!(drag.off));
+                self.animate_state(cx, id!(drag.off));
                 if fe.is_over && fe.digit.has_hovers() {
-                    self.animate_state(cx, ids!(hover.on));
+                    self.animate_state(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, ids!(hover.off));
+                    self.animate_state(cx, id!(hover.off));
                 }
                 self.dragging = None;
                 dispatch_action(cx, self, SliderAction::EndSlide);

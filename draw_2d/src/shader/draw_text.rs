@@ -611,10 +611,10 @@ impl DrawText {
         //let scroll_pos = area.get_scroll_pos(cx);
         //let pos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
         
-        let rect_pos = area.get_read_ref(cx, id!(rect_pos), ShaderTy::Vec2).unwrap();
-        let delta = area.get_read_ref(cx, id!(delta), ShaderTy::Vec2).unwrap();
-        let advance = area.get_read_ref(cx, id!(advance), ShaderTy::Float).unwrap();
-        //let font_size = area.get_read_ref(cx, id!(font_size), ShaderTy::Float).unwrap();
+        let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
+        let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
+        let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
+        //let font_size = area.get_read_ref(cx, live_id!(font_size), ShaderTy::Float).unwrap();
         
         //let line_spacing = self.text_style.line_spacing;
         
@@ -638,7 +638,7 @@ impl DrawText {
         if !area.is_valid(cx) {
             return 0
         }
-        let rect_pos = area.get_read_ref(cx, id!(rect_pos), ShaderTy::Vec2).unwrap();
+        let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
         rect_pos.repeat
     }
     
@@ -649,9 +649,9 @@ impl DrawText {
             return None
         }
         
-        let rect_pos = area.get_read_ref(cx, id!(rect_pos), ShaderTy::Vec2).unwrap();
-        let delta = area.get_read_ref(cx, id!(delta), ShaderTy::Vec2).unwrap();
-        let advance = area.get_read_ref(cx, id!(advance), ShaderTy::Float).unwrap();
+        let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
+        let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
+        let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
         
         if rect_pos.repeat == 0 {
             return None

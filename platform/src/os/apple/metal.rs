@@ -700,10 +700,10 @@ impl CxOsDrawShader {
         let mut buffer_id = 4;
         for (field, _) in shader.fields_as_uniform_blocks {
             match field.0 {
-                id!(draw) => draw_uniform_buffer_id = Some(buffer_id),
-                id!(pass) => pass_uniform_buffer_id = Some(buffer_id),
-                id!(view) => view_uniform_buffer_id = Some(buffer_id),
-                id!(user) => user_uniform_buffer_id = Some(buffer_id),
+                live_id!(draw) => draw_uniform_buffer_id = Some(buffer_id),
+                live_id!(pass) => pass_uniform_buffer_id = Some(buffer_id),
+                live_id!(view) => view_uniform_buffer_id = Some(buffer_id),
+                live_id!(user) => user_uniform_buffer_id = Some(buffer_id),
                 _ => panic!()
             }
             buffer_id += 1;

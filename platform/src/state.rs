@@ -551,7 +551,7 @@ impl LiveApply for State {
             self.live_ptr = Some(cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, start_index));
         }
         if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(States));
+            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, live_id!(States));
             return nodes.skip_node(start_index);
         }
         // this just checks it only has instance subprops
@@ -614,7 +614,7 @@ impl State {
             }
             let state_nodes = self.state.as_mut().unwrap();
             
-            let mut state_index = state_nodes.child_by_name(0, id!(state).as_field()).unwrap();
+            let mut state_index = state_nodes.child_by_name(0, live_id!(state).as_field()).unwrap();
             let mut stack_depth = 0;
             let mut ended = true;
             let mut redraw = false;
@@ -668,16 +668,16 @@ impl State {
             let (ended, time, redraw, track_id) = if let Some(id_index) = node_iter {
                 if let LiveValue::Id(track_id) = nodes[id_index].value {
                     // ok so now we have to find our id in tracks
-                    let track_index = nodes.child_by_path(0, &[id!(tracks).as_field(), track_id.as_field()]).unwrap();
+                    let track_index = nodes.child_by_path(0, &[live_id!(tracks).as_field(), track_id.as_field()]).unwrap();
                     
-                    let time_index = if let Some(time_index) = nodes.child_by_name(track_index, id!(time).as_field()) {time_index}
+                    let time_index = if let Some(time_index) = nodes.child_by_name(track_index, live_id!(time).as_field()) {time_index}
                     else {
                         return (true, false);
                     };
                     
                     let start_time = match &nodes[time_index].value {
                         LiveValue::Id(v) => {
-                            assert!(*v == id!(void));
+                            assert!(*v == live_id!(void));
                             nodes[time_index].value = LiveValue::Float64(ext_time);
                             ext_time
                         }
@@ -687,7 +687,7 @@ impl State {
                         _ => panic!()
                     };
                     
-                    let play = if let Some(play_index) = nodes.child_by_name(track_index, id!(play).as_field()) {
+                    let play = if let Some(play_index) = nodes.child_by_name(track_index, live_id!(play).as_field()) {
                         Play::new_apply(cx, ApplyFrom::New, play_index, nodes)
                     }
                     else {
@@ -698,12 +698,12 @@ impl State {
                     let (ended, time) = play.get_ended_time(ext_time - start_time);
                     
                     if ended { // mark ended step 1
-                        if let Some(index) = nodes.child_by_name(track_index, id!(ended).as_field()) {
+                        if let Some(index) = nodes.child_by_name(track_index, live_id!(ended).as_field()) {
                             nodes[index].value = LiveValue::Int64(cx.event_id as i64);
                         }
                     }
                     
-                    let redraw = if let Some(index) = nodes.child_by_name(track_index, id!(redraw).as_field()) {
+                    let redraw = if let Some(index) = nodes.child_by_name(track_index, live_id!(redraw).as_field()) {
                         if let LiveValue::Bool(redraw) = &nodes[index].value {
                             *redraw
                         }else {false}
@@ -715,7 +715,7 @@ impl State {
             }
             else {panic!()};
             
-            let default_ease = if let Some(ease_index) = nodes.child_by_path(0, &[id!(tracks).as_field(), track_id.as_field(), id!(ease).as_field()]) {
+            let default_ease = if let Some(ease_index) = nodes.child_by_path(0, &[live_id!(tracks).as_field(), track_id.as_field(), live_id!(ease).as_field()]) {
                 Ease::new_apply(cx, ApplyFrom::New, ease_index, nodes)
             }
             else {
@@ -747,7 +747,7 @@ impl State {
                 }
                 else { // try to deserialize a keyframe
                     let mut kf = KeyFrame::new_apply(cx, ApplyFrom::New, node_index, nodes);
-                    if nodes.child_by_name(node_index, id!(ease).as_field()).is_none() {
+                    if nodes.child_by_name(node_index, live_id!(ease).as_field()).is_none() {
                         kf.ease = default_ease.clone();
                     }
                     kf
@@ -836,7 +836,7 @@ impl State {
     pub fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
         if let Some(index) = nodes.last_child(index) {
             if nodes[index].value.is_object() {
-                return nodes.child_by_name(index, id!(value).as_field());
+                return nodes.child_by_name(index, live_id!(value).as_field());
             }
             else {
                 return Some(index)
@@ -848,7 +848,7 @@ impl State {
     pub fn first_keyframe_time_from_array(reader: &LiveNodeReader) -> f64 {
         if let Some(reader) = reader.first_child() {
             if reader.is_object() {
-                if let Some(reader) = reader.child_by_name(id!(time).as_field()) {
+                if let Some(reader) = reader.child_by_name(live_id!(time).as_field()) {
                     return match &reader.value {
                         LiveValue::Float64(v) => *v,
                         LiveValue::Int64(v) => *v as f64,
@@ -862,7 +862,7 @@ impl State {
     
     pub fn is_track_animating(&self, cx: &mut Cx, track_id: LiveId) -> bool {
         if let Some(state) = self.state.as_ref() {
-            if let Some(LiveValue::Int64(ended)) = state.child_value_by_path(0, &[id!(tracks).as_field(), track_id.as_field(), id!(ended).as_field()]) {
+            if let Some(LiveValue::Int64(ended)) = state.child_value_by_path(0, &[live_id!(tracks).as_field(), track_id.as_field(), live_id!(ended).as_field()]) {
                 if *ended == 0 || *ended == cx.event_id as i64 {
                     return true
                 }
@@ -879,7 +879,7 @@ impl State {
                 let live_registry = live_registry_rc.borrow();
                 if live_registry.generation_valid(live_ptr) {
                     let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[check_state_pair[0].as_instance(), id!(default).as_field()]) {
+                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[check_state_pair[0].as_instance(), live_id!(default).as_field()]) {
                         return *default_id == check_state_pair[1];
                     }
                 }
@@ -887,7 +887,7 @@ impl State {
         }
         else {
             let state = self.state.as_ref().unwrap();
-            if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks).as_field(), check_state_pair[0].as_field(), id!(state_id).as_field()]) {
+            if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[live_id!(tracks).as_field(), check_state_pair[0].as_field(), live_id!(state_id).as_field()]) {
                 return *id == check_state_pair[1];
             }
         }
@@ -920,7 +920,7 @@ impl State {
     // hard cut / initialisate the state to a certain state
     pub fn cut_to(&mut self, cx: &mut Cx, state_pair: &StatePair, index: usize, nodes: &[LiveNode]) {
         
-        if let Some(index) = nodes.child_by_name(index, id!(cursor).as_field()) {
+        if let Some(index) = nodes.child_by_name(index, live_id!(cursor).as_field()) {
             let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);
             cx.set_cursor(cursor);
         }
@@ -936,14 +936,14 @@ impl State {
             });
         }
         
-        state.replace_or_insert_last_node_by_path(0, &[id!(tracks).as_field(), track.as_field()], live_object!{
+        state.replace_or_insert_last_node_by_path(0, &[live_id!(tracks).as_field(), track.as_field()], live_object!{
             [track]: {state_id: (state_pair[1]), ended: 1}
         });
         
         let mut path = Vec::new();
-        path.push(id!(state).as_field());
+        path.push(live_id!(state).as_field());
         
-        let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply).as_field()) {
+        let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(live_id!(apply).as_field()) {
             reader
         }
         else {
@@ -1001,7 +1001,7 @@ impl State {
             let mut index = index + 1;
             while !nodes[index].is_close() {
                 let track_id = nodes[index].id;
-                if let Some(LiveValue::Id(state_id)) = nodes.child_value_by_path(index, &[id!(default).as_field()]) {
+                if let Some(LiveValue::Id(state_id)) = nodes.child_value_by_path(index, &[live_id!(default).as_field()]) {
                     if let Some(index) = nodes.child_by_name(index, state_id.as_instance()) {
                         self.cut_to(cx, &[track_id, *state_id], index, nodes);
                     }
@@ -1035,7 +1035,7 @@ impl State {
     
     pub fn animate_to(&mut self, cx: &mut Cx, state_pair: &StatePair, index: usize, nodes: &[LiveNode]) {
         
-        if let Some(index) = nodes.child_by_name(index, id!(cursor).as_field()) {
+        if let Some(index) = nodes.child_by_name(index, live_id!(cursor).as_field()) {
             let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);
             cx.set_cursor(cursor);
         }
@@ -1050,7 +1050,7 @@ impl State {
         let track = state_pair[0];
         
         // ok we have to look up into state/tracks for our state_id what state we are in right now
-        let from_id = if let Some(LiveValue::Id(id)) = state.child_value_by_path(0, &[id!(tracks).as_field(), track.as_field(), id!(state_id).as_field()]) {
+        let from_id = if let Some(LiveValue::Id(id)) = state.child_value_by_path(0, &[live_id!(tracks).as_field(), track.as_field(), live_id!(state_id).as_field()]) {
             *id
         }
         else {
@@ -1060,40 +1060,40 @@ impl State {
         
         let mut path = Vec::new();
         
-        state.replace_or_insert_last_node_by_path(0, &[id!(tracks).as_field(), track.as_field()], live_object!{
+        state.replace_or_insert_last_node_by_path(0, &[live_id!(tracks).as_field(), track.as_field()], live_object!{
             [track]: {state_id: (state_pair[1]), ended: 0, time: void},
         });
         
         // copy in from track
-        if let Some(index) = nodes.child_by_name(index, id!(from).as_field()) {
+        if let Some(index) = nodes.child_by_name(index, live_id!(from).as_field()) {
             if let Some(index) = nodes.child_by_name(index, from_id.as_field()) {
                 state.replace_or_insert_last_node_by_path(
                     0,
-                    &[id!(tracks).as_field(), track.as_field(), id!(play).as_field()],
+                    &[live_id!(tracks).as_field(), track.as_field(), live_id!(play).as_field()],
                     nodes.node_slice(index)
                 );
             }
-            else if let Some(index) = nodes.child_by_name(index, id!(all).as_field()) {
+            else if let Some(index) = nodes.child_by_name(index, live_id!(all).as_field()) {
                 state.replace_or_insert_last_node_by_path(
                     0,
-                    &[id!(tracks).as_field(), track.as_field(), id!(play).as_field()],
+                    &[live_id!(tracks).as_field(), track.as_field(), live_id!(play).as_field()],
                     nodes.node_slice(index)
                 );
             }
         }
         
         // copy ease default if we have one
-        if let Some(index) = nodes.child_by_name(index, id!(ease).as_field()) {
-            state.replace_or_insert_last_node_by_path(0, &[id!(tracks).as_field(), track.as_field(), id!(ease).as_field()], nodes.node_slice(index));
+        if let Some(index) = nodes.child_by_name(index, live_id!(ease).as_field()) {
+            state.replace_or_insert_last_node_by_path(0, &[live_id!(tracks).as_field(), track.as_field(), live_id!(ease).as_field()], nodes.node_slice(index));
         }
         
-        if let Some(index) = nodes.child_by_name(index, id!(redraw).as_field()) {
-            state.replace_or_insert_last_node_by_path(0, &[id!(tracks).as_field(), track.as_field(), id!(redraw).as_field()], nodes.node_slice(index));
+        if let Some(index) = nodes.child_by_name(index, live_id!(redraw).as_field()) {
+            state.replace_or_insert_last_node_by_path(0, &[live_id!(tracks).as_field(), track.as_field(), live_id!(redraw).as_field()], nodes.node_slice(index));
         }
         
-        path.push(id!(state).as_field());
+        path.push(live_id!(state).as_field());
         
-        let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply).as_field()) {
+        let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(live_id!(apply).as_field()) {
             reader
         }
         else {
@@ -1132,8 +1132,8 @@ impl State {
                 let first_time = Self::first_keyframe_time_from_array(&reader);
                 
                 let mut timeline = Vec::new();
-                timeline.open_array(id!(0));
-                timeline.push_id(id!(0), track);
+                timeline.open_array(live_id!(0));
+                timeline.push_id(live_id!(0), track);
                 if first_time != 0.0 { // insert first key from the last value
                     timeline.push_live(state.node_slice(last_index));
                 }
@@ -1193,7 +1193,7 @@ impl State {
                     timeline.push_live(live_array!{(track)});
                     timeline.push_live(state.node_slice(last_index));
                     timeline.push_live(reader.node_slice());
-                    //timeline.last_mut().unwrap().id = id!(0); // clean up property id
+                    //timeline.last_mut().unwrap().id = live_id!(0); // clean up property id
                     timeline.push_live(state.node_slice(last_index));
                     timeline.close();
                     state.replace_or_insert_last_node_by_path(0, &path, &timeline);

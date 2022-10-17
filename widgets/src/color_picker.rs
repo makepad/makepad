@@ -199,13 +199,13 @@ impl ColorPicker {
         
         match event.hits(cx, self.wheel.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(fe) => {
-                self.animate_state(cx, ids!(hover.pressed));
+                self.animate_state(cx, id!(hover.pressed));
                 let rsize = (self.size * 0.28) / 2.0f64.sqrt();
                 let rel = fe.abs - fe.rect.pos;
                 let vx = rel.x - 0.5 * self.size;
@@ -224,10 +224,10 @@ impl ColorPicker {
             },
             Hit::FingerUp(fe) => {
                 if fe.is_over && fe.digit.has_hovers() {
-                    self.animate_state(cx, ids!(hover.on));
+                    self.animate_state(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, ids!(hover.off));
+                    self.animate_state(cx, id!(hover.off));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
                 dispatch_action(cx, ColorPickerAction::DoneChanging)

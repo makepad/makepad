@@ -568,7 +568,7 @@ impl<'a> TyChecker<'a> {
         Ok(builtin .return_tys .get(&arg_tys) .ok_or_else(||{
             let mut message = String::new();
             
-            //if id == id!(color_file){
+            //if id == live_id!(color_file){
              //   println!("CONST {:#?}", arg_exprs);
             //}
             

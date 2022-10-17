@@ -111,7 +111,7 @@ impl FoldButton {
         dispatch_action: &mut dyn FnMut(&mut Cx, FoldButtonAction),
     ) {
         if self.state_handle_event(cx, event).is_animating() {
-            if self.state.is_track_animating(cx, id!(open)) {
+            if self.state.is_track_animating(cx, live_id!(open)) {
                 dispatch_action(cx, FoldButtonAction::Animating(self.opened))
             }
         };
@@ -120,23 +120,23 @@ impl FoldButton {
         if let Some(state) = state {
             match state {
                 ButtonState::Pressed => {
-                    if self.state.is_in_state(cx, ids!(open.yes)) {
-                        self.animate_state(cx, ids!(open.no));
+                    if self.state.is_in_state(cx, id!(open.yes)) {
+                        self.animate_state(cx, id!(open.no));
                         dispatch_action(cx, FoldButtonAction::Closing)
                     }
                     else {
-                        self.animate_state(cx, ids!(open.yes));
+                        self.animate_state(cx, id!(open.yes));
                         dispatch_action(cx, FoldButtonAction::Opening)
                     }
                 }
-                ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
-                ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
+                ButtonState::Default => self.animate_state(cx, id!(hover.off)),
+                ButtonState::Hover => self.animate_state(cx, id!(hover.on)),
             }
         };
     }
     
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
-        self.toggle_state(cx, is_open, animate, ids!(open.yes), ids!(open.no))
+        self.toggle_state(cx, is_open, animate, id!(open.yes), id!(open.no))
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
