@@ -40,9 +40,9 @@ struct Node {
 }
 
 impl AudioGraphNode for Node {
-    fn handle_midi_1_data(&mut self, data: Midi1Data) {
+    fn handle_midi_data(&mut self, data: MidiData) {
         if let Some(audio_unit) = &self.audio_unit {
-            audio_unit.handle_midi_1_data(data);
+            audio_unit.handle_midi_data(data);
         }
     }
 

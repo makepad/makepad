@@ -3,7 +3,6 @@ use {
     crate::{
         makepad_draw_2d::*,
         makepad_widgets::*,
-        makepad_widgets::imgui::*
     }
 };
 
@@ -446,16 +445,14 @@ impl Piano {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PianoKeyId(pub LiveId);
 
-// ImGUI convenience API for Piano
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct PianoRef(WidgetRef);
 
-pub struct PianoImGUI(ImGUIRef);
-
-impl PianoImGUI {
-    pub fn on_notes(&self) -> Vec<PianoNote> {
+impl PianoRef {
+    pub fn notes_played(&self, actions:&WidgetActions) -> Vec<PianoNote> {
         let mut notes = Vec::new();
-        for item in self.0.actions.0.iter() {
-            if item.uid() == self.0.uid {
-                
+        for item in actions {
+            if item.widget == self.0 {
                 if let PianoAction::Note(note) = item.action() {
                     notes.push(note)
                 }
@@ -465,29 +462,14 @@ impl PianoImGUI {
     }
     
     pub fn set_note(&self, cx: &mut Cx, is_on: bool, note_number: u8) {
-        if let Some(mut inner) = self.inner() {
+        if let Some(mut inner) = self.inner_mut() {
             inner.set_note(cx, is_on, note_number)
         }
     }
     
     pub fn set_key_focus(&self, cx: &mut Cx) {
-        if let Some(inner) = self.inner() {
+        if let Some(inner) = self.inner_mut() {
             inner.set_key_focus(cx)
         }
-    }
-    
-    pub fn inner(&self) -> Option<std::cell::RefMut<'_, Piano >> {
-        self.0.inner()
-    }
-}
-
-pub trait PianoImGUIExt {
-    fn piano(&mut self, path: &[LiveId]) -> PianoImGUI;
-}
-
-impl<'a> PianoImGUIExt for ImGUIRun<'a> {
-    fn piano(&mut self, path: &[LiveId]) -> PianoImGUI {
-        let mut frame = self.imgui.root_frame();
-        PianoImGUI(self.safe_ref::<Piano>(frame.component_by_path(path)))
     }
 }

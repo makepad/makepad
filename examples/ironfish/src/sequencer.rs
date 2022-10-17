@@ -3,7 +3,6 @@ use {
     crate::{
         makepad_draw_2d::*,
         makepad_widgets::*,
-        makepad_widgets::imgui::*
     }
 };
 
@@ -264,13 +263,14 @@ impl Sequencer {
 }
 
 
-pub struct SequencerImGUI(ImGUIRef);
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct SequencerRef(WidgetRef);
 
-impl SequencerImGUI {
-    pub fn on_buttons(&self) -> Vec<(usize, usize, bool)> {
+impl SequencerRef {
+    pub fn buttons_clicked(&self, actions:&WidgetActions) -> Vec<(usize, usize, bool)> {
         let mut btns = Vec::new();
-        for item in self.0.actions.0.iter() {
-            if item.uid() == self.0.uid {
+        for item in actions {
+            if item.widget == self.0{
                 if let SequencerAction::Change(x,y,on) = item.action() {
                     btns.push((x,y,on))
                 }
@@ -280,7 +280,7 @@ impl SequencerImGUI {
     }
     
     pub fn clear_buttons(&self, cx:&mut Cx){
-        if let Some(mut inner) = self.inner(){
+        if let Some(mut inner) = self.inner_mut(){
             for (_, button) in inner.buttons.iter_mut() {                
                 button.set_is_active(cx, false, Animate::Yes);
             }
@@ -289,27 +289,12 @@ impl SequencerImGUI {
     
     pub fn update_button(&self, cx:&mut Cx, x:usize, y:usize, state: bool){
         
-        if let Some(mut inner) = self.inner(){
+        if let Some(mut inner) = self.inner_mut(){
             for (_, button) in inner.buttons.iter_mut() {
                 if button.x == x && button.y  == y {
                 button.set_is_active(cx, state, Animate::Yes);
                 }
             }
         }
-    }
-
-    pub fn inner(&self) -> Option<std::cell::RefMut<'_, Sequencer >> {
-        self.0.inner()
-    }
-}
-
-pub trait SequencerImGUIExt {
-    fn sequencer(&mut self, path: &[LiveId]) -> SequencerImGUI;
-}
-
-impl<'a> SequencerImGUIExt for ImGUIRun<'a> {
-    fn sequencer(&mut self, path: &[LiveId]) -> SequencerImGUI {
-        let mut frame = self.imgui.root_frame();
-        SequencerImGUI(self.safe_ref::<Sequencer>(frame.component_by_path(path)))
     }
 }

@@ -40,7 +40,7 @@ struct Node {
 }
 
 impl AudioGraphNode for Node {
-    fn handle_midi_1_data(&mut self, _data: Midi1Data) {
+    fn handle_midi_data(&mut self, _data: MidiData) {
     }
     
     fn all_notes_off(&mut self) {

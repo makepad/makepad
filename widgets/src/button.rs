@@ -3,6 +3,7 @@ use {
         makepad_derive_widget::*,
         makepad_draw_2d::*,
         button_logic::*,
+        frame::*,
         widget::*
     }
 };
@@ -173,3 +174,67 @@ impl Button {
         self.bg.end(cx);
     }
 }
+
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct ButtonRef(WidgetRef); 
+
+impl ButtonRef {
+    pub fn clicked(&self, actions:&WidgetActions) -> bool {
+        if let Some(item) = actions.find_single_action(&self.0) {
+            if let ButtonAction::Click = item.action() {
+                return true
+            }
+        }
+        false
+    }
+}
+/*
+pub trait ButtonFrameRefExt {
+    fn get_button(&self, path: &[LiveId]) -> ButtonRef;
+}
+
+impl ButtonFrameRefExt for FrameRef {
+    fn get_button(&self, path: &[LiveId]) -> ButtonRef {
+        ButtonRef(self.get_widget(path))
+    }
+}
+
+pub trait ButtonWidgetRefExt {
+    fn get_button(&self, path: &[LiveId]) -> ButtonRef;
+    fn into_button(self) -> ButtonRef;
+}
+
+impl ButtonWidgetRefExt for WidgetRef {
+    fn into_button(self) -> ButtonRef {
+        ButtonRef(self)
+    }
+    fn get_button(&self, path: &[LiveId]) -> ButtonRef {
+        ButtonRef(self.get_widget(path))
+    }
+}
+
+impl LiveHook for ButtonRef {}
+impl LiveApply for ButtonRef {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        if let Some(mut inner) = self.inner_mut(){
+            return inner.apply(cx, from, index, nodes)
+        }
+        panic!();
+    }
+}
+
+impl LiveNew for ButtonRef {
+    fn new(cx: &mut Cx) -> Self {
+        Self (WidgetRef::new_with_inner(Box::new(Button::new(cx))))
+    }
+    
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
+        LiveTypeInfo {
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
+            live_type: LiveType::of::<dyn Widget>(),
+            fields: Vec::new(),
+            live_ignore: true,
+            type_name: LiveId(0)
+        }
+    }
+}*/
