@@ -28,6 +28,9 @@ mod geometry;
 mod draw_list;
 mod debug;
 mod component_map;
+
+#[macro_use]
+mod main_app;
 //pub mod audio;
 //pub mod midi;
 
