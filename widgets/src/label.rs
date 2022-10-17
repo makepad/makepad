@@ -38,7 +38,7 @@ impl Widget for Label {
         self.walk
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk:Walk, self_uid:WidgetUid)->WidgetDraw{
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
         let mut lines = self.text.split("\\n");
         for line in lines{
             // lets debugdraw the cliprect

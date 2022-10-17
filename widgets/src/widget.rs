@@ -1,7 +1,9 @@
 use {
     crate::makepad_draw_2d::*,
     std::collections::BTreeMap,
-    std::any::TypeId
+    std::any::TypeId,
+    std::cell::RefCell,
+    std::rc::Rc
 };
 pub use crate::widget;
 
@@ -13,7 +15,7 @@ pub trait Widget: LiveApply {
         _fn_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {}
     
-    fn handle_widget_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<WidgetActionItem> {
+    fn handle_widget_event_vec(&mut self, cx: &mut Cx, event: &Event) -> WidgetActions {
         let mut actions = Vec::new();
         self.handle_widget_event(cx, event, &mut | _, action | {
             actions.push(action);
@@ -24,19 +26,19 @@ pub trait Widget: LiveApply {
     fn widget_query(
         &mut self,
         _query: &WidgetQuery,
-        _callback: &mut Option<WidgetQueryCb>
+        _callback: &mut WidgetQueryCb
     ) -> WidgetResult {
-        return WidgetResult::not_found()
+        WidgetResult::next()
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: WidgetUid) -> WidgetDraw;
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw;
     fn get_walk(&self) -> Walk;
     
     // defaults
     fn redraw(&mut self, _cx: &mut Cx) {}
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, self_uid: WidgetUid) -> WidgetDraw {
-        self.draw_widget(cx, self.get_walk(), self_uid)
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d) -> WidgetDraw {
+        self.draw_widget(cx, self.get_walk())
     }
     
     fn create_child(
@@ -46,8 +48,8 @@ pub trait Widget: LiveApply {
         _at: CreateAt,
         _new_id: LiveId,
         _nodes: &[LiveNode]
-    ) -> Option<&mut Box<dyn Widget >> {
-        None
+    ) -> WidgetRef {
+        WidgetRef::empty()
     }
     
     fn template(
@@ -56,19 +58,23 @@ pub trait Widget: LiveApply {
         path: &[LiveId],
         new_id: LiveId,
         nodes: &[LiveNode]
-    ) -> Option<&mut Box<dyn Widget >> {
+    ) -> WidgetRef {
         // first we query the template
-        if path.len() == 1{
-            if let Some(live_ptr) = self.query_template(path[0]){
+        if path.len() == 1 {
+            if let Some(live_ptr) = self.query_template(path[0]) {
                 return self.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
             }
         }
-        if let Some(WidgetFound::Template(child, live_ptr)) = 
-        self.widget_query(&WidgetQuery::Path(path), &mut None).into_found() {
-            child.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
+
+        let result = self.widget_query(&WidgetQuery::Path(path), &mut |found| {
+            WidgetResult::found(found)
+        });
+        
+        if let Some(WidgetFound::Template(parent, live_ptr)) = result.into_found(){    
+            parent.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
         }
-        else {
-            None
+        else{
+            WidgetRef::empty()
         }
     }
     
@@ -76,23 +82,13 @@ pub trait Widget: LiveApply {
         None
     }
     
-    fn bind_read(&mut self, _cx:&mut Cx, _nodes:&[LiveNode]){
+    fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
     }
     
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
 }
 
-pub struct WidgetQueryCb<'a>{
-    pub cx:&'a mut Cx,
-    pub cb:&'a mut dyn FnMut(&mut Cx, WidgetFound)
-}
-
-impl<'a> WidgetQueryCb<'a>{
-    pub fn call(&mut self, args:WidgetFound){
-        let cb = &mut self.cb;
-        cb(self.cx, args)
-    }
-}
+pub type WidgetQueryCb = dyn FnMut(WidgetFound)->WidgetResult;
 
 #[derive(Clone, Copy)]
 pub enum CreateAt {
@@ -105,100 +101,21 @@ pub enum CreateAt {
 
 pub enum WidgetQuery<'a> {
     All,
-    TypeId(std::any::TypeId),
     Path(&'a [LiveId]),
-    Uid(WidgetUid),
+    Template(&'a [LiveId]),
 }
 
-pub enum WidgetFound<'a> {
-    Child(&'a mut Box<dyn Widget >),
-    Template(&'a mut Box<dyn Widget >, LivePtr)
+pub enum WidgetFound {
+    Child(WidgetRef),
+    Template(WidgetRef, LivePtr)
 }
 
-pub type WidgetResult<'a> = Result<(),WidgetFound<'a>>;
-
-pub trait WidgetResultApi<'a>{
-    fn child(value: &'a mut Box<dyn Widget >) -> WidgetResult<'a> {
-       Result::Err(WidgetFound::Child(value))
-    }
-    fn template(value: &'a mut Box<dyn Widget >, live_ptr: LivePtr) -> WidgetResult<'a> {
-        Result::Err(WidgetFound::Template(value, live_ptr))
-    }    
-    fn not_found()->WidgetResult<'a>{WidgetResult::Ok(())}
-    fn found(arg:WidgetFound)->WidgetResult{WidgetResult::Err(arg)}
-    fn is_not_found(&self)->bool;
-    fn is_found(&self)->bool;
-    fn into_found(self)->Option<WidgetFound<'a>>;
-}
-
-impl<'a> WidgetResultApi<'a> for WidgetResult<'a> {
-
-    fn is_not_found(&self) -> bool {
-        match *self {
-            Result::Ok(_) => true,
-            Result::Err(_) => false
-        }
-    }
-    fn is_found(&self) -> bool {
-        match *self {
-            Result::Ok(_) => false,
-            Result::Err(_) => true
-        }
-    }
-    fn into_found(self)->Option<WidgetFound<'a>>{
-        match self {
-            Result::Ok(_) => None,
-            Result::Err(arg) => Some(arg)
-        }
-    }
-}
-
-/*
-pub enum WidgetResult<'a> {
-    NotFound,
-    Found(WidgetFound<'a>)
-}
-
-impl<'a> WidgetResult<'a> {
-    pub fn child(value: &'a mut Box<dyn Widget >) -> Self {
-        Self::Found(WidgetFound::Child(value))
-    }
-    pub fn template(value: &'a mut Box<dyn Widget >, live_ptr: LivePtr) -> Self {
-        Self::Found(WidgetFound::Template(value, live_ptr))
-    }
-}
-
-impl<'a> FromResidual for WidgetResult<'a> {
-    fn from_residual(residual: WidgetFound<'a>) -> Self {
-        Self::Found(residual)
-    }
-}
-
-impl<'a> Try for WidgetResult<'a> {
-    type Output = ();
-    type Residual = WidgetFound<'a>;
-    
-    fn from_output(_: Self::Output) -> Self {
-        WidgetResult::NotFound
-    }
-    
-    fn branch(self) -> ControlFlow<Self::Residual,
-    Self::Output> {
-        match self {
-            Self::NotFound => ControlFlow::Continue(()),
-            Self::Found(c) => ControlFlow::Break(c)
-        }
-    }
-}*/
-
-pub type WidgetDraw = Result<(),WidgetUid>;
-
-pub trait WidgetDrawApi{
-    fn done()->WidgetDraw{Result::Ok(())}
-    fn not_done(arg:WidgetUid)->WidgetDraw{Result::Err(arg)}
-    fn is_done(&self)->bool;
-    fn is_not_done(&self)->bool;
-    fn as_not_done(&self)->Option<WidgetUid>;
+pub trait WidgetDrawApi {
+    fn done() -> WidgetDraw {Result::Ok(())}
+    fn not_done(arg: WidgetRef) -> WidgetDraw {Result::Err(arg)}
+    fn is_done(&self) -> bool;
+    fn is_not_done(&self) -> bool;
+    fn into_not_done(self) -> Option<WidgetRef>;
 }
 
 impl WidgetDrawApi for WidgetDraw {
@@ -214,58 +131,32 @@ impl WidgetDrawApi for WidgetDraw {
             Result::Err(_) => true
         }
     }
-    fn as_not_done(&self)->Option<WidgetUid>{
-        match *self {
+    fn into_not_done(self) -> Option<WidgetRef> {
+        match self {
             Result::Ok(_) => None,
-            Result::Err(uid) => Some(uid)
+            Result::Err(nd) => Some(nd)
         }
     }
 }
 
-/*
-pub enum WidgetDraw {
-    Done,
-    WidgetUid(WidgetUid)
+
+pub type WidgetResult= Result<(), WidgetFound>;
+pub trait WidgetResultApi {
+    fn found(found:WidgetFound) -> WidgetResult {Result::Err(found)}
+    fn next() -> WidgetResult {Result::Ok(())}
+    fn into_found(self) -> Option<WidgetFound>;
 }
 
-impl WidgetDraw {
-    pub fn is_done(&self) -> bool {
+impl WidgetResultApi for WidgetResult{
+    fn into_found(self) -> Option<WidgetFound>{
         match self {
-            Self::Done => true,
-            _ => false
-        }
-    }
-    pub fn not_done(&self) -> bool {
-        match self {
-            Self::Done => false,
-            _ => true
+            Result::Ok(_) => None,
+            Result::Err(found) => Some(found)
         }
     }
 }
 
-impl FromResidual for WidgetDraw {
-    fn from_residual(residual: WidgetUid) -> Self {
-        Self::WidgetUid(residual)
-    }
-}
-
-impl Try for WidgetDraw {
-    type Output = ();
-    type Residual = WidgetUid;
-    
-    fn from_output(_: Self::Output) -> Self {
-        WidgetDraw::Done
-    }
-    
-    fn branch(self) -> ControlFlow<Self::Residual,
-    Self::Output> {
-        match self {
-            Self::Done => ControlFlow::Continue(()),
-            Self::WidgetUid(c) => ControlFlow::Break(c)
-        }
-    }
-}
-*/
+pub type WidgetDraw = Result<(), WidgetRef>;
 
 
 generate_ref_cast_api!(Widget);
@@ -302,140 +193,181 @@ impl Clone for Box<dyn WidgetAction> {
     }
 }
 
-pub struct WidgetRef(Option<Box<dyn Widget >>);
+#[derive(Clone)]
+pub struct WidgetRef(Rc<RefCell<Option<Box<dyn Widget >> >>);
+
+impl PartialEq for WidgetRef{
+    fn eq(&self, other: &WidgetRef) -> bool{
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn ne(&self, other: &WidgetRef) -> bool { 
+        !Rc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 impl WidgetRef {
-    pub fn empty() -> Self {Self (None)}
+    pub fn empty() -> Self {Self (Rc::new(RefCell::new(None)))}
     
-    pub fn as_uid(&self) -> WidgetUid {
-        if let Some(inner) = &self.0 {
-            WidgetUid::from_frame_component(inner)
+    pub fn is_empty(&self)->bool{
+        self.0.borrow().as_ref().is_none()
+    }
+    
+    pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
+        Self(Rc::new(RefCell::new(Some(widget))))
+    }
+    
+    fn create_child(
+        &self,
+        cx: &mut Cx,
+        live_ptr: LivePtr,
+        at: CreateAt,
+        new_id: LiveId,
+        nodes: &[LiveNode]
+    ) -> WidgetRef {
+        let mut inner = self.0.borrow_mut();
+        if let Some(inner) = &mut *inner {
+            inner.create_child(cx, live_ptr, at, new_id, nodes)
         }
         else {
-            WidgetUid(0)
+            WidgetRef::empty()
         }
     }
     
-    pub fn as_ref(&self) -> Option<&Box<dyn Widget >> {
-        self.0.as_ref()
-    }
-    pub fn as_mut(&mut self) -> Option<&mut Box<dyn Widget >> {
-        self.0.as_mut()
-    }
-    
-    pub fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        if let Some(inner) = &mut self.0 {
+    pub fn handle_widget_event(&self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        if let Some(inner) = self.0.borrow_mut().as_mut(){
             return inner.handle_widget_event(cx, event, dispatch_action)
         }
     }
     
-    pub fn handle_widget_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<WidgetActionItem> {
-        if let Some(inner) = &mut self.0 {
-            return inner.handle_widget_event_iter(cx, event)
+    pub fn handle_widget_event_vec(&self, cx: &mut Cx, event: &Event) -> Vec<WidgetActionItem> {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.handle_widget_event_vec(cx, event)
         }
         Vec::new()
     }
     
-    pub fn widget_query(&mut self, query: &WidgetQuery, callback: &mut Option<WidgetQueryCb>) -> WidgetResult {
-        if let Some(inner) = &mut self.0 {
+    pub fn get_widget(&self, path: &[LiveId]) -> WidgetRef {
+        let result = self.widget_query(&WidgetQuery::Path(path), &mut |found| {
+            WidgetResult::found(found)
+        }); 
+        
+        if let Some(WidgetFound::Child(child)) = result.into_found() {
+            return child
+        }
+        WidgetRef::empty()
+    }
+    
+    pub fn widget_query(&self, query: &WidgetQuery, callback: &mut WidgetQueryCb)->WidgetResult{
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
             match query {
                 WidgetQuery::All => {
-                    if let Some(callback) = callback {
-                        callback.call(WidgetFound::Child(inner))
-                    }
-                    else {
-                        return WidgetResult::child(inner)
-                    }
+                    callback(WidgetFound::Child(self.clone()))?
                 },
-                WidgetQuery::TypeId(id) => {
-                    if inner.type_id() == *id{
-                        if let Some(callback) = callback {
-                            callback.call(WidgetFound::Child(inner))
-                        }
-                        else {
-                            return WidgetResult::child(inner)
-                        }
-                    }
-                },
-                WidgetQuery::Uid(uid) => {
-                    if *uid == WidgetUid(&*inner as *const _ as u64) {
-                        if let Some(callback) = callback {
-                            callback.call(WidgetFound::Child(inner))
-                        }
-                        else {
-                            return WidgetResult::child(inner)
-                        }
-                    }
-                }
-                WidgetQuery::Path(path) => if path.len() == 1{
+                WidgetQuery::Template(path) => if path.len() == 1 {
                     if let Some(live_ptr) = inner.query_template(path[0]) {
-                        if let Some(callback) = callback {
-                            callback.call(WidgetFound::Template(inner, live_ptr))
-                        }
-                        else {
-                            return WidgetResult::template(inner, live_ptr)
-                        }
+                        callback(WidgetFound::Template(self.clone(), live_ptr))?
                     }
                 }
+                _=>()
             }
-            inner.widget_query(query, callback)
+            inner.widget_query(query, callback)?
         }
-        else {
-            WidgetResult::not_found()
-        }
+        WidgetResult::next()
     }
     
     pub fn template(
-        &mut self,
+        &self,
         cx: &mut Cx,
         path: &[LiveId],
         new_id: LiveId,
         nodes: &[LiveNode]
-    ) -> Option<&mut Box<dyn Widget >> {
-        if let Some(inner) = &mut self.0 {
-            return inner.template(cx, path, new_id, nodes);
+    ) -> WidgetRef {
+        let mut inner = self.0.borrow_mut();
+        if let Some(inner) = inner.as_mut() {
+            inner.template(cx, path, new_id, nodes)
         }
         else {
-            None
+            WidgetRef::empty()
         }
     }
     
-    pub fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        if let Some(inner) = &mut self.0 {
-            return inner.draw_widget(cx, walk, WidgetUid(&*inner as *const _ as u64))
+    pub fn draw_widget(&self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            let ret = inner.draw_widget(cx, walk);
+            if let Some(nd) = ret.into_not_done(){
+                if nd.is_empty(){
+                    return WidgetDraw::not_done(self.clone())
+                }
+                return WidgetDraw::not_done(nd);
+            }
         }
         WidgetDraw::done()
     }
     
-    pub fn get_walk(&mut self) -> Walk {
-        if let Some(inner) = &mut self.0 {
+    pub fn get_walk(&self) -> Walk {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.get_walk()
         }
         Walk::default()
     }
     
     // forwarding Widget trait
-    pub fn redraw(&mut self, cx: &mut Cx) {
-        if let Some(inner) = &mut self.0 {
+    pub fn redraw(&self, cx: &mut Cx) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.redraw(cx)
         }
     }
     
-    pub fn draw_walk_widget(&mut self, cx: &mut Cx2d) -> WidgetDraw {
-        if let Some(inner) = &mut self.0 {
-            return inner.draw_walk_widget(cx, WidgetUid(&*inner as *const _ as u64))
+    pub fn draw_walk_widget(&self, cx: &mut Cx2d) -> WidgetDraw {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.draw_walk_widget(cx)
         }
         WidgetDraw::done()
+    }
+
+    pub fn inner_mut<T: 'static + Widget>(&self) -> Option<std::cell::RefMut<'_, T >> {
+        {
+            if let Some(inner) = self.0.borrow_mut().as_mut() {
+                if inner.type_id() != std::any::TypeId::of::<T>(){
+                    return None
+                }
+            }
+            else{
+                return None
+            }
+        }
+        Some(std::cell::RefMut::map(self.0.borrow_mut(), | inner | {
+            inner.as_mut().unwrap().cast_mut::<T>().unwrap()
+        }))
+    }
+
+    pub fn inner<T: 'static + Widget>(&self) -> Option<std::cell::Ref<'_, T >> {
+        {
+            // TODO this shouldnt borrow_mut but otherwise it doesnt compile for some reason
+            if let Some(inner) = self.0.borrow_mut().as_mut() {
+                if inner.type_id() != std::any::TypeId::of::<T>(){
+                    return None
+                }
+            }
+            else{
+                return None
+            }
+        }
+        Some(std::cell::Ref::map(self.0.borrow(), | inner | {
+            inner.as_ref().unwrap().cast::<T>().unwrap()
+        }))
     }
 }
 
 impl LiveHook for WidgetRef {}
 impl LiveApply for WidgetRef {
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        let mut inner = self.0.borrow_mut();
         if let LiveValue::Class {live_type, ..} = nodes[index].value {
-            if let Some(component) = &mut self.0 {
+            if let Some(component) = &mut *inner {
                 if component.type_id() != live_type {
-                    self.0 = None; // type changed, drop old component
+                    *inner = None; // type changed, drop old component
                 }
                 else {
                     return component.apply(cx, from, index, nodes);
@@ -443,14 +375,16 @@ impl LiveApply for WidgetRef {
             }
             if let Some(component) = cx.live_registry.clone().borrow()
                 .components.get::<WidgetRegistry>().new(cx, live_type) {
-                self.0 = Some(component);
-                return self.0.as_mut().unwrap().apply(cx, from, index, nodes);
+                *inner = Some(component);
+                if let Some(component) = &mut *inner {
+                    return component.apply(cx, from, index, nodes);
+                }
             }
-            else{
+            else {
                 cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
             }
         }
-        else if let Some(component) = &mut self.0 {
+        else if let Some(component) = &mut *inner {
             return component.apply(cx, from, index, nodes)
         }
         cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
@@ -460,7 +394,7 @@ impl LiveApply for WidgetRef {
 
 impl LiveNew for WidgetRef {
     fn new(_cx: &mut Cx) -> Self {
-        Self (None)
+        Self (Rc::new(RefCell::new(None)))
     }
     
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
@@ -474,59 +408,43 @@ impl LiveNew for WidgetRef {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Default)]
-pub struct WidgetUid(u64);
-
-impl WidgetUid{
-    pub fn empty()->Self{Self::default()}
-    pub fn is_empty(&self)->bool{self.0 == 0}
-    pub fn from_frame_component(fc:&Box<dyn Widget>)->Self{
-        WidgetUid(&*fc as *const _ as u64)
-    }
+pub struct WidgetActionItem {
+    pub widget: WidgetRef,
+    pub action: Box<dyn WidgetAction>
 }
 
+pub type WidgetActions = Vec<WidgetActionItem>;
 
-pub struct WidgetActionItem {
-    pub uids: Vec<WidgetUid>,
-    pub ids: Vec<LiveId>,
-    pub bind_delta: Option<Vec<LiveNode>>,
-    pub action: Box<dyn WidgetAction>
+pub trait WidgetActionsApi{
+    fn find_single_action(&self, widget:&WidgetRef)->Option<&WidgetActionItem>;
+    fn not_empty(&self)->bool;
+}
+
+impl WidgetActionsApi for WidgetActions{
+    fn find_single_action(&self, widget:&WidgetRef)->Option<&WidgetActionItem>{
+        self.iter().find( | v | &v.widget == widget)
+    }
+    fn not_empty(&self)->bool{
+        self.len()>0
+    }
 }
 
 impl WidgetActionItem {
     pub fn new(action: Box<dyn WidgetAction>) -> Self {
-        Self{
-            uids: Vec::new(),
-            ids: Vec::new(),
-            bind_delta: None,
+        Self {
+            widget: WidgetRef::empty(),
             action
         }
     }
     
-    pub fn bind_delta(mut self, bind_delta: Vec<LiveNode>,) -> Self {
-        if bind_delta.len()>0{self.bind_delta = Some(bind_delta)}
-        self
-    }
-    
-    pub fn action<T: WidgetAction + 'static >(&self)->T where T:Default + Clone{
+    pub fn action<T: WidgetAction + 'static >(&self) -> T where T: Default + Clone {
         self.action.cast::<T>()
     }
     
-    pub fn id(&self)->LiveId{
-        self.ids[0]
-    }
-    
-    pub fn uid(&self)->WidgetUid{
-        self.uids[0]
-    }
-    
-    pub fn has_bind_delta(&self)->bool{
-        self.bind_delta.is_some()
-    }
-    
-    pub fn mark(mut self, id: LiveId, uid: WidgetUid) -> Self {
-        self.uids.push(uid);
-        self.ids.push(id);
+    pub fn set_widget(mut self, widget: &WidgetRef) -> Self {
+        //if self.widget.is_empty(){
+        self.widget = widget.clone();
+        //}
         self
     }
 }

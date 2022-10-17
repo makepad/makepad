@@ -1927,9 +1927,9 @@ impl AudioGraphNode for IronFishState {
         self.rebuildarp();
     }
     
-    fn handle_midi_1_data(&mut self, data: Midi1Data) {
+    fn handle_midi_data(&mut self, data: MidiData) {
         match data.decode() {
-            Midi1Event::Note(note) => {
+            MidiEvent::Note(note) => {
                 if note.is_on {
                     self.note_on(note.note_number, note.velocity);
                 }

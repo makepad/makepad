@@ -102,7 +102,6 @@ pub enum FoldButtonAction {
     Animating(f32)
 }
 
-
 impl FoldButton {
     
     pub fn handle_event(

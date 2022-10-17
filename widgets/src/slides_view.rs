@@ -91,7 +91,7 @@ pub struct SlidesView {
     goal_pos: f64,
     current_pos: f64,
     anim_speed: f64,
-    frame: Frame,
+    frame: FrameRef,
     #[rust] next_frame: NextFrame
 }
 

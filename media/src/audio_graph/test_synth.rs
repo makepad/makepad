@@ -37,9 +37,9 @@ impl AudioGraphNode for Node{
     fn all_notes_off(&mut self){
     }
 
-    fn handle_midi_1_data(&mut self, data:Midi1Data){
+    fn handle_midi_data(&mut self, data:MidiData){
         match data.decode(){
-            Midi1Event::Note(note) if note.is_on =>{
+            MidiEvent::Note(note) if note.is_on =>{
                 self.key_down_time = self.sample_time;
                 self.note = note.note_number as u64;
             }
