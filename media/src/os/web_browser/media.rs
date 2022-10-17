@@ -82,7 +82,7 @@ impl CxMediaApi for Cx {
     fn on_midi_1_input_data(&mut self, event: &Event) -> Vec<Midi1InputData> {
         if let Event::ToWasmMsg(event) = event {
             match event.id{
-                id!(ToWasmMidiInputData)=>{
+                live_id!(ToWasmMidiInputData)=>{
                     let tw = ToWasmMidiInputData::read_to_wasm(&mut event.as_ref());
                     return vec![tw.into()]
                 },
@@ -95,7 +95,7 @@ impl CxMediaApi for Cx {
     fn on_midi_input_list(&mut self, event: &Event) -> Vec<MidiInputInfo> {
         if let Event::ToWasmMsg(event) = event {
             match event.id{
-                id!(ToWasmMidiInputList)=>{
+                live_id!(ToWasmMidiInputList)=>{
                     let tw = ToWasmMidiInputList::read_to_wasm(&mut event.as_ref());
                     let mut ret = Vec::new();
                     for input in tw.inputs{

@@ -111,7 +111,7 @@ pub struct Sequencer {
 impl LiveHook for Sequencer {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for button in self.buttons.values_mut() {
-            if let Some(index) = nodes.child_by_name(index, id!(button).as_field()) {
+            if let Some(index) = nodes.child_by_name(index, live_id!(button).as_field()) {
                 button.apply(cx, from, index, nodes);
             }
         }

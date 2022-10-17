@@ -61,7 +61,7 @@ pub struct TabBar {
 
 impl LiveHook for TabBar {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(tab).as_field()) {
+        if let Some(index) = nodes.child_by_name(index, live_id!(tab).as_field()) {
             for tab in self.tabs.values_mut() {
                 tab.apply(cx, from, index, nodes);
             }

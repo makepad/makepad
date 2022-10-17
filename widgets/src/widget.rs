@@ -56,13 +56,13 @@ pub trait Widget: LiveApply {
         &mut self,
         cx: &mut Cx,
         path: &[LiveId],
-        new_id: LiveId,
+        new_id: &[LiveId;1],
         nodes: &[LiveNode]
     ) -> WidgetRef {
         // first we query the template
         if path.len() == 1 {
             if let Some(live_ptr) = self.query_template(path[0]) {
-                return self.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
+                return self.create_child(cx, live_ptr, CreateAt::Template, new_id[0], nodes)
             }
         }
 
@@ -71,7 +71,7 @@ pub trait Widget: LiveApply {
         });
         
         if let Some(WidgetFound::Template(parent, live_ptr)) = result.into_found(){    
-            parent.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
+            parent.create_child(cx, live_ptr, CreateAt::Template, new_id[0], nodes)
         }
         else{
             WidgetRef::empty()
@@ -280,7 +280,7 @@ impl WidgetRef {
         &self,
         cx: &mut Cx,
         path: &[LiveId],
-        new_id: LiveId,
+        new_id: &[LiveId;1],
         nodes: &[LiveNode]
     ) -> WidgetRef {
         let mut inner = self.0.borrow_mut();
