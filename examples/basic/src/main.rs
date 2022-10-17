@@ -67,7 +67,6 @@ impl App {
         
         // the framewrap can be queried for components and events polled 
         if ui.get_button(ids!(button1)).clicked(&actions){
-            println!("CLICKED");
             self.counter += 1;
             // overwrite our UI structure with an updated value
             ui.apply_over(cx, live!{
