@@ -206,7 +206,7 @@ pub struct NumberBoxId(pub LiveId);
 impl LiveHook for NumberGrid {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for number_box in self.number_boxes.values_mut() {
-            if let Some(index) = nodes.child_by_name(index, id!(number_box).as_field()) {
+            if let Some(index) = nodes.child_by_name(index, live_id!(number_box).as_field()) {
                 number_box.apply(cx, from, index, nodes);
             }
         }

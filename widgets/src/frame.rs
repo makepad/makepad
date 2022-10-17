@@ -181,7 +181,7 @@ impl FrameRef{
     pub fn template(&self,
         cx: &mut Cx,
         path: &[LiveId],
-        new_id: LiveId,
+        new_id: &[LiveId;1],
         nodes: &[LiveNode]
     ) -> WidgetRef {
         self.0.template(cx, path, new_id, nodes)

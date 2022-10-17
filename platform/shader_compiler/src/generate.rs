@@ -6,7 +6,7 @@ use{
         collections::BTreeSet,
     },
     crate::{
-        makepad_live_id::{LiveId, id},
+        makepad_live_id::{LiveId, live_id},
         makepad_live_compiler::{
             makepad_math::PrettyPrintedF32,
             TokenSpan
@@ -99,7 +99,7 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
     write!(string, " {}(", cons_name).unwrap();
     let mut sep = "";
     if param_tys.len() == 1 {
-        backend_writer.write_var_decl(string, sep, false, false, &Ident(id!(x)), &param_tys[0]);
+        backend_writer.write_var_decl(string, sep, false, false, &Ident(live_id!(x)), &param_tys[0]);
     } else {
         for (index, param_ty) in param_tys.iter().enumerate() {
             write!(string, "{}", sep).unwrap();

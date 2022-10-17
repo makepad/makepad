@@ -81,11 +81,11 @@ impl TabCloseButton {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.button.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
                 return TabCloseButtonAction::HoverIn;
             }
             Hit::FingerHoverOut(_)=>{
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
                 return TabCloseButtonAction::HoverOut;
             }
             Hit::FingerDown(_) => return TabCloseButtonAction::WasPressed,

@@ -10,7 +10,7 @@ mod derive_from_live_id;
 use crate::derive_from_live_id::*;
 
 #[proc_macro] 
-pub fn id(item: TokenStream) -> TokenStream {
+pub fn live_id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
 
     let mut parser = TokenParser::new(item);
@@ -39,7 +39,7 @@ pub fn id(item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro] 
-pub fn ids(item: TokenStream) -> TokenStream {
+pub fn id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let mut parser = TokenParser::new(item);
     fn parse(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{

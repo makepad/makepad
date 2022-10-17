@@ -36,7 +36,7 @@ impl LiveApply for View {
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(View));
+            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, live_id!(View));
             return nodes.skip_node(start_index);
         }
         cx.draw_lists[self.draw_list.id()].debug_id = nodes[start_index].id;
@@ -47,7 +47,7 @@ impl LiveApply for View {
                 break;
             }
             match nodes[index].id {
-                id!(debug_id) => cx.draw_lists[self.draw_list.id()].debug_id = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                live_id!(debug_id) => cx.draw_lists[self.draw_list.id()].debug_id = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);

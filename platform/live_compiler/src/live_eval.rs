@@ -101,7 +101,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
             fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
                 if let Some(index) = nodes.last_child(index) {
                     if nodes[index].value.is_object() {
-                        return nodes.child_by_name(index, id!(value).as_field());
+                        return nodes.child_by_name(index, live_id!(value).as_field());
                     }
                     else {
                         return Some(index)
@@ -186,7 +186,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
         LiveValue::ExprCall {ident, args} => {
             *index += 1;
             match ident {
-                id!(blend) if *args == 2 => {
+                live_id!(blend) if *args == 2 => {
                     let a = live_eval(live_registry, start, index, nodes)?;
                     let b = live_eval(live_registry, start, index, nodes)?;
                     if let LiveEval::Vec4(va) = a {

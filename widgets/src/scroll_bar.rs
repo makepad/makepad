@@ -345,7 +345,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.bar.area()) {
                 Hit::FingerDown(fe) => {
-                    self.animate_state(cx, ids!(hover.pressed));
+                    self.animate_state(cx, id!(hover.pressed));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
                         Axis::Horizontal => rel.x,
@@ -364,18 +364,18 @@ impl ScrollBar {
                     }
                 },
                 Hit::FingerHoverIn(_) => {
-                    self.animate_state(cx, ids!(hover.on));
+                    self.animate_state(cx, id!(hover.on));
                 },
                 Hit::FingerHoverOut(_) => {
-                    self.animate_state(cx, ids!(hover.off));
+                    self.animate_state(cx, id!(hover.off));
                 },
                 Hit::FingerUp(fe) => {
                     self.drag_point = None;
                     if fe.is_over && fe.digit.has_hovers() {
-                        self.animate_state(cx, ids!(hover.on));
+                        self.animate_state(cx, id!(hover.on));
                     }
                     else {
-                        self.animate_state(cx, ids!(hover.off));
+                        self.animate_state(cx, id!(hover.off));
                     }
                     return;
                 },

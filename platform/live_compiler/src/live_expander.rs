@@ -20,7 +20,7 @@ pub struct LiveExpander<'a> {
 
 impl<'a> LiveExpander<'a> {
     pub fn is_baseclass(id: LiveId) -> bool {
-        id == id!(Struct)
+        id == live_id!(Struct)
     }
     
     pub fn shift_parent_stack(&self, parents: &mut Vec<(LiveId, usize)>, nodes: &[LiveNode], after_point: usize, old_size: usize, new_size: usize) {
@@ -255,7 +255,7 @@ impl<'a> LiveExpander<'a> {
                     let mut live_type_info = self.live_registry.live_type_infos.get(live_type).unwrap();
                     
                     let mut has_deref_hop = false;
-                    while let Some(field) = live_type_info.fields.iter().find( | f | f.id == id!(draw_super)) {
+                    while let Some(field) = live_type_info.fields.iter().find( | f | f.id == live_id!(draw_super)) {
                         has_deref_hop = true;
                         live_type_info = &field.live_type_info;
                     }
