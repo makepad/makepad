@@ -6,9 +6,9 @@ use makepad_draw_2d::*;
 live_register!{
     // import frame types
     import makepad_widgets::frame::*;
-    // load the widget registry 
+    // load the widget registry
     registry Widget::*;
-
+    
     App: {{App}} {
         ui: {
             layout: {flow: Down}
@@ -22,12 +22,13 @@ live_register!{
             }
             // named button to click
             button1 = Button {
-                walk:{margin:{left:100,top:100}}
+                walk: {margin: {left: 100, top: 100}}
                 text: "Click to count"
             }
             // label to show the counter
             label1 = Label {
-                walk:{margin:{left:100,top:20}}
+                walk: {margin: {left: 114, top: 20}}
+                label: {color: #f},
                 text: "Counter: 0"
             }
         }
@@ -58,15 +59,15 @@ impl App {
         if let Event::Draw(event) = event {
             return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx));
         }
-
+        
         // give the window time to do things
         self.window.handle_event(cx, event);
         
         // call handle event on the frame and return an actions vec
         let actions = ui.handle_event_vec(cx, event);
         
-        // the framewrap can be queried for components and events polled 
-        if ui.get_button(ids!(button1)).clicked(&actions){
+        // the framewrap can be queried for components and events polled
+        if ui.get_button(ids!(button1)).clicked(&actions) {
             self.counter += 1;
             // overwrite our UI structure with an updated value
             ui.apply_over(cx, live!{
@@ -85,7 +86,6 @@ impl App {
         
         // iterate over any user-draw items in the frame
         while let Some(_) = self.ui.draw(cx).into_not_done() {
-            // ok so what if this is a piano.. how do we know this
         };
         
         self.window.end(cx);
