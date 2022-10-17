@@ -118,14 +118,8 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn new(cx: &mut Cx) -> Self {");
             tb.add("        Self (WidgetRef::new_with_inner(Box::new(").ident(clean_name).add("::new(cx))))");
             tb.add("    }");
-            tb.add("    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {");
-            tb.add("        LiveTypeInfo {");
-            tb.add("            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),");
-            tb.add("            live_type: LiveType::of::<dyn Widget>(),");
-            tb.add("            fields: Vec::new(),");
-            tb.add("            live_ignore: true,");
-            tb.add("            type_name: LiveId(0)");
-            tb.add("        }");
+            tb.add("    fn live_type_info(cx: &mut Cx) -> LiveTypeInfo {");
+            tb.add("        ").ident(clean_name).add("::live_type_info(cx)");
             tb.add("    }");
             tb.add("}");
 
