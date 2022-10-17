@@ -53,7 +53,7 @@ impl App {
     
     // event message pump entry point
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let mut ui = self.ui.clone();
+        let ui = self.ui.clone();
         
         // draw events need to be handled with a draw context
         if let Event::Draw(event) = event {
