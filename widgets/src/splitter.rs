@@ -159,12 +159,12 @@ impl Widget for Splitter {
         self.walk
     }
     
-    fn widget_query(&mut self, query: &WidgetQuery, callback: &mut Option<WidgetQueryCb>) -> WidgetResult {
+    fn widget_query(&mut self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
         self.a.widget_query(query, callback) ?;
         self.b.widget_query(query, callback)
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: WidgetUid) -> WidgetDraw {
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }

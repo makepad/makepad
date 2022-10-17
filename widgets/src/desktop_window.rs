@@ -2,10 +2,10 @@ use crate::{
     debug_view::DebugView,
     makepad_draw_2d::*,
     nav_control::NavControl,
-    button_logic::*,
     window_menu::*,
+    button::*,
+    widget::*,
     frame::*,
-    widget::*
 };
 
 live_register!{
@@ -53,7 +53,7 @@ pub struct DesktopWindow {
     pass: Pass,
     depth_texture: Texture,
     
-    frame: Frame,
+    frame: FrameRef,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![
@@ -95,6 +95,22 @@ impl DesktopWindow {
         self.debug_view.handle_event(cx,event);
         self.nav_control.handle_event(cx, event, self.main_view.draw_list_id());
         self.overlay.handle_event(cx, event);
+        let actions = self.frame.handle_event_vec(cx, event);
+        if actions.not_empty(){
+            if self.frame.get_button(ids!(min_btn)).clicked(&actions){
+            
+            }
+            if self.frame.get_button(ids!(max_btn)).clicked(&actions){
+            
+            }
+            if self.frame.get_button(ids!(close_btn)).clicked(&actions){
+            
+            }
+        }
+        /*
+        if self.frame.get_button(ids!(min_btn)).clicked(&actions){
+            
+        }
         
         for item in self.frame.handle_event_vec(cx, event) {
             if let ButtonAction::Click = item.action.cast() {match item.id() {
@@ -114,7 +130,7 @@ impl DesktopWindow {
                 }
                 _ => ()
             }}
-        }
+        }*/
         
         let is_for_other_window = match event {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),

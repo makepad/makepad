@@ -1,12 +1,12 @@
 use {
     crate::{
+        makepad_derive_widget::*,
         makepad_image_formats::jpeg,
         makepad_image_formats::png,
         makepad_draw_2d::*,
         widget::*,
         scroll_bars::ScrollBars,
     },
-    std::any::TypeId
 };
 
 live_register!{
@@ -31,24 +31,6 @@ live_register!{
     ScrollX: Frame {scroll_bars: ScrollBars{show_scroll_x:true, show_scroll_y:false}}
     ScrollY: Frame {scroll_bars: ScrollBars{show_scroll_x:false, show_scroll_y:true}}
 }
-/*
-#[derive(Clone, Copy, Debug, Live, LiveHook)]
-#[live_ignore]
-pub enum Overflow {
-    #[pick] Visible,
-    Hidden,
-    Scroll
-}
-
-impl Overflow{
-    fn is_viewless(&self)->bool{
-        match self{
-            Self::Viewless=>true,
-            _=>false
-        }
-    }
-}
-*/
 
 #[derive(Live)]
 #[live_register(widget!(Frame))]
@@ -176,6 +158,57 @@ impl LiveHook for Frame {
     }
 }
 
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct FrameRef(WidgetRef);
+
+impl FrameRef{
+    pub fn widget_query(&self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
+        self.0.widget_query(query, callback)
+    }
+    
+    pub fn get_widget(&self, path: &[LiveId]) -> WidgetRef {
+         self.0.get_widget(path)
+    }
+
+    pub fn handle_event_vec(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
+        self.0.handle_widget_event_vec(cx, event)
+    }
+
+    pub fn redraw(&self, cx: &mut Cx) {
+        self.0.redraw(cx)
+    }
+
+    pub fn template(&self,
+        cx: &mut Cx,
+        path: &[LiveId],
+        new_id: LiveId,
+        nodes: &[LiveNode]
+    ) -> WidgetRef {
+        self.0.template(cx, path, new_id, nodes)
+    }
+    
+    pub fn draw(&self, cx: &mut Cx2d,) -> WidgetDraw {
+        if let Some(mut inner) = self.inner_mut(){
+            return inner.draw(cx)
+        }
+        WidgetDraw::done()
+    }
+
+    pub fn set_scroll_pos(&self, cx:&mut Cx, v:DVec2){
+        if let Some(mut inner) = self.inner_mut(){
+            inner.set_scroll_pos(cx, v)
+        }
+    }
+
+    pub fn area(&self)->Area{
+        if let Some(inner) = self.inner(){
+            inner.area
+        }
+        else{
+            Area::Empty
+        }
+    }
+}
 
 impl Widget for Frame {
     
@@ -191,9 +224,8 @@ impl Widget for Frame {
 
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
-                let uid = child.as_uid();
                 child.handle_widget_event(cx, event, &mut | cx, action | {
-                    dispatch_action(cx, action.mark(*id, uid));
+                    dispatch_action(cx, action.set_widget(&child));
                 });
             }
         }
@@ -219,15 +251,14 @@ impl Widget for Frame {
         self.walk
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: WidgetUid) -> WidgetDraw {
-        self.draw_walk(cx, walk, self_uid)
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        self.draw_walk(cx, walk)
     }
-    
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
         for child in self.children.values_mut() {
-            child.as_mut().unwrap().redraw(cx);
+            child.redraw(cx);
         }
     }
     
@@ -238,9 +269,9 @@ impl Widget for Frame {
         at: CreateAt,
         new_id: LiveId,
         nodes: &[LiveNode]
-    ) -> Option<&mut Box<dyn Widget >> {
+    ) -> WidgetRef {
         if self.design_mode {
-            return None
+            return WidgetRef::empty()
         }
         
         self.draw_order.retain( | v | *v != new_id);
@@ -248,7 +279,7 @@ impl Widget for Frame {
         // lets resolve the live ptr to something
         let mut x = WidgetRef::new_from_ptr(cx, Some(live_ptr));
         
-        x.as_mut().unwrap().apply(cx, ApplyFrom::ApplyOver, 0, nodes);
+        x.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
         
         self.children.insert(new_id, x);
         
@@ -285,7 +316,7 @@ impl Widget for Frame {
             }
         }
         
-        self.children.get_mut(&new_id).unwrap().as_mut()
+        self.children.get_mut(&new_id).unwrap().clone()
     }
     
     fn query_template(&self, id: LiveId) -> Option<LivePtr> {
@@ -297,45 +328,34 @@ impl Widget for Frame {
         }
     }
     
-    fn widget_query(&mut self, query: &WidgetQuery, callback: &mut Option<WidgetQueryCb>) -> WidgetResult {
+    fn widget_query(&mut self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
         match query {
-            WidgetQuery::All | WidgetQuery::TypeId(_) => {
+            WidgetQuery::All=> {
                 for child in self.children.values_mut() {
                     child.widget_query(query, callback) ?
                 }
             },
-            WidgetQuery::Path(path) => {
+            WidgetQuery::Template(path) | WidgetQuery::Path(path) => {
                 if self.children.get(&path[0]).is_none() {
                     for child in self.children.values_mut() {
-                        child.as_mut().unwrap().widget_query(query, callback) ?;
+                        child.widget_query(query, callback) ?;
                     }
                 }
                 else {
                     if path.len()>1 {
-                        self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().widget_query(
+                        self.children.get_mut(&path[0]).unwrap().widget_query(
                             &WidgetQuery::Path(&path[1..]),
                             callback
                         ) ?;
                     }
                     else {
-                        let child = self.children.get_mut(&path[0]).unwrap().as_mut().unwrap();
-                        if let Some(callback) = callback {
-                            callback.call(WidgetFound::Child(child));
-                        }
-                        else {
-                            return WidgetResult::child(child);
-                        }
+                        let child = self.children.get_mut(&path[0]).unwrap();
+                        callback(WidgetFound::Child(child.clone()))?;
                     }
-                }
-                
-            }
-            WidgetQuery::Uid(_) => {
-                for child in self.children.values_mut() {
-                    child.widget_query(query, callback) ?
                 }
             }
         }
-        WidgetResult::not_found()
+        WidgetResult::next()
     }
     
     
@@ -345,23 +365,6 @@ impl Widget for Frame {
 enum DrawState {
     Drawing(usize),
     DeferWalk(usize)
-}
-
-impl dyn Widget {
-    pub fn by_path<T: 'static + Widget>(&mut self, path: &[LiveId]) -> Option<&mut T> {
-        if let Some(WidgetFound::Child(child)) = self.widget_query(&WidgetQuery::Path(path), &mut None).into_found() {
-            return child.cast_mut::<T>()
-        }
-        None
-    }
-    
-    pub fn by_type<T: 'static + Widget>(&mut self) -> Option<&mut T> {
-        
-        if let Some(WidgetFound::Child(child)) = self.widget_query(&WidgetQuery::TypeId(TypeId::of::<T>()), &mut None).into_found() {
-            return child.cast_mut::<T>()
-        }
-        None
-    }
 }
 
 impl Frame {
@@ -379,61 +382,11 @@ impl Frame {
         self.area
     }
     
-    pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event) -> Vec<WidgetActionItem> {
-        // ok so.
-        // if we get a tab key press
-        // we need to do a next_focus or prev_focus
-        
-        let mut actions = Vec::new();
-        self.handle_widget_event(cx, event, &mut | _, action | {
-            actions.push(action);
-        });
-        actions
-    }
-    
-    pub fn component_by_uid(&mut self, uid: WidgetUid) -> Option<&mut Box<dyn Widget >> {
-        if let Some(WidgetFound::Child(child)) = self.widget_query(&WidgetQuery::Uid(uid), &mut None).into_found() {
-            return Some(child)
-        }
-        None
-    }
-    
-    pub fn component_by_path(&mut self, path: &[LiveId]) -> Option<&mut Box<dyn Widget >> {
-        if let Some(WidgetFound::Child(child)) = self.widget_query(&WidgetQuery::Path(path), &mut None).into_found() {
-            return Some(child)
-        }
-        None
-    }
-    
-    pub fn by_path<T: 'static + Widget>(&mut self, path: &[LiveId]) -> Option<&mut T> {
-        if let Some(WidgetFound::Child(child)) = self.widget_query(&WidgetQuery::Path(path), &mut None).into_found() {
-            return child.cast_mut::<T>()
-        }
-        None
-    }
-    
-    pub fn by_type<T: 'static + Widget>(&mut self) -> Option<&mut T> {
-        
-        if let Some(WidgetFound::Child(child)) = self.widget_query(&WidgetQuery::TypeId(TypeId::of::<T>()), &mut None).into_found() {
-            return child.cast_mut::<T>()
-        }
-        None
-    }
-    
     pub fn draw(&mut self, cx: &mut Cx2d,) -> WidgetDraw {
-        self.draw_walk(cx, self.get_walk(), WidgetUid::default())
+        self.draw_walk(cx, self.get_walk())
     }
     
-    // fetch all the children on this frame and call data_bind_read
-    pub fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        let _ = self.widget_query(&WidgetQuery::All, &mut Some(WidgetQueryCb {cx: cx, cb: &mut | cx, result | {
-            if let WidgetFound::Child(child) = result {
-                child.bind_read(cx, nodes);
-            }
-        }}));
-    }
-    
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk, self_uid: WidgetUid) -> WidgetDraw {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
         if self.hidden {
             return WidgetDraw::done()
         }
@@ -468,7 +421,7 @@ impl Frame {
             }
             
             if self.user_draw {
-                return WidgetDraw::not_done(self_uid)
+                return WidgetDraw::not_done(WidgetRef::empty())
             }
         }
         

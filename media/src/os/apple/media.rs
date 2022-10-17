@@ -18,17 +18,17 @@ pub fn live_register(_cx:&Cx){
 #[derive(Default)]
 struct CxMediaApple{
     pub midi_access: Option<CoreMidiAccess>,
-    pub midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData>>>>,    
+    pub midi_input_data: Arc<Mutex<RefCell<Vec<MidiInputData>>>>,    
 }
 
 impl CxMediaApi for Cx{
     
-    fn send_midi_1_data(&mut self, data:Midi1Data){
+    fn send_midi_data(&mut self, data:MidiData){
          let media = self.get_global::<CxMediaApple>();
          media.midi_access.as_ref().unwrap().send_midi_1_data(data);
     }
     
-    fn on_midi_1_input_data(&mut self, event:&Event)->Vec<Midi1InputData>{
+    fn handle_midi_received(&mut self, event:&Event)->Vec<MidiInputData>{
         if let Event::Signal(se) = event{
             if se.signals.contains(&id!(CoreMidiInputData).into()) {
                 let media = self.get_global::<CxMediaApple>();
@@ -47,7 +47,7 @@ impl CxMediaApi for Cx{
         Vec::new()
     }
     
-    fn on_midi_input_list(&mut self, event:&Event)->Vec<MidiInputInfo>{
+    fn handle_midi_inputs(&mut self, event:&Event)->Vec<MidiInputInfo>{
         if let Event::Signal(se) = event{
             if se.signals.contains(&id!(CoreMidiInputsChanged).into()) {
                 let media = self.get_global::<CxMediaApple>();
@@ -63,7 +63,7 @@ impl CxMediaApi for Cx{
         if !self.has_global::<CxMediaApple>() {
             let mut media = CxMediaApple::default();
             let midi_input_data = media.midi_input_data.clone();
-            if let Ok(ma) = CoreMidiAccess::new_midi_1_input(
+            if let Ok(ma) = CoreMidiAccess::new_midi_input(
                 move | datas | {
                     if let Ok(midi_input_data) = midi_input_data.lock() {
                         let mut midi_input_data = midi_input_data.borrow_mut();

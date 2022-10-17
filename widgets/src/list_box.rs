@@ -344,7 +344,7 @@ impl Widget for ListBox {
     
     fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         self.handle_event(cx, event, &mut | cx, action | {
-            let delta = Vec::new();
+            //let delta = Vec::new();
             match &action {
                 ListBoxAction::WasClicked(_v) => {
                     //if slider.bind.len()>0 {
@@ -353,13 +353,13 @@ impl Widget for ListBox {
                 },
                 _ => ()
             };
-            dispatch_action(cx, WidgetActionItem::new(action.into()).bind_delta(delta))
+            dispatch_action(cx, WidgetActionItem::new(action.into()))
         });
     }
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: WidgetUid) -> WidgetDraw {
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.begin(cx, walk);
         for (i, item_str) in self.items.iter().enumerate(){
             let node_id = id_num!(listbox,i as u64).into();

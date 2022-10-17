@@ -1,7 +1,6 @@
 use makepad_widgets;
 use makepad_widgets::*;
 use makepad_draw_2d::*;
-use makepad_widgets::imgui::*;
 
 // The live DSL area that can be hotloaded
 live_register!{
@@ -12,8 +11,8 @@ live_register!{
 
     App: {{App}} {
         ui: {
-            layout: {padding: 30}
-            walk: {width: Fill, height: Fill, flow: Down},
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fill},
             bg: {
                 shape: Solid
                 // little gradient shader for the background
@@ -23,10 +22,12 @@ live_register!{
             }
             // named button to click
             button1 = Button {
+                walk:{margin:{left:100,top:100}}
                 text: "Click to count"
             }
             // label to show the counter
             label1 = Label {
+                walk:{margin:{left:100,top:20}}
                 text: "Counter: 0"
             }
         }
@@ -51,8 +52,8 @@ impl App {
     
     // event message pump entry point
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let ui = self.ui.clone();
-
+        let mut ui = self.ui.clone();
+        
         // draw events need to be handled with a draw context
         if let Event::Draw(event) = event {
             return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx));
@@ -61,18 +62,19 @@ impl App {
         // give the window time to do things
         self.window.handle_event(cx, event);
         
-        // call handle event on the frame and return a vec of all actions
-        let a = frame.handle_event_vec(cx, event);
+        // call handle event on the frame and return an actions vec
+        let actions = ui.handle_event_vec(cx, event);
         
         // the framewrap can be queried for components and events polled 
-        if ui.get_button(ids!(button1)).clicked(&a){
+        if ui.get_button(ids!(button1)).clicked(&actions){
+            println!("CLICKED");
             self.counter += 1;
             // overwrite our UI structure with an updated value
             ui.apply_over(cx, live!{
                 label1 = {text: (format!("Counter: {}", self.counter))}
             });
             // cause a redraw to happen
-            self.frame.redraw(cx);
+            ui.redraw(cx);
         }
     }
     
@@ -83,11 +85,12 @@ impl App {
         }
         
         // iterate over any user-draw items in the frame
-        while let Some(_) = self.frame.draw(cx).as_not_done() {
+        while let Some(_) = self.ui.draw(cx).into_not_done() {
             // ok so what if this is a piano.. how do we know this
-            
         };
         
         self.window.end(cx);
     }
 }
+
+

@@ -4,7 +4,6 @@ pub use makepad_platform::makepad_math;
 pub use makepad_media;
 
 use makepad_widgets::*;
-use makepad_widgets::imgui::*;
 use makepad_draw_2d::*;
 use makepad_media::*;
 use makepad_media::audio_graph::*;
@@ -596,8 +595,6 @@ live_register!{
                         bind_enum: "RootNote"
                         bind: "sequencer.rootnote"
                         items: ["A", "Asharp", "B", "C", "Csharp", "D", "Dsharp", "E", "F", "Fsharp", "G", "Gsharp"]
-                        
-                        
                     }
                 }
                 
@@ -613,8 +610,6 @@ live_register!{
                         display: ["Minor", "Major", "Dorian", "Pentatonic"]
                     }
                 }
-                
-                
                 
                 arp = InstrumentCheckbox {
                     walk: {width: Fit, height: Fill, margin: 5}
@@ -981,16 +976,11 @@ live_register!{
                         label: "Detune"
                     }
                 }
-                
-                
             }
-            
             
             threecol = Frame {
                 layout: {flow: Right}
                 walk: {width: Fill, height: Fit}
-                
-                
                 harmonic = InstrumentSlider {
                     slider = {
                         slider: {line_color: (COLOR_OSC)}
@@ -1041,7 +1031,7 @@ live_register!{
                 }
             }
         }
-        imgui: {
+        ui: {
             design_mode: false,
             bg: {color: #f00},
             walk: {width: Fill, height: Fill}
@@ -1102,7 +1092,7 @@ live_register!{
                     Frame {
                         walk: {height: Fit, width: Fill}
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
-                        OscPanel {
+                        osc1 = OscPanel {
                             label = {label = {text: "Oscillator 1"}}
                             body = {
                                 type = {dropdown = {bind: "osc1.osc_type"}}
@@ -1204,7 +1194,7 @@ struct KnobBind {
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    imgui: ImGUI,
+    ui: FrameRef,
     audio_graph: AudioGraph,
     window: BareWindow,
     data: f32,
@@ -1263,8 +1253,25 @@ impl App {
         crate::piano::live_register(cx);
         crate::sequencer::live_register(cx);
     }
+    /*
+    pub fn data_bind(&mut self, cx: &mut Cx, db:&mut DataBind){
+        // this one should read AND write depending on what db is set to
+        self.frame.get(ids!(osc1.harmonic.slider)).bind_to(cx, db, ids!(osc1.harmonic));
+        
+        // read-based databinding
+        let disp = self.frame.get(ids!(mod_env.display));
+        disp.apply_over(cx, &db.remap(ids!(mod_envelope.a), ids!(bg.attack)));
+
+        if Event::Construct = event{
+            self.data_bind(cx, &mut DataBinding::read(ironfish.settings.live_read()));
+        }
+    }*/
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let ui = self.ui.clone();
+        
+        cx.handle_midi_inputs(event);
+        
         if let Event::Draw(event) = event {
             return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx));
         }
@@ -1272,19 +1279,19 @@ impl App {
         
         self.window.handle_event(cx, event);
         
-        let mut ui = self.imgui.run(cx, event);
+        let act = ui.handle_event_vec(cx, event);
         
-        if ui.on_construct() {
-            ui.cx.start_midi_input();
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            ui.bind_read(&ironfish.settings.live_read());
-            ui.piano(ids!(piano)).set_key_focus(ui.cx);
+        if let Event::Construct = event {
+            cx.start_midi_input();
+            // let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+            // ui.bind_read(&ironfish.settings.live_read());
+            ui.get_piano(ids!(piano)).set_key_focus(cx);
         }
         
-        let display_audio = ui.display_audio(ids!(display_audio));
+        let display_audio = ui.get_display_audio(ids!(display_audio));
         
         let mut buffers = 0;
-        self.audio_graph.handle_event(ui.cx, ui.event, &mut | cx, action | {
+        self.audio_graph.handle_event(cx, event, &mut | cx, action | {
             match action {
                 AudioGraphAction::DisplayAudio {buffer, voice, active} => {
                     display_audio.process_buffer(cx, active, voice, buffer);
@@ -1297,6 +1304,7 @@ impl App {
         });
         
         // fetch ui binding deltas
+        /*
         for delta in ui.on_bind_deltas() {
             for (index, bind) in self.knob_table.iter_mut().enumerate() {
                 if let Some(value) = delta.read_path(&bind.name) {
@@ -1359,12 +1367,10 @@ impl App {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             ironfish.settings.apply_over(ui.cx, &delta);
             ui.bind_read(&delta);
-        }
+        }*/
+        let piano = ui.get_piano(ids!(piano));
         
-        let piano = ui.piano(ids!(piano));
-        
-        ui.cx.on_midi_input_list(ui.event);
-        for inp in ui.cx.on_midi_1_input_data(ui.event) {
+        for inp in cx.handle_midi_received(event) {
             if inp.data.data0 == 0xb0 {
                 let mut ring = 3;
                 let mut keypressure = 40;
@@ -1390,7 +1396,6 @@ impl App {
                     _ => ()
                 }
                 if keypressure < 40 {
-                    
                 }
                 
                 if ring<3 {
@@ -1402,26 +1407,27 @@ impl App {
                     let mut delta = Vec::new();
                     delta.write_path(&bind.name, LiveValue::Float64(bind.value));
                     delta.debug_print(0, 100);
-                    ui.bind_read(&delta);
                     
-                    ui.cx.send_midi_1_data(Midi1Data {
+                    //ui.bind_read(&delta);
+                    
+                    cx.send_midi_data(MidiData {
                         data0: 0xb0,
                         data1: (3 + ring)as u8,
                         data2: (((bind.value - bind.min) / (bind.max - bind.min)) * 127.0) as u8
                     });
                     let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-                    ironfish.settings.apply_over(ui.cx, &delta);
+                    ironfish.settings.apply_over(cx, &delta);
                 }
             }
-            self.audio_graph.send_midi_1_data(inp.data);
+            self.audio_graph.send_midi_data(inp.data);
             if let Some(note) = inp.data.decode().on_note() {
                 log!("{:?}", inp.data);
-                piano.set_note(ui.cx, note.is_on, note.note_number)
+                piano.set_note(cx, note.is_on, note.note_number)
             }
         }
         
-        for note in piano.on_notes() {
-            self.audio_graph.send_midi_1_data(Midi1Note {
+        for note in piano.notes_played(&act) {
+            self.audio_graph.send_midi_data(MidiNote {
                 channel: 0,
                 is_on: note.is_on,
                 note_number: note.note_number,
@@ -1429,9 +1435,9 @@ impl App {
             }.into());
         }
         
-        let sequencer = ui.sequencer(ids!(sequencer));
+        let sequencer = ui.get_sequencer(ids!(sequencer));
         
-        for (btn_x, btn_y, active) in sequencer.on_buttons() {
+        for (btn_x, btn_y, active) in sequencer.buttons_clicked(&act) {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             let _s = ironfish.settings.clone();
             let bit = 1 << btn_y;
@@ -1440,20 +1446,20 @@ impl App {
             ironfish.settings.sequencer.set_step(btn_x, step ^ bit | act);
         }
         
-        if ui.button(ids!(panic)).clicked() {
+        if ui.get_button(ids!(panic)).clicked(&act) {
             self.audio_graph.all_notes_off();
         }
         
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
-        if ui.button(ids!(clear_grid)).clicked() {
+        if ui.get_button(ids!(clear_grid)).clicked(&act) {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 ironfish.settings.sequencer.set_step(j, 0);
             }
-            sequencer.clear_buttons(ui.cx);
+            sequencer.clear_buttons(cx);
         }
         
-        if ui.button(ids!(grid_down)).clicked() {
+        if ui.get_button(ids!(grid_down)).clicked(&act) {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 //let bv = 1<<j;
@@ -1469,14 +1475,14 @@ impl App {
                 let val = ironfish.settings.sequencer.get_step(j);
                 for i in 0..16 {
                     let bv = 1 << i;
-                    sequencer.update_button(ui.cx, j, i, if val & bv == bv {true} else {false});
+                    sequencer.update_button(cx, j, i, if val & bv == bv {true} else {false});
                 }
             }
         }
         
         let mut reload_sequencer = false;
         
-        if ui.button(ids!(grid_up)).clicked() {
+        if ui.get_button(ids!(grid_up)).clicked(&act) {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 //let bv = 1<<j;
@@ -1489,15 +1495,15 @@ impl App {
             }
             reload_sequencer = true;
         }
-
-        if ui.button(ids!(save1)).clicked() {self.preset(ui.cx, 1, shift); reload_sequencer = true;}
-        if ui.button(ids!(save2)).clicked() {self.preset(ui.cx, 2, shift); reload_sequencer = true;}
-        if ui.button(ids!(save3)).clicked() {self.preset(ui.cx, 3, shift); reload_sequencer = true;}
-        if ui.button(ids!(save4)).clicked() {self.preset(ui.cx, 4, shift); reload_sequencer = true;}
-        if ui.button(ids!(save5)).clicked() {self.preset(ui.cx, 5, shift); reload_sequencer = true;}
-        if ui.button(ids!(save6)).clicked() {self.preset(ui.cx, 6, shift); reload_sequencer = true;}
-        if ui.button(ids!(save7)).clicked() {self.preset(ui.cx, 7, shift); reload_sequencer = true;}
-        if ui.button(ids!(save8)).clicked() {self.preset(ui.cx, 8, shift); reload_sequencer = true;}
+        
+        if ui.get_button(ids!(save1)).clicked(&act) {self.preset(cx, 1, shift); reload_sequencer = true;}
+        if ui.get_button(ids!(save2)).clicked(&act) {self.preset(cx, 2, shift); reload_sequencer = true;}
+        if ui.get_button(ids!(save3)).clicked(&act) {self.preset(cx, 3, shift); reload_sequencer = true;}
+        if ui.get_button(ids!(save4)).clicked(&act) {self.preset(cx, 4, shift); reload_sequencer = true;}
+        if ui.get_button(ids!(save5)).clicked(&act) {self.preset(cx, 5, shift); reload_sequencer = true;}
+        if ui.get_button(ids!(save6)).clicked(&act) {self.preset(cx, 6, shift); reload_sequencer = true;}
+        if ui.get_button(ids!(save7)).clicked(&act) {self.preset(cx, 7, shift); reload_sequencer = true;}
+        if ui.get_button(ids!(save8)).clicked(&act) {self.preset(cx, 8, shift); reload_sequencer = true;}
         
         if reload_sequencer {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
@@ -1505,11 +1511,10 @@ impl App {
                 let val = ironfish.settings.sequencer.get_step(j);
                 for i in 0..16 {
                     let bv = 1 << i;
-                    sequencer.update_button(ui.cx, j, i, if val & bv == bv {true} else {false});
+                    sequencer.update_button(cx, j, i, if val & bv == bv {true} else {false});
                 }
             }
         }
-        
     }
     
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
@@ -1533,7 +1538,7 @@ impl App {
                     let mut nodes = Vec::new();
                     nodes.from_cbor(&data).unwrap();
                     ironfish.settings.apply_over(cx, &nodes);
-                    self.imgui.root_frame().bind_read(cx, &nodes);
+                    //self.imgui.root_frame().bind_read(cx, &nodes);
                 }
                 else {
                     log!("Error decompressing preset");
@@ -1551,7 +1556,7 @@ impl App {
             return;
         }
         
-        while self.imgui.draw(cx).is_not_done() {};
+        while self.ui.draw(cx).is_not_done() {};
         
         self.window.end(cx);
     }

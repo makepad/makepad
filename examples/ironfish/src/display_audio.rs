@@ -5,7 +5,6 @@ use {
         makepad_math::complex::*,
         makepad_widgets::*,
         makepad_media::*,
-        makepad_widgets::imgui::*
     }
 };
 
@@ -256,12 +255,12 @@ impl DisplayAudio {
 }
 
 // ImGUI convenience API for Piano
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct DisplayAudioRef(WidgetRef);
 
-pub struct DisplayAudioImGUI(ImGUIRef);
-
-impl DisplayAudioImGUI {
+impl DisplayAudioRef {
     pub fn process_buffer(&self, cx: &mut Cx, active: bool, voice: usize, buffer: &AudioBuffer) {
-        if let Some(mut inner) = self.inner() {
+        if let Some(mut inner) = self.inner_mut() {
             if inner.layers[voice].process_buffer(cx, active, buffer){
                 inner.area.redraw(cx);
             }
@@ -270,20 +269,4 @@ impl DisplayAudioImGUI {
     
     pub fn voice_off(&self, _cx: &mut Cx, _voice: usize,) {
     }
-    
-    pub fn inner(&self) -> Option<std::cell::RefMut<'_, DisplayAudio >> {
-        self.0.inner()
-    }
 }
-
-pub trait DisplayAudioImGUIExt {
-    fn display_audio(&mut self, path: &[LiveId]) -> DisplayAudioImGUI;
-}
-
-impl<'a> DisplayAudioImGUIExt for ImGUIRun<'a> {
-    fn display_audio(&mut self, path: &[LiveId]) -> DisplayAudioImGUI {
-        let mut frame = self.imgui.root_frame();
-        DisplayAudioImGUI(self.safe_ref::<DisplayAudio>(frame.component_by_path(path)))
-    }
-}
-

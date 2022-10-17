@@ -76,18 +76,14 @@ impl Widget for FoldHeader {
             }
         };
         
-        for item in self.header.handle_widget_event_iter(cx, event) {
-            if item.id() == id!(fold_button) {
+        for item in self.header.handle_widget_event_vec(cx, event) {
+            if item.widget == self.header.get_widget(ids!(fold_button)){
                 match item.action.cast() {
                     FoldButtonAction::Opening => {
                         self.animate_state(cx, ids!(open.on))
                     }
                     FoldButtonAction::Closing => {
                         self.animate_state(cx, ids!(open.off))
-                        // ok so now we need to sample the rectsize
-                        // and now the body walk will switch to 
-                        // fixed height
-                        
                     }
                     _ => ()
                 }
@@ -105,12 +101,12 @@ impl Widget for FoldHeader {
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn widget_query(&mut self, query: &WidgetQuery, callback: &mut Option<WidgetQueryCb>) -> WidgetResult {
+    fn widget_query(&mut self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
         self.header.widget_query(query, callback) ?;
         self.body.widget_query(query, callback)
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: WidgetUid) -> WidgetDraw {
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
