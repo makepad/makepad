@@ -60,6 +60,7 @@ pub use crate::{
     bare_window::BareWindow,
     button_logic::{button_logic_handle_event, ButtonAction},
     button::*,
+    label::*,
     text_input::{TextInput},
     link_label::{LinkLabel},
     desktop_window::{DesktopWindow},

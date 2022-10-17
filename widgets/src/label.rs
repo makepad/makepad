@@ -1,7 +1,9 @@
 #![allow(unused)]
 use {
     crate::{
+        makepad_derive_widget::*,
         makepad_draw_2d::*,
+        frame::*,
         widget::*
     }
 };
@@ -50,5 +52,18 @@ impl Widget for Label {
             self.label.draw_walk(cx, walk, self.align, line);
         }
         WidgetDraw::done()
+    }
+}
+
+
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct LabelRef(WidgetRef); 
+
+impl LabelRef{
+    pub fn set_text(&self, text:&str){
+        if let Some(mut inner) = self.inner_mut(){
+            inner.text.clear();
+            inner.text.push_str(text);
+        }
     }
 }
