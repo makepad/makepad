@@ -93,8 +93,15 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             };
             let snake_name = camel_case_to_snake_case(&clean_name);
             
+            tb.add("impl std::ops::Deref for ").ident(&struct_name).add("{");
+            tb.add("    type Target = WidgetRef;");
+            tb.add("    fn deref(&self)->&Self::Target{");
+            tb.add("        &self.0");
+            tb.add("    }");
+            tb.add("}");
+            
             tb.add("impl").ident(&struct_name).add("{");
-
+            
             tb.add("   pub fn inner(&self) -> Option<std::cell::Ref<'_, ").ident(clean_name).add(" >> {");
             tb.add("       self.0.inner()");
             tb.add("   }");
@@ -103,7 +110,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("       self.0.inner_mut()");
             tb.add("   }");
             tb.add("}");
-
+            
             tb.add("impl LiveHook for ").ident(&struct_name).add("{}");
             tb.add("impl LiveApply for ").ident(&struct_name).add("{");
             tb.add("    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {");
