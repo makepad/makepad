@@ -216,11 +216,11 @@ impl DrawVars {
                                 
                                 let mut slots = 0;
                                 for field in &lf.fields {
-                                    if field.id == id!(draw_super) {
+                                    if field.id == live_id!(draw_super) {
                                         recur_expand(live_registry, shader_registry, level + 1, after_draw_vars, field.live_type_info.live_type, draw_shader_def, span);
                                         continue
                                     }
-                                    if field.id == id!(draw_vars) {
+                                    if field.id == live_id!(draw_vars) {
                                         // assert the thing to be marked correctly
                                         if let LiveFieldKind::Calc = field.live_field_kind {}
                                         else {panic!()}
@@ -526,9 +526,9 @@ impl DrawVars {
         }
         
         let unknown_shader_props = match nodes[index].id {
-            id!(debug) => false,
-            id!(debug_id) => false,
-            id!(draw_call_group) => false,
+            live_id!(debug) => false,
+            live_id!(debug_id) => false,
+            live_id!(draw_call_group) => false,
             _ => true
         };
         

@@ -42,7 +42,7 @@ impl NavControl {
         for next_area in stack{
             if let Some(prev_area) = prev_area{
                 cx.send_trigger(prev_area, Trigger{
-                    id:id!(scroll_focus_nav),
+                    id:live_id!(scroll_focus_nav),
                     from:next_area
                 });
             }

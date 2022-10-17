@@ -177,9 +177,9 @@ impl DesktopButton {
         let state = button_logic_handle_event(cx, event, self.bg.area(), dispatch_action);
         if let Some(state) = state {
             match state {
-                ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),
-                ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
-                ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
+                ButtonState::Pressed => self.animate_state(cx, id!(hover.pressed)),
+                ButtonState::Default => self.animate_state(cx, id!(hover.off)),
+                ButtonState::Hover => self.animate_state(cx, id!(hover.on)),
             }
         }
     }

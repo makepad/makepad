@@ -20,7 +20,7 @@ pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("impl LiveComponentRegistry for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn type_id(&self) -> LiveType {LiveType::of::<").ident(&struct_name).add(">()}");
             
-            tb.add("    fn component_type(&self) -> LiveId {id!(").ident(&trait_name).add(")}");
+            tb.add("    fn component_type(&self) -> LiveId {live_id!(").ident(&trait_name).add(")}");
             tb.add("    fn get_module_set(&self, set: &mut std::collections::BTreeSet<LiveModuleId>){");
             tb.add("        self.map.values().for_each( | (info, _) | {set.insert(info.module_id);});");
             tb.add("    }");
