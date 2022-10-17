@@ -71,19 +71,19 @@ impl Widget for FoldHeader {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            if self.state.is_track_animating(cx, id!(open)) {
+            if self.state.is_track_animating(cx, live_id!(open)) {
                 self.area.redraw(cx);
             }
         };
         
         for item in self.header.handle_widget_event_vec(cx, event) {
-            if item.widget == self.header.get_widget(ids!(fold_button)){
+            if item.widget == self.header.get_widget(id!(fold_button)){
                 match item.action.cast() {
                     FoldButtonAction::Opening => {
-                        self.animate_state(cx, ids!(open.on))
+                        self.animate_state(cx, id!(open.on))
                     }
                     FoldButtonAction::Closing => {
-                        self.animate_state(cx, ids!(open.off))
+                        self.animate_state(cx, id!(open.off))
                     }
                     _ => ()
                 }

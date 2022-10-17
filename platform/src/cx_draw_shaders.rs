@@ -39,10 +39,10 @@ impl CxDrawShaderOptions {
         while let Some(node_index) = node_iter {
             let node = &doc.nodes[node_index];
             match node.id {
-                id!(draw_call_group) => if let LiveValue::Id(id) = node.value {
+                live_id!(draw_call_group) => if let LiveValue::Id(id) = node.value {
                     ret.draw_call_group = id;
                 }
-                id!(debug_id) => if let LiveValue::Id(id) = node.value {
+                live_id!(debug_id) => if let LiveValue::Id(id) = node.value {
                     ret.debug_id = Some(id);
                 }
                 _ => ()
@@ -310,13 +310,13 @@ impl CxDrawShaderMapping {
                     geometries.push(field.ident.0, ty, None);
                 }
                 DrawShaderFieldKind::Instance {var_def_ptr, live_field_kind, ..} => {
-                    if field.ident.0 == id!(rect_pos) {
+                    if field.ident.0 == live_id!(rect_pos) {
                         rect_pos = Some(instances.total_slots);
                     }
-                    if field.ident.0 == id!(rect_size) {
+                    if field.ident.0 == live_id!(rect_size) {
                         rect_size = Some(instances.total_slots);
                     }
-                    if field.ident.0 == id!(draw_clip) {
+                    if field.ident.0 == live_id!(draw_clip) {
                         draw_clip = Some(instances.total_slots);
                     }
                     if var_def_ptr.is_some() {
@@ -332,16 +332,16 @@ impl CxDrawShaderMapping {
                 }
                 DrawShaderFieldKind::Uniform {block_ident, ..} => {
                     match block_ident.0 {
-                        id!(draw) => {
+                        live_id!(draw) => {
                             draw_uniforms.push(field.ident.0, ty, None);
                         }
-                        id!(view) => {
+                        live_id!(view) => {
                             view_uniforms.push(field.ident.0, ty, None);
                         }
-                        id!(pass) => {
+                        live_id!(pass) => {
                             pass_uniforms.push(field.ident.0, ty, None);
                         }
-                        id!(user) => {
+                        live_id!(user) => {
                             user_uniforms.push(field.ident.0, ty, None);
                         }
                         _ => ()

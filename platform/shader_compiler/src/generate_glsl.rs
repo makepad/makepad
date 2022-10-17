@@ -6,7 +6,7 @@ use {
     },
     crate::{
         makepad_live_id::{
-            id,
+            live_id,
             LiveId,
         },
         generate::*,
@@ -161,7 +161,7 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         write!(self.string, "\n").unwrap();
-        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
+        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
         
         writeln!(self.string, "    gl_Position = {}();", DisplayFnName(vertex_def.fn_ptr, vertex_def.ident)).unwrap();
         write!(self.string, "\n").unwrap();
@@ -312,7 +312,7 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         // we need to collect all consts
-        let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap();
+        let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
         write!(self.string, "\n").unwrap();
         writeln!(self.string, "    gl_FragColor = {}();", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
         writeln!(self.string, "}}").unwrap();

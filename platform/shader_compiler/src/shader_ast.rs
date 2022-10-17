@@ -858,59 +858,59 @@ impl DrawShaderDef {
 impl BinOp {
     pub fn from_assign_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            LiveToken::Punct(id!( =)) => Some(BinOp::Assign),
-            LiveToken::Punct(id!( +=)) => Some(BinOp::AddAssign),
-            LiveToken::Punct(id!( -=)) => Some(BinOp::SubAssign),
-            LiveToken::Punct(id!( *=)) => Some(BinOp::MulAssign),
-            LiveToken::Punct(id!( /=)) => Some(BinOp::DivAssign),
+            LiveToken::Punct(live_id!( =)) => Some(BinOp::Assign),
+            LiveToken::Punct(live_id!( +=)) => Some(BinOp::AddAssign),
+            LiveToken::Punct(live_id!( -=)) => Some(BinOp::SubAssign),
+            LiveToken::Punct(live_id!( *=)) => Some(BinOp::MulAssign),
+            LiveToken::Punct(live_id!( /=)) => Some(BinOp::DivAssign),
             _ => None,
         }
     }
     
     pub fn from_or_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            LiveToken::Punct(id!( ||)) => Some(BinOp::Or),
+            LiveToken::Punct(live_id!( ||)) => Some(BinOp::Or),
             _ => None,
         }
     }
     
     pub fn from_and_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            LiveToken::Punct(id!( &&)) => Some(BinOp::And),
+            LiveToken::Punct(live_id!( &&)) => Some(BinOp::And),
             _ => None,
         }
     }
     
     pub fn from_eq_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            LiveToken::Punct(id!( ==)) => Some(BinOp::Eq),
-            LiveToken::Punct(id!( !=)) => Some(BinOp::Ne),
+            LiveToken::Punct(live_id!( ==)) => Some(BinOp::Eq),
+            LiveToken::Punct(live_id!( !=)) => Some(BinOp::Ne),
             _ => None,
         }
     }
     
     pub fn from_rel_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            LiveToken::Punct(id!(<)) => Some(BinOp::Lt),
-            LiveToken::Punct(id!( <=)) => Some(BinOp::Le),
-            LiveToken::Punct(id!(>)) => Some(BinOp::Gt),
-            LiveToken::Punct(id!( >=)) => Some(BinOp::Ge),
+            LiveToken::Punct(live_id!(<)) => Some(BinOp::Lt),
+            LiveToken::Punct(live_id!( <=)) => Some(BinOp::Le),
+            LiveToken::Punct(live_id!(>)) => Some(BinOp::Gt),
+            LiveToken::Punct(live_id!( >=)) => Some(BinOp::Ge),
             _ => None,
         }
     }
     
     pub fn from_add_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            LiveToken::Punct(id!( +)) => Some(BinOp::Add),
-            LiveToken::Punct(id!(-)) => Some(BinOp::Sub),
+            LiveToken::Punct(live_id!( +)) => Some(BinOp::Add),
+            LiveToken::Punct(live_id!(-)) => Some(BinOp::Sub),
             _ => None,
         }
     }
     
     pub fn from_mul_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            LiveToken::Punct(id!(*)) => Some(BinOp::Mul),
-            LiveToken::Punct(id!( /)) => Some(BinOp::Div),
+            LiveToken::Punct(live_id!(*)) => Some(BinOp::Mul),
+            LiveToken::Punct(live_id!( /)) => Some(BinOp::Div),
             _ => None,
         }
     }
@@ -947,8 +947,8 @@ impl fmt::Display for BinOp {
 impl UnOp {
     pub fn from_un_op(token: LiveToken) -> Option<UnOp> {
         match token {
-            LiveToken::Punct(id!(!)) => Some(UnOp::Not),
-            LiveToken::Punct(id!(-)) => Some(UnOp::Neg),
+            LiveToken::Punct(live_id!(!)) => Some(UnOp::Not),
+            LiveToken::Punct(live_id!(-)) => Some(UnOp::Neg),
             _ => None,
         }
     }
@@ -1122,13 +1122,13 @@ impl Ty {
                 }
             }
             LiveValue::Id(id) => match id {
-                id!(bool) => Self::Bool,
-                id!(int) => Self::Int,
-                id!(float) => Self::Float,
-                id!(vec2) => Self::Vec2,
-                id!(vec3) => Self::Vec3,
-                id!(vec4) => Self::Vec4,
-                id!(texture2d) => Self::Texture2D,
+                live_id!(bool) => Self::Bool,
+                live_id!(int) => Self::Int,
+                live_id!(float) => Self::Float,
+                live_id!(vec2) => Self::Vec2,
+                live_id!(vec3) => Self::Vec3,
+                live_id!(vec4) => Self::Vec4,
+                live_id!(texture2d) => Self::Texture2D,
                 _ => {
                     return Err(LiveError {
                         origin: live_error_origin!(),
@@ -1187,22 +1187,22 @@ impl fmt::Display for Ty {
 impl TyLit {
     pub fn from_id(id: LiveId) -> Option<TyLit> {
         match id {
-            id!(vec4) => Some(TyLit::Vec4),
-            id!(vec3) => Some(TyLit::Vec3),
-            id!(vec2) => Some(TyLit::Vec2),
-            id!(mat4) => Some(TyLit::Mat4),
-            id!(mat3) => Some(TyLit::Mat3),
-            id!(mat2) => Some(TyLit::Mat2),
-            id!(float) => Some(TyLit::Float),
-            id!(bool) => Some(TyLit::Bool),
-            id!(int) => Some(TyLit::Int),
-            id!(bvec2) => Some(TyLit::Bvec2),
-            id!(bvec3) => Some(TyLit::Bvec3),
-            id!(bvec4) => Some(TyLit::Bvec4),
-            id!(ivec2) => Some(TyLit::Ivec4),
-            id!(ivec3) => Some(TyLit::Ivec4),
-            id!(ivec4) => Some(TyLit::Ivec4),
-            id!(texture2D) => Some(TyLit::Texture2D),
+            live_id!(vec4) => Some(TyLit::Vec4),
+            live_id!(vec3) => Some(TyLit::Vec3),
+            live_id!(vec2) => Some(TyLit::Vec2),
+            live_id!(mat4) => Some(TyLit::Mat4),
+            live_id!(mat3) => Some(TyLit::Mat3),
+            live_id!(mat2) => Some(TyLit::Mat2),
+            live_id!(float) => Some(TyLit::Float),
+            live_id!(bool) => Some(TyLit::Bool),
+            live_id!(int) => Some(TyLit::Int),
+            live_id!(bvec2) => Some(TyLit::Bvec2),
+            live_id!(bvec3) => Some(TyLit::Bvec3),
+            live_id!(bvec4) => Some(TyLit::Bvec4),
+            live_id!(ivec2) => Some(TyLit::Ivec4),
+            live_id!(ivec3) => Some(TyLit::Ivec4),
+            live_id!(ivec4) => Some(TyLit::Ivec4),
+            live_id!(texture2D) => Some(TyLit::Texture2D),
             _ => None
         }
     }

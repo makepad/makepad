@@ -75,7 +75,7 @@ impl LiveHook for DesktopWindow {
         self.window.set_pass(cx, &self.pass);
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         if cx.platform_type().is_desktop(){
-            self.frame.template(cx, ids!(windows_buttons), id!(my_instrument), live!{});
+            self.frame.template(cx, id!(windows_buttons), id!(my_instrument), live!{});
         }
     }
 }
@@ -97,13 +97,13 @@ impl DesktopWindow {
         self.overlay.handle_event(cx, event);
         let actions = self.frame.handle_event_vec(cx, event);
         if actions.not_empty(){
-            if self.frame.get_button(ids!(min_btn)).clicked(&actions){
+            if self.frame.get_button(id!(min_btn)).clicked(&actions){
             
             }
-            if self.frame.get_button(ids!(max_btn)).clicked(&actions){
+            if self.frame.get_button(id!(max_btn)).clicked(&actions){
             
             }
-            if self.frame.get_button(ids!(close_btn)).clicked(&actions){
+            if self.frame.get_button(id!(close_btn)).clicked(&actions){
             
             }
         }
@@ -114,10 +114,10 @@ impl DesktopWindow {
         
         for item in self.frame.handle_event_vec(cx, event) {
             if let ButtonAction::Click = item.action.cast() {match item.id() {
-                id!(min_btn) => {
+                live_id!(min_btn) => {
                     self.window.minimize(cx);
                 }
-                id!(max_btn) => {
+                live_id!(max_btn) => {
                     if self.window.is_fullscreen(cx) {
                         self.window.restore(cx);
                     }
@@ -125,7 +125,7 @@ impl DesktopWindow {
                         self.window.maximize(cx);
                     }
                 }
-                id!(close_btn) => {
+                live_id!(close_btn) => {
                     self.window.close(cx);
                 }
                 _ => ()

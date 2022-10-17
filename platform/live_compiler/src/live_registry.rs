@@ -51,8 +51,8 @@ pub struct LiveRegistry {
 impl Default for LiveRegistry {
     fn default() -> Self {
         //let mut ignore_no_dsl = HashSet::new();
-        //ignore_no_dsl.insert(id!(Namespace));
-        //ignore_no_dsl.insert(id!(Struct));
+        //ignore_no_dsl.insert(live_id!(Namespace));
+        //ignore_no_dsl.insert(live_id!(Struct));
         Self {
             //ignore_no_dsl,
             main_module: None,
@@ -663,7 +663,7 @@ impl LiveRegistry {
             
             let is_prop_assign = token_index > 2
                 && live_tokens[token_index - 2].is_ident()
-                && live_tokens[token_index - 1].is_punct_id(id!(:));
+                && live_tokens[token_index - 1].is_punct_id(live_id!(:));
             
             if is_prop_assign || live_tokens[token_index].is_value_type() {
                 let token_id = LiveTokenId::new(file_id, token_index - 2);
@@ -767,7 +767,7 @@ impl LiveRegistry {
         for node in &mut original.nodes {
             match &mut node.value {
                 LiveValue::Import(module_id) => {
-                    if module_id.0 == id!(crate) { // patch up crate refs
+                    if module_id.0 == live_id!(crate) { // patch up crate refs
                         module_id.0 = own_module_id.0
                     };
                     deps.insert(*module_id);
