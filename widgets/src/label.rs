@@ -34,6 +34,10 @@ pub struct Label {
 }
 
 impl Widget for Label {
+    fn redraw(&mut self, cx:&mut Cx){
+        self.label.redraw(cx)
+    }
+    
     fn get_walk(&self)->Walk{
         self.walk
     }
