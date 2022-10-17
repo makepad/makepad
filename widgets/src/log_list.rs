@@ -175,7 +175,7 @@ pub struct LogList {
 
 impl LiveHook for LogList {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(log_node).as_field()) {
+        if let Some(index) = nodes.child_by_name(index, live_id!(log_node).as_field()) {
             for (_, node) in self.fold_nodes.iter_mut() {
                 node.apply(cx, from, index, nodes);
             }
@@ -236,7 +236,7 @@ impl LogListNode {
     }
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
-        self.toggle_state(cx, is_selected, animate, ids!(select.on), ids!(select.off))
+        self.toggle_state(cx, is_selected, animate, id!(select.on), id!(select.off))
     }
     
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
@@ -259,10 +259,10 @@ impl LogListNode {
         
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
@@ -270,7 +270,7 @@ impl LogListNode {
                 }
             }
             Hit::FingerDown(_) => {
-                self.animate_state(cx, ids!(select.on));
+                self.animate_state(cx, id!(select.on));
                 /*
                 if self.opened > 0.2 {
                     self.animate_to(cx, self.closed_state);

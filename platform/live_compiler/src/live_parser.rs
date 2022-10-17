@@ -153,11 +153,11 @@ impl<'a> LiveParser<'a> {
         let crate_id = self.expect_ident() ?;
         // if crate_id is capitalized, its a component.
         // so we should make a LiveValue::UseComponent
-        self.expect_token(LiveToken::Punct(id!(::))) ?;
+        self.expect_token(LiveToken::Punct(live_id!(::))) ?;
         
         // ok so. we need to collect everything 'upto' the last id
         let first_module_id = self.expect_ident() ?;
-        self.expect_token(LiveToken::Punct(id!(::))) ?;
+        self.expect_token(LiveToken::Punct(live_id!(::))) ?;
         let mut module = String::new();
         let mut last_id = LiveId(0);
         
@@ -167,12 +167,12 @@ impl<'a> LiveParser<'a> {
                 LiveToken::Ident(id) => {
                     self.skip_token();
                     last_id = id;
-                    if !self.accept_token(LiveToken::Punct(id!(::))) {
+                    if !self.accept_token(LiveToken::Punct(live_id!(::))) {
                         break;
                     }
                     module.push_str(&format!("::{}", id));
                 },
-                LiveToken::Punct(id!(*)) => {
+                LiveToken::Punct(live_id!(*)) => {
                     self.skip_token();
                     last_id = LiveId(0);
                     break;
@@ -197,9 +197,9 @@ impl<'a> LiveParser<'a> {
         let crate_id = self.expect_ident() ?;
         // if crate_id is capitalized, its a component.
         // so we should make a LiveValue::UseComponent
-        self.expect_token(LiveToken::Punct(id!(::))) ?;
+        self.expect_token(LiveToken::Punct(live_id!(::))) ?;
     
-        let component_id = if self.accept_token(LiveToken::Punct(id!(*))) {
+        let component_id = if self.accept_token(LiveToken::Punct(live_id!(*))) {
             LiveId(0)
         }
         else {
@@ -238,7 +238,7 @@ impl<'a> LiveParser<'a> {
     fn possible_edit_info(&mut self, ld: &mut LiveOriginal) -> Result<Option<LiveEditInfo>, LiveError> {
         // metadata is .{key:value}
         // lets align to the next index
-        if self.accept_token(LiveToken::Punct(id!(.))) {
+        if self.accept_token(LiveToken::Punct(live_id!(.))) {
             self.expect_token(LiveToken::Open(Delim::Brace)) ?;
             
             let fill_index = ld.edit_info.len() & 0xf;
@@ -273,7 +273,7 @@ impl<'a> LiveParser<'a> {
                     }
                     LiveToken::Ident(prop_id) => {
                         self.skip_token();
-                        self.expect_token(LiveToken::Punct(id!(:))) ?;
+                        self.expect_token(LiveToken::Punct(live_id!(:))) ?;
                         
                         match self.peek_token() {
                             LiveToken::Bool(val) => {
@@ -343,7 +343,7 @@ impl<'a> LiveParser<'a> {
         let edit_info = self.possible_edit_info(ld) ?;
         let origin = LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info).with_node_has_prefix(true);
         
-        if self.accept_token(LiveToken::Punct(id!(:))) {
+        if self.accept_token(LiveToken::Punct(live_id!(:))) {
             self.expect_live_value(real_prop_id, origin, ld) ?;
         }
         
@@ -372,7 +372,7 @@ impl<'a> LiveParser<'a> {
                 LiveNodeOrigin::from_token_id(self.get_token_id()).with_prop_type(LivePropType::Nameless),
                 ld
             ) ?;
-            self.accept_token(LiveToken::Punct(id!(,)));
+            self.accept_token(LiveToken::Punct(live_id!(,)));
             counter += 1;
         }
         return Err(self.error(format!("Eof in array body"), live_error_origin!()))
@@ -397,7 +397,7 @@ impl<'a> LiveParser<'a> {
             }
             //let span = self.begin_span();
             self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_prop_type(LivePropType::Nameless), ld) ?;
-            self.accept_token(LiveToken::Punct(id!(,)));
+            self.accept_token(LiveToken::Punct(live_id!(,)));
         }
         return Err(self.error(format!("Eof in object body"), live_error_origin!()))
     }
@@ -424,9 +424,9 @@ impl<'a> LiveParser<'a> {
             let token_id = self.get_token_id();
             let prop_id = self.expect_ident() ?;
             let edit_info = self.possible_edit_info(ld) ?;
-            self.expect_token(LiveToken::Punct(id!(:))) ?;
+            self.expect_token(LiveToken::Punct(live_id!(:))) ?;
             self.expect_live_value(prop_id, LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info), ld) ?;
-            self.accept_token(LiveToken::Punct(id!(,)));
+            self.accept_token(LiveToken::Punct(live_id!(,)));
         }
         return Err(self.error(format!("Eof in named enum"), live_error_origin!()))
     }
@@ -492,7 +492,7 @@ impl<'a> LiveParser<'a> {
                     value: LiveValue::Bool(val)
                 });
             },
-            LiveToken::Punct(id!(-))=>{
+            LiveToken::Punct(live_id!(-))=>{
                 self.skip_token();
                 match self.peek_token() {
                     LiveToken::Int(val) => {
@@ -556,11 +556,11 @@ impl<'a> LiveParser<'a> {
                     value: LiveValue::Dependency {string_start: index as usize, string_count: len as usize}
                 });
             },
-            LiveToken::Ident(id!(vec2)) => {
+            LiveToken::Ident(live_id!(vec2)) => {
                 self.skip_token();
                 if self.accept_token(LiveToken::Open(Delim::Paren)) {
                     let x = self.expect_float() ?;
-                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    self.expect_token(LiveToken::Punct(live_id!(,))) ?;
                     let y = self.expect_float() ?;
                     self.expect_token(LiveToken::Close(Delim::Paren)) ?;
                     ld.nodes.push(LiveNode {
@@ -573,17 +573,17 @@ impl<'a> LiveParser<'a> {
                     ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
-                        value: LiveValue::Id(id!(vec2))
+                        value: LiveValue::Id(live_id!(vec2))
                     });
                 }
             },
-            LiveToken::Ident(id!(vec3)) => {
+            LiveToken::Ident(live_id!(vec3)) => {
                 self.skip_token();
                 if self.accept_token(LiveToken::Open(Delim::Paren)) {
                     let x = self.expect_float() ?;
-                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    self.expect_token(LiveToken::Punct(live_id!(,))) ?;
                     let y = self.expect_float() ?;
-                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    self.expect_token(LiveToken::Punct(live_id!(,))) ?;
                     let z = self.expect_float() ?;
                     self.expect_token(LiveToken::Close(Delim::Paren)) ?;
                     ld.nodes.push(LiveNode {
@@ -596,19 +596,19 @@ impl<'a> LiveParser<'a> {
                     ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
-                        value: LiveValue::Id(id!(vec3))
+                        value: LiveValue::Id(live_id!(vec3))
                     });
                 }
             },
-            LiveToken::Ident(id!(vec4)) => {
+            LiveToken::Ident(live_id!(vec4)) => {
                 self.skip_token();
                 if self.accept_token(LiveToken::Open(Delim::Paren)) {
                     let x = self.expect_float() ?;
-                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    self.expect_token(LiveToken::Punct(live_id!(,))) ?;
                     let y = self.expect_float() ?;
-                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    self.expect_token(LiveToken::Punct(live_id!(,))) ?;
                     let z = self.expect_float() ?;
-                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    self.expect_token(LiveToken::Punct(live_id!(,))) ?;
                     let w = self.expect_float() ?;
                     self.expect_token(LiveToken::Close(Delim::Paren)) ?;
                     ld.nodes.push(LiveNode {
@@ -621,13 +621,13 @@ impl<'a> LiveParser<'a> {
                     ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
-                        value: LiveValue::Id(id!(vec4))
+                        value: LiveValue::Id(live_id!(vec4))
                     });
                 }
             },
             LiveToken::Ident(base) => { // we're gonna parse a class or an enum
                 self.skip_token();
-                if self.accept_token(LiveToken::Punct(id!(::))) { // enum
+                if self.accept_token(LiveToken::Punct(live_id!(::))) { // enum
                     let variant = self.expect_ident() ?;
                     match self.peek_token() {
                         LiveToken::Open(Delim::Brace) => {
@@ -696,7 +696,7 @@ impl<'a> LiveParser<'a> {
     /*
     fn expect_var_def_type(&mut self) -> Result<(), LiveError> {
         self.expect_ident() ?;
-        if self.accept_token(LiveToken::Ident(id!(in))) {
+        if self.accept_token(LiveToken::Ident(live_id!(in))) {
             self.expect_ident() ?;
         }
         Ok(())
@@ -711,8 +711,8 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 return Ok(())
             }
-            LiveToken::Ident(id!(vec2)) => {todo!()}
-            LiveToken::Ident(id!(vec3)) => {todo!()}
+            LiveToken::Ident(live_id!(vec2)) => {todo!()}
+            LiveToken::Ident(live_id!(vec3)) => {todo!()}
             _ => ()
         }
         Err(self.error(format!("Expected value literal"), live_error_origin!()))
@@ -744,15 +744,15 @@ impl<'a> LiveParser<'a> {
                     // there is another token coming
                     if let LiveToken::Ident(_) = self.peek_token() {
                         match prop_id {
-                            id!(fn) => {
+                            live_id!(fn) => {
                                 self.expect_fn(ld) ?;
                                 self.accept_optional_delim();
                             }
-                            id!(import) => {
+                            live_id!(import) => {
                                 self.expect_import(ld) ?;
                                 self.accept_optional_delim();
                             }
-                            id!(registry) => {
+                            live_id!(registry) => {
                                 self.expect_registry(ld) ?;
                                 self.accept_optional_delim();
                             }
@@ -815,11 +815,11 @@ impl<'a> LiveParser<'a> {
     }
     
     pub fn expect_prop_type(&mut self)->Result<LivePropType, LiveError>{
-        Ok(if self.accept_token(LiveToken::Punct(id!(:))){
+        Ok(if self.accept_token(LiveToken::Punct(live_id!(:))){
             LivePropType::Field
         }
-        else if self.accept_token(LiveToken::Punct(id!(=))){
-            if self.accept_token(LiveToken::Punct(id!( ?))) {
+        else if self.accept_token(LiveToken::Punct(live_id!(=))){
+            if self.accept_token(LiveToken::Punct(live_id!( ?))) {
                 LivePropType::Template
             }
             else{
@@ -832,8 +832,8 @@ impl<'a> LiveParser<'a> {
     }
     
     pub fn accept_optional_delim(&mut self) {
-        if !self.accept_token(LiveToken::Punct(id!(,))) {
-            self.accept_token(LiveToken::Punct(id!(;)));
+        if !self.accept_token(LiveToken::Punct(live_id!(,))) {
+            self.accept_token(LiveToken::Punct(live_id!(;)));
         }
     }
     
@@ -986,7 +986,7 @@ impl<'a> LiveParser<'a> {
             // ok so what do we do here.
             // we accept 
             self.expect_live_value(LiveId::empty(), ld) ?;
-            self.accept_token(Token::Punct(id!(,)));
+            self.accept_token(Token::Punct(live_id!(,)));
         }
         return Err(self.error(format!("Eof in array body")))*/
     }
@@ -997,12 +997,12 @@ impl<'a> LiveParser<'a> {
     
     fn expect_cond_expr(&mut self) -> Result<Expr, LiveError> {
         let expr = self.expect_or_expr() ?;
-        Ok(if self.accept_token(LiveToken::Punct(id!( ?))) {
+        Ok(if self.accept_token(LiveToken::Punct(live_id!( ?))) {
             let token_id = self.get_token_id();
             let expr_if_true = self.expect_expr() ?;
-            self.expect_token(LiveToken::Punct(id!(:))) ?;
+            self.expect_token(LiveToken::Punct(live_id!(:))) ?;
             let expr_if_false = self.expect_cond_expr() ?;
-            Expr ::Call {token_id, ident: id!(cond), arg_exprs: vec![expr, expr_if_true, expr_if_false]}
+            Expr ::Call {token_id, ident: live_id!(cond), arg_exprs: vec![expr, expr_if_true, expr_if_false]}
         } else {
             expr
         })
@@ -1094,7 +1094,7 @@ impl<'a> LiveParser<'a> {
     fn expect_member_expr(&mut self) -> Result<Expr, LiveError> {
         let mut acc = self.expect_prim_expr() ?;
         loop {
-            if let LiveToken::Punct(id!(.)) = self.peek_token() {
+            if let LiveToken::Punct(live_id!(.)) = self.peek_token() {
                 self.skip_token();
                 let token_id = self.get_token_id();
                 let ident = self.expect_ident() ?;
@@ -1156,7 +1156,7 @@ impl<'a> LiveParser<'a> {
         if !self.accept_token(LiveToken::Close(Delim::Paren)) {
             loop {
                 arg_exprs.push(self.expect_expr() ?);
-                if !self.accept_token(LiveToken::Punct(id!(,))) {
+                if !self.accept_token(LiveToken::Punct(live_id!(,))) {
                     break;
                 }
             }
@@ -1217,48 +1217,48 @@ enum Expr {
 impl LiveBinOp {
     fn from_or_op(token: LiveToken) -> Option<Self> {
         match token {
-            LiveToken::Punct(id!( ||)) => Some(Self::Or),
+            LiveToken::Punct(live_id!( ||)) => Some(Self::Or),
             _ => None,
         }
     }
     
     fn from_and_op(token: LiveToken) -> Option<Self> {
         match token {
-            LiveToken::Punct(id!( &&)) => Some(Self::And),
+            LiveToken::Punct(live_id!( &&)) => Some(Self::And),
             _ => None,
         }
     }
     
     fn from_eq_op(token: LiveToken) -> Option<Self> {
         match token {
-            LiveToken::Punct(id!( ==)) => Some(Self::Eq),
-            LiveToken::Punct(id!( !=)) => Some(Self::Ne),
+            LiveToken::Punct(live_id!( ==)) => Some(Self::Eq),
+            LiveToken::Punct(live_id!( !=)) => Some(Self::Ne),
             _ => None,
         }
     }
     
     fn from_rel_op(token: LiveToken) -> Option<Self> {
         match token {
-            LiveToken::Punct(id!(<)) => Some(Self::Lt),
-            LiveToken::Punct(id!( <=)) => Some(Self::Le),
-            LiveToken::Punct(id!(>)) => Some(Self::Gt),
-            LiveToken::Punct(id!( >=)) => Some(Self::Ge),
+            LiveToken::Punct(live_id!(<)) => Some(Self::Lt),
+            LiveToken::Punct(live_id!( <=)) => Some(Self::Le),
+            LiveToken::Punct(live_id!(>)) => Some(Self::Gt),
+            LiveToken::Punct(live_id!( >=)) => Some(Self::Ge),
             _ => None,
         }
     }
     
     fn from_add_op(token: LiveToken) -> Option<Self> {
         match token {
-            LiveToken::Punct(id!( +)) => Some(Self::Add),
-            LiveToken::Punct(id!(-)) => Some(Self::Sub),
+            LiveToken::Punct(live_id!( +)) => Some(Self::Add),
+            LiveToken::Punct(live_id!(-)) => Some(Self::Sub),
             _ => None,
         }
     }
     
     fn from_mul_op(token: LiveToken) -> Option<Self> {
         match token {
-            LiveToken::Punct(id!(*)) => Some(Self::Mul),
-            LiveToken::Punct(id!( /)) => Some(Self::Div),
+            LiveToken::Punct(live_id!(*)) => Some(Self::Mul),
+            LiveToken::Punct(live_id!( /)) => Some(Self::Div),
             _ => None,
         }
     }
@@ -1267,8 +1267,8 @@ impl LiveBinOp {
 impl LiveUnOp {
     pub fn from_un_op(token: LiveToken) -> Option<Self> {
         match token {
-            LiveToken::Punct(id!(!)) => Some(Self::Not),
-            LiveToken::Punct(id!(-)) => Some(Self::Neg),
+            LiveToken::Punct(live_id!(!)) => Some(Self::Not),
+            LiveToken::Punct(live_id!(-)) => Some(Self::Neg),
             _ => None,
         }
     }

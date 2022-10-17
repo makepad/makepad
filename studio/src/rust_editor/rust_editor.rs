@@ -140,7 +140,7 @@ impl RustEditor {
             
             match token_cache[input.line].tokens().first() {
                 Some(TokenWithLen {token: FullToken::Comment, ..}) |
-                Some(TokenWithLen {token: FullToken::Punct(id!(#)), ..}) |
+                Some(TokenWithLen {token: FullToken::Punct(live_id!(#)), ..}) |
                 None => {
                     zoom_out = input.zoom_out
                 }
@@ -316,91 +316,91 @@ impl RustEditor {
         match (token, next_token) {
             (FullToken::Comment, _) => self.text_color_comment,
             (FullToken::Ident(_), Some(FullToken::Open(Delim::Paren))) => self.text_color_function_identifier,
-            (FullToken::Ident(_), Some(FullToken::Punct(id!(!)))) => self.text_color_macro_identifier,
+            (FullToken::Ident(_), Some(FullToken::Punct(live_id!(!)))) => self.text_color_macro_identifier,
             
             (FullToken::Lifetime, _) => self.text_color_lifetime,
             
-            (FullToken::Ident(id!(if)), _) |
-            (FullToken::Ident(id!(else)), _) |
-            (FullToken::Ident(id!(return)), _) |
-            (FullToken::Ident(id!(match)), _) => self.text_color_branch_keyword,
+            (FullToken::Ident(live_id!(if)), _) |
+            (FullToken::Ident(live_id!(else)), _) |
+            (FullToken::Ident(live_id!(return)), _) |
+            (FullToken::Ident(live_id!(match)), _) => self.text_color_branch_keyword,
             
-            (FullToken::Ident(id!(for)), _) |
-            (FullToken::Ident(id!(while)), _) |
-            (FullToken::Ident(id!(break)), _) |
-            (FullToken::Ident(id!(continue)), _) |
-            (FullToken::Ident(id!(loop)), _) => self.text_color_loop_keyword,
+            (FullToken::Ident(live_id!(for)), _) |
+            (FullToken::Ident(live_id!(while)), _) |
+            (FullToken::Ident(live_id!(break)), _) |
+            (FullToken::Ident(live_id!(continue)), _) |
+            (FullToken::Ident(live_id!(loop)), _) => self.text_color_loop_keyword,
             
-            (FullToken::Ident(id!(abstract)), _) |
-            (FullToken::Ident(id!(async)), _) |
-            (FullToken::Ident(id!(as)), _) |
-            (FullToken::Ident(id!(await)), _) |
-            (FullToken::Ident(id!(become)), _) |
-            (FullToken::Ident(id!(box)), _) |
-            (FullToken::Ident(id!(const)), _) |
-            (FullToken::Ident(id!(crate)), _) |
-            (FullToken::Ident(id!(do)), _) |
-            (FullToken::Ident(id!(dyn)), _) |
-            (FullToken::Ident(id!(enum)), _) |
-            (FullToken::Ident(id!(extern)), _) |
-            (FullToken::Ident(id!(false)), _) |
-            (FullToken::Ident(id!(final)), _) |
-            (FullToken::Ident(id!(fn)), _) |
-            (FullToken::Ident(id!(impl)), _) |
-            (FullToken::Ident(id!(in)), _) |
-            (FullToken::Ident(id!(let)), _) |
-            (FullToken::Ident(id!(macro)), _) |
-            (FullToken::Ident(id!(mod)), _) |
-            (FullToken::Ident(id!(move)), _) |
-            (FullToken::Ident(id!(mut)), _) |
-            (FullToken::Ident(id!(override)), _) |
-            (FullToken::Ident(id!(priv)), _) |
-            (FullToken::Ident(id!(pub)), _) |
-            (FullToken::Ident(id!(ref)), _) |
-            (FullToken::Ident(id!(self)), _) |
-            (FullToken::Ident(id!(static)), _) |
-            (FullToken::Ident(id!(struct)), _) |
-            (FullToken::Ident(id!(super)), _) |
-            (FullToken::Ident(id!(trait)), _) |
-            (FullToken::Ident(id!(true)), _) |
-            (FullToken::Ident(id!(typeof)), _) |
-            (FullToken::Ident(id!(unsafe)), _) |
-            (FullToken::Ident(id!(use)), _) |
-            (FullToken::Ident(id!(unsized)), _) |
-            (FullToken::Ident(id!(virtual)), _) |
-            (FullToken::Ident(id!(yield)), _) |
-            (FullToken::Ident(id!(where)), _) |
+            (FullToken::Ident(live_id!(abstract)), _) |
+            (FullToken::Ident(live_id!(async)), _) |
+            (FullToken::Ident(live_id!(as)), _) |
+            (FullToken::Ident(live_id!(await)), _) |
+            (FullToken::Ident(live_id!(become)), _) |
+            (FullToken::Ident(live_id!(box)), _) |
+            (FullToken::Ident(live_id!(const)), _) |
+            (FullToken::Ident(live_id!(crate)), _) |
+            (FullToken::Ident(live_id!(do)), _) |
+            (FullToken::Ident(live_id!(dyn)), _) |
+            (FullToken::Ident(live_id!(enum)), _) |
+            (FullToken::Ident(live_id!(extern)), _) |
+            (FullToken::Ident(live_id!(false)), _) |
+            (FullToken::Ident(live_id!(final)), _) |
+            (FullToken::Ident(live_id!(fn)), _) |
+            (FullToken::Ident(live_id!(impl)), _) |
+            (FullToken::Ident(live_id!(in)), _) |
+            (FullToken::Ident(live_id!(let)), _) |
+            (FullToken::Ident(live_id!(macro)), _) |
+            (FullToken::Ident(live_id!(mod)), _) |
+            (FullToken::Ident(live_id!(move)), _) |
+            (FullToken::Ident(live_id!(mut)), _) |
+            (FullToken::Ident(live_id!(override)), _) |
+            (FullToken::Ident(live_id!(priv)), _) |
+            (FullToken::Ident(live_id!(pub)), _) |
+            (FullToken::Ident(live_id!(ref)), _) |
+            (FullToken::Ident(live_id!(self)), _) |
+            (FullToken::Ident(live_id!(static)), _) |
+            (FullToken::Ident(live_id!(struct)), _) |
+            (FullToken::Ident(live_id!(super)), _) |
+            (FullToken::Ident(live_id!(trait)), _) |
+            (FullToken::Ident(live_id!(true)), _) |
+            (FullToken::Ident(live_id!(typeof)), _) |
+            (FullToken::Ident(live_id!(unsafe)), _) |
+            (FullToken::Ident(live_id!(use)), _) |
+            (FullToken::Ident(live_id!(unsized)), _) |
+            (FullToken::Ident(live_id!(virtual)), _) |
+            (FullToken::Ident(live_id!(yield)), _) |
+            (FullToken::Ident(live_id!(where)), _) |
             
-            (FullToken::Ident(id!(u8)), _) |
-            (FullToken::Ident(id!(i8)), _) |
-            (FullToken::Ident(id!(u16)), _) |
-            (FullToken::Ident(id!(i16)), _) |
-            (FullToken::Ident(id!(u32)), _) |
-            (FullToken::Ident(id!(i32)), _) |
-            (FullToken::Ident(id!(f32)), _) |
-            (FullToken::Ident(id!(u64)), _) |
-            (FullToken::Ident(id!(i64)), _) |
-            (FullToken::Ident(id!(f64)), _) |
-            (FullToken::Ident(id!(usize)), _) |
-            (FullToken::Ident(id!(isize)), _) |
-            (FullToken::Ident(id!(bool)), _) |
+            (FullToken::Ident(live_id!(u8)), _) |
+            (FullToken::Ident(live_id!(i8)), _) |
+            (FullToken::Ident(live_id!(u16)), _) |
+            (FullToken::Ident(live_id!(i16)), _) |
+            (FullToken::Ident(live_id!(u32)), _) |
+            (FullToken::Ident(live_id!(i32)), _) |
+            (FullToken::Ident(live_id!(f32)), _) |
+            (FullToken::Ident(live_id!(u64)), _) |
+            (FullToken::Ident(live_id!(i64)), _) |
+            (FullToken::Ident(live_id!(f64)), _) |
+            (FullToken::Ident(live_id!(usize)), _) |
+            (FullToken::Ident(live_id!(isize)), _) |
+            (FullToken::Ident(live_id!(bool)), _) |
             
-            (FullToken::Ident(id!(instance)), _) |
-            (FullToken::Ident(id!(uniform)), _) |
-            (FullToken::Ident(id!(texture)), _) |
-            (FullToken::Ident(id!(float)), _) |
-            (FullToken::Ident(id!(vec2)), _) |
-            (FullToken::Ident(id!(vec3)), _) |
-            (FullToken::Ident(id!(vec4)), _) |
-            (FullToken::Ident(id!(mat2)), _) |
-            (FullToken::Ident(id!(mat3)), _) |
-            (FullToken::Ident(id!(mat4)), _) |
-            (FullToken::Ident(id!(ivec2)), _) |
-            (FullToken::Ident(id!(ivec3)), _) |
-            (FullToken::Ident(id!(ivec4)), _) |
-            (FullToken::Ident(id!(bvec2)), _) |
-            (FullToken::Ident(id!(bvec3)), _) |
-            (FullToken::Ident(id!(bvec4)), _) => self.text_color_other_keyword,
+            (FullToken::Ident(live_id!(instance)), _) |
+            (FullToken::Ident(live_id!(uniform)), _) |
+            (FullToken::Ident(live_id!(texture)), _) |
+            (FullToken::Ident(live_id!(float)), _) |
+            (FullToken::Ident(live_id!(vec2)), _) |
+            (FullToken::Ident(live_id!(vec3)), _) |
+            (FullToken::Ident(live_id!(vec4)), _) |
+            (FullToken::Ident(live_id!(mat2)), _) |
+            (FullToken::Ident(live_id!(mat3)), _) |
+            (FullToken::Ident(live_id!(mat4)), _) |
+            (FullToken::Ident(live_id!(ivec2)), _) |
+            (FullToken::Ident(live_id!(ivec3)), _) |
+            (FullToken::Ident(live_id!(ivec4)), _) |
+            (FullToken::Ident(live_id!(bvec2)), _) |
+            (FullToken::Ident(live_id!(bvec3)), _) |
+            (FullToken::Ident(live_id!(bvec4)), _) => self.text_color_other_keyword,
             (FullToken::Ident(_), _) => {
                 if text[0].is_uppercase(){
                     if text.len() > 1 && text[1].is_uppercase() {

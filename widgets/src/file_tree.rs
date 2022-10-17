@@ -348,15 +348,15 @@ impl FileTreeNode {
     }
     
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, ids!(select.on), ids!(select.off))
+        self.toggle_state(cx, is, animate, id!(select.on), id!(select.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, ids!(focus.on), ids!(focus.off))
+        self.toggle_state(cx, is, animate, id!(focus.on), id!(focus.off))
     }
     
     pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, ids!(open.on), ids!(open.off));
+        self.toggle_state(cx, is, animate, id!(open.on), id!(open.off));
     }
     
     pub fn handle_event(
@@ -370,10 +370,10 @@ impl FileTreeNode {
         }
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_)=> {
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
@@ -381,14 +381,14 @@ impl FileTreeNode {
                 }
             }
             Hit::FingerDown(_) => {
-                self.animate_state(cx, ids!(select.on));
+                self.animate_state(cx, id!(select.on));
                 if self.is_folder {
-                    if self.state.is_in_state(cx, ids!(open.on)) {
-                        self.animate_state(cx, ids!(open.off));
+                    if self.state.is_in_state(cx, id!(open.on)) {
+                        self.animate_state(cx, id!(open.off));
                         dispatch_action(cx, FileTreeNodeAction::Closing);
                     }
                     else {
-                        self.animate_state(cx, ids!(open.on));
+                        self.animate_state(cx, id!(open.on));
                         dispatch_action(cx, FileTreeNodeAction::Opening);
                     }
                     
@@ -464,7 +464,7 @@ impl FileTree {
                 if is_open {
                     tree_node.set_folder_is_open(cx, true, Animate::No)
                 }
-                (tree_node, id!(folder_node))
+                (tree_node, live_id!(folder_node))
             });
             
             tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
@@ -498,7 +498,7 @@ impl FileTree {
         if self.should_node_draw(cx) {
             let file_node = self.file_node;
             let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
-                (FileTreeNode::new_from_ptr(cx, file_node), id!(file_node))
+                (FileTreeNode::new_from_ptr(cx, file_node), live_id!(file_node))
             });
             tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
         }

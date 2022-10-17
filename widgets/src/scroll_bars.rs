@@ -49,7 +49,7 @@ impl ScrollBars {
     pub fn handle_main_event(&mut self, cx: &mut Cx, event: &Event,  dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
         if let Event::Trigger(te) = event{
             if let Some(triggers) = te.triggers.get(&self.area){
-                if let Some(trigger) = triggers.iter().find(|t| t.id == id!(scroll_focus_nav)){
+                if let Some(trigger) = triggers.iter().find(|t| t.id == live_id!(scroll_focus_nav)){
                     let self_rect = self.area.get_rect(cx);
                     self.scroll_into_view(
                         cx,

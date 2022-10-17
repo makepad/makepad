@@ -158,7 +158,7 @@ pub struct PopupMenu {
 
 impl LiveHook for PopupMenu {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(list_node).as_field()) {
+        if let Some(index) = nodes.child_by_name(index, live_id!(list_node).as_field()) {
             for (_, node) in self.menu_items.iter_mut() {
                 node.apply(cx, from, index, nodes);
             }
@@ -213,15 +213,15 @@ impl PopupMenuItem {
             HitOptions::with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerSweepIn(_) => {
                 dispatch_action(cx, PopupMenuItemAction::WasSweeped);
-                self.animate_state(cx, ids!(hover.on));
-                self.animate_state(cx, ids!(select.on));
+                self.animate_state(cx, id!(hover.on));
+                self.animate_state(cx, id!(select.on));
             }
             Hit::FingerSweepOut(se) => {
                 if se.is_finger_up() {
@@ -233,8 +233,8 @@ impl PopupMenuItem {
                     }
                 }
                 else {
-                    self.animate_state(cx, ids!(hover.off));
-                    self.animate_state(cx, ids!(select.off));
+                    self.animate_state(cx, id!(hover.off));
+                    self.animate_state(cx, id!(select.off));
                 }
             }
             _ => {}
@@ -303,12 +303,12 @@ impl PopupMenu {
     fn select_item_state(&mut self, cx: &mut Cx, which_id: PopupMenuItemId) {
         for (id, item) in &mut *self.menu_items {
             if *id == which_id {
-                item.cut_state(cx, ids!(select.on));
-                item.cut_state(cx, ids!(hover.on));
+                item.cut_state(cx, id!(select.on));
+                item.cut_state(cx, id!(hover.on));
             }
             else {
-                item.cut_state(cx, ids!(select.off));
-                item.cut_state(cx, ids!(hover.off));
+                item.cut_state(cx, id!(select.off));
+                item.cut_state(cx, id!(hover.off));
             }
         }
     }

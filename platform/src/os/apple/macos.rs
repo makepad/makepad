@@ -213,7 +213,7 @@ impl Cx {
                     if self.os.last_mouse_button == None ||
                     self.os.last_mouse_button == Some(md.button) {
                         self.os.last_mouse_button = Some(md.button);
-                        let digit_id = id!(mouse).into();
+                        let digit_id = live_id!(mouse).into();
                         self.fingers.alloc_digit(digit_id);
                         self.fingers.process_tap_count(
                             digit_id,
@@ -226,7 +226,7 @@ impl Cx {
                     }
                 }
                 CocoaEvent::MouseMove(mm) => {
-                    let digit_id = id!(mouse).into();
+                    let digit_id = live_id!(mouse).into();
                     
                     if !self.fingers.is_digit_allocated(digit_id) {
                         let area = self.fingers.get_hover_area(digit_id);
@@ -252,7 +252,7 @@ impl Cx {
                 CocoaEvent::MouseUp(md) => {
                     if self.os.last_mouse_button == Some(md.button) {
                         self.os.last_mouse_button = None;
-                        let digit_id = id!(mouse).into();
+                        let digit_id = live_id!(mouse).into();
                         self.call_event_handler(&Event::FingerUp(
                             md.into_finger_up_event(
                                 &self.fingers,
@@ -264,7 +264,7 @@ impl Cx {
                 }
                 CocoaEvent::Scroll(e) => {
                     self.call_event_handler(&Event::FingerScroll(
-                        e.into_finger_scroll_event(id!(mouse).into())
+                        e.into_finger_scroll_event(live_id!(mouse).into())
                     ))
                 }
                 CocoaEvent::WindowDragQuery(e) => {
@@ -402,7 +402,7 @@ impl Cx {
     fn handle_core_midi_signals(&mut self, se: &SignalEvent) {
         
         if self.platform.midi_access.is_some() {
-            if se.signals.contains(&id!(CoreMidiInputData).into()) {
+            if se.signals.contains(&live_id!(CoreMidiInputData).into()) {
                 let out_data = if let Ok(data) = self.platform.midi_input_data.lock() {
                     let mut data = data.borrow_mut();
                     let out_data = data.clone();
@@ -414,7 +414,7 @@ impl Cx {
                 };
                 self.call_event_handler(&mut Event::Midi1InputData(out_data));
             }
-            else if se.signals.contains(&id!(CoreMidiInputsChanged).into()) {
+            else if se.signals.contains(&live_id!(CoreMidiInputsChanged).into()) {
                 let inputs = self.platform.midi_access.as_ref().unwrap().connect_all_inputs();
                 self.call_event_handler(&mut Event::MidiInputList(MidiInputListEvent {inputs}));
             }
@@ -460,17 +460,17 @@ impl CxOsApi for Cx {
                     if let Ok(midi_input_data) = midi_input_data.lock() {
                         let mut midi_input_data = midi_input_data.borrow_mut();
                         midi_input_data.extend_from_slice(&datas);
-                        Cx::post_signal(id!(CoreMidiInputData).into());
+                        Cx::post_signal(live_id!(CoreMidiInputData).into());
                     }
                 },
                 move || {
-                    Cx::post_signal(id!(CoreMidiInputsChanged).into());
+                    Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
                 }
             ) {
                 self.platform.midi_access = Some(ma);
             }
         }
-        Cx::post_signal(id!(CoreMidiInputsChanged).into());
+        Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
     }*/
     /*
     

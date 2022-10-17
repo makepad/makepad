@@ -338,7 +338,7 @@ impl CodeEditorImpl {
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
         // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
-            if self.state.is_track_animating(cx, id!(zoom)) {
+            if self.state.is_track_animating(cx, live_id!(zoom)) {
                 let next_pos = self.position_to_dvec2(center_line, lines_layout);
                 let last_pos = self.zoom_last_pos.unwrap();
                 let pos = self.scroll_bars.get_scroll_pos();
@@ -867,7 +867,7 @@ impl CodeEditorImpl {
         }
         
         match event.hits(cx, self.scroll_bars.area()) {
-            Hit::Trigger(te) => if te.0.iter().any(|t| t.id == id!(select_scroll)) { //
+            Hit::Trigger(te) => if te.0.iter().any(|t| t.id == live_id!(select_scroll)) { //
                 self.handle_select_scroll_in_trigger(cx, state, lines_layout);
             },
             Hit::FingerDown(fe) => {
@@ -1152,7 +1152,7 @@ impl CodeEditorImpl {
             else {
                 select_scroll.at_end = true;
             }
-            cx.send_trigger(self.scroll_bars.area(), Trigger{id:id!(select_scroll), from:Area::Empty});
+            cx.send_trigger(self.scroll_bars.area(), Trigger{id:live_id!(select_scroll), from:Area::Empty});
         }
     }
     

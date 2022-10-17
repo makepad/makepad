@@ -1,7 +1,7 @@
 use{
     std::collections::HashMap,
     crate::{
-        makepad_live_id::{LiveId, id},
+        makepad_live_id::{LiveId, live_id},
         shader_ast::{Ident, ShaderTy}
     },
 };
@@ -11,7 +11,7 @@ macro_rules! builtin {
     ($f:ident, [$(($($a:path),*) -> $b:path),*]) => {
         (
             Builtin2 {
-                id: id!($f),
+                id: live_id!($f),
                 maps: &[$(
                     (
                         &[

@@ -145,7 +145,7 @@ impl Tab {
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
         self.is_selected = is_selected;
-        self.toggle_state(cx, is_selected, animate, ids!(selected.on), ids!(selected.off));
+        self.toggle_state(cx, is_selected, animate, id!(selected.on), id!(selected.off));
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
@@ -192,16 +192,16 @@ impl Tab {
         match self.close_button.handle_event(cx, event) {
             TabCloseButtonAction::WasPressed => dispatch_action(cx, TabAction::CloseWasPressed),
             TabCloseButtonAction::HoverIn => block_hover_out = true,
-            TabCloseButtonAction::HoverOut => self.animate_state(cx, ids!(hover.off)),
+            TabCloseButtonAction::HoverOut => self.animate_state(cx, id!(hover.off)),
             _ => ()
         };
         
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => if !block_hover_out {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerDown(_) => {
                 dispatch_action(cx, TabAction::WasPressed);
