@@ -15,7 +15,7 @@ use makepad_platform::Cx;
 pub use makepad_platform;
 pub use makepad_platform::makepad_error_log;
 
-pub fn live_register(cx:&mut Cx){
-    self::audio_graph::live_register(cx);
-    self::os::live_register(cx);
+pub fn live_design(cx:&mut Cx){
+    self::audio_graph::live_design(cx);
+    self::os::live_design(cx);
 }

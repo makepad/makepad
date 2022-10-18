@@ -9,10 +9,10 @@ use {
 };
 pub use crate::button_logic::ButtonAction;
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     
-    DrawLabelText: {{DrawLabelText}} {
+    DrawLabelText= {{DrawLabelText}} {
         text_style: {
             font: {
                 //path: d"resources/IBMPlexSans-SemiBold.ttf"
@@ -32,12 +32,12 @@ live_register!{
         }
     }
     
-    Button: {{Button}} {
+    Button= {{Button}} {
         bg: {
             instance hover: 0.0
             instance pressed: 0.0
             
-            const BORDER_RADIUS: 3.0
+            const BORDER_RADIUS = 3.0
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -80,8 +80,8 @@ live_register!{
         }
         
         walk: {
-            width: Size::Fit,
-            height: Size::Fit,
+            width: Fit,
+            height: Fit,
             margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
         }
         
@@ -94,7 +94,7 @@ live_register!{
             hover = {
                 default: off,
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         bg: {pressed: 0.0, hover: 0.0}
                         label: {pressed: 0.0, hover: 0.0}
@@ -103,8 +103,8 @@ live_register!{
                 
                 on = {
                     from: {
-                        all: Play::Forward {duration: 0.1}
-                        pressed: Play::Forward {duration: 0.01}
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
                     }
                     apply: {
                         bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
@@ -113,7 +113,7 @@ live_register!{
                 }
                 
                 pressed = {
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                         label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
@@ -125,7 +125,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook, Widget)]
-#[live_register(widget!(Button))]
+#[live_design_fn(widget_factory!(Button))]
 pub struct Button {
     state: State,
     
@@ -150,7 +150,7 @@ struct DrawLabelText {
 
 impl Button {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
         self.state_handle_event(cx, event);
         let state = button_logic_handle_event(cx, event, self.bg.area(), dispatch_action);
         if let Some(state) = state {
@@ -160,6 +160,10 @@ impl Button {
                 ButtonState::Hover => self.animate_state(cx, id!(hover.on)),
             }
         };
+    }
+    
+    pub fn area(&self)->Area{
+        self.bg.area()
     }
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
@@ -188,53 +192,3 @@ impl ButtonRef {
         false
     }
 }
-/*
-pub trait ButtonFrameRefExt {
-    fn get_button(&self, path: &[LiveId]) -> ButtonRef;
-}
-
-impl ButtonFrameRefExt for FrameRef {
-    fn get_button(&self, path: &[LiveId]) -> ButtonRef {
-        ButtonRef(self.get_widget(path))
-    }
-}
-
-pub trait ButtonWidgetRefExt {
-    fn get_button(&self, path: &[LiveId]) -> ButtonRef;
-    fn into_button(self) -> ButtonRef;
-}
-
-impl ButtonWidgetRefExt for WidgetRef {
-    fn into_button(self) -> ButtonRef {
-        ButtonRef(self)
-    }
-    fn get_button(&self, path: &[LiveId]) -> ButtonRef {
-        ButtonRef(self.get_widget(path))
-    }
-}
-
-impl LiveHook for ButtonRef {}
-impl LiveApply for ButtonRef {
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if let Some(mut inner) = self.inner_mut(){
-            return inner.apply(cx, from, index, nodes)
-        }
-        panic!();
-    }
-}
-
-impl LiveNew for ButtonRef {
-    fn new(cx: &mut Cx) -> Self {
-        Self (WidgetRef::new_with_inner(Box::new(Button::new(cx))))
-    }
-    
-    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-        LiveTypeInfo {
-            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: LiveType::of::<dyn Widget>(),
-            fields: Vec::new(),
-            live_ignore: true,
-            type_name: LiveId(0)
-        }
-    }
-}*/

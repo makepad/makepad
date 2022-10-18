@@ -1,10 +1,10 @@
 use crate::makepad_draw_2d::*;
 
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     
-    DrawColorWheel: {{DrawColorWheel}} {
+    DrawColorWheel= {{DrawColorWheel}} {
         instance hover: float
         instance pressed: float
         
@@ -70,13 +70,13 @@ live_register!{
         }
     }
     
-    ColorPicker: {{ColorPicker}} {
+    ColorPicker= {{ColorPicker}} {
         
         state: {
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         wheel: {pressed: 0.0, hover: 0.0}
                     }
@@ -85,8 +85,8 @@ live_register!{
                 on = {
                     cursor: Arrow,
                     from: {
-                        all: Play::Forward {duration: 0.1}
-                        pressed: Play::Forward {duration: 0.01}
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
                     }
                     apply: {
                         wheel: {
@@ -98,7 +98,7 @@ live_register!{
                 
                 pressed = {
                     cursor: Arrow,
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         wheel: {
                             pressed: [{time: 0.0, value: 1.0}],
@@ -194,7 +194,7 @@ impl ColorPicker {
         Vec4::from_hsva(Vec4 {x: self.hue, y: self.sat, z: self.val, w: 1.0})
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.wheel.area()) {

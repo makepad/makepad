@@ -5,8 +5,8 @@ use {
     },
 };
 
-live_register!{
-    DrawColor: {{DrawColor}} {
+live_design!{
+    DrawColor= {{DrawColor}} {
         fn pixel(self) -> vec4 {
             return vec4(self.color.rgb*self.color.a, self.color.a);
         }

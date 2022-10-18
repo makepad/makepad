@@ -5,33 +5,33 @@ use crate::{
     fold_button::*
 };
 
-live_register!{
-    FoldHeader: {{FoldHeader}} {
+live_design!{
+    FoldHeader= {{FoldHeader}} {
         walk: {
-            width: Size::Fill,
-            height: Size::Fit
+            width: Fill,
+            height: Fit
         }
         body_walk: {
-            width: Size::Fill,
-            height: Size::Fit
+            width: Fill,
+            height: Fit
         }
         layout: {
-            flow: Flow::Down,
+            flow: Down,
         }
         state: {
             open = {
                 default: on
                 off = {
-                    from: {all: Play::Forward {duration: 0.2}}
-                    ease: Ease::ExpDecay {d1: 0.96, d2: 0.97}
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
                     }
                 }
                 on = {
-                    from: {all: Play::Forward {duration: 0.2}}
-                    ease: Ease::ExpDecay {d1: 0.98, d2: 0.95}
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
@@ -43,7 +43,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(widget!(FoldHeader))]
+#[live_design_fn(widget_factory!(FoldHeader))]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] rect_size: f64,
@@ -64,7 +64,7 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
-    fn handle_widget_event(
+    fn handle_widget_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -76,7 +76,7 @@ impl Widget for FoldHeader {
             }
         };
         
-        for item in self.header.handle_widget_event_vec(cx, event) {
+        for item in self.header.handle_widget_event(cx, event) {
             if item.widget == self.header.get_widget(id!(fold_button)){
                 match item.action.cast() {
                     FoldButtonAction::Opening => {
@@ -91,7 +91,7 @@ impl Widget for FoldHeader {
             dispatch_action(cx, item)
         }
         
-        self.body.handle_widget_event(cx, event, dispatch_action);
+        self.body.handle_widget_event_fn(cx, event, dispatch_action);
     }
     
     fn redraw(&mut self, cx: &mut Cx) {

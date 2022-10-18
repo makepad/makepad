@@ -6,10 +6,10 @@ use crate::{
     widget::*,
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     
-    FoldButton: {{FoldButton}} {
+    FoldButton= {{FoldButton}} {
         bg: {
             instance opened: 0.0
             instance hover: 0.0
@@ -46,12 +46,12 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {bg: {hover: 0.0}}
                 }
                 
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {bg: {hover: 1.0}}
                 }
             }
@@ -59,8 +59,8 @@ live_register!{
             open = {
                 default: yes
                 no = {
-                    from: {all: Play::Forward {duration: 0.2}}
-                    ease: Ease::ExpDecay {d1: 0.96, d2: 0.97}
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
@@ -68,8 +68,8 @@ live_register!{
                     }
                 }
                 yes = {
-                    from: {all: Play::Forward {duration: 0.2}}
-                    ease: Ease::ExpDecay {d1: 0.98, d2: 0.95}
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
@@ -82,7 +82,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook, Widget)]
-#[live_register(widget!(FoldButton))]
+#[live_design_fn(widget_factory!(FoldButton))]
 pub struct FoldButton {
     state: State,
     
@@ -104,7 +104,7 @@ pub enum FoldButtonAction {
 
 impl FoldButton {
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -141,6 +141,10 @@ impl FoldButton {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.bg.draw_walk(cx, walk);
+    }
+    
+    pub fn area(&mut self)->Area{
+        self.bg.area()
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, fade: f64) {

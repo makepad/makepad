@@ -3,12 +3,14 @@ use {
         makepad_derive_widget::*,
         makepad_draw_2d::*,
         widget::*,
+        data_binding::DataBinding,
+        frame::*,
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
-    DrawCheckBox: {{DrawCheckBox}} {
+    DrawCheckBox= {{DrawCheckBox}} {
         uniform size: 7.0;
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -56,7 +58,7 @@ live_register!{
         }
     }
     
-    CheckBox: {{CheckBox}} {
+    CheckBox= {{CheckBox}} {
         label_text: {
             color: #9
         }
@@ -81,13 +83,13 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.15}}
+                    from: {all: Forward {duration: 0.15}}
                     apply: {
                         check_box: {hover: 0.0}
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         check_box: {hover: 1.0}
                     }
@@ -96,13 +98,13 @@ live_register!{
             focus = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.0}}
+                    from: {all: Forward {duration: 0.0}}
                     apply: {
                         check_box: {focus: 0.0}
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         check_box: {focus: 1.0}
                     }
@@ -111,12 +113,12 @@ live_register!{
             selected = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.0}}
+                    from: {all: Forward {duration: 0.0}}
                     apply: {check_box: {selected: 0.0}}
                 }
                 on = {
                     cursor: Arrow,
-                    from: {all: Play::Forward {duration: 0.0}}
+                    from: {all: Forward {duration: 0.0}}
                     apply: {check_box: {selected: 1.0}}
                 }
             }
@@ -143,7 +145,7 @@ pub enum CheckType {
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(widget!(CheckBox))]
+#[live_design_fn(widget_factory!(CheckBox))]
 pub struct CheckBox {
     check_box: DrawCheckBox,
     
@@ -169,7 +171,7 @@ pub enum CheckBoxAction {
 
 impl CheckBox {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, CheckBoxAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, CheckBoxAction)) {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.check_box.area()) {
@@ -208,29 +210,13 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
-    fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        if let Some(value) = nodes.read_path(&self.bind) {
-            if let Some(value) = value.as_bool(){
-                self.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
-            }
-        }
-    }
-    
+
     fn redraw(&mut self, cx: &mut Cx) {
         self.check_box.redraw(cx);
     }
     
-    fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        self.handle_event(cx, event, &mut | cx, _checkbox, action | {
-        /*let mut delta = Vec::new();
-            match &action {
-                CheckBoxAction::Change(v)=> {
-                    if checkbox.bind.len()>0 {
-                        delta.write_path(&checkbox.bind, LiveValue::Bool(*v));
-                    }
-                },
-                _ => ()
-            };*/
+    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        self.handle_event_fn(cx, event, &mut | cx, _checkbox, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into()))
         });
     }
@@ -242,3 +228,31 @@ impl Widget for CheckBox {
         WidgetDraw::done()
     }
 }
+
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct CheckBoxRef(WidgetRef);
+
+impl CheckBoxRef {
+    pub fn bind_to(&self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId],  act: &WidgetActions, ) {
+        match db {
+            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(&self.0) {
+                match item.action() {
+                    CheckBoxAction::Change(v)=> {
+                        nodes.write_by_field_path(path,  LiveValue::Bool(v));
+                    }
+                    _ => ()
+                }
+            }
+            DataBinding::ToWidgets(nodes) => {
+                if let Some(mut inner) = self.inner_mut(){
+                    if let Some(value) = nodes.read_by_field_path(path) {
+                        if let Some(value) = value.as_bool(){
+                            inner.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

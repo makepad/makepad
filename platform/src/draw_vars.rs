@@ -141,7 +141,7 @@ impl DrawVars {
         self.draw_shader.is_some()
     }
     
-    pub fn live_register(_cx: &mut Cx) {}
+    pub fn live_design(_cx: &mut Cx) {}
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {

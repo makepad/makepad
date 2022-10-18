@@ -10,11 +10,11 @@ use {
     },
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawBgQuad: {{DrawBgQuad}} {
+    DrawBgQuad = {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
@@ -28,7 +28,7 @@ live_register!{
         }
     }
     
-    DrawNameText: {{DrawNameText}} {
+    DrawNameText = {{DrawNameText}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -42,7 +42,7 @@ live_register!{
         }
     }
     
-    ListBoxItem: {{ListBoxItem}} {
+    ListBoxItem = {{ListBoxItem}} {
         layout: {
             align: {y: 0.5},
             padding: {left: 5},
@@ -52,7 +52,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         hover: 0.0,
                         bg_quad: {hover: (hover)}
@@ -61,7 +61,7 @@ live_register!{
                 }
                 on = {
                     cursor: Hand
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {hover: 1.0},
                 }
             }
@@ -69,7 +69,7 @@ live_register!{
             select = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         selected: 0.0,
                         bg_quad: {selected: (selected)}
@@ -77,7 +77,7 @@ live_register!{
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {selected: 1.0}
                 }
             }
@@ -87,11 +87,11 @@ live_register!{
         min_drag_distance: 10.0
     }
     
-    ListBox: {{ListBox}} {
+    ListBox = {{ListBox}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
         list_item: ListBoxItem {}
-        walk: {width:Fill, height:Fit}
-        layout: {flow: Flow::Down}
+        walk: {width: Fill, height: Fit}
+        layout: {flow: Down}
         scroll_bars: {}
     }
 }
@@ -115,10 +115,10 @@ struct DrawNameText {
 
 #[derive(Live, LiveHook)]
 pub struct ListBoxItem {
-
+    
     bg_quad: DrawBgQuad,
     name_text: DrawNameText,
-
+    
     layout: Layout,
     state: State,
     
@@ -132,7 +132,7 @@ pub struct ListBoxItem {
 }
 
 #[derive(Live)]
-#[live_register(widget!(ListBox))]
+#[live_design_fn(widget_factory!(ListBox))]
 pub struct ListBox {
     scroll_bars: ScrollBars,
     list_item: Option<LivePtr>,
@@ -179,7 +179,7 @@ pub enum ListBoxAction {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct ListBoxItemId(pub LiveId);
 
-impl ListBoxItem{
+impl ListBoxItem {
     pub fn set_draw_state(&mut self, is_even: f32) {
         self.bg_quad.is_even = is_even;
         self.name_text.is_even = is_even;
@@ -202,7 +202,7 @@ impl ListBoxItem{
         self.toggle_state(cx, is_selected, animate, id!(select.on), id!(select.off))
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -270,7 +270,7 @@ impl ListBox {
         cx: &mut Cx2d,
         item_id: ListBoxItemId,
         label: &str,
-    ){
+    ) {
         self.count += 1;
         
         let list_item = self.list_item;
@@ -293,17 +293,17 @@ impl ListBox {
         }
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxAction),
     ) {
-        self.scroll_bars.handle_event(cx, event, &mut |_,_|{});
+        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
         
         let mut actions = Vec::new();
         for (node_id, node) in self.list_items.iter_mut() {
-            node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {
@@ -329,21 +329,21 @@ impl ListBox {
 
 
 impl Widget for ListBox {
-    fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
+    /*fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
         // lets use enum name to find a selected item here
-        /*
+        
         if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
             self.set_internal(*v as f32);
             self.update_text_input(cx);
-        }*/
-    }
+        }
+    }*/
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx);
     }
     
-    fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        self.handle_event(cx, event, &mut | cx, action | {
+    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        self.handle_event_fn(cx, event, &mut | cx, action | {
             //let delta = Vec::new();
             match &action {
                 ListBoxAction::WasClicked(_v) => {
@@ -361,8 +361,8 @@ impl Widget for ListBox {
     
     fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.begin(cx, walk);
-        for (i, item_str) in self.items.iter().enumerate(){
-            let node_id = id_num!(listbox,i as u64).into();
+        for (i, item_str) in self.items.iter().enumerate() {
+            let node_id = id_num!(listbox, i as u64).into();
             self.count += 1;
             let list_item = self.list_item;
             let item = self.list_items.get_or_insert(cx, node_id, | cx | {

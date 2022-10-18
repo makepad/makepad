@@ -314,7 +314,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     encode_f32(v.z, &mut out);
                     encode_f32(v.w, &mut out);
                 },
-                LiveValue::BareEnum {variant, ..} => {
+                LiveValue::BareEnum(variant) => {
                     out.push(1 + CBOR_MAP_START);
                     encode_str("if", &mut out);
                     encode_id(*variant, &mut out);
@@ -323,7 +323,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     stack.push(StackItem {index: out.len(), count: 0, has_keys: false});
                     out.push(CBOR_ARRAY_START);
                 },
-                LiveValue::TupleEnum {variant, ..} => {
+                LiveValue::TupleEnum(variant) => {
                     out.push(1 + CBOR_MAP_START);
                     encode_str("enum", &mut out);
                     out.push(2 + CBOR_ARRAY_START);
@@ -331,7 +331,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     stack.push(StackItem {index: out.len(), count: 0, has_keys: false});
                     out.push(CBOR_ARRAY_START);
                 },
-                LiveValue::NamedEnum {variant, ..} => {
+                LiveValue::NamedEnum(variant) => {
                     out.push(1 + CBOR_MAP_START);
                     encode_str("enum", &mut out);
                     out.push(2 + CBOR_ARRAY_START);
@@ -740,7 +740,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                                     self.push(LiveNode {
                                         id,
                                         origin,
-                                        value: LiveValue::BareEnum {base: LiveId(0), variant}
+                                        value: LiveValue::BareEnum(variant)
                                     });
                                     o = o1;
                                     continue;

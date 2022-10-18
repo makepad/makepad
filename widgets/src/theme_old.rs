@@ -1,6 +1,6 @@
 use crate::makepad_platform::*;
 
-live_register!{
+live_design!{
 
     
     FONT_DATA:{

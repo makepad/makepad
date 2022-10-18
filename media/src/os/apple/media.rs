@@ -12,7 +12,7 @@ use{
     }
 };
 
-pub fn live_register(_cx:&Cx){
+pub fn live_design(_cx:&Cx){
 }
 
 #[derive(Default)]

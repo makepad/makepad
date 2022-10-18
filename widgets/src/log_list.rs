@@ -12,11 +12,11 @@ use {
     },
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawBgQuad: {{DrawBgQuad}} {
+    DrawBgQuad= {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
@@ -30,7 +30,7 @@ live_register!{
         }
     }
     
-    DrawNameText: {{DrawNameText}} {
+    DrawNameText= {{DrawNameText}} {
         fn get_color(self) -> vec4 {
             return mix(
                 COLOR_TEXT_DEFAULT,
@@ -41,7 +41,7 @@ live_register!{
         text_style: FONT_DATA {top_drop: 1.15},
     }
     
-    LogListNode: {{LogListNode}} {
+    LogListNode= {{LogListNode}} {
 
         layout: {
             align: {y: 0.5},
@@ -53,8 +53,8 @@ live_register!{
             margin:{left:5}
         }
         icon_walk: {
-            width: Size::Fixed((DIM_DATA_ICON_WIDTH)),
-            height: Size::Fixed((DIM_DATA_ICON_WIDTH)),
+            width: Fixed((DIM_DATA_ICON_WIDTH)),
+            height: Fixed((DIM_DATA_ICON_WIDTH)),
             margin: {
                 left: 1,
                 right: 0,
@@ -65,7 +65,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         hover: 0.0,
                         bg: {hover: (hover)}
@@ -75,7 +75,7 @@ live_register!{
                 }
                 on = {
                     cursor: Hand
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {hover: 1.0},
                 }
             }
@@ -83,7 +83,7 @@ live_register!{
             select = {
                 default: off
                 off = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         selected: 0.0,
                         bg: {selected: (selected)}
@@ -92,7 +92,7 @@ live_register!{
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {selected: 1.0}
                 }
             }
@@ -104,10 +104,10 @@ live_register!{
         min_drag_distance: 10.0
     }
     
-    LogList: {{LogList}} {
+    LogList= {{LogList}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
         fold_node: LogListNode {}
-        layout: {flow: Flow::Down, clip_x:true, clip_y:true},
+        layout: {flow: Down, clip_x:true, clip_y:true},
     }
 }
 
@@ -243,7 +243,7 @@ impl LogListNode {
         self.fold_button.set_is_open(cx, is_open, animate);
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -253,9 +253,9 @@ impl LogListNode {
             self.bg.area().redraw(cx);
         }
         
-        self.fold_button.handle_event(cx, event, &mut |_,_|{});
+        self.fold_button.handle_event_fn(cx, event, &mut |_,_|{});
         
-        self.link_label.handle_event(cx, event, &mut |_,_|{});
+        self.link_label.handle_event_fn(cx, event, &mut |_,_|{});
         
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_) => {
@@ -377,11 +377,11 @@ impl LogList {
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
         //let view_area = self.view_area;
-        self.scroll_bars.handle_event(cx, event, &mut |_,_|{});
+        self.scroll_bars.handle_event_fn(cx, event, &mut |_,_|{});
         
         let mut actions = Vec::new();
         for (node_id, node) in self.fold_nodes.iter_mut() {
-            node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {

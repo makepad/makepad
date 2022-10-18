@@ -9,8 +9,8 @@ use {
     },
 };
 
-live_register!{
-    AudioUnitInstrument: {{AudioUnitInstrument}} {
+live_design!{
+    AudioUnitInstrument= {{AudioUnitInstrument}} {
         plugin: "FM8"
     }
 }
@@ -25,7 +25,7 @@ enum FromUI {
 }
 
 #[derive(Live)]
-#[live_register(audio_component!(AudioUnitInstrument))]
+#[live_design_fn(audio_component!(AudioUnitInstrument))]
 struct AudioUnitInstrument {
     plugin: String,
     preset_data: String,
@@ -119,7 +119,7 @@ impl AudioComponent for AudioUnitInstrument {
         })
     }
     
-    fn handle_event(&mut self, _cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event_fn(&mut self, _cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         // ui EVENT
         while let Ok(to_ui) = self.to_ui.try_recv(event) {
             match to_ui {

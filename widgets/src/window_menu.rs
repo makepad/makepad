@@ -1,7 +1,7 @@
 // a window menu implementation
 use crate::makepad_platform::*;
 
-live_register!{
+live_design!{
 }
 
 #[derive(Clone)]

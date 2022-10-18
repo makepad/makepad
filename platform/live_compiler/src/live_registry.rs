@@ -52,7 +52,7 @@ impl Default for LiveRegistry {
     fn default() -> Self {
         //let mut ignore_no_dsl = HashSet::new();
         //ignore_no_dsl.insert(live_id!(Namespace));
-        //ignore_no_dsl.insert(live_id!(Struct));
+        //ignore_no_dsl.insert(live_id!(struct));
         Self {
             //ignore_no_dsl,
             main_module: None,
@@ -218,7 +218,7 @@ impl LiveRegistry {
                     error!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
-                if let Some(index) = doc.nodes.child_by_name(0, name.as_field()) {
+                if let Some(index) = doc.nodes.child_by_name(0, name.as_instance()) {
                     return Some(LiveDocNodes {nodes: &doc.nodes, file_id: *file_id, index});
                 }
                 else {
@@ -241,7 +241,7 @@ impl LiveRegistry {
                     error!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
-                if let Some(index) = doc.nodes.child_by_name(0, name.as_field()) {
+                if let Some(index) = doc.nodes.child_by_name(0, name.as_instance()) {
                     return Some(LivePtr {file_id:*file_id, index:index as u32, generation:live.generation});
                 }
                 else {
@@ -295,7 +295,7 @@ impl LiveRegistry {
                 log!("Looking for {} but its not expanded yet, dependency order bug", file.file_name);
                 return None
             }
-            if let Some(index) = file.expanded.nodes.child_by_name(0, item.as_field()) {
+            if let Some(index) = file.expanded.nodes.child_by_name(0, item.as_instance()) {
                 return Some(LiveScopeTarget::LivePtr(
                     LivePtr {file_id: file_id, index: index as u32, generation: file.generation}
                 ))
@@ -305,7 +305,7 @@ impl LiveRegistry {
     }
     
     pub fn find_scope_target_via_start(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
-        if let Some(index) = nodes.scope_up_down_by_name(index, item.as_field()) {
+        if let Some(index) = nodes.scope_up_down_by_name(index, item.as_instance()) {
             match &nodes[index].value {
                 LiveValue::Import(module_id) => {
                     if let Some(ret) = self.find_module_id_name(item, *module_id) {

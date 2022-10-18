@@ -59,12 +59,12 @@ pub use crate::{
     },
 };
 
-pub fn live_register(cx: &mut Cx) {
-    crate::shader::draw_quad::live_register(cx);
-    crate::shader::draw_color::live_register(cx);
-    crate::shader::draw_shape::live_register(cx);
-    crate::shader::draw_text::live_register(cx);
-    crate::geometry::geometry_gen::live_register(cx);
-    crate::shader::std::live_register(cx);
-    crate::font::live_register(cx);
+pub fn live_design(cx: &mut Cx) {
+    crate::shader::draw_quad::live_design(cx);
+    crate::shader::draw_color::live_design(cx);
+    crate::shader::draw_shape::live_design(cx);
+    crate::shader::draw_text::live_design(cx);
+    crate::geometry::geometry_gen::live_design(cx);
+    crate::shader::std::live_design(cx);
+    crate::font::live_design(cx);
 }

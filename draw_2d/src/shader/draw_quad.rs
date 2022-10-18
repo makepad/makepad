@@ -8,12 +8,12 @@ use {
     },
 };
 
-live_register!{
+live_design!{
     
-    DrawQuad: {{DrawQuad}} {
+    DrawQuad = {{DrawQuad}} {
         varying pos: vec2
         
-        fn clip_and_transform_vertex(self)->vec4{
+        fn clip_and_transform_vertex(self) -> vec4 {
             let clipped: vec2 = clamp(
                 self.geom_pos * self.rect_size + self.rect_pos,
                 self.draw_clip.xy,
@@ -29,7 +29,7 @@ live_register!{
             )))
         }
         
-        fn transform_vertex(self)->vec4{
+        fn transform_vertex(self) -> vec4 {
             let clipped: vec2 = self.geom_pos * self.rect_size + self.rect_pos;
             
             self.pos = (clipped - self.rect_pos) / self.rect_size
@@ -65,7 +65,7 @@ pub struct DrawQuad {
 }
 
 impl DrawQuad {
-    pub fn begin(&mut self, cx: &mut Cx2d, walk:Walk, layout: Layout) {
+    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
         self.draw_clip = cx.turtle().draw_clip().into();
         cx.begin_turtle(walk, layout);
         if self.draw_vars.draw_shader.is_some() {
@@ -74,12 +74,12 @@ impl DrawQuad {
         }
     }
     
-    pub fn end(&mut self, cx: &mut Cx2d){
+    pub fn end(&mut self, cx: &mut Cx2d) {
         let rect = cx.end_turtle();
         self.draw_vars.area.set_rect(cx, &rect);
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk)->Rect {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> Rect {
         let rect = cx.walk_turtle(walk);
         self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos.into();
@@ -87,9 +87,9 @@ impl DrawQuad {
         self.draw(cx);
         rect
     }
-
-    pub fn draw(&mut self, cx: &mut Cx2d){
-        if let Some(mi) = &mut self.many_instances{
+    
+    pub fn draw(&mut self, cx: &mut Cx2d) {
+        if let Some(mi) = &mut self.many_instances {
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
         }
         else if self.draw_vars.can_instance() {
@@ -101,7 +101,7 @@ impl DrawQuad {
     pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect) {
         self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos.into();
-        self.rect_size = rect.size.into();  
+        self.rect_size = rect.size.into();
         self.draw(cx);
     }
     
@@ -112,20 +112,20 @@ impl DrawQuad {
         self.rect_size = rect.size.into();
         self.draw(cx);
     }
-
-    pub fn new_draw_call(&self, cx:&mut Cx2d){
+    
+    pub fn new_draw_call(&self, cx: &mut Cx2d) {
         cx.new_draw_call(&self.draw_vars);
     }
     
-    pub fn append_to_draw_call(&self, cx:&mut Cx2d){
+    pub fn append_to_draw_call(&self, cx: &mut Cx2d) {
         cx.new_draw_call(&self.draw_vars);
     }
     
-    pub fn begin_many_instances(&mut self, cx: &mut Cx2d){
+    pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
-        self.many_instances = mi;   
+        self.many_instances = mi;
     }
-
+    
     pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
         if let Some(mi) = self.many_instances.take() {
             let new_area = cx.end_many_instances(mi);

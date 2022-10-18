@@ -32,10 +32,16 @@ pub trait LiveNodeSlice {
     fn child_or_append_index_by_name(&self, parent_index: usize, name: LiveProp) -> Result<usize, usize>;
     //fn next_child_by_name(&self, child_index: usize, name: LiveId) -> Option<usize>;
     fn child_by_name(&self, parent_index: usize, name: LiveProp) -> Option<usize>;
+    
     fn sibling_by_name(&self, start_index: usize, name: LiveProp) -> Option<usize>;
+
     fn child_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<usize>;
+    
+    fn child_by_field_path(&self, parent_index: usize, path:&[LiveId]) -> Option<usize>;
+
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<&LiveValue>;
-    fn read_path(&self, path: &str) -> Option<&LiveValue>;
+
+    fn read_by_field_path(&self, path: &[LiveId]) -> Option<&LiveValue>;
     
     fn first_node_with_token_id(&self, match_token_id: LiveTokenId, also_in_dsl: bool) -> Option<usize>;
     
@@ -58,7 +64,7 @@ pub trait LiveNodeVec {
     fn insert_children_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]);
     fn insert_children_from_self(&mut self, from_index: usize, insert_start: usize);
     
-    fn write_path(&mut self, path: &str, value: LiveValue);
+    fn write_by_field_path(&mut self, path: &[LiveId], value: LiveValue);
     fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     
@@ -73,10 +79,10 @@ pub trait LiveNodeVec {
     fn push_vec3(&mut self, id: LiveId, v: Vec3);
     fn push_vec4(&mut self, id: LiveId, v: Vec4);
     fn push_id(&mut self, id: LiveId, v: LiveId);
-    fn push_bare_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId);
+    fn push_bare_enum(&mut self, id: LiveId, variant: LiveId);
     
-    fn open_tuple_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId);
-    fn open_named_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId);
+    fn open_tuple_enum(&mut self, id: LiveId, variant: LiveId);
+    fn open_named_enum(&mut self, id: LiveId, variant: LiveId);
     fn open_object(&mut self, id: LiveId);
     fn open_clone(&mut self, id: LiveId, clone: LiveId);
     fn open_array(&mut self, id: LiveId);
@@ -443,6 +449,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             None
         }
     }
+    
     /*
     fn sibling_by_name(&self, start_index: usize, name: LiveId) -> Option<usize>{
         let self_ref = self.as_ref();
@@ -510,6 +517,18 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         None
     }
     
+    fn child_by_field_path(&self, parent_index: usize, path: &[LiveId]) -> Option<usize> {
+        let mut index = parent_index;
+        for level in path {
+            if let Some(child) = self.child_by_name(index, LiveProp(*level, LivePropType::Field)) {
+                index = child
+            }
+            else {
+                return None
+            }
+        }
+        Some(index)
+    }
     
     fn child_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<usize> {
         let mut index = parent_index;
@@ -533,18 +552,8 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         }
     }
     
-    fn read_path(&self, path: &str) -> Option<&LiveValue> {
-        let mut ids = [LiveProp(LiveId(0), LivePropType::Field); 8];
-        let mut parsed = 0;
-        for (index, step) in path.split(".").enumerate() {
-            if parsed >= ids.len() {
-                eprintln!("read_path too many path segs");
-                return None
-            }
-            ids[index] = LiveProp(LiveId::from_str_unchecked(step), LivePropType::Field);
-            parsed += 1;
-        }
-        if let Some(index) = self.child_by_path(0, &ids[0..parsed]) {
+    fn read_by_field_path(&self, path: &[LiveId]) -> Option<&LiveValue> {
+        if let Some(index) = self.child_by_field_path(0, path) {
             Some(&self.as_ref()[index].value)
         }
         else {
@@ -725,8 +734,8 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 LiveValue::ExprMember(id) => {
                     writeln!(f, "{}{} <ExprMember> {:?}", node.id, pt, id).unwrap();
                 },
-                LiveValue::BareEnum {base, variant} => {
-                    writeln!(f, "{}{} <BareEnum> {}::{}", node.id, pt, base, variant).unwrap();
+                LiveValue::BareEnum(variant) => {
+                    writeln!(f, "{}{} <BareEnum> {}", node.id, pt, variant).unwrap();
                 },
                 // stack items
                 LiveValue::Expr {expand_index} => {
@@ -740,12 +749,12 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                     writeln!(f, "{}{} <Array>", node.id, pt).unwrap();
                     stack_depth += 1;
                 },
-                LiveValue::TupleEnum {base, variant} => {
-                    writeln!(f, "{}{} <TupleEnum> {}::{}", node.id, pt, base, variant).unwrap();
+                LiveValue::TupleEnum (variant) => {
+                    writeln!(f, "{}{} <TupleEnum> {}", node.id, pt, variant).unwrap();
                     stack_depth += 1;
                 },
-                LiveValue::NamedEnum {base, variant} => {
-                    writeln!(f, "{}{} <NamedEnum> {}::{}", node.id, pt, base, variant).unwrap();
+                LiveValue::NamedEnum (variant)=> {
+                    writeln!(f, "{}{} <NamedEnum> {}", node.id, pt, variant).unwrap();
                     stack_depth += 1;
                 },
                 LiveValue::Object => {
@@ -850,16 +859,18 @@ impl LiveNodeVec for Vec<LiveNode> {
         insert_point + num_nodes
     }
     
-    fn write_path(&mut self, path: &str, value: LiveValue) {
+    fn write_by_field_path(&mut self, path: &[LiveId], value: LiveValue) {
         let mut ids = [LiveProp(LiveId(0), LivePropType::Field); 8];
-        let mut parsed = 0;
-        for (index, step) in path.split(".").enumerate() {
-            if parsed >= ids.len() {
-                eprintln!("write_path too many path segs");
+        if path.len() > ids.len(){
+            eprintln!("write_by_field_path too many path segs");
+            return
+        }
+        for (index, step) in path.iter().enumerate(){
+            if index >= ids.len() {
+                eprintln!("write_value_by_path too many path segs");
                 return
             }
-            ids[index] = LiveProp(LiveId::from_str_unchecked(step), LivePropType::Field);
-            parsed += 1;
+            ids[index] = LiveProp(*step, LivePropType::Field);
         }
         let was_empty = self.len() == 0;
         if was_empty {
@@ -867,7 +878,7 @@ impl LiveNodeVec for Vec<LiveNode> {
         }
         self.replace_or_insert_last_node_by_path(
             0,
-            &ids[0..parsed],
+            &ids[0..path.len()],
             &[LiveNode::from_value(value)]
         );
         if was_empty {
@@ -971,9 +982,9 @@ impl LiveNodeVec for Vec<LiveNode> {
     fn push_vec4(&mut self, id: LiveId, v: Vec4) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec4(v)})}
     fn push_id(&mut self, id: LiveId, v: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Id(v)})}
     
-    fn push_bare_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::BareEnum {base, variant}})}
-    fn open_tuple_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::TupleEnum {base, variant}})}
-    fn open_named_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::NamedEnum {base, variant}})}
+    fn push_bare_enum(&mut self, id: LiveId, variant: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::BareEnum(variant)})}
+    fn open_tuple_enum(&mut self, id: LiveId, variant: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::TupleEnum(variant)})}
+    fn open_named_enum(&mut self, id: LiveId, variant: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::NamedEnum(variant)})}
     fn open_object(&mut self, id: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Object})}
     fn open_clone(&mut self, id: LiveId, clone: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Clone(clone)})}
     fn open_array(&mut self, id: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Array})}

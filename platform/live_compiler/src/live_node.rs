@@ -52,12 +52,12 @@ pub enum LiveValue {
     ExprMember(LiveId),
     ExprCall {ident: LiveId, args: usize},
      // enum thing
-    BareEnum {base: LiveId, variant: LiveId},
+    BareEnum (LiveId),
     // tree items
     Array,
     Expr {expand_index: Option<u32>},
-    TupleEnum {base: LiveId, variant: LiveId},
-    NamedEnum {base: LiveId, variant: LiveId},
+    TupleEnum (LiveId),
+    NamedEnum (LiveId),
     Object,
     Clone(LiveId),
     Class {live_type: LiveType, class_parent: Option<LivePtr>},
@@ -254,6 +254,7 @@ impl LiveNodeOrigin {
     pub fn token_id(&self) -> Option<LiveTokenId> {
         LiveTokenId::from_bits((self.0 & 0x0fff_ffff) as u32)
     }
+    
     
     pub fn set_first_def(&mut self, token_id: Option<LiveTokenId>) -> &mut Self {
         if let Some(token_id) = token_id {
@@ -677,15 +678,6 @@ impl LiveValue {
             _ => None
         }
     }*/
-    
-    pub fn enum_base_id(&self) -> Option<LiveId> {
-        match self {
-            Self::BareEnum {base, ..} => Some(*base),
-            Self::TupleEnum {base, ..} => Some(*base),
-            Self::NamedEnum {base, ..} => Some(*base),
-            _ => None
-        }
-    }
     
     pub fn set_clone_name(&mut self, name: LiveId) {
         match self {
