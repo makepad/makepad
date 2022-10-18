@@ -10,7 +10,7 @@ live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawBgQuad= {{DrawBgQuad}} {
+    DrawBgQuad = {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             
@@ -33,7 +33,7 @@ live_design!{
         }
     }
     
-    DrawNameText= {{DrawNameText}} {
+    DrawNameText = {{DrawNameText}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -48,7 +48,7 @@ live_design!{
         //text_style: FONT_DATA {top_drop: 1.15},
     }
     
-    PopupMenuItem= {{PopupMenuItem}} {
+    PopupMenuItem = {{PopupMenuItem}} {
         layout: {
             align: {y: 0.5},
             padding: {left: 15, top: 5, bottom: 5},
@@ -94,8 +94,8 @@ live_design!{
         indent_width: 10.0
     }
     
-    PopupMenu= {{PopupMenu}} {
-        menu_item: PopupMenuItem {}
+    PopupMenu = {{PopupMenu}} {
+        menu_item: <PopupMenuItem> {}
         layout: {
             flow: Down,
             padding: 5
@@ -259,10 +259,10 @@ impl PopupMenu {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d, shift: DVec2) {
-        // ok so. 
+        // ok so.
         let menu_rect1 = cx.turtle().padded_rect_used().translate(shift);
-        let pass_rect = Rect{pos:dvec2(0.0,0.0), size:cx.current_pass_size()};
-        let menu_rect2 = pass_rect.add_margin(-dvec2(10.0,10.0)).contain(menu_rect1);
+        let pass_rect = Rect {pos: dvec2(0.0, 0.0), size: cx.current_pass_size()};
+        let menu_rect2 = pass_rect.add_margin(-dvec2(10.0, 10.0)).contain(menu_rect1);
         cx.turtle_mut().set_shift(shift + (menu_rect2.pos - menu_rect1.pos));
         self.bg.end(cx);
         

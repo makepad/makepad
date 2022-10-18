@@ -84,6 +84,7 @@ live_design!{
         
         popup_menu: <PopupMenu>{
         }
+        
         selected_item: 0
         state: {
             hover = {
