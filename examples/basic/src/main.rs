@@ -3,13 +3,13 @@ use makepad_widgets::*;
 use makepad_draw_2d::*;
 
 // The live DSL area that can be hotloaded
-live_register!{
+live_design!{
     // import frame types
     import makepad_widgets::frame::*;
     // load the widget registry
     registry Widget::*;
     
-    App: {{App}} {
+    App = {{App}} {
         ui: {
             layout: {flow: Down, spacing: 20, align:{x:0.5,y:0.5}}
             walk: {width: Fill, height: Fill},
@@ -21,12 +21,12 @@ live_register!{
                 }
             }
             // named button to click
-            button1 = Button {
+            button1 = <Button> {
                 //walk: {margin: {left: 100, top: 100}}
                 text: "Click to count"
             }
             // label to show the counter
-            label1 = Label {
+            label1 = <Label> {
                 //walk: {margin: {left: 114, top: 20}}
                 label: {color: #f},
                 text: "Counter: 0"
@@ -38,17 +38,24 @@ live_register!{
 main_app!(App);
 
 // main application struct
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct App {
     window: BareWindow,
     ui: FrameRef,
     #[rust] counter: usize
 }
 
+impl LiveHook for App{
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize>{
+        //_nodes.debug_print(0,100);
+        None
+    }
+}
+
 impl App {
     // register dependencies, in this case the makepad widgets library
-    pub fn live_register(cx: &mut Cx) {
-        makepad_widgets::live_register(cx);
+    pub fn live_design(cx: &mut Cx) {
+        makepad_widgets::live_design(cx);
     }
     
     // event message pump entry point
@@ -64,7 +71,7 @@ impl App {
         self.window.handle_event(cx, event);
         
         // call handle event on the frame and return an actions vec
-        let actions = ui.handle_event_vec(cx, event);
+        let actions = ui.handle_event(cx, event);
         
         // the framewrap can be queried for components and events polled
         if ui.get_button(id!(button1)).clicked(&actions) {

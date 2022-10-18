@@ -8,8 +8,8 @@ use {
     },
 };
 
-live_register!{
-    Mixer: {{Mixer}} {
+live_design!{
+    Mixer= {{Mixer}} {
     }
 }
 
@@ -17,7 +17,7 @@ live_register!{
 enum FromUI {}
 
 #[derive(Live)]
-#[live_register(audio_component!(Mixer))]
+#[live_design_fn(audio_component!(Mixer))]
 struct Mixer {
     #[rust] inputs: ComponentMap<LiveId, AudioComponentRef>,
     #[rust] from_ui: FromUISender<FromUI>,
@@ -101,10 +101,10 @@ impl AudioComponent for Mixer {
         })
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         for input in self.inputs.values_mut() {
             if let Some(input) = input.as_mut() {
-                input.handle_event(cx, event, dispatch_action)
+                input.handle_event_fn(cx, event, dispatch_action)
             }
         }
     }

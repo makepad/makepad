@@ -19,7 +19,6 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
     else {
         tb.end()
     }
-    
 }
 
 fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<(), TokenStream> {
@@ -348,11 +347,11 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        }");
         tb.add("    }");
         
-        tb.add("    fn live_register(cx: &mut Cx) {");
+        tb.add("    fn live_design(cx: &mut Cx) {");
         
-        for attr in main_attribs.iter().filter( | attr | attr.name == "live_register") {
+        for attr in main_attribs.iter().filter( | attr | attr.name == "live_design_fn") {
             if attr.args.is_none() {
-                return error_result("live_register needs an argument")
+                return error_result("live_design needs an argument")
             }
             tb.add("(").stream(attr.args.clone()).add(")(cx);");
         }
@@ -363,10 +362,10 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             if attr.name == "live" || attr.name == "calc" {
                 match unwrap_option(field.ty.clone()) {
                     Ok(inside) => {
-                        tb.add("<").stream(Some(inside)).add("as LiveNew>::live_register(cx);");
+                        tb.add("<").stream(Some(inside)).add("as LiveNew>::live_design(cx);");
                     }
                     Err(not_option) => {
-                        tb.add("<").stream(Some(not_option)).add("as LiveNew>::live_register(cx);");
+                        tb.add("<").stream(Some(not_option)).add("as LiveNew>::live_design(cx);");
                     }
                 }
             }
@@ -492,7 +491,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        }");
         tb.add("    }");
         
-        tb.add("    fn live_register(cx: &mut Cx) {");
+        tb.add("    fn live_design(cx: &mut Cx) {");
         
         
         let is_u32_enum = main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
@@ -527,7 +526,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        let mut index = start_index;");
         tb.add("        let enum_id = LiveId(").suf_u64(LiveId::from_str(&enum_name).unwrap().0).add(");");
         tb.add("        match &nodes[start_index].value{");
-        tb.add("            LiveValue::Id(variant)=>{");
+
+        tb.add("            LiveValue::BareEnum(variant)=>{");
         tb.add("                match variant{");
         for item in &items {
             if let EnumKind::Bare = item.kind {
@@ -541,33 +541,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("                }");
         tb.add("            },");
         
-        tb.add("            LiveValue::BareEnum{base,variant}=>{");
-        /*tb.add("                if *base != enum_id{");
-        tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), index, nodes, enum_id, *base);");
-        tb.add("                    index = nodes.skip_node(index);");
-        tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
-        tb.add("                    return index;");
-        tb.add("                }");*/
-        tb.add("                match variant{");
-        for item in &items {
-            if let EnumKind::Bare = item.kind {
-                tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")=>{index += 1;*self = Self::").ident(&item.name).add("},");
-            }
-        }
-        tb.add("                    _=>{");
-        tb.add("                        cx.apply_error_wrong_enum_variant(live_error_origin!(), index, nodes, enum_id, *variant);");
-        tb.add("                        index = nodes.skip_node(index);");
-        tb.add("                    }");
-        tb.add("                }");
-        tb.add("            },");
-        
-        tb.add("            LiveValue::NamedEnum{base, variant}=>{");
-        /*tb.add("                if *base != enum_id{");
-        tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), index, nodes, enum_id, *base);");
-        tb.add("                    index = nodes.skip_node(index);");
-        tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
-        tb.add("                    return index;");
-        tb.add("                }");*/
+        tb.add("            LiveValue::NamedEnum(variant)=>{");
         tb.add("                match variant{");
         for item in &items {
             if let EnumKind::Named(fields) = &item.kind {
@@ -608,13 +582,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("                    }");
         tb.add("                }");
         tb.add("            }");
-        tb.add("            LiveValue::TupleEnum{base, variant}=>{");
-        tb.add("                if *base != enum_id{");
-        tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), index, nodes, enum_id, *base);");
-        tb.add("                    index = nodes.skip_node(index);");
-        tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
-        tb.add("                    return index;");
-        tb.add("                }");
+        tb.add("            LiveValue::TupleEnum(variant)=>{");
         tb.add("                match variant{");
         
         for item in &items {

@@ -7,10 +7,10 @@ use {
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     
-    DrawDesktopButton: {{DrawDesktopButton}} {
+    DrawDesktopButton= {{DrawDesktopButton}} {
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             sdf.aa *= 3.0;
@@ -87,13 +87,13 @@ live_register!{
         }
     }
     
-    DesktopButton: {{DesktopButton}} {
+    DesktopButton= {{DesktopButton}} {
         
         state:{
             hover = {
                 default: off,
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         bg: {pressed: 0.0, hover: 0.0}
                     }
@@ -101,8 +101,8 @@ live_register!{
                 
                 on = {
                     from: {
-                        all: Play::Forward {duration: 0.1}
-                        state_down: Play::Snap
+                        all: Forward {duration: 0.1}
+                        state_down: Snap
                     }
                     apply: {
                         bg: {
@@ -113,7 +113,7 @@ live_register!{
                 }
                 
                 pressed = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         bg: {
                             pressed: 1.0,
@@ -127,7 +127,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook, Widget)]
-#[live_register(widget!(DesktopButton))]
+#[live_design_fn(widget_factory!(DesktopButton))]
 pub struct DesktopButton {
     walk: Walk,
     state: State,
@@ -171,7 +171,7 @@ impl DrawDesktopButton{
 }
 
 impl DesktopButton {
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.state_handle_event(cx, event);
 
         let state = button_logic_handle_event(cx, event, self.bg.area(), dispatch_action);
@@ -182,6 +182,10 @@ impl DesktopButton {
                 ButtonState::Hover => self.animate_state(cx, id!(hover.on)),
             }
         }
+    }
+    
+    pub fn area(&mut self)->Area{
+        self.bg.area()
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {

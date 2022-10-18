@@ -3,10 +3,10 @@ use makepad_widgets::*;
 use makepad_draw_2d::*;
 use makepad_widgets::imgui::*;
 
-live_register!{
+live_design!{
     import makepad_widgets::frame::*;
     registry Widget::*;
-    App: {{App}} {imgui: {Frame {
+    App= {{App}} {imgui: {Frame {
         walk: {width: Fill, height: Fill},
         bg: {
             shape:Solid
@@ -31,8 +31,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn live_register(cx: &mut Cx) {
-        makepad_widgets::live_register(cx);
+    pub fn live_design(cx: &mut Cx) {
+        makepad_widgets::live_design(cx);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {

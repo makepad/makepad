@@ -1,16 +1,16 @@
 use crate::makepad_draw_2d::*;
 
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     
-    DrawFocusRect: {{DrawFocusRect}} {
+    DrawFocusRect= {{DrawFocusRect}} {
         fn pixel(self) -> vec4 {
             return #000f
         }
     }
     
-    NavControl: {{NavControl}} {
+    NavControl= {{NavControl}} {
         label: {
             text_style: {
                 font_size: 6

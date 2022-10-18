@@ -5,8 +5,8 @@ use {
     },
 };
 
-live_register!{
-    GeometryQuad2D: {{GeometryQuad2D}} {
+live_design!{
+    GeometryQuad2D = {{GeometryQuad2D}} {
         x1: 0.0;
         y1: 0.0;
         x2: 1.0;

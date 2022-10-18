@@ -1,12 +1,12 @@
 use crate::makepad_draw_2d::*;
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import crate::theme::*;
     
-    DrawScrollBar: {{DrawScrollBar}} {
+    DrawScrollBar= {{DrawScrollBar}} {
         draw_depth: 5.0
-        const BORDER_RADIUS: 1.5
+        const BORDER_RADIUS = 1.5
         const BAR_WIDTH: 6.0
         instance pressed: 0.0
         instance hover: 0.0
@@ -43,7 +43,7 @@ live_register!{
         }
     }
     
-    ScrollBar: {{ScrollBar}} {
+    ScrollBar= {{ScrollBar}} {
         bar_size: 10.0,
         bar_side_margin: 3.0
         min_handle_size: 30.0
@@ -52,7 +52,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         bar: {pressed: 0.0, hover: 0.0}
                     }
@@ -61,8 +61,8 @@ live_register!{
                 on = {
                     cursor: Default,
                     from: {
-                        all: Play::Forward {duration: 0.1}
-                        pressed: Play::Forward {duration: 0.01}
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
                     }
                     apply: {
                         bar: {
@@ -74,7 +74,7 @@ live_register!{
                 
                 pressed = {
                     cursor: Default,
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         bar: {
                             pressed: 1.0,
@@ -333,7 +333,7 @@ impl ScrollBar {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         if self.visible {
             self.state_handle_event(cx, event);
             if self.next_frame.is_event(event).is_some() {

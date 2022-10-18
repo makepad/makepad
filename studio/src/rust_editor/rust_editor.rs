@@ -27,11 +27,11 @@ use {
     
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::fold_button::FoldButton;
     
-    RustEditor: {{RustEditor}} {
+    RustEditor= {{RustEditor}} {
         
         
         fold_button: FoldButton {
@@ -284,7 +284,7 @@ impl RustEditor {
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        self.editor_impl.scroll_bars.handle_event(cx, event, &mut |_,_|{});
+        self.editor_impl.scroll_bars.handle_event_fn(cx, event, &mut |_,_|{});
         
         if self.editor_impl.session_id.is_none() {
             return

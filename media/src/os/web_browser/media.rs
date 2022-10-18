@@ -62,7 +62,7 @@ impl Into<MidiInputInfo> for WMidiInputInfo {
     }
 }
 
-pub fn live_register(cx: &mut Cx) {
+pub fn live_design(cx: &mut Cx) {
     cx.os.append_to_wasm_js(&[
         ToWasmMidiInputData::to_string(),
         ToWasmMidiInputList::to_string(),

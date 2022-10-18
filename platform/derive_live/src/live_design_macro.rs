@@ -10,13 +10,13 @@ use {
     std::fmt::Write
 };
 
-pub fn live_register_impl(input: TokenStream) -> TokenStream {
+pub fn live_design_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     if let Some(span) = parser.span() {
         let (s, live_types) = token_parser_to_whitespace_matching_string(&mut parser, span);
         //tb.ident(&cx);
-        tb.add("pub fn live_register(cx:&mut Cx) {");
+        tb.add("pub fn live_design(cx:&mut Cx) {");
         tb.add("    let live_body = LiveBody {");
         tb.add("        cargo_manifest_path: env!(").string("CARGO_MANIFEST_DIR").add(").to_string(),");
         tb.add("        module_path :").ident_with_span("module_path", span).add("!().to_string(),");
@@ -26,7 +26,7 @@ pub fn live_register_impl(input: TokenStream) -> TokenStream {
         tb.add("        live_type_infos:{");
         tb.add("            let mut v = Vec::new();");
         for live_type in &live_types {
-            tb.stream(Some(live_type.clone())).add("::live_register(cx);");
+            tb.stream(Some(live_type.clone())).add("::live_design(cx);");
             tb.add("        v.push(").stream(Some(live_type.clone())).add("::live_type_info(cx));");
         }
         tb.add("            v");
@@ -38,7 +38,7 @@ pub fn live_register_impl(input: TokenStream) -> TokenStream {
         return tb.end();
     }
     else {
-        tb.add("pub fn live_register(cx:&mut Cx) {");
+        tb.add("pub fn live_design(cx:&mut Cx) {");
         tb.add("}");
         return tb.end();
     }

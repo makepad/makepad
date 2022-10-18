@@ -6,11 +6,11 @@ use {
     },
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawBgQuad: {{DrawBgQuad}} {
+    DrawBgQuad= {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             
@@ -33,7 +33,7 @@ live_register!{
         }
     }
     
-    DrawNameText: {{DrawNameText}} {
+    DrawNameText= {{DrawNameText}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -48,7 +48,7 @@ live_register!{
         //text_style: FONT_DATA {top_drop: 1.15},
     }
     
-    PopupMenuItem: {{PopupMenuItem}} {
+    PopupMenuItem= {{PopupMenuItem}} {
         layout: {
             align: {y: 0.5},
             padding: {left: 15, top: 5, bottom: 5},
@@ -61,7 +61,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         hover: 0.0,
                         bg: {hover: (hover)}
@@ -70,7 +70,7 @@ live_register!{
                 }
                 on = {
                     cursor: Hand
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {hover: 1.0},
                 }
             }
@@ -78,7 +78,7 @@ live_register!{
             select = {
                 default: off
                 off = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         selected: 0.0,
                         bg: {selected: (selected)}
@@ -86,7 +86,7 @@ live_register!{
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {selected: 1.0}
                 }
             }
@@ -94,10 +94,10 @@ live_register!{
         indent_width: 10.0
     }
     
-    PopupMenu: {{PopupMenu}} {
+    PopupMenu= {{PopupMenu}} {
         menu_item: PopupMenuItem {}
         layout: {
-            flow: Flow::Down,
+            flow: Down,
             padding: 5
         }
         bg: {
@@ -196,7 +196,7 @@ impl PopupMenuItem {
         self.bg.end(cx);
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -313,7 +313,7 @@ impl PopupMenu {
         }
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -322,7 +322,7 @@ impl PopupMenu {
     ) {
         let mut actions = Vec::new();
         for (item_id, node) in self.menu_items.iter_mut() {
-            node.handle_event(cx, event, sweep_area, &mut | _, e | actions.push((*item_id, e)));
+            node.handle_event_fn(cx, event, sweep_area, &mut | _, e | actions.push((*item_id, e)));
         }
         
         for (node_id, action) in actions {

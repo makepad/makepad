@@ -4,12 +4,12 @@ use crate::{
     widget::*,
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawSplitter: {{DrawSplitter}} {
-        const BORDER_RADIUS: 1.0
+    DrawSplitter= {{DrawSplitter}} {
+        const BORDER_RADIUS = 1.0
         const SPLITER_PAD: 1.0
         const SPLITER_GRABBER: 110.0
         instance pressed: 0.0
@@ -49,7 +49,7 @@ live_register!{
         }
     }
     
-    Splitter: {{Splitter}} {
+    Splitter= {{Splitter}} {
         split_bar_size: (DIM_SPLITTER_SIZE)
         min_horizontal: (DIM_SPLITTER_MIN_HORIZONTAL)
         max_horizontal: (DIM_SPLITTER_MAX_HORIZONTAL)
@@ -60,7 +60,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         bar: {pressed: 0.0, hover: 0.0}
                     }
@@ -68,8 +68,8 @@ live_register!{
                 
                 on = {
                     from: {
-                        all: Play::Forward {duration: 0.1}
-                        state_down: Play::Forward {duration: 0.01}
+                        all: Forward {duration: 0.1}
+                        state_down: Forward {duration: 0.01}
                     }
                     apply: {
                         bar: {
@@ -80,7 +80,7 @@ live_register!{
                 }
                 
                 pressed = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         bar: {
                             pressed: [{time: 0.0, value: 1.0}],
@@ -102,7 +102,7 @@ pub struct DrawSplitter {
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(widget!(Splitter))]
+#[live_design_fn(widget_factory!(Splitter))]
 pub struct Splitter {
     #[live(Axis::Horizontal)] pub axis: Axis,
     #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
@@ -136,19 +136,19 @@ enum DrawState {
 
 impl Widget for Splitter {
     
-    fn handle_widget_event(
+    fn handle_widget_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let mut redraw = false;
-        self.handle_event(cx, event, &mut | cx, action | {
+        self.handle_event_fn(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into()));
             redraw = true;
         });
-        self.a.handle_widget_event(cx, event, dispatch_action);
-        self.b.handle_widget_event(cx, event, dispatch_action);
+        self.a.handle_widget_event_fn(cx, event, dispatch_action);
+        self.b.handle_widget_event_fn(cx, event, dispatch_action);
         if redraw {
             self.a.redraw(cx);
             self.b.redraw(cx);
@@ -157,6 +157,10 @@ impl Widget for Splitter {
     
     fn get_walk(&self) -> Walk {
         self.walk
+    }
+    
+    fn redraw(&mut self, cx:&mut Cx){
+        self.bar.redraw(cx)
     }
     
     fn widget_query(&mut self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
@@ -243,7 +247,7 @@ impl Splitter {
         self.align = align;
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,

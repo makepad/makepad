@@ -15,8 +15,8 @@ mod derive_live_read;
 use crate::derive_live_read::*;
 
 
-mod live_register_macro;
-use crate::live_register_macro::*;
+mod live_design_macro;
+use crate::live_design_macro::*;
 
 mod live_macro;
 use crate::live_macro::*;
@@ -37,7 +37,7 @@ mod colorhex;
     rust,
     pick,
     state,
-    live_register,
+    live_design_fn,
     live_ignore,
     live_debug
 ))]
@@ -82,8 +82,8 @@ pub fn generate_clone_cast_api(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn live_register(input: TokenStream) -> TokenStream {
-    live_register_impl(input)
+pub fn live_design(input: TokenStream) -> TokenStream {
+    live_design_impl(input)
 }
 
 #[proc_macro_derive(LiveComponentRegistry)]

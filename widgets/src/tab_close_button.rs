@@ -1,10 +1,10 @@
 use crate::makepad_draw_2d::*;
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    TabCloseButton: {{TabCloseButton}} {
+    TabCloseButton= {{TabCloseButton}} {
         button: {
             
             instance hover: float;
@@ -32,7 +32,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         button: {hover: 0.0}
                     }
@@ -40,7 +40,7 @@ live_register!{
                 
                 on =  {
                     cursor: Hand,
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         button: {hover:1.0}
                     }

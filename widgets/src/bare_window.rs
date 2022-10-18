@@ -4,8 +4,8 @@ use crate::{
     nav_control::NavControl,
 };
 
-live_register!{
-    BareWindow: {{BareWindow}} {
+live_design!{
+    BareWindow= {{BareWindow}} {
         main_view:{}
     }
 }

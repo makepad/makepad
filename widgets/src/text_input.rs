@@ -8,14 +8,14 @@ use {
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import crate::theme::*;
     
-    DrawLabel: {{DrawLabel}} {
+    DrawLabel= {{DrawLabel}} {
         instance hover: 0.0
         instance focus: 0.0
-        text_style: FONT_LABEL {}
+        text_style: <FONT_LABEL> {}
         fn get_color(self) -> vec4 {
             return
             mix(
@@ -34,11 +34,11 @@ live_register!{
         }
     }
     
-    TextInput: {{TextInput}} {
+    TextInput= {{TextInput}} {
         
         cursor: {
             instance focus: 0.0
-            const BORDER_RADIUS: 0.5
+            const BORDER_RADIUS = 0.5
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -57,7 +57,7 @@ live_register!{
         select: {
             instance hover: 0.0
             instance focus: 0.0
-            const BORDER_RADIUS: 2.0
+            const BORDER_RADIUS = 2.0
             fn pixel(self) -> vec4 {
                 //return mix(#f00,#0f0,self.pos.y)
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -107,14 +107,14 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         select: {hover: 0.0}
                         label: {hover: 0.0}
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         select: {hover: 1.0}
                         label: {hover: 1.0}
@@ -124,7 +124,7 @@ live_register!{
             focus = {
                 default: off
                 off = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         cursor: {focus: 0.0},
                         select: {focus: 0.0}
@@ -132,7 +132,7 @@ live_register!{
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         cursor: {focus: 1.0},
                         select: {focus: 1.0}
@@ -171,7 +171,7 @@ pub struct DrawLabel {
 
 
 #[derive(Live)]
-#[live_register(widget!(TextInput))]
+#[live_design_fn(widget_factory!(TextInput))]
 pub struct TextInput {
     state: State,
     
@@ -213,19 +213,19 @@ impl LiveHook for TextInput {
 }
 
 impl Widget for TextInput {
-    fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
-        /*
+    /*fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
+        
         if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
             self.set_internal(*v as f32);
-        }*/
-    }
+        }
+    }*/
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.bg.redraw(cx);
     }
     
-    fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        self.handle_event(cx, event, &mut | cx, action | {
+    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        self.handle_event_fn(cx, event, &mut | cx, action | {
             //let mut delta = Vec::new();
             //let mut tab = None;
             match &action {
@@ -433,13 +433,13 @@ impl TextInput {
         }
     }
     
-    pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event) -> Vec<TextInputAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<TextInputAction> {
         let mut actions = Vec::new();
-        self.handle_event(cx, event, &mut | _, a | actions.push(a));
+        self.handle_event_fn(cx, event, &mut | _, a | actions.push(a));
         actions
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.bg.area()) {
             Hit::KeyFocusLost(_) => {

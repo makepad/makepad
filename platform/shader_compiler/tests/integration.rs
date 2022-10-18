@@ -2,7 +2,7 @@
     DrawQuad: DrawShader {
         uniform uni1: float
         
-        rust_type: {{0}},
+        rust_type= {{0}},
         
         const cnst1: float = 1.0
         live: 1.0

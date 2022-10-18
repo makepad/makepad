@@ -234,7 +234,7 @@ impl ShaderRegistry {
                     if ids.len() == 0 {
                         return LiveNodeFindResult::Component(now_ptr);
                     }
-                    match nodes.child_by_name(index, ids[0].as_field()) {
+                    match nodes.child_by_name(index, ids[0].as_instance()) {
                         Some(child_index) => {
                             return walk_recur(live_registry, None, file_id, generation, child_index, nodes, &ids[1..])
                         }
@@ -245,14 +245,14 @@ impl ShaderRegistry {
                 }
                 LiveValue::Clone(clone) => {
                     if ids.len() == 0 {
-                        if clone == live_id!(Struct) {
+                        if clone == live_id!(struct) {
                             return LiveNodeFindResult::Struct(StructPtr(now_ptr));
                         }
                         return LiveNodeFindResult::Component(now_ptr);
                     }
-                    match nodes.child_by_name(index, ids[0].as_field()) {
+                    match nodes.child_by_name(index, ids[0].as_instance()) {
                         Some(child_index) => {
-                            let struct_ptr = if clone == live_id!(Struct) {
+                            let struct_ptr = if clone == live_id!(struct) {
                                 Some(now_ptr)
                             }
                             else {
@@ -269,7 +269,7 @@ impl ShaderRegistry {
                     if ids.len() == 0 {
                         return LiveNodeFindResult::NotFound;
                     }
-                    match nodes.child_by_name(index, ids[0].as_field()) {
+                    match nodes.child_by_name(index, ids[0].as_instance()) {
                         Some(child_index) => {
                             return walk_recur(live_registry, None, file_id,  generation,  child_index, nodes, &ids[1..])
                         }
@@ -372,7 +372,7 @@ impl ShaderRegistry {
         
         match struct_node.value {
             LiveValue::Clone(clone) => {
-                if clone != live_id!(Struct) {
+                if clone != live_id!(struct) {
                     panic!()
                 }
                 let mut struct_def = StructDef {
@@ -509,7 +509,7 @@ impl ShaderRegistry {
         draw_shader_def.add_uniform(id_from_str!(draw_zbias).unwrap(), id_from_str!(draw).unwrap(), Ty::Float, TokenSpan::default());
         
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
-        
+
         match class_node.value {
             LiveValue::Class {live_type, ..} => {
                 
@@ -544,7 +544,12 @@ impl ShaderRegistry {
                         LiveValue::Vec3(_) |
                         LiveValue::Vec4(_) | 
                         LiveValue::Expr{..} => {
+                            let before = live_registry.get_node_prefix(prop.origin);
                             if prop.origin.prop_type() != LivePropType::Field{
+                                if before == Some(live_id!(const)){
+                                    node_iter = doc.nodes.next_child(node_index);
+                                    continue;
+                                }
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
                                     span: prop.origin.token_id().unwrap().into(),
@@ -638,8 +643,6 @@ impl ShaderRegistry {
                                         ty_expr
                                     });
                                 }
-                                Some(live_id!(const)) => {
-                                },
                                 None => {
                                     if let LiveValue::Bool(val) = prop.value {
                                         match prop.id {
