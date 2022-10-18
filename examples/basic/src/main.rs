@@ -2,13 +2,24 @@ use makepad_widgets;
 use makepad_widgets::*;
 use makepad_draw_2d::*;
 
-// The live DSL area that can be hotloaded
-live_design!{
+// The live_register macro generates a function that registers a DSL code block with the global
+// context object (`Cx`).
+//
+// DSL code blocks are used in Makepad to facilitate live coding. A DSL code block defines
+// structured data that describes the styling of the UI. The Makepad runtime automatically
+// initializes UI components from their corresponding DSL definitions. Moreover, external programs
+// (such as a code editor) can notify the Makepad runtime that a DSL code block has been changed,
+// allowing the runtime to automatically update the affected UI components.
+live_design! {
+
     // import frame types
     import makepad_widgets::frame::*;
     // load the widget registry
     registry Widget::*;
-    
+
+    // The App: {{App}} syntax is used to inherit a DSL object from a Rust struct. This tells the
+    // Makepad runtime that whenever a Rust struct named `App` is initialized, it should obtain its
+    // initial values from the DSL object named `App`. 
     App = {{App}} {
         ui: {
             layout: {flow: Down, spacing: 20, align:{x:0.5,y:0.5}}
@@ -34,7 +45,14 @@ live_design!{
         }
     }
 }
-// define main function and eventloop entry point for both wasm and desktop
+
+// This main_app macro generates the code necessary to initialize and run your application.
+//
+// This code is almost always the same between different applications, so it is convenient to use a
+// macro for it. The two main tasks that this code needs to carry out are: initializing both the
+// main application struct (`App`) and the global context object (`Cx`), and setting up event
+// handling. On desktop, this means creating and running our own event loop. On web, this means
+// creating an event handler function that the browser event loop can call into.
 main_app!(App);
 
 // main application struct
