@@ -5,16 +5,18 @@ use {
         makepad_derive_widget::*,
         popup_menu::{PopupMenu, PopupMenuAction},
         makepad_draw_2d::*,
-        widget::*
+        data_binding::DataBinding,
+        widget::*,
+        frame::*,
     }
 };
 pub use crate::button_logic::ButtonAction;
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::popup_menu::PopupMenu;
     
-    DrawLabelText: {{DrawLabelText}} {
+    DrawLabelText= {{DrawLabelText}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -32,12 +34,12 @@ live_register!{
         }
     }
     
-    DropDown: {{DropDown}} {
+    DropDown= {{DropDown}} {
         bg: {
             instance hover: 0.0
             instance pressed: 0.0
             instance focus: 0.0,
-            const BORDER_RADIUS: 0.5
+            const BORDER_RADIUS = 0.5
             
             fn get_bg(self, inout sdf:Sdf2d){
                 sdf.box(
@@ -69,8 +71,8 @@ live_register!{
         }
         
         walk: {
-            width: Size::Fill,
-            height: Size::Fit,
+            width: Fill,
+            height: Fit,
             margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
         }
         
@@ -80,14 +82,14 @@ live_register!{
             padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
         }
         
-        popup_menu: PopupMenu {
+        popup_menu: <PopupMenu>{
         }
         selected_item: 0
         state: {
             hover = {
                 default: off,
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         bg: {pressed: 0.0, hover: 0.0}
                         label: {pressed: 0.0, hover: 0.0}
@@ -96,8 +98,8 @@ live_register!{
                 
                 on = {
                     from: {
-                        all: Play::Forward {duration: 0.1}
-                        pressed: Play::Forward {duration: 0.01}
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
                     }
                     apply: {
                         bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
@@ -106,7 +108,7 @@ live_register!{
                 }
                 
                 pressed = {
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                         label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
@@ -116,14 +118,14 @@ live_register!{
             focus = {
                 default: off
                 off = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         bg: {focus: 0.0},
                         label: {focus: 0.0}
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         bg: {focus: 1.0},
                         label: {focus: 1.0}
@@ -135,7 +137,7 @@ live_register!{
 }
 
 #[derive(Live)]
-#[live_register(widget!(DropDown))]
+#[live_design_fn(widget_factory!(DropDown))]
 pub struct DropDown {
     state: State,
     
@@ -214,7 +216,7 @@ impl DropDown {
         self.bg.redraw(cx);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &DropDown, DropDownAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &DropDown, DropDownAction)) {
         self.state_handle_event(cx, event);
         
         if self.is_open && self.popup_menu.is_some() {
@@ -223,7 +225,7 @@ impl DropDown {
             let mut map = global.map.borrow_mut();
             let menu = map.get_mut(&self.popup_menu.unwrap()).unwrap();
             let mut close = false;
-            menu.handle_event(cx, event, self.bg.area(), &mut | cx, action | {
+            menu.handle_event_fn(cx, event, self.bg.area(), &mut | cx, action | {
                 match action {
                     PopupMenuAction::WasSweeped(_node_id) => {
                         //dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
@@ -365,7 +367,7 @@ impl DropDown {
 }
 
 impl Widget for DropDown {
-    fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
+    /*fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
         if let Some(LiveValue::BareEnum {variant, ..}) = nodes.read_path(&self.bind) {
             // it should be a BareEnum
             for (index, item) in self.items.iter().enumerate() {
@@ -375,14 +377,14 @@ impl Widget for DropDown {
                 }
             }
         }
-    }
+    }*/
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.bg.redraw(cx);
     }
     
-    fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        self.handle_event(cx, event, &mut | cx, _drop_down, action | {
+    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        self.handle_event_fn(cx, event, &mut | cx, _drop_down, action | {
             /*let mut delta = Vec::new();
             match &action {
                 DropDownAction::Select(v) => {
@@ -405,3 +407,34 @@ impl Widget for DropDown {
         WidgetDraw::done()
     }
 }
+
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct DropDownRef(WidgetRef);
+
+impl DropDownRef {
+    pub fn bind_to(&self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId],  act: &WidgetActions, ) {
+        match db {
+            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(&self.0) {
+                match item.action() {
+                    DropDownAction::Select(v) => {
+                        if let Some(mut inner) = self.inner_mut(){
+                            let variant = LiveId::from_str(&inner.items[v]).unwrap();
+                            nodes.write_by_field_path(path,  LiveValue::BareEnum(variant));
+                        }
+                    }
+                    _ => ()
+                }
+            }
+            DataBinding::ToWidgets(nodes) => {
+                if let Some(mut inner) = self.inner_mut(){
+                    if let Some(value) = nodes.read_by_field_path(path) {
+                        if let Some(value) = value.as_bool(){
+                            inner.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

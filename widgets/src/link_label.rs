@@ -8,11 +8,11 @@ use {
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import crate::theme::*;
     
-    LinkLabel: {{LinkLabel}} {
+    LinkLabel= {{LinkLabel}} {
         button: {
             bg: {
                 const THICKNESS: 0.8
@@ -44,8 +44,8 @@ live_register!{
             }
             
             walk: {
-                width: Size::Fit,
-                height: Size::Fit,
+                width: Fit,
+                height: Fit,
                 margin: {left: 5.0, top: 0.0, right: 0.0}
             }
             
@@ -63,8 +63,8 @@ pub struct LinkLabel {
 
 impl LinkLabel {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
-        self.button.handle_event(cx, event, dispatch_action)
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
+        self.button.handle_event_fn(cx, event, dispatch_action)
     }
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {

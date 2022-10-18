@@ -21,8 +21,8 @@ use {
     },
 };
 
-live_register!{
-    LogView: {{LogView}} {
+live_design!{
+    LogView= {{LogView}} {
     }
 }
 
@@ -82,6 +82,6 @@ impl LogView {
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
-        self.log_list.handle_event(cx, event, &mut |_,_|{})
+        self.log_list.handle_event_fn(cx, event, &mut |_,_|{})
     }
 }

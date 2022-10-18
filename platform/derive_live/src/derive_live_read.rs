@@ -116,10 +116,9 @@ fn derive_live_read_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) 
             match &item.kind{
                 EnumKind::Bare=>{
                     tb.add("    Self::").ident(&item.name).add("=>{");
-                    tb.add("        out.push(LiveNode::from_id_value(id, LiveValue::BareEnum{");
-                    tb.add("            base: LiveId(").suf_u64(LiveId::from_str(&enum_name).unwrap().0).add("),");
-                    tb.add("            variant: LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")");
-                    tb.add("        }));");
+                    tb.add("        out.push(LiveNode::from_id_value(id, LiveValue::BareEnum(");
+                    tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")");
+                    tb.add("        )));");
                     tb.add("    },");
                 }
                 EnumKind::Named(fields)=>{
@@ -128,10 +127,9 @@ fn derive_live_read_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) 
                         tb.ident(&field.name).add(":").ident(&format!("prefix_{}", field.name)).add(",");
                     }
                     tb.add("    }=>{");
-                    tb.add("        out.push(LiveNode::from_id_value(id, LiveValue::NamedEnum{");
-                    tb.add("            base: LiveId(").suf_u64(LiveId::from_str(&enum_name).unwrap().0).add("),");
-                    tb.add("            variant: LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")");
-                    tb.add("        }));");
+                    tb.add("        out.push(LiveNode::from_id_value(id, LiveValue::NamedEnum(");
+                    tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")");
+                    tb.add("        )));");
                     for field in fields {
                         tb.ident(&format!("prefix_{}", field.name)).add(".live_read_to(LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(", out);");
                     }
@@ -144,10 +142,9 @@ fn derive_live_read_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) 
                         tb.ident(&format!("var{}", i)).add(",");
                     }
                     tb.add("    ) =>{");
-                    tb.add("        out.push(LiveNode::from_id_value(id, LiveValue::TupleEnum{");
-                    tb.add("            base: LiveId(").suf_u64(LiveId::from_str(&enum_name).unwrap().0).add("),");
-                    tb.add("            variant: LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")");
-                    tb.add("        }));");
+                    tb.add("        out.push(LiveNode::from_id_value(id, LiveValue::TupleEnum(");
+                    tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")");
+                    tb.add("        )));");
                     for i in 0..args.len() {
                         tb.ident(&format!("var{}", i)).add(".live_read_to(LiveId(0), out);");
                     }

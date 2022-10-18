@@ -6,13 +6,13 @@ use {
     },
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import crate::tab_bar::TabBar
     import makepad_widgets::splitter::Splitter
     import makepad_widgets::theme::*;
     
-    DrawRoundCorner: {{DrawRoundCorner}} {
+    DrawRoundCorner = {{DrawRoundCorner}} {
         draw_depth: 6.0
         border_radius: 10.0
         fn pixel(self) -> vec4 {
@@ -37,11 +37,11 @@ live_register!{
         }
     }
     
-    Dock: {{Dock}} {
+    Dock= {{Dock}} {
         const BORDER_SIZE: 6.0
         border_size: (BORDER_SIZE)
         layout: {
-            flow: Flow::Down
+            flow: Down
             padding: {left: (BORDER_SIZE), top: 0.0, right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
         }
         padding_fill: {color: (COLOR_BG_APP)}
@@ -284,7 +284,7 @@ impl Dock {
                 Panel::Split(panel) => {
                     panel
                         .splitter
-                        .handle_event(cx, event, &mut | cx, action | match action {
+                        .handle_event_fn(cx, event, &mut | cx, action | match action {
                         SplitterAction::Changed {axis, align} => {
                             dispatch_action(cx, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align});
                         },
@@ -295,7 +295,7 @@ impl Dock {
                     let mut redraw = false;
                     panel
                         .tab_bar
-                        .handle_event(cx, event, &mut | cx, action | match action {
+                        .handle_event_fn(cx, event, &mut | cx, action | match action {
                         TabBarAction::ReceivedDraggedItem(item) => dispatch_action(
                             cx,
                             DockAction::TabBarReceivedDraggedItem(*panel_id, item),

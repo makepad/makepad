@@ -8,10 +8,10 @@ use {
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
-    Label: {{Label}} {
+    Label= {{Label}} {
         walk:{
             width:Fit
             height:Fit
@@ -23,7 +23,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(widget!(Label))]
+#[live_design_fn(widget_factory!(Label))]
 pub struct Label {
     label: DrawText,
     walk: Walk,

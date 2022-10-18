@@ -55,13 +55,13 @@ impl BuildClient {
     #[cfg(target_arch = "wasm32")]
     pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd){}
      
-    pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event) -> Vec<BuildMsgWrap> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<BuildMsgWrap> {
         let mut a = Vec::new();
-        self.handle_event(cx, event, &mut | _, v | a.push(v));
+        self.handle_event_fn(cx, event, &mut | _, v | a.push(v));
         a
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_msg: &mut dyn FnMut(&mut Cx, BuildMsgWrap)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_msg: &mut dyn FnMut(&mut Cx, BuildMsgWrap)) {
         match event {
             Event::Signal(event)
             if event.signals.contains(&self.msg_signal) => {

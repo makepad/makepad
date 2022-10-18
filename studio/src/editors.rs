@@ -78,10 +78,10 @@ impl EditorView {
     }
 }
 
-live_register!{
+live_design!{
     import crate::rust_editor::rust_editor::RustEditor;
     
-    Editors: {{Editors}} {
+    Editors= {{Editors}} {
         rust_editor: RustEditor {},
     }
 }
@@ -165,7 +165,7 @@ impl Editors {
     ) {
         let view = &mut self.editor_views[view_id];
         let mut actions = Vec::new();
-        view.handle_event(cx, state, event, send_request, &mut | _, action | actions.push(action));
+        view.handle_event_fn(cx, state, event, send_request, &mut | _, action | actions.push(action));
         for action in actions {
             match action {
                 CodeEditorAction::RedrawViewsForDocument(document_id) => {

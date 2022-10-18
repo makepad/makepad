@@ -15,8 +15,8 @@ use {
     },
 };
 
-live_register!{
-    CollabClient: {{CollabClient}} {}
+live_design!{
+    CollabClient= {{CollabClient}} {}
 }
 
 #[derive(Live)]

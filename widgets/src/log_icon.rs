@@ -1,10 +1,10 @@
 use crate::makepad_draw_2d::*;
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawLogIconQuad: {{DrawLogIconQuad}} {
+    DrawLogIconQuad= {{DrawLogIconQuad}} {
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * vec2(10., 10.))
             match self.icon_type {

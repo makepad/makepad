@@ -37,13 +37,13 @@ use {
     std::mem,
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawSelection: {{DrawSelection}} {
+    DrawSelection= {{DrawSelection}} {
         const GLOOPINESS: 8.
-        const BORDER_RADIUS: 2.
+        const BORDER_RADIUS = 2.
         
         fn vertex(self) -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
             let clipped: vec2 = clamp(
@@ -72,7 +72,7 @@ live_register!{
         }
     }
     
-    DrawIndentLine: {{DrawIndentLine}} {
+    DrawIndentLine= {{DrawIndentLine}} {
         fn pixel(self) -> vec4 {
             //return #f00;
             let thickness = 0.8 + self.dpi_dilate * 0.5;
@@ -83,7 +83,7 @@ live_register!{
         }
     }
     
-    DrawMsgLine: {{DrawMsgLine}} {
+    DrawMsgLine= {{DrawMsgLine}} {
         debug_id: my_id
         const THICKNESS: 1.0
         const WAVE_HEIGHT: 0.05
@@ -115,7 +115,7 @@ live_register!{
         }
     }
     
-    CodeEditorImpl: {{CodeEditorImpl}} {
+    CodeEditorImpl= {{CodeEditorImpl}} {
         scroll_bars: {
             scroll_bar_y: {smoothing: 0.15},
         }
@@ -155,28 +155,28 @@ live_register!{
             caret = {
                 default: on
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {caret_quad: {color: #b0}}
                 }
                 
                 off = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {caret_quad: {color: #0000}}
                 }
             }
             zoom = {
                 default: on
                 on = {
-                    from: {all: Play::Forward {duration: 0.4}}
+                    from: {all: Forward {duration: 0.4}}
                     ease: Ease::ExpDecay {d1: 0.96, d2: 0.97}
-                    //from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+                    //from: {all: Exp {speed1: 0.96, speed2: 0.97}}
                     redraw: true
                     apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                 }
                 off = {
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     ease: Ease::ExpDecay {d1: 0.98, d2: 0.95}
-                    //from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+                    //from: {all: Exp {speed1: 0.98, speed2: 0.95}}
                     redraw: true
                     apply: {zoom_out: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
                 }
@@ -850,7 +850,7 @@ impl CodeEditorImpl {
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        self.scroll_bars.handle_event(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
         
         if self.state_handle_event(cx, event).must_redraw() {
             self.scroll_bars.redraw(cx);

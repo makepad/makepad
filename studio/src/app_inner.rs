@@ -31,8 +31,8 @@ use {
     },
 };
 
-live_register!{
-    AppInner: {{AppInner}} {
+live_design!{
+    AppInner= {{AppInner}} {
         // window: {caption: "Makepad Studio"}
     }
 }
@@ -137,7 +137,7 @@ impl AppInner {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) {
-        self.window.handle_event(cx, event, &mut | _, _ | {});
+        self.window.handle_event_fn(cx, event, &mut | _, _ | {});
         
         match event {
             Event::Construct => {
@@ -236,7 +236,7 @@ impl AppInner {
             }
         }
         
-        for action in self.file_tree.handle_event_vec(cx, event) {
+        for action in self.file_tree.handle_event(cx, event) {
             match action {
                 FileTreeAction::WasClicked(file_node_id) => {
                     let node = &state.file_nodes[file_node_id];
@@ -303,7 +303,7 @@ impl AppInner {
             }
         }
         
-        for action in self.build_manager.handle_event_vec(cx, event, state){
+        for action in self.build_manager.handle_event(cx, event, state){
             match action{
                 BuildManagerAction::RedrawDoc{doc_id}=>{
                     self.editors.redraw_views_for_document(cx, &mut state.editor_state, doc_id);
@@ -319,7 +319,7 @@ impl AppInner {
             }
         }
         self.run_view.handle_event(cx, event, &mut state.build_state);
-        self.log_view.handle_event(cx, event, &mut | _, _ | {});
+        self.log_view.handle_event_fn(cx, event, &mut | _, _ | {});
         self.shader_view.handle_event(cx, event);
         self.slides_view.handle_event(cx, event);
     }

@@ -20,8 +20,8 @@ pub use {
     }
 };
 
-live_register!{
-    DrawTrapezoidText: {{DrawTrapezoidText}} {
+live_design!{
+    DrawTrapezoidText= {{DrawTrapezoidText}} {
         
         varying v_p0: vec2;
         varying v_p1: vec2;

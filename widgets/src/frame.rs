@@ -9,31 +9,30 @@ use {
     },
 };
 
-live_register!{
-    import crate::scroll_bars::ScrollBars;    
-
-    Frame: {{Frame}} {}
-
-    Solid: Frame {bg: {shape: Solid}}
-    Rect: Frame {bg: {shape: Rect}}
-    Box: Frame {bg: {shape: Box}}
-    BoxX: Frame {bg: {shape: BoxX}}
-    BoxY: Frame {bg: {shape: BoxY}}
-    BoxAll: Frame {bg: {shape: BoxAll}}
-    GradientY: Frame {bg: {shape: GradientY}}
-    Circle: Frame {bg: {shape: Circle}}
-    Hexagon: Frame {bg: {shape: Hexagon}}
-    GradientX: Frame {bg: {shape: Solid, fill: GradientX}}
-    GradientY: Frame {bg: {shape: Solid, fill: GradientY}}
-    Image: Frame {bg: {shape: Solid, fill: Image}}
-    UserDraw: Frame {user_draw: true}
-    ScrollXY: Frame {scroll_bars: ScrollBars{show_scroll_x:true, show_scroll_y:true}}
-    ScrollX: Frame {scroll_bars: ScrollBars{show_scroll_x:true, show_scroll_y:false}}
-    ScrollY: Frame {scroll_bars: ScrollBars{show_scroll_x:false, show_scroll_y:true}}
+live_design!{
+    import crate::scroll_bars::ScrollBars;
+    
+    Frame = {{Frame}} {}
+    
+    Solid = <Frame> {bg: {shape: Solid}}
+    Rect = <Frame> {bg: {shape: Rect}}
+    Box = <Frame> {bg: {shape: Box}}
+    BoxX = <Frame> {bg: {shape: BoxX}}
+    BoxY = <Frame> {bg: {shape: BoxY}}
+    BoxAll = <Frame> {bg: {shape: BoxAll}}
+    Circle = <Frame> {bg: {shape: Circle}}
+    Hexagon = <Frame> {bg: {shape: Hexagon}}
+    GradientX = <Frame> {bg: {shape: Solid, fill: GradientX}}
+    GradientY = <Frame> {bg: {shape: Solid, fill: GradientY}}
+    Image = <Frame> {bg: {shape: Solid, fill: Image}}
+    UserDraw = <Frame> {user_draw: true}
+    ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
+    ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
+    ScrollY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
 }
 
 #[derive(Live)]
-#[live_register(widget!(Frame))]
+#[live_design_fn(widget_factory!(Frame))]
 pub struct Frame { // draw info per UI element
     bg: DrawShape,
     
@@ -51,7 +50,7 @@ pub struct Frame { // draw info per UI element
     
     cursor: Option<MouseCursor>,
     scroll_bars: Option<LivePtr>,
-
+    
     #[rust] scroll_bars_obj: Option<ScrollBars>,
     
     #[live(false)] design_mode: bool,
@@ -71,8 +70,8 @@ impl LiveHook for Frame {
         if self.has_view && self.view.is_none() {
             self.view = Some(View::new(cx));
         }
-        if self.scroll_bars.is_some(){
-            if self.scroll_bars_obj.is_none(){
+        if self.scroll_bars.is_some() {
+            if self.scroll_bars_obj.is_none() {
                 self.scroll_bars_obj = Some(ScrollBars::new_from_ptr(cx, self.scroll_bars));
             }
         }
@@ -161,50 +160,45 @@ impl LiveHook for Frame {
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct FrameRef(WidgetRef);
 
-impl FrameRef{
+impl FrameRef {
     pub fn widget_query(&self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
         self.0.widget_query(query, callback)
     }
     
     pub fn get_widget(&self, path: &[LiveId]) -> WidgetRef {
-         self.0.get_widget(path)
+        self.0.get_widget(path)
     }
-
-    pub fn handle_event_vec(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
-        self.0.handle_widget_event_vec(cx, event)
+    
+    pub fn handle_event(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
+        self.0.handle_widget_event(cx, event)
     }
-
+    
     pub fn redraw(&self, cx: &mut Cx) {
         self.0.redraw(cx)
     }
-
-    pub fn template(&self,
-        cx: &mut Cx,
-        path: &[LiveId],
-        new_id: &[LiveId;1],
-        nodes: &[LiveNode]
-    ) -> WidgetRef {
+    
+    pub fn template(&self, cx: &mut Cx, path: &[LiveId], new_id: &[LiveId; 1], nodes: &[LiveNode]) -> WidgetRef {
         self.0.template(cx, path, new_id, nodes)
     }
     
     pub fn draw(&self, cx: &mut Cx2d,) -> WidgetDraw {
-        if let Some(mut inner) = self.inner_mut(){
+        if let Some(mut inner) = self.inner_mut() {
             return inner.draw(cx)
         }
         WidgetDraw::done()
     }
-
-    pub fn set_scroll_pos(&self, cx:&mut Cx, v:DVec2){
-        if let Some(mut inner) = self.inner_mut(){
+    
+    pub fn set_scroll_pos(&self, cx: &mut Cx, v: DVec2) {
+        if let Some(mut inner) = self.inner_mut() {
             inner.set_scroll_pos(cx, v)
         }
     }
-
-    pub fn area(&self)->Area{
-        if let Some(inner) = self.inner(){
+    
+    pub fn area(&self) -> Area {
+        if let Some(inner) = self.inner() {
             inner.area
         }
-        else{
+        else {
             Area::Empty
         }
     }
@@ -212,19 +206,19 @@ impl FrameRef{
 
 impl Widget for Frame {
     
-    fn handle_widget_event(
+    fn handle_widget_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
-        if let Some(scroll_bars) = &mut self.scroll_bars_obj{
-            scroll_bars.handle_main_event(cx, event, &mut |_,_|{});
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.handle_main_event(cx, event, &mut | _, _ | {});
         }
-
+        
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
-                child.handle_widget_event(cx, event, &mut | cx, action | {
+                child.handle_widget_event_fn(cx, event, &mut | cx, action | {
                     dispatch_action(cx, action.set_widget(&child));
                 });
             }
@@ -242,8 +236,8 @@ impl Widget for Frame {
             }
         }
         
-        if let Some(scroll_bars) = &mut self.scroll_bars_obj{
-            scroll_bars.handle_scroll_event(cx, event, &mut |_,_|{});
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.handle_scroll_event(cx, event, &mut | _, _ | {});
         }
     }
     
@@ -330,7 +324,7 @@ impl Widget for Frame {
     
     fn widget_query(&mut self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
         match query {
-            WidgetQuery::All=> {
+            WidgetQuery::All => {
                 for child in self.children.values_mut() {
                     child.widget_query(query, callback) ?
                 }
@@ -350,7 +344,7 @@ impl Widget for Frame {
                     }
                     else {
                         let child = self.children.get_mut(&path[0]).unwrap();
-                        callback(WidgetFound::Child(child.clone()))?;
+                        callback(WidgetFound::Child(child.clone())) ?;
                     }
                 }
             }
@@ -368,17 +362,17 @@ enum DrawState {
 }
 
 impl Frame {
-
-    pub fn set_scroll_pos(&mut self, cx:&mut Cx, v:DVec2){
-        if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+    
+    pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: DVec2) {
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.set_scroll_pos(cx, v);
         }
-        else{
+        else {
             self.layout.scroll = v;
         }
     }
-
-    pub fn area(&self)->Area{
+    
+    pub fn area(&self) -> Area {
         self.area
     }
     
@@ -402,11 +396,11 @@ impl Frame {
             }
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
-            let scroll = if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+            let scroll = if let Some(scroll_bars) = &mut self.scroll_bars_obj {
                 scroll_bars.begin_nav_area(cx);
                 scroll_bars.get_scroll_pos()
             }
-            else{
+            else {
                 self.layout.scroll
             };
             
@@ -454,10 +448,10 @@ impl Frame {
                 self.draw_state.set(DrawState::DeferWalk(step + 1));
             }
             else {
-                if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+                if let Some(scroll_bars) = &mut self.scroll_bars_obj {
                     scroll_bars.draw_scroll_bars(cx);
                 };
-
+                
                 if self.bg.shape != Shape::None {
                     self.bg.end(cx);
                     self.area = self.bg.area();
@@ -466,11 +460,11 @@ impl Frame {
                     cx.end_turtle_with_area(&mut self.area);
                 };
                 
-                if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+                if let Some(scroll_bars) = &mut self.scroll_bars_obj {
                     scroll_bars.set_area(self.area);
                     scroll_bars.end_nav_area(cx);
                 };
-
+                
                 if self.has_view {
                     self.view.as_mut().unwrap().end(cx);
                 }

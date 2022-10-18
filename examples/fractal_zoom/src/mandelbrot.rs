@@ -10,12 +10,12 @@ use {
 use crate::mandelbrot_simd::*;
 
 // Our live DSL to define the shader and UI def
-live_register!{
+live_design!{
     // include shader standard library with the Pal object
     import makepad_draw_2d::shader::std::*;
     
     // the shader to draw the texture tiles
-    DrawTile: {{DrawTile}} {
+    DrawTile= {{DrawTile}} {
         texture tex: texture2d
         fn pixel(self) -> vec4 {
             //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
@@ -36,7 +36,7 @@ live_register!{
         }
     }
     
-    Mandelbrot: {{Mandelbrot}} {
+    Mandelbrot= {{Mandelbrot}} {
         max_iter: 320,
     }
 }
@@ -404,7 +404,7 @@ impl FractalSpace {
 
 
 #[derive(Live, Widget)]
-#[live_register(widget!(Mandelbrot))]
+#[live_design_fn(widget_factory!(Mandelbrot))]
 pub struct Mandelbrot {
     // DSL accessible
     draw_tile: DrawTile,
@@ -529,7 +529,7 @@ impl Mandelbrot {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
         //self.state_handle_event(cx, event);
         if let Event::Signal(_) = event {
             // this batches up all the input signals into a single animation frame

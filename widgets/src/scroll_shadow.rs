@@ -1,10 +1,10 @@
 use crate::makepad_draw_2d::*;
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import crate::theme::*;
     
-    ScrollShadow: {{ScrollShadow}} {
+    ScrollShadow= {{ScrollShadow}} {
         
         shadow_size: 4.0,
         

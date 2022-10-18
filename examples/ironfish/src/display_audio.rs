@@ -8,11 +8,11 @@ use {
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawFFT: {{DrawFFT}} {
+    DrawFFT = {{DrawFFT}} {
         texture wave_texture: texture2d
         texture fft_texture: texture2d
         fn pixel(self) -> vec4 {
@@ -20,7 +20,7 @@ live_register!{
             
             let fft = sample2d(
                 self.fft_texture,
-                vec2(mod (1.0 - self.pos.y*0.5, 0.5), fract(self.pos.x + self.shift_fft))
+                vec2(mod (1.0 - self.pos.y * 0.5, 0.5), fract(self.pos.x + self.shift_fft))
                 //vec2(self.pos.y, fract(self.pos.x + self.shift_fft))
             );
             
@@ -29,8 +29,8 @@ live_register!{
             let right_fft = fft.y + fft.z / 256.0;
             let left_fft = fft.w + fft.x / 256.0;
             
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size*vec2(1.0,0.5));
-            let color = Pal::iq1(self.layer+0.25) * 0.5;
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size * vec2(1.0, 0.5));
+            let color = Pal::iq1(self.layer + 0.25) * 0.5;
             if left < 0.0 {
                 sdf.rect(0., self.rect_size.y * 0.25, self.rect_size.x, -left * self.rect_size.y + 0.5);
             }
@@ -60,7 +60,7 @@ live_register!{
         }
     }
     
-    DisplayAudio: {{DisplayAudio}} {
+    DisplayAudio = {{DisplayAudio}} {
         walk: {
             width: Fill,
             height: Fill
@@ -77,7 +77,7 @@ struct DrawFFT {
 }
 
 #[derive(Live, Widget)]
-#[live_register(widget!(DisplayAudio))]
+#[live_design_fn(widget_factory!(DisplayAudio))]
 pub struct DisplayAudio {
     //view: View,
     walk: Walk,
@@ -114,7 +114,7 @@ impl DisplayAudioLayer {
             multisample: None
         });
         Self {
-            fft_empty_count: FFT_SIZE_X*FFT_SIZE_Y+1,
+            fft_empty_count: FFT_SIZE_X * FFT_SIZE_Y + 1,
             active: false,
             wave_texture,
             fft_texture,
@@ -125,8 +125,9 @@ impl DisplayAudioLayer {
         }
     }
     
-    pub fn process_buffer(&mut self, cx: &mut Cx, active:bool, audio: &AudioBuffer)->bool{
-        if self.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y && !active{
+    
+    pub fn process_buffer(&mut self, cx: &mut Cx, active: bool, audio: &AudioBuffer) -> bool {
+        if self.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y && !active {
             return false
         }
         // alright we have a texture. lets write the audio somewhere
@@ -134,17 +135,17 @@ impl DisplayAudioLayer {
         let mut buf = Vec::new();
         self.wave_texture.swap_image_u32(cx, &mut buf);
         buf.resize(WAVE_SIZE_X * WAVE_SIZE_Y, 0);
-
-        if !self.active{
+        
+        if !self.active {
             let left_u16 = ((0.0 + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
             let right_u16 = ((0.0 + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
-            for i in 0..buf.len(){buf[i] = left_u16 << 16 | right_u16}
+            for i in 0..buf.len() {buf[i] = left_u16 << 16 | right_u16}
             // clear the texture
             self.data_offset = 0;
             // clear the fft
             let mut buf = Vec::new();
             self.fft_texture.swap_image_u32(cx, &mut buf);
-            for i in 0..buf.len(){buf[i] = 0}
+            for i in 0..buf.len() {buf[i] = 0}
             self.fft_texture.swap_image_u32(cx, &mut buf);
             self.fft_slot = 0;
         }
@@ -168,10 +169,10 @@ impl DisplayAudioLayer {
             let fft_now = (fft_off + i) & (FFT_SIZE_T - 1);
             self.fft_buffer[0][fft_now] = cf32(left[i], 0.0);
             self.fft_buffer[1][fft_now] = cf32(right[i], 0.0);
-            if left[i] != 0.0 || right[i] != 0.0{
+            if left[i] != 0.0 || right[i] != 0.0 {
                 self.fft_empty_count = 0;
             }
-            else{
+            else {
                 self.fft_empty_count += 1;
             }
             // if the fft buffer is full, emit a new fftline
@@ -179,7 +180,7 @@ impl DisplayAudioLayer {
                 let mut buf = Vec::new();
                 self.fft_texture.swap_image_u32(cx, &mut buf);
                 buf.resize(FFT_SIZE_X * FFT_SIZE_Y, 0);
-                if self.fft_empty_count < FFT_SIZE_T{
+                if self.fft_empty_count < FFT_SIZE_T {
                     fft_f32_recursive_pow2_forward(&mut self.fft_buffer[0], &mut self.fft_scratch);
                     fft_f32_recursive_pow2_forward(&mut self.fft_buffer[1], &mut self.fft_scratch);
                 }
@@ -211,7 +212,7 @@ pub enum DisplayAudioAction {
 const WAVE_SIZE_X: usize = 1024;
 const WAVE_SIZE_Y: usize = 1;
 const FFT_SIZE_T: usize = 512;
-const FFT_SIZE_X: usize = FFT_SIZE_T>>1;
+const FFT_SIZE_X: usize = FFT_SIZE_T >> 1;
 const FFT_SIZE_Y: usize = 512;
 
 impl LiveHook for DisplayAudio {
@@ -233,7 +234,7 @@ impl DisplayAudio {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         
         for (index, layer) in self.layers.iter().enumerate() {
-            if !layer.active || layer.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y{
+            if !layer.active || layer.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y {
                 continue
             }
             self.fft.layer = index as f32 / self.layers.len() as f32;
@@ -245,7 +246,11 @@ impl DisplayAudio {
         //self.view.end(cx);
     }
     
-    pub fn handle_event(
+    pub fn area(&mut self) -> Area {
+        self.area
+    }
+    
+    pub fn handle_event_fn(
         &mut self,
         _cx: &mut Cx,
         _event: &Event,
@@ -261,7 +266,7 @@ pub struct DisplayAudioRef(WidgetRef);
 impl DisplayAudioRef {
     pub fn process_buffer(&self, cx: &mut Cx, active: bool, voice: usize, buffer: &AudioBuffer) {
         if let Some(mut inner) = self.inner_mut() {
-            if inner.layers[voice].process_buffer(cx, active, buffer){
+            if inner.layers[voice].process_buffer(cx, active, buffer) {
                 inner.area.redraw(cx);
             }
         }

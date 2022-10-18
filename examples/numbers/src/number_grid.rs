@@ -6,9 +6,9 @@ use {
     std::fmt::Write,
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
-    DrawBg: {{DrawBg}} {
+    DrawBg= {{DrawBg}} {
         instance hover: float
         instance focus: float
         
@@ -50,7 +50,7 @@ live_register!{
         }
     }
     
-    DrawLabel: {{DrawLabel}} {
+    DrawLabel= {{DrawLabel}} {
         instance hover: float
         instance focus: float
 
@@ -59,7 +59,7 @@ live_register!{
         }
     }
     
-    NumberBox: {{NumberBox}} {
+    NumberBox= {{NumberBox}} {
        
        layout:{padding:{left:14,top:1, bottom:1, right:5}}
        
@@ -71,14 +71,14 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         label: {hover: 0.0}
                         bg: {hover: 0.0}
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         label: {hover: 1.0}
                         bg: {hover: 1.0}
@@ -88,14 +88,14 @@ live_register!{
             focus = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         label: {focus: 0.0}
                         bg: {focus: 0.0}
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         label: {focus: 1.0}
                         bg: {focus: 1.0}
@@ -105,7 +105,7 @@ live_register!{
         }
     }
     
-    NumberGrid: {{NumberGrid}} {
+    NumberGrid= {{NumberGrid}} {
         number_box: NumberBox {}
         walk: {
             width: Size::Fill,
@@ -143,7 +143,7 @@ pub struct NumberBox {
 }
 
 #[derive(Live, Widget)]
-#[live_register(widget!(NumberGrid))]
+#[live_design_fn(widget_factory!(NumberGrid))]
 pub struct NumberGrid {
     scroll_bars: ScrollBars,
     walk: Walk,
@@ -156,7 +156,7 @@ pub struct NumberGrid {
 }
 
 impl NumberBox {
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.bg.area()) {
@@ -264,7 +264,7 @@ impl NumberGrid{
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, NumberGridAction),
     ) {
-        self.scroll_bars.handle_event(cx, event, &mut |_,_|{});
+        self.scroll_bars.handle_event_fn(cx, event, &mut |_,_|{});
         
         match event{
             Event::KeyDown(fe) if fe.key_code == KeyCode::Space=>{
@@ -283,7 +283,7 @@ impl NumberGrid{
         
         let mut actions = Vec::new();
         for (box_id, number_box) in self.number_boxes.iter_mut() {
-            number_box.handle_event(cx, event, &mut | _, action | {
+            number_box.handle_event_fn(cx, event, &mut | _, action | {
                 actions.push((*box_id, action))
             });
         }
