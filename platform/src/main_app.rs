@@ -13,7 +13,7 @@ macro_rules!main_app {
                 
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
             }));
-            live_register(&mut cx);
+            live_design(&mut cx);
             cx.init();
             cx.event_loop();
         }
@@ -33,7 +33,7 @@ macro_rules!main_app {
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
             })));
             
-            live_register(&mut cx);
+            live_design(&mut cx);
             cx.init();
             Box::into_raw(cx) as u32
         }

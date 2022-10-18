@@ -6,11 +6,11 @@ use {
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawKey: {{DrawKey}} {
+    DrawKey= {{DrawKey}} {
         
         fn height_map(self, pos: vec2) -> float {
             let fx = 1 - pow(1.2 - sin(pos.x * PI), 10.8);
@@ -62,18 +62,18 @@ live_register!{
         }
     }
     
-    PianoKey: {{PianoKey}} {
+    PianoKey= {{PianoKey}} {
         
         state: {
             hover = {
                 default: off,
                 off = {
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {draw_key: {hover: 0.0}}
                 }
                 
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {draw_key: {hover: 1.0}}
                 }
             }
@@ -82,37 +82,37 @@ live_register!{
                 default: off
                 
                 off = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {draw_key: {focussed: 1.0}}
                 }
                 
                 on = {
-                    from: {all: Play::Forward {duration: 0.05}}
+                    from: {all: Forward {duration: 0.05}}
                     apply: {draw_key: {focussed: 0.0}}
                 }
             }
             pressed = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.05}}
+                    from: {all: Forward {duration: 0.05}}
                     apply: {draw_key: {pressed: 0.0}}
                 }
                 
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {draw_key: {pressed: 1.0}}
                 }
             }
         }
     }
     
-    Piano: {{Piano}} {
-        piano_key: PianoKey {}
+    Piano= {{Piano}} {
+        piano_key: <PianoKey> {}
         white_size: vec2(20.0, 75.0),
         black_size: vec2(15.0, 50.0),
         walk: {
-            width: Size::Fit,
-            height: Size::Fit
+            width: Fit,
+            height: Fit
         }
     }
 }
@@ -134,7 +134,7 @@ pub struct PianoKey {
 }
 
 #[derive(Live, Widget)]
-#[live_register(widget!(Piano))]
+#[live_design_fn(widget_factory!(Piano))]
 pub struct Piano {
     #[rust] area: Area,
     walk: Walk,
@@ -193,14 +193,14 @@ impl PianoKey {
     }
     
     fn set_is_pressed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, ids!(pressed.on), ids!(pressed.off))
+        self.toggle_state(cx, is, animate, id!(pressed.on), id!(pressed.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, ids!(focus.on), ids!(focus.off))
+        self.toggle_state(cx, is, animate, id!(focus.on), id!(focus.off))
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -217,24 +217,24 @@ impl PianoKey {
         ) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerSweepIn(_) => {
-                self.animate_state(cx, ids!(hover.on));
-                self.animate_state(cx, ids!(pressed.on));
+                self.animate_state(cx, id!(hover.on));
+                self.animate_state(cx, id!(pressed.on));
                 dispatch_action(cx, PianoKeyAction::Pressed(127));
             }
             Hit::FingerSweepOut(se) => {
                 if se.is_finger_up() && se.digit.has_hovers(){
-                    self.animate_state(cx, ids!(hover.on));
+                    self.animate_state(cx, id!(hover.on));
                 }
                 else{
-                    self.animate_state(cx, ids!(hover.off));
+                    self.animate_state(cx, id!(hover.off));
                 }
-                self.animate_state(cx, ids!(pressed.off));
+                self.animate_state(cx, id!(pressed.off));
                 dispatch_action(cx, PianoKeyAction::Up);
             }
             _ => {}
@@ -308,6 +308,10 @@ impl Piano {
         self.black_keys.retain_visible();
     }
     
+    pub fn area(&mut self)->Area{
+        self.area
+    }
+    
     pub fn set_key_focus(&self, cx: &mut Cx) {
         cx.set_key_focus(self.area);
     }
@@ -322,7 +326,7 @@ impl Piano {
         }
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -330,7 +334,7 @@ impl Piano {
     ) {
         let mut actions = Vec::new();
         for (key_id, piano_key) in self.black_keys.iter_mut().chain(self.white_keys.iter_mut()) {
-            piano_key.handle_event(cx, event, self.area, &mut | _, action | {
+            piano_key.handle_event_fn(cx, event, self.area, &mut | _, action | {
                 actions.push((*key_id, action))
             });
         }

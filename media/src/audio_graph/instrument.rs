@@ -8,8 +8,8 @@ use {
     },
 };
 
-live_register!{
-    Instrument: {{Instrument}} {
+live_design!{
+    Instrument= {{Instrument}} {
     }
 }
 
@@ -17,7 +17,7 @@ live_register!{
 enum FromUI {}
 
 #[derive(Live)]
-#[live_register(audio_component!(Instrument))]
+#[live_design_fn(audio_component!(Instrument))]
 struct Instrument {
     #[rust] step_order: Vec<LiveId>,
     #[rust] steps: ComponentMap<LiveId, AudioComponentRef>,
@@ -112,10 +112,10 @@ impl AudioComponent for Instrument {
         })
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         for step in self.steps.values_mut(){
             if let Some(step) = step.as_mut(){
-                step.handle_event(cx, event, dispatch_action)
+                step.handle_event_fn(cx, event, dispatch_action)
             }
         }
     }

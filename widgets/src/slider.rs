@@ -1,15 +1,17 @@
 use {
     crate::{
         makepad_derive_widget::*,
+        frame::*,
+        data_binding::DataBinding,
         makepad_draw_2d::*,
         widget::*,
         text_input::{TextInput, TextInputAction}
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
-    DrawSlider: {{DrawSlider}} {
+    DrawSlider= {{DrawSlider}} {
         instance hover: float
         instance focus: float
         instance drag: float
@@ -46,7 +48,7 @@ live_register!{
         }
     }
     
-    Slider: {{Slider}} {
+    Slider= {{Slider}} {
         min: 0.0,
         max: 1.0,
         
@@ -63,7 +65,7 @@ live_register!{
         label_align: {
             y: 0.0
         }
-       
+        
         text_input: {
             cursor_margin_bottom: 3.0,
             cursor_margin_top: 4.0,
@@ -89,7 +91,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         slider: {hover: 0.0}
                         //text_input: {state: {hover = off}}
@@ -97,7 +99,7 @@ live_register!{
                 }
                 on = {
                     //cursor: Arrow,
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         slider: {hover: 1.0}
                         //text_input: {state: {hover = on}}
@@ -107,13 +109,13 @@ live_register!{
             focus = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.0}}
+                    from: {all: Forward {duration: 0.0}}
                     apply: {
                         slider: {focus: 0.0}
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         slider: {focus: 1.0}
                     }
@@ -122,12 +124,12 @@ live_register!{
             drag = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {slider: {drag: 0.0}}
                 }
                 on = {
                     cursor: Arrow,
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {slider: {drag: 1.0}}
                 }
             }
@@ -143,7 +145,7 @@ pub struct DrawSlider {
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(widget!(Slider))]
+#[live_design_fn(widget_factory!(Slider))]
 pub struct Slider {
     slider: DrawSlider,
     
@@ -157,13 +159,13 @@ pub struct Slider {
     label_text: DrawText,
     label: String,
     
-    bind: String,
-    
     text_input: TextInput,
     
     min: f64,
     max: f64,
-    
+
+    bind: String,
+
     #[rust] pub value: f64,
     #[rust] pub dragging: Option<f64>,
 }
@@ -188,9 +190,9 @@ impl Slider {
         self.value = (external - self.min) / (self.max - self.min)
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
         self.state_handle_event(cx, event);
-        for action in self.text_input.handle_event_vec(cx, event) {
+        for action in self.text_input.handle_event(cx, event) {
             match action {
                 TextInputAction::KeyFocus => {
                     self.animate_state(cx, id!(focus.on));
@@ -279,21 +281,21 @@ impl Slider {
 
 
 impl Widget for Slider {
-    fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+    /* fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         if let Some(value) = nodes.read_path(&self.bind) {
             if let Some(value) = value.as_float(){
                 self.set_internal(value);
                 self.update_text_input(cx);
             }
         }
-    }
+    }*/
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.slider.redraw(cx);
     }
     
-    fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        self.handle_event(cx, event, &mut | cx, _slider, action | {
+    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        self.handle_event_fn(cx, event, &mut | cx, _slider, action | {
             /*let mut delta = Vec::new();
             match &action {
                 SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
@@ -314,3 +316,32 @@ impl Widget for Slider {
         WidgetDraw::done()
     }
 }
+
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct SliderRef(WidgetRef);
+
+impl SliderRef {
+    pub fn bind_to(&self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId],  act: &WidgetActions, ) {
+        match db {
+            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(&self.0) {
+                match item.action() {
+                    SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
+                        nodes.write_by_field_path(path, LiveValue::Float64(v as f64));
+                    }
+                    _ => ()
+                }
+            }
+            DataBinding::ToWidgets(nodes) => {
+                if let Some(mut inner) = self.inner_mut(){
+                    if let Some(value) = nodes.read_by_field_path(path) {
+                        if let Some(value) = value.as_float(){
+                            inner.set_internal(value);
+                            inner.update_text_input(cx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

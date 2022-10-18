@@ -4,10 +4,10 @@ use makepad_draw_2d::*;
 mod number_grid;
 use makepad_widgets::imgui::*;
 
-live_register!{
+live_design!{
     import makepad_widgets::frame::*;
     registry Widget::*;
-    App: {{App}} {
+    App= {{App}} {
         imgui:{
             ScrollY{
                 bg:{color:#5, shape:Solid}
@@ -26,9 +26,9 @@ pub struct App {
 }
 
 impl App {  
-    pub fn live_register(cx: &mut Cx) {
-        makepad_widgets::live_register(cx);
-        number_grid::live_register(cx);
+    pub fn live_design(cx: &mut Cx) {
+        makepad_widgets::live_design(cx);
+        number_grid::live_design(cx);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {

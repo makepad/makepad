@@ -10,11 +10,11 @@ use {
 };
 
 
-live_register!{
+live_design!{
     
-    DrawText: {{DrawText}} {
+    DrawText= {{DrawText}} {
         //debug: true;
-        wrapping: Wrapping::None
+        wrapping: None
         text_style: {
             font: {
                 path: d"resources/IBMPlexSans-Text.ttf"

@@ -5,9 +5,9 @@ use {
     },
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
-    DrawShape: {{DrawShape}} {
+    DrawShape= {{DrawShape}} {
         texture image: texture2d
         
         fn get_color(self)->vec4{

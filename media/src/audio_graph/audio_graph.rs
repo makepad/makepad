@@ -11,9 +11,9 @@ use {
     std::sync::{Arc, Mutex},
 };
 
-live_register!{
+live_design!{
     registry AudioComponent::*;
-    AudioGraph: {{AudioGraph}} {
+    AudioGraph= {{AudioGraph}} {
         root: BasicSynth {
         }
     }
@@ -60,7 +60,6 @@ struct Node {
     display_buffers: Vec<AudioBuffer>,
     root: Option<Box<dyn AudioGraphNode + Send >>
 }
-
 
 impl AudioGraph {
     
@@ -143,14 +142,14 @@ impl AudioGraph {
         });
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)
     ) {
         if let Some(root) = self.root.as_mut() {
-            root.handle_event(cx, event, &mut | _, _ | {});
+            root.handle_event_fn(cx, event, &mut | _, _ | {});
         }
         
         while let Ok(to_ui) = self.to_ui.try_recv(event) {

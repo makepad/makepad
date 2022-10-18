@@ -2,14 +2,14 @@ use crate::makepad_draw_2d::*;
 use crate::frame::*;
 use crate::widget::*;
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::frame::*;
     registry Widget::*;
     
     const SLIDE_WIDTH: 800
     
-    Body: Label {
+    Body = <Label> {
         label: {
             color: #f
             text_style: {
@@ -19,11 +19,11 @@ live_register!{
         text: ""
     }
     
-    Slide: Frame {
+    Slide = <Frame> {
         bg: {shape: Box, color: #2, radius: 10}
         walk: {width: (SLIDE_WIDTH), height: Fill}
         layout: {align: {x: 0.5, y: 0.5}, flow: Down, spacing: 40}
-        title = Label {
+        title = <Label> {
             label: {
                 color: #f
                 text_style: {
@@ -34,35 +34,34 @@ live_register!{
         }
     }
     
-    SlidesView: {{SlidesView}} {
+    SlidesView = {{SlidesView}} {
         slide_width: (SLIDE_WIDTH)
         goal_pos: 0.0
         anim_speed: 0.9
-        frame: ScrollX{
+        frame: <ScrollX> {
             walk: {width: Fill, height: Fill}
-            Slide {title = {text: "Portable SIMD"}, Body {text: "For Native and Wasm"}}
-            Slide {title = {text: "Intro"}, Body {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
+            <Slide> {title = {text: "Portable SIMD"}, <Body> {text: "For Native and Wasm"}}
+            <Slide> {title = {text: "Intro"}, <Body> {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
             
-            Slide {title = {text: "Fractals Native"}, Body {text: "Native: All cores and SIMD"}}
-            Slide {title = {text: "Fractals web"}, Body {text: "No SIMD on safari"}}
+            <Slide> {title = {text: "Fractals Native"}, <Body> {text: "Native: All cores and SIMD"}}
+            <Slide> {title = {text: "Fractals web"}, <Body> {text: "No SIMD on safari"}}
+            <Slide> {title = {text: "Mandelbrot"}, <Body> {text: "Trivially parallel"}}
+            <Slide> {title = {text: "Tile engine"}, <Body> {text: "Threads and queues\nchange core counter"}}
+            <Slide> {title = {text: "Live updating"}, <Body> {text: "Core feature of makepad\nLive shaders+DSL"}}
             
-            Slide {title = {text: "Mandelbrot"}, Body {text: "Trivially parallel"}}
-            Slide {title = {text: "Tile engine"}, Body {text: "Threads and queues\nchange core counter"}}
-            Slide {title = {text: "Live updating"}, Body {text: "Core feature of makepad\nLive shaders+DSL"}}
-
-            Slide {title = {text: "SIMD"}, Body {text: "Single instruction\nMultiple data\nLane bitsize"}}
-            Slide {title = {text: "Lanes"}, Body {text: "128 bit (ARM/Wasm)\n256 bit: AMD/Intel\n512 bit intel"}}
-            Slide {title = {text: "CPU Instructions"}, Body {text: "intel: MMX\nintel: SSE2\nintel: AVX\nARM: Neon"}}
-            Slide {title = {text: "Intrinsics"}, Body {text: "CPU specific\nMany codepaths"}}
-            Slide {title = {text: "Portable SIMD"}, Body {text: "Write once run everywhere"}}
-            Slide {title = {text: "Mandelbrot"}, Body {text: "Show code"}}
-
-            Slide {title = {text: "Web issues"}, Body {text: "Bindgen huge\nRust primitives\nStack frame\nSafari"}}
-            Slide {title = {text: "Audio threads"}, Body {text: "Fun audio"}}
-
-            Slide {title = {text: "Future for Makepad"}, Body {text: "Rust IDE\nLive coding\nDesigntool"}}
-            Slide {title = {text: "Links"}, Body {text: "twitter: @makepad @rikarends\ngithub.com/makepad/makepad"}}
-/*
+            <Slide> {title = {text: "SIMD"}, <Body> {text: "Single instruction\nMultiple data\nLane bitsize"}}
+            <Slide> {title = {text: "Lanes"}, <Body> {text: "128 bit (ARM/Wasm)\n256 bit: AMD/Intel\n512 bit intel"}}
+            <Slide> {title = {text: "CPU Instructions"}, <Body> {text: "intel: MMX\nintel: SSE2\nintel: AVX\nARM: Neon"}}
+            <Slide> {title = {text: "Intrinsics"}, <Body> {text: "CPU specific\nMany codepaths"}}
+            <Slide> {title = {text: "Portable SIMD"}, <Body> {text: "Write once run everywhere"}}
+            <Slide> {title = {text: "Mandelbrot"}, <Body> {text: "Show code"}}
+            
+            <Slide> {title = {text: "Web issues"}, <Body> {text: "Bindgen huge\nRust primitives\nStack frame\nSafari"}}
+            <Slide> {title = {text: "Audio threads"}, <Body> {text: "Fun audio"}}
+            
+            <Slide> {title = {text: "Future for Makepad"}, <Body> {text: "Rust IDE\nLive coding\nDesigntool"}}
+            <Slide> {title = {text: "Links"}, <Body> {text: "twitter: @makepad @rikarends\ngithub.com/makepad/makepad"}}
+            /*
             Slide {title = {text: "Makepad JS"}}
             Slide {title = {text: "What was wrong"}, Body {text: "Not stable after 30+ mins"}}
             Slide {title = {text: "The real problem"}, Body {text: "No CPU perf left over\nNo VR + HiFPS"}}
@@ -104,7 +103,7 @@ impl SlidesView {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         // lets handle mousedown, setfocus
-        self.frame.handle_event_vec(cx, event);
+        self.frame.handle_event(cx, event);
         match event {
             Event::Construct => {
                 self.next_frame(cx);

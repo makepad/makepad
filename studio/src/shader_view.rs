@@ -1,7 +1,7 @@
 use crate::makepad_draw_2d::*;
 
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     
     Slides:[
@@ -22,7 +22,7 @@ live_register!{
         RustMacroReflection
     ]
     
-    ShaderView: {{ShaderView}} {
+    ShaderView= {{ShaderView}} {
         bg_quad: {
             instance hover: 0.0
             instance pressed: 0.0
@@ -53,18 +53,18 @@ live_register!{
             hover = {
                 default:off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {bg_quad: {pressed: 0.0, hover: 0.0}}
                 }
                 
                 on = {
                     cursor: Arrow,
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {bg_quad: {pressed: 0.0, hover: 1.0}}
                 }
                 
                 pressed = {
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {bg_quad: {pressed: 1.0, hover: 1.0}}
                 }
             }

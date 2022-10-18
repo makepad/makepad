@@ -8,31 +8,31 @@ use crate::{
     frame::*,
 };
 
-live_register!{
+live_design!{
     import crate::theme::*;
     registry Widget::*;
     import makepad_widgets::frame::*;
     
-    DesktopWindow: {{DesktopWindow}} {
+    DesktopWindow= {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
         var caption: "Makepad"
         frame: {
             layout: {
-                flow: Flow::Down
+                flow: Down
             },
-            windows_buttons =? Solid {
+            windows_buttons =? <Solid> {
                 bg: {color: (COLOR_BG_APP)}
                 walk:{height: 29},
-                caption_label = Frame {
+                caption_label = <Frame> {
                     layout: {align: {x: 0.5, y: 0.5}},
-                    Label {text: (caption), walk: {margin: {left: 100}}}
+                    <Label> {text: (caption), walk: {margin: {left: 100}}}
                 }
                 //min_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMin}
                 //max_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMax}
                 //close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
                 
             }
-            inner_view = Frame {user_draw: true}
+            inner_view = <Frame> {user_draw: true}
         }
         
         window: {
@@ -90,12 +90,12 @@ pub enum DesktopWindowEvent {
 
 impl DesktopWindow {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowEvent)){
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowEvent)){
         
         self.debug_view.handle_event(cx,event);
         self.nav_control.handle_event(cx, event, self.main_view.draw_list_id());
         self.overlay.handle_event(cx, event);
-        let actions = self.frame.handle_event_vec(cx, event);
+        let actions = self.frame.handle_event(cx, event);
         if actions.not_empty(){
             if self.frame.get_button(id!(min_btn)).clicked(&actions){
             
@@ -112,7 +112,7 @@ impl DesktopWindow {
             
         }
         
-        for item in self.frame.handle_event_vec(cx, event) {
+        for item in self.frame.handle_event(cx, event) {
             if let ButtonAction::Click = item.action.cast() {match item.id() {
                 live_id!(min_btn) => {
                     self.window.minimize(cx);

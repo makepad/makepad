@@ -5,11 +5,11 @@ use {
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    Tab: {{Tab}} {
+    Tab= {{Tab}} {
         name: {
             text_style: FONT_LABEL {}
             instance hover: 0.0
@@ -51,8 +51,8 @@ live_register!{
             }
         }
         walk:{
-            width: Size::Fit,
-            height: Size::Fill, //Fixed((DIM_TAB_HEIGHT)),
+            width: Fit,
+            height: Fill, //Fixed((DIM_TAB_HEIGHT)),
         }
         
         layout: {
@@ -69,7 +69,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         hover: 0.0,
                         bg: {hover: (hover)}
@@ -79,7 +79,7 @@ live_register!{
                 
                 on = {
                     cursor: Hand,
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         hover: [{time: 0.0, value: 1.0}],
                     }
@@ -89,7 +89,7 @@ live_register!{
             selected = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.3}}
+                    from: {all: Forward {duration: 0.3}}
                     apply: {
                         selected: 0.0,
                         close_button: {button: {selected: (selected)}}
@@ -99,7 +99,7 @@ live_register!{
                 }
                 
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {
                         selected: 1.0,
                     }
@@ -163,24 +163,8 @@ impl Tab {
         }
     }
     
-    /*
-    fn color(&self, is_selected: bool) -> Vec4 {
-        if is_selected {
-            self.color_selected
-        } else {
-            self.color
-        }
-    }
     
-    fn name_color(&self, is_selected: bool) -> Vec4 {
-        if is_selected {
-            self.name_color_selected
-        } else {
-            self.name_color
-        }
-    }*/
-    
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,

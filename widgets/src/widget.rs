@@ -5,19 +5,19 @@ use {
     std::cell::RefCell,
     std::rc::Rc
 };
-pub use crate::widget;
+pub use crate::widget_factory;
 
 pub trait Widget: LiveApply {
-    fn handle_widget_event(
+    fn handle_widget_event_fn(
         &mut self,
         _cx: &mut Cx,
         _event: &Event,
         _fn_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {}
     
-    fn handle_widget_event_vec(&mut self, cx: &mut Cx, event: &Event) -> WidgetActions {
+    fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event) -> WidgetActions {
         let mut actions = Vec::new();
-        self.handle_widget_event(cx, event, &mut | _, action | {
+        self.handle_widget_event_fn(cx, event, &mut | _, action | {
             actions.push(action);
         });
         actions
@@ -35,7 +35,7 @@ pub trait Widget: LiveApply {
     fn get_walk(&self) -> Walk;
     
     // defaults
-    fn redraw(&mut self, _cx: &mut Cx) {}
+    fn redraw(&mut self, _cx: &mut Cx);// {}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d) -> WidgetDraw {
         self.draw_widget(cx, self.get_walk())
@@ -82,8 +82,8 @@ pub trait Widget: LiveApply {
         None
     }
     
-    fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
-    }
+    /*fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
+    }*/
     
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
 }
@@ -234,15 +234,15 @@ impl WidgetRef {
         }
     }
     
-    pub fn handle_widget_event(&self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    pub fn handle_widget_event_fn(&self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         if let Some(inner) = self.0.borrow_mut().as_mut(){
-            return inner.handle_widget_event(cx, event, dispatch_action)
+            return inner.handle_widget_event_fn(cx, event, dispatch_action)
         }
     }
     
-    pub fn handle_widget_event_vec(&self, cx: &mut Cx, event: &Event) -> Vec<WidgetActionItem> {
+    pub fn handle_widget_event(&self, cx: &mut Cx, event: &Event) -> Vec<WidgetActionItem> {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.handle_widget_event_vec(cx, event)
+            return inner.handle_widget_event(cx, event)
         }
         Vec::new()
     }
@@ -490,7 +490,7 @@ impl<T: Clone> DrawStateWrap<T> {
 }
 
 #[macro_export]
-macro_rules!widget {
+macro_rules!widget_factory {
     ( $ ty: ty) => {
         | cx: &mut Cx | {
             struct Factory();

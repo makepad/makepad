@@ -1,10 +1,10 @@
 use crate::makepad_draw_2d::*;
 
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     
-    DrawRect: {{DrawRect}} {
+    DrawRect = {{DrawRect}} {
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
@@ -15,7 +15,7 @@ live_register!{
         draw_depth: 20.0
     }
     
-    DebugView: {{DebugView}} {
+    DebugView = {{DebugView}} {
         label: {
             text_style: {
                 font_size: 6

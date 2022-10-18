@@ -37,8 +37,8 @@ use {
     },
 };
 
-live_register!{
-    BuildManager: {{BuildManager}} {
+live_design!{
+    BuildManager= {{BuildManager}} {
         recompile_timeout: 0.2
     }
 }
@@ -129,9 +129,9 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) -> Vec<BuildManagerAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) -> Vec<BuildManagerAction> {
         let mut actions = Vec::new();
-        self.handle_event(cx, event, state, &mut | _, action | actions.push(action));
+        self.handle_event_fn(cx, event, state, &mut | _, action | actions.push(action));
         actions
     }
     
@@ -152,7 +152,7 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if self.recompile_timer.is_event(event) {
             self.file_change(cx, state);
             state.editor_state.messages.clear();
@@ -166,7 +166,7 @@ impl BuildManager {
         let mut any_msg = false;
         for wrap in &mut state.build_state.clients {
             let editor_state = &mut state.editor_state;
-            wrap.client.handle_event(cx, event, &mut | cx, wrap | {
+            wrap.client.handle_event_fn(cx, event, &mut | cx, wrap | {
                 let msg_id = editor_state.messages.len();
                 // ok we have a cmd_id in wrap.msg
                 match wrap.msg {

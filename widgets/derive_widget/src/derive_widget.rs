@@ -40,10 +40,13 @@ pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
             let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
             tb.add("impl").stream(generic.clone());
             tb.add("Widget for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {");
-            tb.add("        self.handle_event(cx, event, &mut |cx, action|{");
+            tb.add("    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {");
+            tb.add("        self.handle_event_fn(cx, event, &mut |cx, action|{");
             tb.add("            dispatch_action(cx, WidgetActionItem::new(action.into()))");
             tb.add("        });");
+            tb.add("    }");
+            tb.add("    fn redraw(&mut self, cx:&mut Cx) {");
+            tb.add("        self.area().redraw(cx)");
             tb.add("    }");
             tb.add("    fn get_walk(&self) -> Walk {");
             tb.add("        self.walk");

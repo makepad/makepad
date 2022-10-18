@@ -6,19 +6,19 @@ pub use {
     }
 };
 
-live_register!{
+live_design!{
     
-    const PI: 3.141592653589793
-    const E: 2.718281828459045
-    const LN2: 0.6931471805599453
-    const LN10: 2.302585092994046
-    const LOG2E: 1.4426950408889634
-    const LOG10E: 0.4342944819032518
-    const SQRT1_2: 0.70710678118654757
-    const TORAD: 0.017453292519943295
-    const GOLDEN: 1.618033988749895
+    const PI = 3.141592653589793
+    const E = 2.718281828459045
+    const LN2 = 0.6931471805599453
+    const LN10 = 2.302585092994046
+    const LOG2E = 1.4426950408889634
+    const LOG10E = 0.4342944819032518
+    const SQRT1_2 = 0.70710678118654757
+    const TORAD = 0.017453292519943295
+    const GOLDEN = 1.618033988749895
     
-    Math: {
+    Math = {
         fn rotate_2d(v: vec2, a: float) -> vec2 {
             let ca = cos(a);
             let sa = sin(a);
@@ -26,7 +26,7 @@ live_register!{
         }
     }
     
-    Pal: {
+    Pal = {
         
         fn premul(v: vec4) -> vec4 {
             return vec4(v.x * v.w, v.y * v.w, v.z * v.w, v.w);
@@ -85,7 +85,7 @@ live_register!{
         }
     }
     
-    Sdf2d: Struct {
+    Sdf2d = struct {
         field pos: vec2
         field result: vec4
         field last_pos: vec2

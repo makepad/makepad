@@ -8,10 +8,10 @@ mod mandelbrot;
 #[cfg(feature = "nightly")]
 mod mandelbrot_simd;
 
-live_register!{
+live_design!{
     import makepad_widgets::frame::*;
     registry Widget::*;
-    App: {{App}} {
+    App= {{App}} {
         frame: {
             walk:{width: Fill, height: Fill},
             
@@ -37,15 +37,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn live_register(cx: &mut Cx) {
-        makepad_widgets::live_register(cx);
-        mandelbrot::live_register(cx);
+    pub fn live_design(cx: &mut Cx) {
+        makepad_widgets::live_design(cx);
+        mandelbrot::live_design(cx);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.window.handle_event(cx, event);
         
-        for _ in self.frame.handle_event_vec(cx, event) {
+        for _ in self.frame.handle_event(cx, event) {
         }
         
         match event {

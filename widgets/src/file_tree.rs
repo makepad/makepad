@@ -9,11 +9,11 @@ use {
     }
 };
 
-live_register!{
+live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawBgQuad: {{DrawBgQuad}} {
+    DrawBgQuad = {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
@@ -31,7 +31,7 @@ live_register!{
         }
     }
     
-    DrawNameText: {{DrawNameText}} {
+    DrawNameText = {{DrawNameText}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -49,7 +49,7 @@ live_register!{
         }
     }
     
-    DrawIconQuad: {{DrawIconQuad}} {
+    DrawIconQuad = {{DrawIconQuad}} {
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             let w = self.rect_size.x;
@@ -69,17 +69,17 @@ live_register!{
         }
     }
     
-    FileTreeNode: {{FileTreeNode}} {
+    FileTreeNode = {{FileTreeNode}} {
         
         layout: {
             align: {y: 0.5},
             padding: {left: 5.0, bottom: 0,},
         }
         
-        icon_walk:{
-            width:Size::Fixed((DIM_DATA_ICON_WIDTH)),
-            height:Size::Fixed((DIM_DATA_ICON_HEIGHT)),
-            margin:{
+        icon_walk: {
+            width: Fixed((DIM_DATA_ICON_WIDTH)),
+            height: Fixed((DIM_DATA_ICON_HEIGHT)),
+            margin: {
                 left: 1
                 top: 0
                 right: 2
@@ -87,11 +87,11 @@ live_register!{
             },
         }
         
-        state : {
+        state: {
             hover = {
-                default:off
+                default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.2}}
+                    from: {all: Forward {duration: 0.2}}
                     apply: {
                         hover: 0.0,
                         bg: {hover: (hover)}
@@ -102,20 +102,20 @@ live_register!{
                 
                 on = {
                     cursor: Hand
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {hover: 1.0},
                 }
             }
             
             focus = {
-                default:on
+                default: on
                 on = {
-                    from: {all: Play::Snap}
+                    from: {all: Snap}
                     apply: {focussed: 1.0}
                 }
                 
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {focussed: 0.0}
                 }
             }
@@ -123,7 +123,7 @@ live_register!{
             select = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Forward {duration: 0.1}}
                     apply: {
                         selected: 0.0,
                         bg: {selected: (selected)}
@@ -132,8 +132,8 @@ live_register!{
                     }
                 }
                 on = {
-                    from: {all: Play::Snap}
-                    apply: {selected:1.0}
+                    from: {all: Snap}
+                    apply: {selected: 1.0}
                 }
                 
             }
@@ -141,12 +141,12 @@ live_register!{
             open = {
                 default: off
                 off = {
-                    //from: {all: Play::Exp {speed1: 0.80, speed2: 0.97}}
+                    //from: {all: Exp {speed1: 0.80, speed2: 0.97}}
                     //duration: 0.2
                     redraw: true
                     
-                    from: {all: Play::Forward{duration:0.2}}
-                    ease: Ease::ExpDecay{d1:0.80,d2:0.97}
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.80, d2: 0.97}
                     
                     //ease: Ease::OutExp
                     apply: {
@@ -158,12 +158,12 @@ live_register!{
                 }
                 
                 on = {
-                    //from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
+                    //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
                     
-                    from: {all: Play::Forward{duration:0.2}}
-                    ease: Ease::ExpDecay{d1:0.82,d2:0.95}
+                    from: {all: Forward {duration: 0.2}}
+                    ease: ExpDecay {d1: 0.82, d2: 0.95}
                     
-                    //from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
+                    //from: {all: Exp {speed1: 0.82, speed2: 0.95}}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
@@ -176,7 +176,7 @@ live_register!{
         min_drag_distance: 10.0
     }
     
-    FileTree: {{FileTree}} {
+    FileTree = {{FileTree}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
         file_node: FileTreeNode {
             is_folder: false,
@@ -188,7 +188,7 @@ live_register!{
             bg: {is_folder: 1.0}
             name: {is_folder: 1.0}
         }
-        layout: {flow: Flow::Down, clip_x:true, clip_y:true},
+        layout: {flow: Down, clip_x: true, clip_y: true},
         scroll_bars: {}
     }
 }
@@ -300,11 +300,11 @@ pub enum FileTreeNodeAction {
 
 impl FileTreeNode {
     pub fn set_draw_state(&mut self, is_even: f32, scale: f64) {
-        self.bg.scale = scale as f32; 
+        self.bg.scale = scale as f32;
         self.bg.is_even = is_even;
-        self.name.scale = scale as f32; 
+        self.name.scale = scale as f32;
         self.name.is_even = is_even;
-        self.icon.scale = scale as f32; 
+        self.icon.scale = scale as f32;
         self.icon.is_even = is_even;
         self.name.font_scale = scale;
     }
@@ -317,7 +317,7 @@ impl FileTreeNode {
         cx.walk_turtle(self.indent_walk(depth));
         
         self.icon.draw_walk(cx, self.icon_walk);
-         
+        
         self.name.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.bg.end(cx);
     }
@@ -359,7 +359,7 @@ impl FileTreeNode {
         self.toggle_state(cx, is, animate, id!(open.on), id!(open.off));
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -369,7 +369,7 @@ impl FileTreeNode {
             self.bg.redraw(cx);
         }
         match event.hits(cx, self.bg.area()) {
-            Hit::FingerHoverIn(_)=> {
+            Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
@@ -403,7 +403,7 @@ impl FileTreeNode {
 
 impl FileTree {
     
-    pub fn begin(&mut self, cx: &mut Cx2d){
+    pub fn begin(&mut self, cx: &mut Cx2d) {
         self.scroll_bars.begin(cx, Walk::default(), self.layout);
         self.count = 0;
     }
@@ -544,19 +544,19 @@ impl FileTree {
         self.scroll_bars.redraw(cx);
     }
     
-    pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {
         let mut a = Vec::new();
-        self.handle_event(cx, event, &mut | _, v | a.push(v));
+        self.handle_event_fn(cx, event, &mut | _, v | a.push(v));
         a
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeAction),
     ) {
-        self.scroll_bars.handle_event(cx, event, &mut |_,_|{});
+        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
         
         match event {
             Event::DragEnd => self.dragging_node_id = None,
@@ -565,7 +565,7 @@ impl FileTree {
         
         let mut actions = Vec::new();
         for (node_id, (node, _)) in self.tree_nodes.iter_mut() {
-            node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {
