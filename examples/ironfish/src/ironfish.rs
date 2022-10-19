@@ -8,9 +8,13 @@
 // - regular wavetable oscs
 // - mod matrix
 // - reverb
-// - chorus
-// - predelay for mod envelope
+// - chorus 
+// - predelay for mod envelope?
 // - longer sequencer
+// - record to sequencer
+// - omnichord mode playing
+// - better arp
+// - fv1 emu? 
 
 #![allow(dead_code)]
 
