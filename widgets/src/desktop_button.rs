@@ -126,7 +126,7 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, Widget)]
 #[live_design_fn(widget_factory!(DesktopButton))]
 pub struct DesktopButton {
     walk: Walk,
@@ -209,27 +209,5 @@ impl DesktopButton {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
         self.bg.draw_walk(cx, walk);
-    }
-}
-
-impl Widget for DesktopButton {
-    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.bg.redraw(cx);
-    }
-    
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let uid = self.get_widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
-    }
-    
-    fn get_walk(&self) -> Walk {self.walk}
-    
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.draw_walk(cx, walk);
-        WidgetDraw::done()
     }
 }
