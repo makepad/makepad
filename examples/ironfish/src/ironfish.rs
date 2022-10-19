@@ -168,14 +168,21 @@ pub struct TouchSettings {
 
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
-pub struct EffectSettings {
+pub struct BitCrushSettings {
+    #[live(false)] enable: boola,
+    #[live(0.8)] amount: f32a,
+  
+}
+
+
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct DelaySettings {
     #[live(0.5)] delaysend: f32a,
     #[live(0.8)] delayfeedback: f32a,
     #[live(0.0)] cross: f32a,
     #[live(0.5)] difference: f32a
     
 }
-
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct ArpSettings {
@@ -294,7 +301,8 @@ pub struct IronFishSettings {
     volume_envelope: EnvelopeSettings,
     mod_envelope: EnvelopeSettings,
     touch: TouchSettings,
-    fx: EffectSettings,
+    delay: DelaySettings,
+    bitcrush: BitCrushSettings,
     pub sequencer: SequencerSettings,
     pub arp: ArpSettings,
     chorus: ChorusSettings,
@@ -1576,20 +1584,46 @@ impl IronFishState {
         return output; // * 1000.0;
     }
     */
-    
+    pub fn apply_bitcrush(&mut self, buffer: &mut AudioBuffer) {
+        
+        if !self.settings.bitcrush.enable.get() {return;}; 
+
+        let amount = self.settings.bitcrush.amount.get();
+        let crushbits = (amount * 22.0) as i32;
+        let precrushmult = 65536.0 * 8.0;
+        let postcrushmult = (1 << crushbits) as f32 / precrushmult; 
+        let frame_count = buffer.frame_count();
+        let (left, right) = buffer.stereo_mut();
+        for i in 0..frame_count {
+            let intermediate_left = (left[i] *precrushmult) as i32 ;
+            let crushed_left = intermediate_left >> crushbits;
+            
+            left[i] = (crushed_left as f32) * postcrushmult;
+            let intermediate_right = (right[i] *precrushmult) as i32 ;
+            let crushed_right = intermediate_right >> crushbits;
+            
+            right[i] = (crushed_right as f32) * postcrushmult;
+        }
+
+    }
+
     pub fn apply_delay(&mut self, buffer: &mut AudioBuffer) {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
         
-        let icross = self.settings.fx.cross.get();
+        let icross = self.settings.delay.cross.get();
         let cross = 1.0 - icross;
         
-        let leftoffs = (self.settings.fx.difference.get() * 15000.0) as usize;
+        let leftoffs = (self.settings.delay.difference.get() * 15000.0) as usize;
         
         let mut delayreadposl = self.delaywritepos + (44100 - 15000) - leftoffs;
         let mut delayreadposr = self.delaywritepos + (44100 - 15000) + leftoffs;
         while delayreadposl >= 44100 {delayreadposl -= 44100;};
         while delayreadposr >= 44100 {delayreadposr -= 44100;};
+
+        let fb = self.settings.delay.delayfeedback.get() * 0.98;
+        let send = self.settings.delay.delaysend.get();
+
         for i in 0..frame_count {
             let rr = self.delaylineright[delayreadposr];
             let ll = self.delaylineleft[delayreadposl];
@@ -1597,11 +1631,11 @@ impl IronFishState {
             let mut r = ll * cross + rr * icross;
             let mut l = rr * cross + ll * icross;
             
-            r *= self.settings.fx.delayfeedback.get() * 0.9;
-            r += self.settings.fx.delaysend.get() * (right[i]);
+            r *= fb ;
+            r += send * (right[i]);
             
-            l *= self.settings.fx.delayfeedback.get() * 0.9;
-            l += self.settings.fx.delaysend.get() * (left[i]);
+            l *= fb;
+            l += send * (left[i]);
             
             self.delaylineright[self.delaywritepos] = r;
             self.delaylineleft[self.delaywritepos] = l;
@@ -1866,7 +1900,9 @@ impl IronFishState {
                 display.send_buffer(true, i, dp);
             }
         }
+        self.apply_bitcrush(buffer);
         self.chorus.apply_chorus(buffer, &self.settings.chorus, self.settings.sample_rate.get());
+        
         self.apply_delay(buffer);
     }
 }
