@@ -1115,7 +1115,7 @@ impl App {
         // this one should read AND write depending on what db is set to
         let ui = self.ui.clone();
         
-        //let t = profile_start();
+        // (widget path, data path)
         let bind_table:&[(&[LiveId], &[LiveId])] = &[
             // Touch
             (id!(touch.scale.slider), id!(touch.scale)),
@@ -1189,26 +1189,27 @@ impl App {
         }
         
         // this maps data to the ADSR graphs
+        // (widget path, widget value path, data path)
         let  map_table:&[(&[LiveId], &[LiveId], &[LiveId])] = &[
-            (id!(mod_envelope.a), id!(mod_env.display), id!(bg.attack)),
-            (id!(mod_envelope.h), id!(mod_env.display), id!(bg.hold)),
-            (id!(mod_envelope.d), id!(mod_env.display), id!(bg.decay)),
-            (id!(mod_envelope.s), id!(mod_env.display), id!(bg.sustain)),
-            (id!(mod_envelope.r), id!(mod_env.display), id!(bg.release)),
-            (id!(volume_envelope.a), id!(vol_env.display), id!(bg.attack)),
-            (id!(volume_envelope.h), id!(vol_env.display), id!(bg.hold)),
-            (id!(volume_envelope.d), id!(vol_env.display), id!(bg.decay)),
-            (id!(volume_envelope.s), id!(vol_env.display), id!(bg.sustain)),
-            (id!(volume_envelope.r), id!(vol_env.display), id!(bg.release))
+            (id!(mod_env.display), id!(bg.attack), id!(mod_envelope.a)),
+            (id!(mod_env.display), id!(bg.hold), id!(mod_envelope.h)),
+            (id!(mod_env.display), id!(bg.decay), id!(mod_envelope.d)),
+            (id!(mod_env.display), id!(bg.sustain), id!(mod_envelope.s)),
+            (id!(mod_env.display), id!(bg.release), id!(mod_envelope.r)),
+            (id!(vol_env.display), id!(bg.attack), id!(volume_envelope.a)),
+            (id!(vol_env.display), id!(bg.hold), id!(volume_envelope.h)),
+            (id!(vol_env.display), id!(bg.decay), id!(volume_envelope.d)),
+            (id!(vol_env.display), id!(bg.sustain), id!(volume_envelope.s)),
+            (id!(vol_env.display), id!(bg.release), id!(volume_envelope.r))
         ];
         
         // write the value 
         for map in map_table{
             let nodes = db.nodes();
-            if let Some(value) = nodes.read_by_field_path(map.0){
+            if let Some(value) = nodes.read_by_field_path(map.2){
                 let mut nodes = LiveNodeVec::new();
-                nodes.write_by_field_path(map.2, value.clone());
-                ui.get_widget(map.1).apply_over(cx, &nodes)
+                nodes.write_by_field_path(map.1, value.clone());
+                ui.get_widget(map.0).apply_over(cx, &nodes)
             }
         }
         
