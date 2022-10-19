@@ -45,6 +45,12 @@ pub struct Cx2d<'a> {
 impl<'a> Deref for Cx2d<'a> {type Target = Cx; fn deref(&self) -> &Self::Target {self.cx}}
 impl<'a> DerefMut for Cx2d<'a> {fn deref_mut(&mut self) -> &mut Self::Target {self.cx}}
 
+impl<'a> Drop for Cx2d<'a>{
+    fn drop(&mut self){
+        self.draw_font_atlas();
+    }
+}
+
 impl<'a> Cx2d<'a> {
     pub fn set_sweep_lock(&mut self, lock:Area){
         *self.overlay_sweep_lock.as_ref().unwrap().borrow_mut() = lock;
@@ -57,14 +63,14 @@ impl<'a> Cx2d<'a> {
         }
     }
     
-    pub fn draw<T, F>(cx: &'a mut Cx, draw_event: &'a DrawEvent, app: &mut T,  mut cb: F) where F: FnMut(&mut Cx2d, &mut T) {
+    pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
         Self::lazy_construct_font_atlas(cx);
         Self::lazy_construct_nav_tree(cx);
         cx.redraw_id += 1;
         let fonts_atlas_rc = cx.get_global::<CxFontsAtlasRc>().clone();
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
 
-        let mut cx_2d = Cx2d {
+        Self {
             overlay_id: None,
             fonts_atlas_rc,
             current_dpi_factor: 1.0,
@@ -77,10 +83,7 @@ impl<'a> Cx2d<'a> {
             turtles: Vec::new(),
             align_list: Vec::new(),
             nav_tree_rc,
-        };
-        cb(&mut cx_2d, app);
-        // lets render fonts
-        cx_2d.draw_font_atlas();
+        }
     }
     
     pub fn current_dpi_factor(&self) -> f64 {

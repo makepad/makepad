@@ -1112,8 +1112,9 @@ impl App {
     }
     
     pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions) {
-
-        // (widget path, data path)
+        
+        // TODO! we're going to make a nice macro for these tables
+        // so they are easier to read and write
         let data_table = BindDataTable(&[
             // Touch
             (id!(touch.scale.slider), id!(touch.scale)),
@@ -1178,7 +1179,7 @@ impl App {
             (id!(osc2.type.dropdown), id!(osc2.osc_type)),
             (id!(osc2.transpose.slider), id!(osc2.transpose)),
             (id!(osc2.detune.slider), id!(osc2.detune)),
-            (id!(osc2.harmonic.slider), id!(osc2.harmonic)),
+            (id!(osc2.harmonic.slider), id!(osc2.harmonic)), 
             (id!(osc2.harmonicenv.slider), id!(osc2.harmonicenv)),
             (id!(osc2.harmoniclfo.slider), id!(osc2.harmoniclfo)),
         ]);
@@ -1187,7 +1188,7 @@ impl App {
         
         // this maps data to the ADSR graphs
         // (widget path, widget value path, data path)
-        let  map_table = BindMapTable(&[
+        let  map_table = BindMapTable(&[ 
             (id!(mod_env.display), id!(bg.attack), id!(mod_envelope.a)),
             (id!(mod_env.display), id!(bg.hold), id!(mod_envelope.h)),
             (id!(mod_env.display), id!(bg.decay), id!(mod_envelope.d)),
@@ -1203,10 +1204,10 @@ impl App {
         // write the value 
         db.process_map_table(cx, &self.ui, map_table);
 
-        // (widget path, widget value path, data path, enum compare)
+        // (widget path, widget value path, data path, enum compare, neq)
         let tab_table = BindTabTable(&[
-            (id!(osc1.supersaw), id!(hidden), id!(osc1.osc_type), id!(SuperSaw)),
-            (id!(osc2.supersaw), id!(hidden), id!(osc2.osc_type), id!(SuperSaw)),
+            (id!(osc1.supersaw), id!(hidden), id!(osc1.osc_type), id!(SuperSaw), false),
+            (id!(osc2.supersaw), id!(hidden), id!(osc2.osc_type), id!(SuperSaw), false),
         ]);
         
         db.process_tab_table(cx, &self.ui, tab_table);
@@ -1225,7 +1226,7 @@ impl App {
         cx.handle_midi_inputs(event);
         
         if let Event::Draw(event) = event {
-            return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx));
+            return self.draw(&mut Cx2d::new(cx, event));
         }
         
         self.window.handle_event(cx, event);
