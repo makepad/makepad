@@ -146,12 +146,11 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     }
                 })
             }
-            
-            if let Some(index) = nodes.scope_up_by_name(start - 1, id.as_instance()) {
+            if let Some(index) = nodes.scope_up_by_name(start - 1, id.as_field()) {
                 // found ok now what. it depends on the type of the thing here
                 value_to_live_value(live_registry, index, nodes)?
             }
-            else if let Some(index) = nodes.scope_up_by_name(start - 1, id.as_field()) {
+            else if let Some(index) = nodes.scope_up_by_name(start - 1, id.as_instance()) {
                 // found ok now what. it depends on the type of the thing here
                 value_to_live_value(live_registry, index, nodes)?
             }
