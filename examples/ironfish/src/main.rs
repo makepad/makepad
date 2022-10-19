@@ -673,7 +673,31 @@ live_design!{
             }
         }
     }
-    
+    CrushFXPanel = <FishPanel> {
+        label = {bg: {color: (COLOR_FX)}, label = {text: "Bitcrush",}}
+        body = {
+            layout: {flow: Right}
+            walk: {width: Fill, height: Fit}
+           
+            crushenable = <InstrumentCheckbox> {
+                walk: {width: Fit, height: Fill, margin: 5}
+                layout: {align: {x: 0.0, y: 0.5}}
+                checkbox = {
+                    label: "On"
+                }
+            }
+
+            crushamount = <InstrumentSlider> {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    min: 0.0
+                    max: 1.0
+                    label: "Amount"
+                    
+                }
+            }
+        }
+    }
     DelayFXPanel = <FishPanel> {
         label = {bg: {color: (COLOR_FX)}, label = {text: "Delay",}}
         body = {
@@ -1096,8 +1120,9 @@ live_design!{
                 }
                 <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    <DelayFXPanel> {}
+                    <CrushFXPanel> {}
                     <ChorusFXPanel> {}
+                    <DelayFXPanel> {}
                     <SequencerPanel> {}
                 }
             }
@@ -1154,10 +1179,15 @@ impl App {
             (id!(sub.slider), id!(sub_osc)),
             (id!(porta.slider), id!(portamento)),
             // DelayFX Panel
-            (id!(delaysend.slider), id!(fx.delaysend)),
-            (id!(delayfeedback.slider), id!(fx.delayfeedback)),
-            (id!(delaydifference.slider), id!(fx.difference)),
-            (id!(delaycross.slider), id!(fx.cross)),
+            (id!(delaysend.slider), id!(delay.delaysend)),
+            (id!(delayfeedback.slider), id!(delay.delayfeedback)),
+
+            (id!(crushenable.checkbox), id!(bitcrush.enable)),
+            (id!(crushamount.slider), id!(bitcrush.amount)),
+           
+
+            (id!(delaydifference.slider), id!(delay.difference)),
+            (id!(delaycross.slider), id!(delay.cross)),
             // Chorus panel
             (id!(chorusmix.slider), id!(chorus.mix)),
             (id!(chorusdelay.slider), id!(chorus.mindelay)),
@@ -1184,8 +1214,8 @@ impl App {
             (id!(modamount.slider), id!(filter1.envelope_amount)),
             // Filter panel
             (id!(filter_type.dropdown), id!(filter1.filter_type)),
-            (id!(cutoff), id!(filter1.cutoff)),
-            (id!(resonance), id!(filter1.resonance)),
+            (id!(cutoff.slider), id!(filter1.cutoff)),
+            (id!(resonance.slider), id!(filter1.resonance)),
             // Osc1 panel
             (id!(osc1.supersaw.spread.slider), id!(supersaw1.spread)),
             (id!(osc1.supersaw.diffuse.slider), id!(supersaw1.diffuse)),
