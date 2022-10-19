@@ -871,7 +871,7 @@ impl State {
         false
     }
     
-    pub fn is_in_state(&self, cx: &mut Cx, check_state_pair: &StatePair) -> bool {
+    pub fn is_in_state(&self, cx: &Cx, check_state_pair: &StatePair) -> bool {
         // if we aren't initialized, look if our state id is a default
         if self.need_init() {
             if let Some(live_ptr) = self.live_ptr {
