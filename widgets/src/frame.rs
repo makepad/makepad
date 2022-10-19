@@ -341,7 +341,7 @@ impl Widget for Frame {
                     }
                 }
             }
-            WidgetCache::No | WidgetCache::Clear => {
+            WidgetCache::No => {
                 if let WidgetCache::Clear = cached {
                     self.find_cache.clear();
                 }
