@@ -10,13 +10,12 @@ use {
         frame::*,
     }
 };
-pub use crate::button_logic::ButtonAction;
 
 live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::popup_menu::PopupMenu;
     
-    DrawLabelText= {{DrawLabelText}} {
+    DrawLabelText = {{DrawLabelText}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -34,14 +33,14 @@ live_design!{
         }
     }
     
-    DropDown= {{DropDown}} {
+    DropDown = {{DropDown}} {
         bg: {
             instance hover: 0.0
             instance pressed: 0.0
             instance focus: 0.0,
             const BORDER_RADIUS = 0.5
             
-            fn get_bg(self, inout sdf:Sdf2d){
+            fn get_bg(self, inout sdf: Sdf2d) {
                 sdf.box(
                     0.,
                     0.,
@@ -82,7 +81,7 @@ live_design!{
             padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
         }
         
-        popup_menu: <PopupMenu>{
+        popup_menu: <PopupMenu> {
         }
         
         selected_item: 0
@@ -152,8 +151,8 @@ pub struct DropDown {
     
     popup_menu: Option<LivePtr>,
     
-    items: Vec<String>,
-    display: Vec<String>,
+    labels: Vec<String>,
+    values: Vec<LiveValue>,
     
     #[rust] last_rect: Option<Rect>,
     #[rust] is_open: bool,
@@ -194,7 +193,7 @@ impl LiveHook for DropDown {
 }
 #[derive(Clone, WidgetAction)]
 pub enum DropDownAction {
-    Select(usize),
+    Select(usize, LiveValue),
     None
 }
 
@@ -234,7 +233,7 @@ impl DropDown {
                     PopupMenuAction::WasSelected(node_id) => {
                         //dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                         self.selected_item = node_id.0.0 as usize;
-                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item));
+                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
                         self.bg.redraw(cx);
                         close = true;
                     }
@@ -273,15 +272,15 @@ impl DropDown {
                 KeyCode::ArrowUp => {
                     if self.selected_item > 0 {
                         self.selected_item -= 1;
-                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item));
+                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
                         self.set_closed(cx);
                         self.bg.redraw(cx);
                     }
                 }
                 KeyCode::ArrowDown => {
-                    if self.items.len() > 0 && self.selected_item < self.items.len() - 1 {
+                    if self.values.len() > 0 && self.selected_item < self.values.len() - 1 {
                         self.selected_item += 1;
-                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item));
+                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
                         self.set_closed(cx);
                         self.bg.redraw(cx);
                     }
@@ -325,13 +324,10 @@ impl DropDown {
         
         self.bg.begin(cx, walk, self.layout);
         //let start_pos = cx.turtle().rect().pos;
-        if let Some(val) = self.display.get(self.selected_item) {
+        if let Some(val) = self.labels.get(self.selected_item) {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
-        else if let Some(val) = self.items.get(self.selected_item) {
-            self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
-        }
-        else{
+        else {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), " ");
         }
         self.bg.end(cx);
@@ -349,17 +345,12 @@ impl DropDown {
             let mut item_pos = None;
             
             lb.begin(cx, last_rect.size.x);
-            for (i, item) in self.items.iter().enumerate() {
+            for (i, item) in self.labels.iter().enumerate() {
                 let node_id = LiveId(i as u64).into();
                 if i == self.selected_item {
                     item_pos = Some(cx.turtle().pos());
                 }
-                if i < self.display.len(){
-                    lb.draw_item(cx, node_id, &self.display[i]);
-                }
-                else{
-                    lb.draw_item(cx, node_id, item);
-                }
+                lb.draw_item(cx, node_id, &item);
             }
             // ok we shift the entire menu. however we shouldnt go outside the screen area
             lb.end(cx, last_rect.pos - item_pos.unwrap());
@@ -368,36 +359,42 @@ impl DropDown {
 }
 
 impl Widget for DropDown {
-    /*fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
-        if let Some(LiveValue::BareEnum {variant, ..}) = nodes.read_path(&self.bind) {
-            // it should be a BareEnum
-            for (index, item) in self.items.iter().enumerate() {
-                if LiveId::from_str(item).unwrap() == *variant {
-                    self.selected_item = index;
-                    break;
+    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    
+    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], act: &WidgetActions,) {
+        match db {
+            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
+                match item.action() {
+                    DropDownAction::Select(_, value) => {
+                        nodes.write_by_field_path(path, value.clone());
+                    }
+                    _ => ()
+                }
+            }
+            DataBinding::ToWidgets(nodes) => {
+                if let Some(value) = nodes.read_by_field_path(path) {
+                    if let Some(index) = self.values.iter().position(|v| v == value){
+                        if self.selected_item != index{
+                            self.selected_item = index;
+                            self.redraw(cx);
+                        }
+                    }
+                    else{
+                        error!("Value not in values list {:?}", value);
+                    }
                 }
             }
         }
-    }*/
+    }
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.bg.redraw(cx);
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let uid = self.get_widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, _drop_down, action | {
-            /*let mut delta = Vec::new();
-            match &action {
-                DropDownAction::Select(v) => {
-                    if drop_down.bind.len()>0 {
-                        let base = LiveId::from_str(&drop_down.bind_enum).unwrap();
-                        let variant = LiveId::from_str(&drop_down.items[*v]).unwrap();
-                        delta.write_path(&drop_down.bind, LiveValue::BareEnum {base, variant});
-                    }
-                },
-                _ => ()
-            };*/
-            dispatch_action(cx, WidgetActionItem::new(action.into()))
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
     
@@ -411,31 +408,3 @@ impl Widget for DropDown {
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct DropDownRef(WidgetRef);
-
-impl DropDownRef {
-    pub fn bind_to(&self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId],  act: &WidgetActions, ) {
-        match db {
-            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(&self.0) {
-                match item.action() {
-                    DropDownAction::Select(v) => {
-                        if let Some(mut inner) = self.inner_mut(){
-                            let variant = LiveId::from_str(&inner.items[v]).unwrap();
-                            nodes.write_by_field_path(path,  LiveValue::BareEnum(variant));
-                        }
-                    }
-                    _ => ()
-                }
-            }
-            DataBinding::ToWidgets(nodes) => {
-                if let Some(mut inner) = self.inner_mut(){
-                    if let Some(value) = nodes.read_by_field_path(path) {
-                        if let Some(value) = value.as_bool(){
-                            inner.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-

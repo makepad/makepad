@@ -75,7 +75,7 @@ impl LiveHook for DesktopWindow {
         self.window.set_pass(cx, &self.pass);
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         if cx.platform_type().is_desktop(){
-            self.frame.template(cx, id!(windows_buttons), id!(my_instrument), live!{});
+            //self.frame.template(cx, id!(windows_buttons), id!(my_instrument), live!{});
         }
     }
 }

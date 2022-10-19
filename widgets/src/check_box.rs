@@ -210,14 +210,36 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
-
+    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    
+    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId],  act: &WidgetActions, ) {
+        match db {
+            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
+                match item.action() {
+                    CheckBoxAction::Change(v)=> {
+                        nodes.write_by_field_path(path,  LiveValue::Bool(v));
+                    }
+                    _ => ()
+                }
+            }
+            DataBinding::ToWidgets(nodes) => {
+                if let Some(value) = nodes.read_by_field_path(path) {
+                    if let Some(value) = value.as_bool(){
+                        self.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
+                    }
+                }
+            }
+        }
+    }
+    
     fn redraw(&mut self, cx: &mut Cx) {
         self.check_box.redraw(cx);
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let uid = self.get_widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, _checkbox, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into()))
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
     
@@ -231,28 +253,3 @@ impl Widget for CheckBox {
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct CheckBoxRef(WidgetRef);
-
-impl CheckBoxRef {
-    pub fn bind_to(&self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId],  act: &WidgetActions, ) {
-        match db {
-            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(&self.0) {
-                match item.action() {
-                    CheckBoxAction::Change(v)=> {
-                        nodes.write_by_field_path(path,  LiveValue::Bool(v));
-                    }
-                    _ => ()
-                }
-            }
-            DataBinding::ToWidgets(nodes) => {
-                if let Some(mut inner) = self.inner_mut(){
-                    if let Some(value) = nodes.read_by_field_path(path) {
-                        if let Some(value) = value.as_bool(){
-                            inner.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-

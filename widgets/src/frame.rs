@@ -1,4 +1,5 @@
 use {
+    std::collections::hash_map::HashMap,
     crate::{
         makepad_derive_widget::*,
         makepad_image_formats::jpeg,
@@ -47,6 +48,8 @@ pub struct Frame { // draw info per UI element
     has_view: bool,
     hidden: bool,
     user_draw: bool,
+    
+    #[rust] find_cache: HashMap<u64, (WidgetRef, usize)>,
     
     cursor: Option<MouseCursor>,
     scroll_bars: Option<LivePtr>,
@@ -161,25 +164,14 @@ impl LiveHook for Frame {
 pub struct FrameRef(WidgetRef);
 
 impl FrameRef {
-    pub fn widget_query(&self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
-        self.0.widget_query(query, callback)
-    }
-    
-    pub fn get_widget(&self, path: &[LiveId]) -> WidgetRef {
-        self.0.get_widget(path)
-    }
     
     pub fn handle_event(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
         self.0.handle_widget_event(cx, event)
     }
     
-    pub fn redraw(&self, cx: &mut Cx) {
-        self.0.redraw(cx)
-    }
-    
-    pub fn template(&self, cx: &mut Cx, path: &[LiveId], new_id: &[LiveId; 1], nodes: &[LiveNode]) -> WidgetRef {
+    /*pub fn template(&self, cx: &mut Cx, path: &[LiveId], new_id: &[LiveId; 1], nodes: &[LiveNode]) -> WidgetRef {
         self.0.template(cx, path, new_id, nodes)
-    }
+    }*/
     
     pub fn draw(&self, cx: &mut Cx2d,) -> WidgetDraw {
         if let Some(mut inner) = self.inner_mut() {
@@ -205,6 +197,7 @@ impl FrameRef {
 }
 
 impl Widget for Frame {
+    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
     
     fn handle_widget_event_fn(
         &mut self,
@@ -218,9 +211,7 @@ impl Widget for Frame {
         
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
-                child.handle_widget_event_fn(cx, event, &mut | cx, action | {
-                    dispatch_action(cx, action.set_widget(&child));
-                });
+                child.handle_widget_event_fn(cx, event,dispatch_action);
             }
         }
         
@@ -313,46 +304,75 @@ impl Widget for Frame {
         self.children.get_mut(&new_id).unwrap().clone()
     }
     
-    fn query_template(&self, id: LiveId) -> Option<LivePtr> {
-        if let Some((live_ptr, _)) = self.templates.get(&id) {
+    fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache,) -> WidgetResult {
+        match cached {
+            WidgetCache::Yes | WidgetCache::Clear => {
+                if let WidgetCache::Clear = cached {
+                    self.find_cache.clear();
+                }
+                let mut hash = 0u64;
+                for i in 0..path.len() {
+                    hash ^= path[i].0
+                }
+                if let Some((widget, store_count)) = self.find_cache.get(&hash) {
+                    let now_count = widget.strong_count();
+                    if now_count >= *store_count{
+                        return WidgetResult::found(widget.clone())
+                    }
+                }
+                
+                if let Some(child) = self.children.get_mut(&path[0]) {
+                    if path.len()>1 {
+                        if let Some(result) = child.find_widget(&path[1..], WidgetCache::No).into_found() {
+                            let store_count = result.strong_count();
+                            self.find_cache.insert(hash, (result.clone(), store_count));
+                            return WidgetResult::found(result)
+                        }
+                    }
+                    return WidgetResult::found(child.clone());
+                }
+                else {
+                    for child in self.children.values_mut() {
+                        if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
+                            let store_count = result.strong_count();
+                            self.find_cache.insert(hash, (result.clone(),store_count));
+                            return WidgetResult::found(result)
+                        }
+                    }
+                }
+            }
+            WidgetCache::No | WidgetCache::Clear => {
+                if let WidgetCache::Clear = cached {
+                    self.find_cache.clear();
+                }
+                if let Some(child) = self.children.get_mut(&path[0]) {
+                    if path.len()>1 {
+                        if let Some(result) = child.find_widget(&path[1..], WidgetCache::No).into_found() {
+                            return WidgetResult::found(result)
+                        }
+                    }
+                    return WidgetResult::found(child.clone());
+                }
+                else {
+                    for child in self.children.values_mut() {
+                        if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
+                            return WidgetResult::found(result)
+                        }
+                    }
+                }
+            }
+        }
+        WidgetResult::not_found()
+    }
+    
+    fn find_template(&self, id: &[LiveId; 1]) -> Option<LivePtr> {
+        if let Some((live_ptr, _)) = self.templates.get(&id[0]) {
             Some(*live_ptr)
         }
         else {
             None
         }
     }
-    
-    fn widget_query(&mut self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
-        match query {
-            WidgetQuery::All => {
-                for child in self.children.values_mut() {
-                    child.widget_query(query, callback) ?
-                }
-            },
-            WidgetQuery::Template(path) | WidgetQuery::Path(path) => {
-                if self.children.get(&path[0]).is_none() {
-                    for child in self.children.values_mut() {
-                        child.widget_query(query, callback) ?;
-                    }
-                }
-                else {
-                    if path.len()>1 {
-                        self.children.get_mut(&path[0]).unwrap().widget_query(
-                            &WidgetQuery::Path(&path[1..]),
-                            callback
-                        ) ?;
-                    }
-                    else {
-                        let child = self.children.get_mut(&path[0]).unwrap();
-                        callback(WidgetFound::Child(child.clone())) ?;
-                    }
-                }
-            }
-        }
-        WidgetResult::next()
-    }
-    
-    
 }
 
 #[derive(Clone)]

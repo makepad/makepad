@@ -275,7 +275,7 @@ impl SequencerRef {
     pub fn buttons_clicked(&self, actions: &WidgetActions) -> Vec<(usize, usize, bool)> {
         let mut btns = Vec::new();
         for item in actions {
-            if item.widget == self.0 {
+            if item.widget_uid == self.get_widget_uid() {
                 if let SequencerAction::Change(x, y, on) = item.action() {
                     btns.push((x, y, on))
                 }

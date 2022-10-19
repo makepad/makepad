@@ -2,7 +2,6 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw_2d::*,
-    button_logic::*,
     widget::*,
 };
 
@@ -81,7 +80,7 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Live, LiveHook)]
 #[live_design_fn(widget_factory!(FoldButton))]
 pub struct FoldButton {
     state: State,
@@ -116,22 +115,37 @@ impl FoldButton {
             }
         };
         
-        let state = button_logic_handle_event(cx, event, self.bg.area(), &mut | _, _ | {});
-        if let Some(state) = state {
-            match state {
-                ButtonState::Pressed => {
-                    if self.state.is_in_state(cx, id!(open.yes)) {
-                        self.animate_state(cx, id!(open.no));
-                        dispatch_action(cx, FoldButtonAction::Closing)
-                    }
-                    else {
-                        self.animate_state(cx, id!(open.yes));
-                        dispatch_action(cx, FoldButtonAction::Opening)
-                    }
+        match event.hits(cx, self.bg.area()) {
+            Hit::FingerDown(_fe) => {
+                if self.state.is_in_state(cx, id!(open.yes)) {
+                    self.animate_state(cx, id!(open.no));
+                    dispatch_action(cx, FoldButtonAction::Closing)
                 }
-                ButtonState::Default => self.animate_state(cx, id!(hover.off)),
-                ButtonState::Hover => self.animate_state(cx, id!(hover.on)),
+                else {
+                    self.animate_state(cx, id!(open.yes));
+                    dispatch_action(cx, FoldButtonAction::Opening)
+                }
+                self.animate_state(cx, id!(hover.pressed));
+            },
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                 self.animate_state(cx, id!(hover.on));
             }
+            Hit::FingerHoverOut(_) => {
+                self.animate_state(cx, id!(hover.off));
+            }
+            Hit::FingerUp(fe) => if fe.is_over {
+                if fe.digit.has_hovers() {
+                    self.animate_state(cx, id!(hover.on));
+                }
+                else{
+                    self.animate_state(cx, id!(hover.off));
+                }
+            }
+            else {
+                self.animate_state(cx, id!(hover.off));
+            }
+            _ => ()
         };
     }
     
@@ -156,4 +170,24 @@ impl FoldButton {
     }
 }
 
+impl Widget for FoldButton {
+    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
 
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.bg.redraw(cx);
+    }
+    
+    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let uid = self.get_widget_uid();
+        self.handle_event_fn(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
+}
