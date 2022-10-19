@@ -642,7 +642,15 @@ impl LiveValue {
             _ => None
         }
     }
-    
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Float64(v) => Some(*v as i64),
+            Self::Float32(v) => Some(*v as i64),
+            Self::Int64(v) => Some(*v),
+            _ => None
+        }
+    }    
     pub fn as_vec2(&self) -> Option<Vec2> {
         match self {
             Self::Vec2(v) => Some(*v),
