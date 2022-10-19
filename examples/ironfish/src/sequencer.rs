@@ -228,7 +228,7 @@ impl Sequencer {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, SequencerAction),
     ) {
-        for (btn_id, button) in self.buttons.iter_mut() {
+        for button in self.buttons.values_mut() {
             button.handle_event_fn(cx, event, self.area, dispatch_action);
         }
         

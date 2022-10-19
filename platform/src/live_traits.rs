@@ -62,18 +62,6 @@ pub trait LiveNew: LiveApply {
         }
         return ret
     }
-    /*
-    fn new_as_main_module(cx: &mut Cx, module_path: &str, id: LiveId) -> Option<Self> where Self: Sized {
-        let module_id = LiveModuleId::from_str(module_path).unwrap();
-        {
-            let live_registry_rc = cx.live_registry.clone();
-            let mut live_registry = live_registry_rc.borrow_mut();
-            if let Some(file_id) = live_registry.module_id_to_file_id.get(&module_id) {
-                live_registry.main_module = Some(*file_id);
-            }
-        }
-        Self::new_from_module(cx, module_path, id)
-    }*/
     
     fn new_main(cx: &mut Cx) -> Self where Self: Sized {
         let lti = Self::live_type_info(cx);
@@ -296,7 +284,7 @@ impl<T, const N:usize> LiveApply for [T;N]  where T: LiveApply + LiveNew + 'stat
                     break;
                 }
                 if count < self.len(){
-                    self[count].apply(cx, from, index, nodes);
+                    index = self[count].apply(cx, from, index, nodes);
                     count += 1;
                 }
                 else{
