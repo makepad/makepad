@@ -6,7 +6,7 @@ use {
             LiveId,
             LiveModuleId,
             LiveTypeInfo,
-            LiveNodeSlice
+            LiveNodeSliceApi
         },
         live_traits::{LiveNew, LiveApply, ApplyFrom},
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},

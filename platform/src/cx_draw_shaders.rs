@@ -8,7 +8,7 @@ use {
         },
     },
     crate::{
-        makepad_live_compiler::{LiveValue, LiveFieldKind, LiveNode, LivePtr, LiveNodeSlice},
+        makepad_live_compiler::{LiveValue, LiveFieldKind, LiveNode, LivePtr, LiveNodeSliceApi},
         makepad_shader_compiler::*,
         makepad_live_id::*,
         live_traits::*,

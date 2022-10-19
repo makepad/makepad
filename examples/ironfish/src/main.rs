@@ -1187,17 +1187,38 @@ impl App {
         for bind in bind_table{
             ui.get_widget(bind.0).bind_to(cx, db, bind.1, act);
         }
-
-        //profile_end(t);
-        //let disp = self.ui.get_frame(id!(mod_env.display));
+        
+        // this maps data to the ADSR graphs
+        let  map_table:&[(&[LiveId], &[LiveId], &[LiveId])] = &[
+            (id!(mod_envelope.a), id!(mod_env.display), id!(bg.attack)),
+            (id!(mod_envelope.h), id!(mod_env.display), id!(bg.hold)),
+            (id!(mod_envelope.d), id!(mod_env.display), id!(bg.decay)),
+            (id!(mod_envelope.s), id!(mod_env.display), id!(bg.sustain)),
+            (id!(mod_envelope.r), id!(mod_env.display), id!(bg.release)),
+            (id!(volume_envelope.a), id!(vol_env.display), id!(bg.attack)),
+            (id!(volume_envelope.h), id!(vol_env.display), id!(bg.hold)),
+            (id!(volume_envelope.d), id!(vol_env.display), id!(bg.decay)),
+            (id!(volume_envelope.s), id!(vol_env.display), id!(bg.sustain)),
+            (id!(volume_envelope.r), id!(vol_env.display), id!(bg.release))
+        ];
+        
+        // write the value 
+        for map in map_table{
+            let nodes = db.nodes();
+            if let Some(value) = nodes.read_by_field_path(map.0){
+                let mut nodes = LiveNodeVec::new();
+                nodes.write_by_field_path(map.2, value.clone());
+                ui.get_widget(map.1).apply_over(cx, &nodes)
+            }
+        }
+        
+        // now lets show/hide elements based on dropdown data values
+        
         
         if let Some(nodes) = db.from_widgets(){
-            //nodes.debug_print(0,100);
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             ironfish.settings.apply_over(cx, &nodes);
         }
-        // this updates the read value to the envelope
-        //disp.bind_apply(cx, db, id!(mod_envelope.a), id!(bg.attack));
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
@@ -1238,129 +1259,16 @@ impl App {
             };
         });
         
-        // fetch ui binding deltas
-        /*
-        for delta in ui.on_bind_deltas() {
-            for (index, bind) in self.knob_table.iter_mut().enumerate() {
-                if let Some(value) = delta.read_path(&bind.name) {
-                    if let Some(v) = value.as_float() {
-                        
-                        let mod_env = ui.frame(ids!(mod_env.display));
-                        let vol_env = ui.frame(ids!(vol_env.display));
-                        match bind.name.as_ref() {
-                            "mod_envelope.a" => mod_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
-                            "mod_envelope.h" => mod_env.apply_over(ui.cx, live!{bg: {hold: (v)}}),
-                            "mod_envelope.d" => mod_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
-                            "mod_envelope.s" => mod_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
-                            "mod_envelope.r" => mod_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
-                            "volume_envelope.a" => vol_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
-                            "volume_envelope.h" => vol_env.apply_over(ui.cx, live!{bg: {hold: (v)}}),
-                            "volume_envelope.d" => vol_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
-                            "volume_envelope.s" => vol_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
-                            "volume_envelope.r" => vol_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
-                            _ => ()
-                        }
-                        
-                        let mut knob = 3;
-                        if self.knob_bind[0] == index {
-                            knob = 0
-                        }
-                        if self.knob_bind[1] == index {
-                            knob = 1
-                        }
-                        if knob == 3
-                        {
-                            knob = self.knob_change;
-                            self.knob_change = (self.knob_change + 1) % (self.knob_bind.len());
-                            self.last_knob_index = index;
-                            self.knob_bind[knob] = index;
-                            
-                            ui.cx.send_midi_1_data(Midi1Data {
-                                data0: 0xb0,
-                                data1: (1 + knob)as u8,
-                                data2: bind.ty as u8
-                            });
-                            
-                            ui.cx.send_midi_1_data(Midi1Data {
-                                data0: 0xb0,
-                                data1: (5 + knob) as u8,
-                                data2: bind.rgb as u8
-                            });
-                            
-                        }
-                        
-                        bind.value = v;
-                        //log!("SEND SHIT {} {}", v, (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8);
-                        ui.cx.send_midi_1_data(Midi1Data {
-                            data0: 0xb0,
-                            data1: (3 + knob)as u8,
-                            data2: (((v - bind.min) / (bind.max - bind.min)) * 127.0) as u8
-                        });
-                    }
-                }
-            }
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            ironfish.settings.apply_over(ui.cx, &delta);
-            ui.bind_read(&delta);
-        }*/
         let piano = ui.get_piano(id!(piano));
-        /*
+        
         for inp in cx.handle_midi_received(event) {
-            if inp.data.data0 == 0xb0 {
-                let mut ring = 3;
-                let mut keypressure = 40;
-                match inp.data.data1 {
-                    10 => {
-                        ring = 0;
-                    }
-                    11 => {
-                        ring = 1;
-                    }
-                    20 => {keypressure = 0;}
-                    21 => {keypressure = 1;}
-                    22 => {keypressure = 2;}
-                    23 => {keypressure = 3;}
-                    24 => {keypressure = 4;}
-                    25 => {keypressure = 5;}
-                    26 => {keypressure = 6;}
-                    27 => {keypressure = 7;}
-                    28 => {keypressure = 8;}
-                    29 => {keypressure = 9;}
-                    30 => {keypressure = 10;}
-                    31 => {keypressure = 11;}
-                    _ => ()
-                }
-                if keypressure < 40 {
-                }
-                
-                if ring<3 {
-                    log!("{:?}", inp.data);
-                    
-                    let bind_id = self.knob_bind[ring];
-                    let bind = &mut self.knob_table[bind_id];
-                    bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max - bind.min) * 0.001) + bind.value).min(bind.max).max(bind.min);
-                    let mut delta = Vec::new();
-                    delta.write_path(&bind.name, LiveValue::Float64(bind.value));
-                    delta.debug_print(0, 100);
-                    
-                    //ui.bind_read(&delta);
-                    
-                    cx.send_midi_data(MidiData {
-                        data0: 0xb0,
-                        data1: (3 + ring)as u8,
-                        data2: (((bind.value - bind.min) / (bind.max - bind.min)) * 127.0) as u8
-                    });
-                    let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-                    ironfish.settings.apply_over(cx, &delta);
-                }
-            }
             self.audio_graph.send_midi_data(inp.data);
             if let Some(note) = inp.data.decode().on_note() {
                 log!("{:?}", inp.data);
                 piano.set_note(cx, note.is_on, note.note_number)
             }
         }
-        */
+        
         for note in piano.notes_played(&act) {
             self.audio_graph.send_midi_data(MidiNote {
                 channel: 0,

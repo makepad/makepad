@@ -10,7 +10,7 @@ use {
         live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveIdAsProp},
         live_node_reader::{LiveNodeMutReader},
-        live_node_vec::{LiveNodeSlice, LiveNodeVec},
+        live_node_vec::{LiveNodeSliceApi, LiveNodeVecApi},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId, LiveFileGeneration},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
         span::{TextSpan, TextPos},
