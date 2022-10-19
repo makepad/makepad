@@ -2,7 +2,6 @@ pub use makepad_draw_2d::makepad_platform;
 pub use makepad_draw_2d::makepad_image_formats;
 pub use makepad_draw_2d;
 
-pub mod button_logic;
 pub mod button;
 pub mod label;
 pub mod desktop_button;
@@ -59,12 +58,12 @@ mod theme;
 pub use crate::{
     data_binding::DataBinding,
     bare_window::BareWindow,
-    button_logic::{button_logic_handle_event, ButtonAction},
     button::*,
     frame::*,
     label::*,
     slider::*,
     check_box::*,
+    drop_down::*,
     text_input::{TextInput},
     link_label::{LinkLabel},
     desktop_window::{DesktopWindow},
@@ -72,6 +71,7 @@ pub use crate::{
     scroll_shadow::{ScrollShadow},
     scroll_bar::{ScrollBar},
     widget::{
+        WidgetUid,
         WidgetDraw,
         WidgetDrawApi,
         CreateAt,

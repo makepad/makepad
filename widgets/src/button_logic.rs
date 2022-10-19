@@ -13,14 +13,6 @@ pub enum ButtonState {
     Pressed,
 }
 
-#[derive(Clone, WidgetAction)]
-pub enum ButtonAction {
-    None,
-    Click,
-    Press,
-    Release
-}
-
 impl ButtonAction {
     pub fn is_click(&self) -> bool {
         match self {

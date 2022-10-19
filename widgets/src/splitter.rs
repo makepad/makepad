@@ -135,6 +135,7 @@ enum DrawState {
 }
 
 impl Widget for Splitter {
+    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
     
     fn handle_widget_event_fn(
         &mut self,
@@ -143,8 +144,9 @@ impl Widget for Splitter {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let mut redraw = false;
+        let uid = self.get_widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into()));
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
             redraw = true;
         });
         self.a.handle_widget_event_fn(cx, event, dispatch_action);
@@ -163,9 +165,9 @@ impl Widget for Splitter {
         self.bar.redraw(cx)
     }
     
-    fn widget_query(&mut self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
-        self.a.widget_query(query, callback) ?;
-        self.b.widget_query(query, callback)
+    fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache) -> WidgetResult {
+        self.a.find_widget(path, cached) ?;
+        self.b.find_widget(path, cached)
     }
     
     fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
