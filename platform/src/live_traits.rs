@@ -62,18 +62,6 @@ pub trait LiveNew: LiveApply {
         }
         return ret
     }
-    /*
-    fn new_as_main_module(cx: &mut Cx, module_path: &str, id: LiveId) -> Option<Self> where Self: Sized {
-        let module_id = LiveModuleId::from_str(module_path).unwrap();
-        {
-            let live_registry_rc = cx.live_registry.clone();
-            let mut live_registry = live_registry_rc.borrow_mut();
-            if let Some(file_id) = live_registry.module_id_to_file_id.get(&module_id) {
-                live_registry.main_module = Some(*file_id);
-            }
-        }
-        Self::new_from_module(cx, module_path, id)
-    }*/
     
     fn new_main(cx: &mut Cx) -> Self where Self: Sized {
         let lti = Self::live_type_info(cx);
@@ -162,6 +150,15 @@ pub trait LiveRead{
     
 }
 
+impl<T, const N:usize> LiveRead for [T;N]  where T: LiveRead {
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        out.open_array(id);
+        for i in 0..N{
+            self[i].live_read_to(LiveId(i as u64), out);
+        }
+        out.close();
+    }
+} 
 
 #[derive(Debug, Clone, Copy)]
 pub enum ApplyFrom {
@@ -272,6 +269,53 @@ impl<T> LiveNew for Vec<T> where T: LiveApply + LiveNew + 'static{
         T::live_type_info(_cx)
     }
 }
+
+
+impl<T, const N:usize> LiveHook for [T;N] where T: LiveApply + LiveNew + 'static{}
+impl<T, const N:usize> LiveApply for [T;N]  where T: LiveApply + LiveNew + 'static {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        // we can only apply from an Array
+        if nodes[index].is_array(){
+            let mut index = index + 1;
+            let mut count = 0;
+            loop{
+                if nodes[index].is_close(){
+                    index += 1;
+                    break;
+                }
+                if count < self.len(){
+                    index = self[count].apply(cx, from, index, nodes);
+                    count += 1;
+                }
+                else{
+                   index = nodes.skip_node(index)
+                }
+            }
+            index
+        }
+        else{
+            cx.apply_error_expected_array(live_error_origin!(), index, nodes);
+            nodes.skip_node(index)
+        }
+    }
+} 
+
+impl<T, const N:usize> LiveNew for [T;N] where T: LiveApply + LiveNew + 'static{
+    fn new(cx: &mut Cx) -> Self {
+        std::array::from_fn(|_| T::new(cx))
+    }
+    
+    fn new_apply(cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self {
+        let mut ret = Self::new(cx);
+        ret.apply(cx, from, index, nodes);
+        ret
+    }
+    
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
+        T::live_type_info(_cx)
+    }
+}
+
 
 
 

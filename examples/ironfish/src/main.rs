@@ -1236,6 +1236,8 @@ impl App {
             (id!(osc2.harmonic.slider), id!(osc2.harmonic)), 
             (id!(osc2.harmonicenv.slider), id!(osc2.harmonicenv)),
             (id!(osc2.harmoniclfo.slider), id!(osc2.harmoniclfo)),
+            // sequencer
+            (id!(sequencer), id!(sequencer.steps)),
         ]);
         
         db.process_data_table(cx, &self.ui, data_table, act);
@@ -1271,6 +1273,7 @@ impl App {
         db.process_tab_table(cx, &self.ui, tab_table);
         
         if let Some(nodes) = db.from_widgets(){
+            nodes.debug_print(0,100);
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             ironfish.settings.apply_over(cx, &nodes);
         }
@@ -1333,28 +1336,16 @@ impl App {
             }.into());
         }
         
-        let sequencer = ui.get_sequencer(id!(sequencer));
-        
-        for (btn_x, btn_y, active) in sequencer.buttons_clicked(&act) {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            let _s = ironfish.settings.clone();
-            let bit = 1 << btn_y;
-            let act = if active {bit} else {0};
-            let step = ironfish.settings.sequencer.get_step(btn_x);
-            ironfish.settings.sequencer.set_step(btn_x, step ^ bit | act);
-        }
-        
         if ui.get_button(id!(panic)).clicked(&act) {
             self.audio_graph.all_notes_off();
         }
-        
+
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.get_button(id!(clear_grid)).clicked(&act) {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 ironfish.settings.sequencer.set_step(j, 0);
             }
-            sequencer.clear_buttons(cx);
         }
         
         if ui.get_button(id!(grid_down)).clicked(&act) {
@@ -1368,17 +1359,7 @@ impl App {
                 
                 ironfish.settings.sequencer.set_step(j, modstep);
             }
-            
-            for j in 0..16 {
-                let val = ironfish.settings.sequencer.get_step(j);
-                for i in 0..16 {
-                    let bv = 1 << i;
-                    sequencer.update_button(cx, j, i, if val & bv == bv {true} else {false});
-                }
-            }
         }
-        
-        let mut reload_sequencer = false;
         
         if ui.get_button(id!(grid_up)).clicked(&act) {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
@@ -1391,29 +1372,17 @@ impl App {
                 ironfish.settings.sequencer.set_step(j, modstep);
                 
             }
-            reload_sequencer = true;
         }
         
-        if ui.get_button(id!(save1)).clicked(&act) {self.preset(cx, 1, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save2)).clicked(&act) {self.preset(cx, 2, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save3)).clicked(&act) {self.preset(cx, 3, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save4)).clicked(&act) {self.preset(cx, 4, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save5)).clicked(&act) {self.preset(cx, 5, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save6)).clicked(&act) {self.preset(cx, 6, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save7)).clicked(&act) {self.preset(cx, 7, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save8)).clicked(&act) {self.preset(cx, 8, shift); reload_sequencer = true;}
-        
-        if reload_sequencer {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            for j in 0..16 {
-                let val = ironfish.settings.sequencer.get_step(j);
-                for i in 0..16 {
-                    let bv = 1 << i;
-                    sequencer.update_button(cx, j, i, if val & bv == bv {true} else {false});
-                }
-            }
-        }
-        
+        if ui.get_button(id!(save1)).clicked(&act) {self.preset(cx, 1, shift);}
+        if ui.get_button(id!(save2)).clicked(&act) {self.preset(cx, 2, shift);}
+        if ui.get_button(id!(save3)).clicked(&act) {self.preset(cx, 3, shift);}
+        if ui.get_button(id!(save4)).clicked(&act) {self.preset(cx, 4, shift);}
+        if ui.get_button(id!(save5)).clicked(&act) {self.preset(cx, 5, shift);}
+        if ui.get_button(id!(save6)).clicked(&act) {self.preset(cx, 6, shift);}
+        if ui.get_button(id!(save7)).clicked(&act) {self.preset(cx, 7, shift);}
+        if ui.get_button(id!(save8)).clicked(&act) {self.preset(cx, 8, shift);}
+
         self.data_bind(cx, &mut db, &act);
     }
     
