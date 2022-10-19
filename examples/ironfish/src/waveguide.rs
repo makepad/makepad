@@ -17,7 +17,7 @@ impl Default for Waveguide {
 
 impl Waveguide {
 
-    pub fn clear(&mut self)
+    pub fn _clear(&mut self)
     {
         self.headposition = 0;
         for s in 0..MAX_WG_DELAY
