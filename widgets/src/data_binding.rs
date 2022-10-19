@@ -27,7 +27,7 @@ impl DataBinding{
     
     pub fn from_widgets(&self)->Option<&[LiveNode]>{
         match self{
-            Self::FromWidgets(v)=>Some(v),
+            Self::FromWidgets(v) if v.len() > 2=>Some(v),
             _=>None
         }
     }
@@ -44,7 +44,7 @@ impl DataBinding{
             let data_nodes = self.nodes();
             if let Some(value) = data_nodes.read_by_field_path(map.2){
                 let mut ui_nodes = LiveNodeVec::new();
-                ui_nodes.write_by_field_path(map.1, value.clone());
+                ui_nodes.write_by_field_path(map.1, &[LiveNode::from_value(value.clone())]);
                 ui.get_widget(map.0).apply_over(cx, &ui_nodes)
             }
         }   
@@ -56,7 +56,9 @@ impl DataBinding{
             if let Some(LiveValue::BareEnum(id)) = nodes.read_by_field_path(tab.2){
                 let value =  *id == tab.3[0];
                 let mut nodes = LiveNodeVec::new();
-                nodes.write_by_field_path(tab.1, LiveValue::Bool(if tab.4 {value} else {!value}));
+                nodes.write_by_field_path(tab.1, &[LiveNode::from_value(
+                    LiveValue::Bool(if tab.4 {value} else {!value})
+                )]);
                 ui.get_widget(tab.0).apply_over(cx, &nodes)
             }
         }
