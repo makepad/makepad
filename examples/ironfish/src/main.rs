@@ -1136,7 +1136,7 @@ impl App {
         
         // TODO! we're going to make a nice macro for these tables
         // so they are easier to read and write
-        let data_table = BindDataTable(&[
+        let data_table = DataBindTable(&[
             // Touch
             (id!(touch.scale.slider), id!(touch.scale)),
             (id!(touch.curve.slider), id!(touch.curve)),
@@ -1203,7 +1203,7 @@ impl App {
             (id!(osc2.type.dropdown), id!(osc2.osc_type)),
             (id!(osc2.transpose.slider), id!(osc2.transpose)),
             (id!(osc2.detune.slider), id!(osc2.detune)),
-            (id!(osc2.harmonic.slider), id!(osc2.harmonic)), 
+            (id!(osc2.harmonic.slider), id!(osc2.harmonic)),
             (id!(osc2.harmonicenv.slider), id!(osc2.harmonicenv)),
             (id!(osc2.harmoniclfo.slider), id!(osc2.harmoniclfo)),
             // sequencer
@@ -1214,7 +1214,7 @@ impl App {
         
         // this maps data to the ADSR graphs
         // (widget path, widget value path, data path)
-        let  map_table = BindMapTable(&[ 
+        let map_table = MapBindTable(&[
             (id!(mod_env.display), id!(bg.attack), id!(mod_envelope.a)),
             (id!(mod_env.display), id!(bg.hold), id!(mod_envelope.h)),
             (id!(mod_env.display), id!(bg.decay), id!(mod_envelope.d)),
@@ -1227,11 +1227,11 @@ impl App {
             (id!(vol_env.display), id!(bg.release), id!(volume_envelope.r))
         ]);
         
-        // write the value 
+        // write the value
         db.process_map_table(cx, &self.ui, map_table);
-
+        
         // (widget path, widget value path, data path, enum compare, neq)
-        let tab_table = BindTabTable(&[
+        let tab_table = BoolBindTable(&[
             (id!(osc1.supersaw), id!(hidden), id!(osc1.osc_type), id!(SuperSaw), false),
             (id!(osc2.supersaw), id!(hidden), id!(osc2.osc_type), id!(SuperSaw), false),
             (id!(osc1.hypersaw), id!(hidden), id!(osc1.osc_type), id!(HyperSaw), false),
@@ -1240,27 +1240,25 @@ impl App {
             (id!(osc2.harmonic), id!(hidden), id!(osc2.osc_type), id!(HarmonicSeries), false),
         ]);
         
-        db.process_tab_table(cx, &self.ui, tab_table);
+        db.process_bool_table(cx, &self.ui, tab_table);
         
-        if let Some(nodes) = db.from_widgets(){
-            nodes.debug_print(0,100);
+        if let Some(nodes) = db.from_widgets() {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             ironfish.settings.apply_over(cx, &nodes);
         }
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let ui = self.ui.clone();
-        
-        let mut db = DataBinding::new();
-        
-        cx.handle_midi_inputs(event);
-        
         if let Event::Draw(event) = event {
             return self.draw(&mut Cx2d::new(cx, event));
         }
         
         self.window.handle_event(cx, event);
+        
+        let ui = self.ui.clone();
+        let mut db = DataBinding::new();
+        
+        cx.handle_midi_inputs(event);
         
         let act = ui.handle_event(cx, event);
         
@@ -1309,39 +1307,18 @@ impl App {
         if ui.get_button(id!(panic)).clicked(&act) {
             self.audio_graph.all_notes_off();
         }
-
+        
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.get_button(id!(clear_grid)).clicked(&act) {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            for j in 0..16 {
-                ironfish.settings.sequencer.set_step(j, 0);
-            }
+            ui.get_sequencer(id!(sequencer)).clear_grid(cx, &mut db);
         }
         
         if ui.get_button(id!(grid_down)).clicked(&act) {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            for j in 0..16 {
-                //let bv = 1<<j;
-                let step = ironfish.settings.sequencer.get_step(j);
-                let mut modstep = step << 1;
-                
-                if (modstep & 1 << 16) == 1 << 16 {modstep += 1; modstep -= 1 << 16};
-                
-                ironfish.settings.sequencer.set_step(j, modstep);
-            }
+            ui.get_sequencer(id!(sequencer)).grid_down(cx, &mut db);
         }
         
         if ui.get_button(id!(grid_up)).clicked(&act) {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            for j in 0..16 {
-                //let bv = 1<<j;
-                let step = ironfish.settings.sequencer.get_step(j);
-                let mut modstep = step >> 1;
-                if (step & 1) == 1 {modstep += 1 << 15;}
-                
-                ironfish.settings.sequencer.set_step(j, modstep);
-                
-            }
+            ui.get_sequencer(id!(sequencer)).grid_up(cx, &mut db);
         }
         
         if ui.get_button(id!(save1)).clicked(&act) {self.preset(cx, 1, shift);}
@@ -1352,7 +1329,7 @@ impl App {
         if ui.get_button(id!(save6)).clicked(&act) {self.preset(cx, 6, shift);}
         if ui.get_button(id!(save7)).clicked(&act) {self.preset(cx, 7, shift);}
         if ui.get_button(id!(save8)).clicked(&act) {self.preset(cx, 8, shift);}
-
+        
         self.data_bind(cx, &mut db, &act);
     }
     
