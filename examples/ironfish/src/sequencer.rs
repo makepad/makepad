@@ -241,7 +241,7 @@ impl Sequencer {
         }
     }
     
-    pub fn get_button_state(&self, cx: &Cx) -> Vec<u32> {
+    pub fn get_steps(&self, cx: &Cx) -> Vec<u32> {
         let mut steps = Vec::new();
         steps.resize(self.grid_y, 0u32);
         for (btn_id, button) in self.buttons.iter() {
@@ -254,7 +254,7 @@ impl Sequencer {
         steps
     }
     
-    pub fn set_button_state(&mut self, cx: &mut Cx, steps: &[u32]) {
+    pub fn set_steps(&mut self, cx: &mut Cx, steps: &[u32]) {
         if steps.len() != self.grid_x {
             panic!()
         }
@@ -293,17 +293,20 @@ impl Widget for Sequencer {
     
     fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], actions: &WidgetActions) {
         match db {
-            DataBinding::FromWidgets(nodes) => if let Some(_) = actions.find_single_action(self.get_widget_uid()) {
-                let steps = self.get_button_state(cx);
-                let mut array = LiveNodeVec::new();
-                array.open_array(LiveId(0));
-                for step in steps{
-                    array.push(LiveNode::from_value(LiveValue::Int64(step as i64)));
+            DataBinding::FromWidgets{nodes, updated} =>{
+                let uid = self.get_widget_uid();
+                if actions.find_single_action(uid).is_some() || updated.contains(&uid){
+                    let steps = self.get_steps(cx);
+                    let mut array = LiveNodeVec::new();
+                    array.open_array(LiveId(0));
+                    for step in steps{
+                        array.push(LiveNode::from_value(LiveValue::Int64(step as i64)));
+                    }
+                    array.close();
+                    nodes.write_by_field_path(path, &array);
                 }
-                array.close();
-                nodes.write_by_field_path(path, &array);
             }
-            DataBinding::ToWidgets(nodes) => {
+            DataBinding::ToWidgets{nodes} => {
                 if let Some(mut index) = nodes.child_by_field_path(0,path) {
                     let mut steps = Vec::new();
                     if nodes[index].is_array(){
@@ -313,49 +316,51 @@ impl Widget for Sequencer {
                             index += 1;
                         }
                     }
-                    self.set_button_state(cx, &steps);
+                    self.set_steps(cx, &steps);
                 }
             }
         }
     }
 }
-
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct SequencerRef(WidgetRef);
 
-impl SequencerRef {
-    /*
-    pub fn buttons_clicked(&self, actions: &WidgetActions) -> Vec<(usize, usize, bool)> {
-        let mut btns = Vec::new();
-        for item in actions {
-            if item.widget_uid == self.get_widget_uid() {
-                if let SequencerAction::Change(x, y, on) = item.action() {
-                    btns.push((x, y, on))
-                }
-            }
-        }
-        btns
-    }
+impl SequencerRef{
     
-    pub fn clear_buttons(&self, cx: &mut Cx) {
-        if let Some(mut inner) = self.inner_mut() {
-            for (_, button) in inner.buttons.iter_mut() {
-                button.set_is_active(cx, false, Animate::Yes);
-            }
+    pub fn clear_grid(&self, cx:&mut Cx, db: &mut DataBinding){
+        if let Some(mut inner) = self.inner_mut(){
+            let mut steps = inner.get_steps(cx);
+            for step in &mut steps{*step = 0};
+            inner.set_steps(cx, &steps);
+            db.set_updated(inner.get_widget_uid())
         }
     }
     
-    pub fn update_button(&self, cx: &mut Cx, x: usize, y: usize, state: bool) {
-        
-        if let Some(mut inner) = self.inner_mut() {
-            for (_, button) in inner.buttons.iter_mut() {
-                if button.x == x && button.y == y {
-                    button.set_is_active(cx, state, Animate::Yes);
-                }
+    pub fn grid_down(&self, cx:&mut Cx, db: &mut DataBinding){
+        if let Some(mut inner) = self.inner_mut(){
+            let mut steps = inner.get_steps(cx);
+            for step in &mut steps{
+                let mut modstep = *step << 1;
+                if (modstep & 1 << 16) == 1 << 16 {modstep += 1; modstep -= 1 << 16};
+                *step = modstep;
             }
+            inner.set_steps(cx, &steps);
+            db.set_updated(inner.get_widget_uid())
         }
-    }*/
+    }
+
+    
+    pub fn grid_up(&self, cx:&mut Cx, db: &mut DataBinding){
+        if let Some(mut inner) = self.inner_mut(){
+            let mut steps = inner.get_steps(cx);
+            for step in &mut steps{
+                let mut modstep = *step >> 1;
+                if (*step & 1) == 1 {modstep += 1 << 15;}
+                *step = modstep;
+            }
+            inner.set_steps(cx, &steps);
+            db.set_updated(inner.get_widget_uid())
+        }
+    }
 }
-
-
