@@ -85,6 +85,8 @@ pub use {
         LiveModuleId,
         LiveNodeSlice,
         LiveNodeVec,
+        LiveNodeSliceApi,
+        LiveNodeVecApi,
     },
     component_map::{
         ComponentMap

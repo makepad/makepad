@@ -19,7 +19,7 @@ use {
     }
 };
 
-pub trait LiveNodeSlice {
+pub trait LiveNodeSliceApi {
     fn parent(&self, child_index: usize) -> Option<usize>;
     fn append_child_index(&self, parent_index: usize) -> usize;
     fn first_child(&self, parent_index: usize) -> Option<usize>;
@@ -57,7 +57,9 @@ pub trait LiveNodeSlice {
     fn debug_print(&self, parent_index: usize, max_depth: usize);
 }
 
-pub trait LiveNodeVec {
+pub type LiveNodeSlice<'a> = &'a[LiveNode];
+
+pub trait LiveNodeVecApi {
     fn insert_node_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]) -> usize;
     fn insert_node_from_self(&mut self, from_index: usize, insert_start: usize) -> usize;
     
@@ -91,8 +93,10 @@ pub trait LiveNodeVec {
     fn close(&mut self);
 }
 
+pub type LiveNodeVec = Vec<LiveNode>;
+
 // accessing the Gen structure like a tree
-impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
+impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
     
     fn first_node_with_token_id(&self, match_token_id: LiveTokenId, also_in_dsl: bool) -> Option<usize> {
         for (node_index, node) in self.as_ref().iter().enumerate() {
@@ -805,7 +809,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
 }
 
 
-impl LiveNodeVec for Vec<LiveNode> {
+impl LiveNodeVecApi for LiveNodeVec {
     fn insert_children_from_other(&mut self, source_index: usize, insert_point: usize, other: &[LiveNode]) {
         
         if !other[source_index].is_open() {

@@ -9,7 +9,10 @@ pub enum DataBinding{
 
 impl DataBinding{
     pub fn new()->Self{
-        Self::FromWidgets(Vec::new())
+        let mut nodes = Vec::new();
+        nodes.open();
+        nodes.close();
+        Self::FromWidgets(nodes)
     }
     
     pub fn to_widgets(&mut self, nodes:Vec<LiveNode>){
@@ -18,8 +21,15 @@ impl DataBinding{
     
     pub fn from_widgets(&self)->Option<&[LiveNode]>{
         match self{
-            Self::FromWidgets(v) if v.len()>0=>Some(v),
+            Self::FromWidgets(v)=>Some(v),
             _=>None
+        }
+    }
+    
+    pub fn nodes(&self)->&[LiveNode]{
+        match self{
+            Self::FromWidgets(v)=>v,
+            Self::ToWidgets(v)=>v
         }
     }
 }
