@@ -16,8 +16,8 @@ use {
             LiveId,
             LiveNode,
             LiveIdAsProp,
-            LiveNodeSlice,
-            LiveNodeVec
+            LiveNodeSliceApi,
+            LiveNodeVecApi
          },
         live_traits::{LiveNew},
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},

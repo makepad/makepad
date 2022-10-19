@@ -8,7 +8,7 @@ use {
             LiveType,
             LiveId,
             LiveNode,
-            LiveNodeSlice
+            LiveNodeSliceApi
         },
         live_traits::{LiveNew},
         makepad_derive_live::*,

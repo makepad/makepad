@@ -54,6 +54,8 @@ pub use {
         live_node_vec::{
             LiveNodeSlice,
             LiveNodeVec,
+            LiveNodeSliceApi,
+            LiveNodeVecApi,
         },
        live_node_cbor::{
             LiveNodeSliceToCbor,

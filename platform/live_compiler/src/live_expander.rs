@@ -6,7 +6,7 @@ use {
         live_error::{LiveError},
         live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveValue, LiveNode, LiveIdAsProp, LivePropType},
-        live_node_vec::{LiveNodeSlice, LiveNodeVec},
+        live_node_vec::{LiveNodeSliceApi, LiveNodeVecApi},
         live_registry::{LiveRegistry, LiveScopeTarget},
     }
 };
