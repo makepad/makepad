@@ -289,6 +289,35 @@ impl LiveAtomic for i64a {
     }
 }
 
+impl<T, const N:usize> LiveAtomic for [T;N]  where T: LiveAtomic {
+    fn apply_atomic(&self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        // we can only apply from an Array
+        if nodes[index].is_array(){
+            let mut index = index + 1;
+            let mut count = 0;
+            loop{
+                if nodes[index].is_close(){
+                    index += 1;
+                    break;
+                }
+                if count < self.len(){
+                    self[count].apply_atomic(cx, from, index, nodes);
+                    count += 1;
+                }
+                else{
+                   index = nodes.skip_node(index)
+                }
+            }
+            index
+        }
+        else{
+            cx.apply_error_expected_array(live_error_origin!(), index, nodes);
+            nodes.skip_node(index)
+        }
+    }
+} 
+
+
 impl LiveHook for i64a {}
 impl LiveApply for i64a {
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
