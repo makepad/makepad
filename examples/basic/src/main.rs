@@ -131,8 +131,7 @@ impl App {
         let ui = self.ui.clone();
 
         if let Event::Draw(event) = event {
-            let mut nothing = ();
-            return Cx2d::draw(cx, event, &mut nothing, |cx, _| self.draw(cx));
+            return self.draw(&mut Cx2d::new(cx, event));
         }
 
         // Forward the event to the window.

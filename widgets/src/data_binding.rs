@@ -10,7 +10,7 @@ pub enum DataBinding{
 }
 
 pub struct BindMapTable<'a>(pub &'a [(&'a [LiveId], &'a [LiveId], &'a [LiveId])]);
-pub struct BindTabTable<'a>(pub &'a [(&'a [LiveId], &'a [LiveId], &'a [LiveId], &'a [LiveId])]);
+pub struct BindTabTable<'a>(pub &'a [(&'a [LiveId], &'a [LiveId], &'a [LiveId], &'a [LiveId], bool)]);
 pub struct BindDataTable<'a>(pub &'a [(&'a [LiveId], &'a [LiveId])]);
 
 impl DataBinding{
@@ -54,9 +54,9 @@ impl DataBinding{
         for tab in tab_table.0{
             let nodes = self.nodes();
             if let Some(LiveValue::BareEnum(id)) = nodes.read_by_field_path(tab.2){
-                let value = *id != tab.3[0];
+                let value =  *id == tab.3[0];
                 let mut nodes = LiveNodeVec::new();
-                nodes.write_by_field_path(tab.1, LiveValue::Bool(value));
+                nodes.write_by_field_path(tab.1, LiveValue::Bool(if tab.4 {value} else {!value}));
                 ui.get_widget(tab.0).apply_over(cx, &nodes)
             }
         }
