@@ -1112,9 +1112,7 @@ impl App {
     }
     
     pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions) {
-        // this one should read AND write depending on what db is set to
-        let ui = self.ui.clone();
-        
+
         // (widget path, data path)
         let data_table = BindDataTable(&[
             // Touch
