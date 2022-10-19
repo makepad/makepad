@@ -301,7 +301,7 @@ impl<T, const N:usize> LiveAtomic for [T;N]  where T: LiveAtomic {
                     break;
                 }
                 if count < self.len(){
-                    self[count].apply_atomic(cx, from, index, nodes);
+                    index = self[count].apply_atomic(cx, from, index, nodes);
                     count += 1;
                 }
                 else{
