@@ -456,7 +456,7 @@ impl PianoRef {
     pub fn notes_played(&self, actions:&WidgetActions) -> Vec<PianoNote> {
         let mut notes = Vec::new();
         for item in actions {
-            if item.widget == self.0 {
+            if item.widget_uid == self.get_widget_uid() {
                 if let PianoAction::Note(note) = item.action() {
                     notes.push(note)
                 }

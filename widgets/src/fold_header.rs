@@ -64,6 +64,8 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
+    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+
     fn handle_widget_event_fn(
         &mut self,
         cx: &mut Cx,
@@ -77,7 +79,7 @@ impl Widget for FoldHeader {
         };
         
         for item in self.header.handle_widget_event(cx, event) {
-            if item.widget == self.header.get_widget(id!(fold_button)){
+            if item.widget_uid == self.header.get_widget(id!(fold_button)).get_widget_uid(){
                 match item.action.cast() {
                     FoldButtonAction::Opening => {
                         self.animate_state(cx, id!(open.on))
@@ -100,10 +102,10 @@ impl Widget for FoldHeader {
     }
     
     fn get_walk(&self) -> Walk {self.walk}
-    
-    fn widget_query(&mut self, query: &WidgetQuery, callback: &mut WidgetQueryCb) -> WidgetResult {
-        self.header.widget_query(query, callback) ?;
-        self.body.widget_query(query, callback)
+
+    fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache) -> WidgetResult {
+        self.header.find_widget(path, cached) ?;
+        self.body.find_widget(path, cached)
     }
     
     fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {

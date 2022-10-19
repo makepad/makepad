@@ -329,6 +329,8 @@ impl ListBox {
 
 
 impl Widget for ListBox {
+    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+
     /*fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
         // lets use enum name to find a selected item here
         
@@ -343,17 +345,9 @@ impl Widget for ListBox {
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let uid = self.get_widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, action | {
-            //let delta = Vec::new();
-            match &action {
-                ListBoxAction::WasClicked(_v) => {
-                    //if slider.bind.len()>0 {
-                    //    delta.write_path(&slider.bind, LiveValue::Float(*v as f64));
-                    //}
-                },
-                _ => ()
-            };
-            dispatch_action(cx, WidgetActionItem::new(action.into()))
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
     

@@ -18,7 +18,7 @@ impl DataBinding{
     
     pub fn from_widgets(&self)->Option<&[LiveNode]>{
         match self{
-            Self::FromWidgets(v)=>Some(v),
+            Self::FromWidgets(v) if v.len()>0=>Some(v),
             _=>None
         }
     }

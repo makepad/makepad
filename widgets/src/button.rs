@@ -2,13 +2,10 @@ use {
     crate::{
         makepad_derive_widget::*,
         makepad_draw_2d::*,
-        button_logic::*,
         frame::*,
         widget::*
     }
 };
-pub use crate::button_logic::ButtonAction;
-
 live_design!{
     import makepad_draw_2d::shader::std::*;
     
@@ -124,6 +121,14 @@ live_design!{
     }
 }
 
+#[derive(Clone, WidgetAction)]
+pub enum ButtonAction {
+    None,
+    Click,
+    Press,
+    Release
+}
+
 #[derive(Live, LiveHook, Widget)]
 #[live_design_fn(widget_factory!(Button))]
 pub struct Button {
@@ -152,19 +157,36 @@ impl Button {
     
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
         self.state_handle_event(cx, event);
-        let state = button_logic_handle_event(cx, event, self.bg.area(), dispatch_action);
-        if let Some(state) = state {
-            match state {
-                ButtonState::Pressed => self.animate_state(cx, id!(hover.pressed)),
-                ButtonState::Default => self.animate_state(cx, id!(hover.off)),
-                ButtonState::Hover => self.animate_state(cx, id!(hover.on)),
+        match event.hits(cx, self.bg.area()) {
+            Hit::FingerDown(_fe) => {
+                dispatch_action(cx, ButtonAction::Press);
+                self.animate_state(cx, id!(hover.pressed));
+            },
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                 self.animate_state(cx, id!(hover.on));
             }
+            Hit::FingerHoverOut(_) => {
+                self.animate_state(cx, id!(hover.off));
+            }
+            Hit::FingerUp(fe) => if fe.is_over {
+                dispatch_action(cx, ButtonAction::Click);
+                if fe.digit.has_hovers() {
+                    self.animate_state(cx, id!(hover.on));
+                }
+                else{
+                    self.animate_state(cx, id!(hover.off));
+                }
+            }
+            else {
+                dispatch_action(cx, ButtonAction::Release);
+                self.animate_state(cx, id!(hover.off));
+            }
+            _ => ()
         };
     }
     
-    pub fn area(&self)->Area{
-        self.bg.area()
-    }
+    pub fn area(&self)->Area{self.bg.area()}
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
         self.bg.begin(cx, self.walk, self.layout);
@@ -184,7 +206,7 @@ pub struct ButtonRef(WidgetRef);
 
 impl ButtonRef {
     pub fn clicked(&self, actions:&WidgetActions) -> bool {
-        if let Some(item) = actions.find_single_action(&self.0) {
+        if let Some(item) = actions.find_single_action(self.get_widget_uid()) {
             if let ButtonAction::Click = item.action() {
                 return true
             }

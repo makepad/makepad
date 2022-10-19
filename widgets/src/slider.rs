@@ -11,7 +11,7 @@ use {
 
 live_design!{
     import makepad_draw_2d::shader::std::*;
-    DrawSlider= {{DrawSlider}} {
+    DrawSlider = {{DrawSlider}} {
         instance hover: float
         instance focus: float
         instance drag: float
@@ -48,7 +48,7 @@ live_design!{
         }
     }
     
-    Slider= {{Slider}} {
+    Slider = {{Slider}} {
         min: 0.0,
         max: 1.0,
         
@@ -163,9 +163,9 @@ pub struct Slider {
     
     min: f64,
     max: f64,
-
+    
     bind: String,
-
+    
     #[rust] pub value: f64,
     #[rust] pub dragging: Option<f64>,
 }
@@ -186,8 +186,10 @@ impl Slider {
         self.value * (self.max - self.min) + self.min
     }
     
-    fn set_internal(&mut self, external: f64) {
-        self.value = (external - self.min) / (self.max - self.min)
+    fn set_internal(&mut self, external: f64) -> bool {
+        let old = self.value;
+        self.value = (external - self.min) / (self.max - self.min);
+        old != self.value
     }
     
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
@@ -281,31 +283,16 @@ impl Slider {
 
 
 impl Widget for Slider {
-    /* fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        if let Some(value) = nodes.read_path(&self.bind) {
-            if let Some(value) = value.as_float(){
-                self.set_internal(value);
-                self.update_text_input(cx);
-            }
-        }
-    }*/
-    
     fn redraw(&mut self, cx: &mut Cx) {
         self.slider.redraw(cx);
     }
     
+    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let uid = self.get_widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, _slider, action | {
-            /*let mut delta = Vec::new();
-            match &action {
-                SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
-                    if slider.bind.len()>0 {
-                        delta.write_path(&slider.bind, LiveValue::Float64(*v as f64));
-                    }
-                },
-                _ => ()
-            };*/
-            dispatch_action(cx, WidgetActionItem::new(action.into()))
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
     
@@ -315,15 +302,10 @@ impl Widget for Slider {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
-}
-
-#[derive(Clone, PartialEq, WidgetRef)]
-pub struct SliderRef(WidgetRef);
-
-impl SliderRef {
-    pub fn bind_to(&self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId],  act: &WidgetActions, ) {
+    
+    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], act: &WidgetActions,) {
         match db {
-            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(&self.0) {
+            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
                 match item.action() {
                     SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
                         nodes.write_by_field_path(path, LiveValue::Float64(v as f64));
@@ -332,12 +314,12 @@ impl SliderRef {
                 }
             }
             DataBinding::ToWidgets(nodes) => {
-                if let Some(mut inner) = self.inner_mut(){
-                    if let Some(value) = nodes.read_by_field_path(path) {
-                        if let Some(value) = value.as_float(){
-                            inner.set_internal(value);
-                            inner.update_text_input(cx);
+                if let Some(value) = nodes.read_by_field_path(path) {
+                    if let Some(value) = value.as_float() {
+                        if self.set_internal(value) {
+                            self.redraw(cx)
                         }
+                        self.update_text_input(cx);
                     }
                 }
             }
@@ -345,3 +327,5 @@ impl SliderRef {
     }
 }
 
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct SliderRef(WidgetRef);
