@@ -944,7 +944,7 @@ live_design!{
                 }
             }
             
-            threecol = <Frame> {
+            harmonic = <Frame> {
                 layout: {flow: Right}
                 walk: {width: Fill, height: Fit}
                 harmonic = <InstrumentSlider> {
@@ -1234,6 +1234,8 @@ impl App {
             (id!(osc2.supersaw), id!(hidden), id!(osc2.osc_type), id!(SuperSaw), false),
             (id!(osc1.hypersaw), id!(hidden), id!(osc1.osc_type), id!(HyperSaw), false),
             (id!(osc2.hypersaw), id!(hidden), id!(osc2.osc_type), id!(HyperSaw), false),
+            (id!(osc1.harmonic), id!(hidden), id!(osc1.osc_type), id!(HarmonicSeries), false),
+            (id!(osc2.harmonic), id!(hidden), id!(osc2.osc_type), id!(HarmonicSeries), false),
         ]);
         
         db.process_tab_table(cx, &self.ui, tab_table);
