@@ -899,6 +899,27 @@ live_design!{
                         }
                     }
                 }
+                hypersaw = <Frame> {
+                    layout: {flow: Right}
+                    walk: {width: Fill, height: Fit}
+                    spread = <InstrumentSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: 0.0
+                            max: 1.0
+                            label: "Spread"
+                        }
+                    }
+                    diffuse = <InstrumentSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: 0.0
+                            max: 1.0
+                            label: "Diffuse"
+                        }
+                    }
+                }
+                
             }
             
             twocol = <Frame> {
@@ -923,7 +944,7 @@ live_design!{
                 }
             }
             
-            threecol = <Frame> {
+            harmonic = <Frame> {
                 layout: {flow: Right}
                 walk: {width: Fill, height: Fit}
                 harmonic = <InstrumentSlider> {
@@ -1169,6 +1190,9 @@ impl App {
             (id!(osc1.supersaw.spread.slider), id!(supersaw1.spread)),
             (id!(osc1.supersaw.diffuse.slider), id!(supersaw1.diffuse)),
             
+            (id!(osc1.hypersaw.spread.slider), id!(supersaw1.spread)),
+            (id!(osc1.hypersaw.diffuse.slider), id!(supersaw1.diffuse)),
+            
             (id!(osc1.type.dropdown), id!(osc1.osc_type)),
             (id!(osc1.transpose.slider), id!(osc1.transpose)),
             (id!(osc1.detune.slider), id!(osc1.detune)),
@@ -1210,6 +1234,10 @@ impl App {
         let tab_table = BindTabTable(&[
             (id!(osc1.supersaw), id!(hidden), id!(osc1.osc_type), id!(SuperSaw), false),
             (id!(osc2.supersaw), id!(hidden), id!(osc2.osc_type), id!(SuperSaw), false),
+            (id!(osc1.hypersaw), id!(hidden), id!(osc1.osc_type), id!(HyperSaw), false),
+            (id!(osc2.hypersaw), id!(hidden), id!(osc2.osc_type), id!(HyperSaw), false),
+            (id!(osc1.harmonic), id!(hidden), id!(osc1.osc_type), id!(HarmonicSeries), false),
+            (id!(osc2.harmonic), id!(hidden), id!(osc2.osc_type), id!(HarmonicSeries), false),
         ]);
         
         db.process_tab_table(cx, &self.ui, tab_table);
