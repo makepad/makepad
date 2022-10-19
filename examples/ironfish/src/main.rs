@@ -1116,7 +1116,7 @@ impl App {
         let ui = self.ui.clone();
         
         // (widget path, data path)
-        let bind_table:&[(&[LiveId], &[LiveId])] = &[
+        let data_table = BindDataTable(&[
             // Touch
             (id!(touch.scale.slider), id!(touch.scale)),
             (id!(touch.curve.slider), id!(touch.curve)),
@@ -1183,14 +1183,13 @@ impl App {
             (id!(osc2.harmonic.slider), id!(osc2.harmonic)),
             (id!(osc2.harmonicenv.slider), id!(osc2.harmonicenv)),
             (id!(osc2.harmoniclfo.slider), id!(osc2.harmoniclfo)),
-        ];
-        for bind in bind_table{
-            ui.get_widget(bind.0).bind_to(cx, db, bind.1, act);
-        }
+        ]);
+        
+        db.process_data_table(cx, &self.ui, data_table, act);
         
         // this maps data to the ADSR graphs
         // (widget path, widget value path, data path)
-        let  map_table:&[(&[LiveId], &[LiveId], &[LiveId])] = &[
+        let  map_table = BindMapTable(&[
             (id!(mod_env.display), id!(bg.attack), id!(mod_envelope.a)),
             (id!(mod_env.display), id!(bg.hold), id!(mod_envelope.h)),
             (id!(mod_env.display), id!(bg.decay), id!(mod_envelope.d)),
@@ -1201,20 +1200,18 @@ impl App {
             (id!(vol_env.display), id!(bg.decay), id!(volume_envelope.d)),
             (id!(vol_env.display), id!(bg.sustain), id!(volume_envelope.s)),
             (id!(vol_env.display), id!(bg.release), id!(volume_envelope.r))
-        ];
+        ]);
         
         // write the value 
-        for map in map_table{
-            let nodes = db.nodes();
-            if let Some(value) = nodes.read_by_field_path(map.2){
-                let mut nodes = LiveNodeVec::new();
-                nodes.write_by_field_path(map.1, value.clone());
-                ui.get_widget(map.0).apply_over(cx, &nodes)
-            }
-        }
+        db.process_map_table(cx, &self.ui, map_table);
+
+        // (widget path, widget value path, data path, enum compare)
+        let tab_table = BindTabTable(&[
+            (id!(osc1.supersaw), id!(hidden), id!(osc1.osc_type), id!(SuperSaw)),
+            (id!(osc2.supersaw), id!(hidden), id!(osc2.osc_type), id!(SuperSaw)),
+        ]);
         
-        // now lets show/hide elements based on dropdown data values
-        
+        db.process_tab_table(cx, &self.ui, tab_table);
         
         if let Some(nodes) = db.from_widgets(){
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
