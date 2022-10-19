@@ -305,7 +305,7 @@ impl Widget for Slider {
     
     fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], act: &WidgetActions,) {
         match db {
-            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
+            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
                 match item.action() {
                     SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
                         nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Float64(v as f64))]);
@@ -313,7 +313,7 @@ impl Widget for Slider {
                     _ => ()
                 }
             }
-            DataBinding::ToWidgets(nodes) => {
+            DataBinding::ToWidgets{nodes,..} => {
                 if let Some(value) = nodes.read_by_field_path(path) {
                     if let Some(value) = value.as_float() {
                         if self.set_internal(value) {

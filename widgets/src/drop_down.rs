@@ -363,7 +363,7 @@ impl Widget for DropDown {
     
     fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], act: &WidgetActions,) {
         match db {
-            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
+            DataBinding::FromWidgets{nodes,..}=> if let Some(item) = act.find_single_action(self.get_widget_uid()) {
                 match item.action() {
                     DropDownAction::Select(_, value) => {
                         nodes.write_by_field_path(path, &[LiveNode::from_value(value.clone())]);
@@ -371,7 +371,7 @@ impl Widget for DropDown {
                     _ => ()
                 }
             }
-            DataBinding::ToWidgets(nodes) => {
+            DataBinding::ToWidgets{nodes}=> {
                 if let Some(value) = nodes.read_by_field_path(path) {
                     if let Some(index) = self.values.iter().position(|v| v == value){
                         if self.selected_item != index{
