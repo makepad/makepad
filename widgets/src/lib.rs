@@ -56,7 +56,7 @@ pub mod widget;
 mod theme;
 
 pub use crate::{
-    data_binding::DataBinding,
+    data_binding::{DataBinding, BindMapTable, BindTabTable, BindDataTable},
     bare_window::BareWindow,
     button::*,
     frame::*,
