@@ -214,7 +214,7 @@ impl Widget for CheckBox {
     
     fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], act: &WidgetActions,) {
         match db {
-            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
+            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
                 match item.action() {
                     CheckBoxAction::Change(v) => {
                         nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Bool(v))]);
@@ -222,7 +222,7 @@ impl Widget for CheckBox {
                     _ => ()
                 }
             }
-            DataBinding::ToWidgets(nodes) => {
+            DataBinding::ToWidgets{nodes} => {
                 if let Some(value) = nodes.read_by_field_path(path) {
                     if let Some(value) = value.as_bool() {
                         self.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
