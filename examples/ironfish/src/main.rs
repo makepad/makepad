@@ -22,7 +22,6 @@ use crate::display_audio::*;
 use std::fs::File;
 use std::io::prelude::*;
 
-
 live_design!{
     registry AudioComponent::*;
     registry Widget::*;
@@ -117,7 +116,7 @@ live_design!{
         }
     }
     
-    FishButton = <Button>{
+    FishButton = <Button> {
         label: {
             text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}}
             fn get_color(self) -> vec4 {
@@ -299,7 +298,10 @@ live_design!{
                     return sdf.result
                 }
             }
-            label_text: {text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_TEXT_H2)}
+            label_text: {
+                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}},
+                color: (COLOR_TEXT_H2)
+            }
             walk: {margin: {top: 3, right: 0, bottom: 5, left: 0}}
             label_walk: {
                 margin: {left: 23.0, top: 0, bottom: 0, right: 0}
@@ -309,11 +311,13 @@ live_design!{
     
     InstrumentDropdown = <ElementBox> {
         layout: {align: {y: 0.5}, padding: 0, flow: Right}
-        label = <Label> {walk: {width: Fit, margin: {right: 5}}, label: {
-            color: (COLOR_TEXT_H2)
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}},
-            color: (COLOR_TEXT_H2)
-        }}
+        label = <Label> {
+            walk: {width: Fit, margin: {right: 5}},
+            label: {
+                color: (COLOR_TEXT_H2)
+                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}},
+            }
+        }
         walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0}}
         dropdown = <FishDropDown> {}
     }
@@ -432,7 +436,10 @@ live_design!{
         walk: {width: Fill, height: Fit}
         layout: {padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
         label = <Label> {
-            label: {text_style: {font_size: (FONT_SIZE_H1), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_TEXT_H1)}
+            label: {
+                text_style: {font_size: (FONT_SIZE_H1), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}},
+                color: (COLOR_TEXT_H1)
+            }
             text: "replace me!"
         }
     }
@@ -473,8 +480,6 @@ live_design!{
                 scale = <InstrumentBipolarSlider> {
                     slider = {
                         slider: {line_color: (COLOR_TOUCH)}
-                        slider: {line_color: (COLOR_TOUCH)}
-                        slider: {line_color: (COLOR_TOUCH)}
                         min: -1.0
                         max: 1.0
                         label: "Scale"
@@ -511,7 +516,7 @@ live_design!{
             }
         }
     }
-
+    
     SequencerPanel = <FishPanel> {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
         walk: {width: Fill, height: Fill}
@@ -578,10 +583,8 @@ live_design!{
                     dropdown = {
                         layout: {align: {x: 0.0, y: 0.0}}
                         walk: {width: Fill, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
-                        display: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
-                        bind_enum: "RootNote"
-                        bind: "sequencer.rootnote"
-                        items: ["A", "Asharp", "B", "C", "Csharp", "D", "Dsharp", "E", "F", "Fsharp", "G", "Gsharp"]
+                        labels: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
+                        values: [A, Asharp, B, C, Csharp, D, Dsharp, E, F, Fsharp, G, Gsharp]
                     }
                 }
                 
@@ -591,10 +594,8 @@ live_design!{
                     dropdown = {
                         layout: {align: {x: 0.0, y: 0.0}}
                         walk: {width: Fill, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
-                        items: ["Minor", "Major", "Dorian", "Pentatonic"]
-                        bind: "sequencer.scale"
-                        bind_enum: "MusicalScale"
-                        display: ["Minor", "Major", "Dorian", "Pentatonic"]
+                        labels: ["Minor", "Major", "Dorian", "Pentatonic"]
+                        values: [Minor, Major, Dorian, Pentatonic]
                     }
                 }
                 
@@ -602,7 +603,6 @@ live_design!{
                     walk: {width: Fit, height: Fill, margin: 5}
                     layout: {align: {x: 0.0, y: 0.5}}
                     checkbox = {
-                        bind: "arp.enabled",
                         label: "Arp"
                     }
                 }
@@ -638,7 +638,6 @@ live_design!{
             balance = <InstrumentBipolarSlider> {
                 slider = {
                     slider: {line_color: (COLOR_MIX)}
-                    bind: "osc_balance"
                     min: 0.0
                     max: 1.0
                     label: "Oscillator 1/2 Balance"
@@ -650,7 +649,6 @@ live_design!{
                 noise = <InstrumentSlider> {
                     slider = {
                         slider: {line_color: (COLOR_MIX)}
-                        bind: "noise"
                         min: 0.0
                         max: 1.0
                         label: "Noise"
@@ -659,7 +657,6 @@ live_design!{
                 sub = <InstrumentSlider> {
                     slider = {
                         slider: {line_color: (COLOR_MIX)}
-                        bind: "sub_osc"
                         min: 0.0
                         max: 1.0
                         label: "Sub"
@@ -668,7 +665,6 @@ live_design!{
                 porta = <InstrumentSlider> {
                     slider = {
                         slider: {line_color: (COLOR_MIX)}
-                        bind: "portamento"
                         min: 0.0
                         max: 1.0
                         label: "Portamento"
@@ -686,7 +682,6 @@ live_design!{
             delaysend = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "fx.delaysend"
                     min: 0.0
                     max: 1.0
                     label: "Delay Send"
@@ -695,7 +690,6 @@ live_design!{
             delayfeedback = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "fx.delayfeedback"
                     min: 0.0
                     max: 1.0
                     label: "Delay Feedback"
@@ -705,7 +699,6 @@ live_design!{
             delaydifference = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "fx.difference"
                     min: 0.0
                     max: 1.0
                     label: "Delay Stereo"
@@ -714,11 +707,9 @@ live_design!{
             delaycross = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "fx.cross"
                     min: 0.0
                     max: 1.0
                     label: "Delay Cross"
-                    
                 }
             }
         }
@@ -732,7 +723,6 @@ live_design!{
             chorusmix = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "chorus.mix"
                     min: 0.0
                     max: 1.0
                     label: "Mix"
@@ -741,17 +731,14 @@ live_design!{
             chorusdelay = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "chorus.mindelay"
                     min: 0.0
                     max: 1.0
                     label: "Pre"
-                    
                 }
             }
             chorusmod = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "chorus.moddepth"
                     min: 0.0
                     max: 1.0
                     label: "Depth"
@@ -760,7 +747,6 @@ live_design!{
             chorusrate = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "chorus.rate"
                     min: 0.0
                     max: 1.0
                     label: "Rate"
@@ -770,22 +756,18 @@ live_design!{
             chorusphase = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "chorus.phasediff"
                     min: 0.0
                     max: 1.0
                     label: "Phasing"
-                    
                 }
             }
             
             chorusfeedback = <InstrumentBipolarSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
-                    bind: "chorus.feedback"
                     min: -1
                     max: 1
                     label: "Feedback"
-                    
                 }
             }
         }
@@ -799,7 +781,6 @@ live_design!{
             rate = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_LFO)}
-                    bind: "lfo.rate"
                     min: 0.0
                     max: 1.0
                     label: "Rate"
@@ -808,7 +789,6 @@ live_design!{
             lfoamount = <InstrumentBipolarSlider> {
                 slider = {
                     slider: {line_color: (COLOR_LFO)}
-                    bind: "filter1.lfo_amount"
                     min: -1.0
                     max: 1.0
                     label: "LFO -> Cutoff"
@@ -818,7 +798,6 @@ live_design!{
                 walk: {height: Fit, margin: 3.0}
                 layout: {flow: Down, spacing: 0.0, align: {x: 0.0, y: 1.0}}
                 checkbox = {
-                    bind: "lfo.synconkey",
                     label: "Key sync"
                 }
             }
@@ -833,11 +812,6 @@ live_design!{
             vol_env = <EnvelopePanel> {
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fill}
-                attack = {slider = {bind: "volume_envelope.a"}}
-                hold = {slider = {bind: "volume_envelope.h"}}
-                decay = {slider = {bind: "volume_envelope.d"}}
-                sustain = {slider = {bind: "volume_envelope.s"}}
-                release = {slider = {bind: "volume_envelope.r"}}
             }
         }
     }
@@ -850,17 +824,10 @@ live_design!{
             mod_env = <EnvelopePanel> {
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fit}
-                
-                attack = {slider = {bind: "mod_envelope.a"}}
-                hold = {slider = {bind: "mod_envelope.h"}}
-                decay = {slider = {bind: "mod_envelope.d"}}
-                sustain = {slider = {bind: "mod_envelope.s"}}
-                release = {slider = {bind: "mod_envelope.r"}}
             }
             modamount = <InstrumentBipolarSlider> {
                 slider = {
                     slider: {line_color: (COLOR_ENV)}
-                    bind: "filter1.envelope_amount"
                     min: -1.0
                     max: 1.0
                     label: "Mod -> Cutoff"
@@ -874,19 +841,17 @@ live_design!{
         body = {
             layout: {flow: Down}
             walk: {width: Fill, height: Fill}
-            <InstrumentDropdown> {
+            filter_type = <InstrumentDropdown> {
                 walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
                 dropdown = {
-                    bind_enum: "FilterType"
-                    bind: "filter1.filter_type"
-                    items: ["LowPass", "HighPass", "BandPass", "BandReject"]
+                    labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
+                    values: [LowPass, HighPass, BandPass, BandReject]
                 }
             }
             
             cutoff = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FILTER)}
-                    bind: "filter1.cutoff"
                     min: 0.0
                     max: 1.0
                     label: "Cutoff"
@@ -896,7 +861,6 @@ live_design!{
             resonance = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FILTER)}
-                    bind: "filter1.resonance"
                     min: 0.0
                     max: 1.0
                     label: "Resonance"
@@ -912,27 +876,23 @@ live_design!{
                 layout: {flow: Down}
                 walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
                 dropdown = {
-                    bind_enum: "OscType"
-                    bind: "osc1.osc_type"
-                    items: ["DPWSawPulse", "BlampTri", "Pure", "SuperSaw", "HyperSaw", "HarmonicSeries"]
-                    display: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
+                    values: [DPWSawPulse, BlampTri, Pure, SuperSaw, HyperSaw, HarmonicSeries]
+                    labels: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
                 }
-                <Frame> {
+                supersaw = <Frame> {
                     layout: {flow: Right}
                     walk: {width: Fill, height: Fit}
-                    detune = <InstrumentSlider> {
+                    spread = <InstrumentSlider> {
                         slider = {
                             slider: {line_color: (COLOR_OSC)}
-                            bind: "supersaw1.spread"
                             min: 0.0
                             max: 1.0
                             label: "Spread"
                         }
                     }
-                    mix = <InstrumentSlider> {
+                    diffuse = <InstrumentSlider> {
                         slider = {
                             slider: {line_color: (COLOR_OSC)}
-                            bind: "supersaw1.diffuse"
                             min: 0.0
                             max: 1.0
                             label: "Diffuse"
@@ -947,7 +907,6 @@ live_design!{
                 transpose = <InstrumentBipolarSlider> {
                     slider = {
                         slider: {line_color: (COLOR_OSC)}
-                        bind: "osc1.transpose"
                         min: -24.0
                         max: 24.0
                         label: "Transpose"
@@ -957,7 +916,6 @@ live_design!{
                 detune = <InstrumentBipolarSlider> {
                     slider = {
                         slider: {line_color: (COLOR_OSC)}
-                        bind: "osc1.detune"
                         min: -1.0
                         max: 1.0
                         label: "Detune"
@@ -971,7 +929,6 @@ live_design!{
                 harmonic = <InstrumentSlider> {
                     slider = {
                         slider: {line_color: (COLOR_OSC)}
-                        bind: "osc1.harmonic"
                         min: 0
                         max: 1.0
                         label: "Harmonic"
@@ -980,7 +937,6 @@ live_design!{
                 harmonicenv = <InstrumentBipolarSlider> {
                     slider = {
                         slider: {line_color: (COLOR_OSC)}
-                        bind: "osc1.harmonicenv"
                         min: -1.0
                         max: 1.0
                         label: "Mod -> Harmonic"
@@ -989,7 +945,6 @@ live_design!{
                 harmoniclfo = <InstrumentBipolarSlider> {
                     slider = {
                         slider: {line_color: (COLOR_OSC)}
-                        bind: "osc1.harmoniclfo"
                         min: -1.0
                         max: 1.0
                         label: "LFO -> Harmonic"
@@ -1083,21 +1038,9 @@ live_design!{
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         osc1 = <OscPanel> {
                             label = {label = {text: "Oscillator 1"}}
-                            body = {
-                                type = {dropdown = {bind: "osc1.osc_type"}}
-                                threecol = {harmonic = {slider = {bind: "osc1.harmonic"}}}
-                                twocol = {transpose = {slider = {bind: "osc1.transpose"}}}
-                                twocol = {detune = {slider = {bind: "osc1.detune"}}}
-                            }
                         }
-                        <OscPanel> {
+                        osc2 = <OscPanel> {
                             label = {label = {text: "Oscillator 2"}}
-                            body = {
-                                type = {dropdown = {bind: "osc2.osc_type"}}
-                                threecol = {harmonic = {slider = {bind: "osc2.harmonic"}}}
-                                twocol = {transpose = {slider = {bind: "osc2.transpose"}}}
-                                twocol = {detune = {slider = {bind: "osc2.detune"}}}
-                            }
                         }
                     }
                     <Frame> {
@@ -1148,10 +1091,11 @@ pub struct App {
     ui: FrameRef,
     audio_graph: AudioGraph,
     window: BareWindow,
+    
 }
 
-impl LiveHook for App{
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize>{
+impl LiveHook for App {
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> Option<usize> {
         //_nodes.debug_print(0,100);
         None
     }
@@ -1167,27 +1111,92 @@ impl App {
         crate::sequencer::live_design(cx);
     }
     
-    pub fn data_bind(&mut self, cx: &mut Cx, db:&mut DataBinding, act:&WidgetActions){
+    pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions) {
         // this one should read AND write depending on what db is set to
-
-        self.ui.get_slider(id!(touch.scale.slider)).bind_to(cx, db, id!(touch.scale), act);
-        self.ui.get_slider(id!(touch.curve.slider)).bind_to(cx, db, id!(touch.curve), act);
-        self.ui.get_slider(id!(touch.offset.slider)).bind_to(cx, db, id!(touch.offset), act);
-        self.ui.get_slider(id!(touch.touchamount.slider)).bind_to(cx, db, id!(filter1.touch_amount), act);
+        let ui = self.ui.clone();
         
-        self.ui.get_check_box(id!(playpause.checkbox)).bind_to(cx, db, id!(sequencer.playing), act);
+        //let t = profile_start();
+        let bind_table:&[(&[LiveId], &[LiveId])] = &[
+            // Touch
+            (id!(touch.scale.slider), id!(touch.scale)),
+            (id!(touch.curve.slider), id!(touch.curve)),
+            (id!(touch.offset.slider), id!(touch.offset)),
+            (id!(touch.touchamount.slider), id!(filter1.touch_amount)),
+            // sequencer
+            (id!(playpause.checkbox), id!(sequencer.playing)),
+            (id!(speed.slider), id!(sequencer.bpm)),
+            (id!(rootnote.dropdown), id!(sequencer.rootnote)),
+            (id!(scaletype.dropdown), id!(sequencer.scale)),
+            (id!(arp.checkbox), id!(arp.enabled)),
+            // Mixer panel
+            (id!(balance.slider), id!(osc_balance)),
+            (id!(noise.slider), id!(noise)),
+            (id!(sub.slider), id!(sub_osc)),
+            (id!(porta.slider), id!(portamento)),
+            // DelayFX Panel
+            (id!(delaysend.slider), id!(fx.delaysend)),
+            (id!(delayfeedback.slider), id!(fx.delayfeedback)),
+            (id!(delaydifference.slider), id!(fx.difference)),
+            (id!(delaycross.slider), id!(fx.cross)),
+            // Chorus panel
+            (id!(chorusmix.slider), id!(chorus.mix)),
+            (id!(chorusdelay.slider), id!(chorus.mindelay)),
+            (id!(chorusmod.slider), id!(chorus.moddepth)),
+            (id!(chorusrate.slider), id!(chorus.rate)),
+            (id!(chorusphase.slider), id!(chorus.phasediff)),
+            (id!(chorusfeedback.slider), id!(chorus.feedback)),
+            //LFO Panel
+            (id!(rate.slider), id!(lfo.rate)),
+            (id!(lfoamount.slider), id!(filter1.lfo_amount)),
+            (id!(sync.checkbox), id!(lfo.synconkey)),
+            //Volume Envelope
+            (id!(vol_env.attack.slider), id!(volume_envelope.a)),
+            (id!(vol_env.hold.slider), id!(volume_envelope.h)),
+            (id!(vol_env.decay.slider), id!(volume_envelope.d)),
+            (id!(vol_env.sustain.slider), id!(volume_envelope.s)),
+            (id!(vol_env.release.slider), id!(volume_envelope.r)),
+            //Mod Envelope
+            (id!(mod_env.attack.slider), id!(mod_envelope.a)),
+            (id!(mod_env.hold.slider), id!(mod_envelope.h)),
+            (id!(mod_env.decay.slider), id!(mod_envelope.d)),
+            (id!(mod_env.sustain.slider), id!(mod_envelope.s)),
+            (id!(mod_env.release.slider), id!(mod_envelope.r)),
+            (id!(modamount.slider), id!(filter1.envelope_amount)),
+            // Filter panel
+            (id!(filter_type.dropdown), id!(filter1.filter_type)),
+            (id!(cutoff), id!(filter1.cutoff)),
+            (id!(resonance), id!(filter1.resonance)),
+            // Osc1 panel
+            (id!(osc1.supersaw.spread.slider), id!(supersaw1.spread)),
+            (id!(osc1.supersaw.diffuse.slider), id!(supersaw1.diffuse)),
+            
+            (id!(osc1.type.dropdown), id!(osc1.osc_type)),
+            (id!(osc1.transpose.slider), id!(osc1.transpose)),
+            (id!(osc1.detune.slider), id!(osc1.detune)),
+            (id!(osc1.harmonic.slider), id!(osc1.harmonic)),
+            (id!(osc1.harmonicenv.slider), id!(osc1.harmonicenv)),
+            (id!(osc1.harmoniclfo.slider), id!(osc1.harmoniclfo)),
+            // Osc2 panel
+            (id!(osc2.type.dropdown), id!(osc2.osc_type)),
+            (id!(osc2.transpose.slider), id!(osc2.transpose)),
+            (id!(osc2.detune.slider), id!(osc2.detune)),
+            (id!(osc2.harmonic.slider), id!(osc2.harmonic)),
+            (id!(osc2.harmonicenv.slider), id!(osc2.harmonicenv)),
+            (id!(osc2.harmoniclfo.slider), id!(osc2.harmoniclfo)),
+        ];
+        for bind in bind_table{
+            ui.get_widget(bind.0).bind_to(cx, db, bind.1, act);
+        }
 
-        self.ui.get_slider(id!(speed.slider)).bind_to(cx, db, id!(sequencer.bpm), act);
-
-        self.ui.get_slider(id!(rootnote.dropdown)).bind_to(cx, db, id!(sequencer.rootnote), act);
-        
+        //profile_end(t);
         //let disp = self.ui.get_frame(id!(mod_env.display));
         
-        /*if let Some(nodes) = db.from_widgets(){
+        if let Some(nodes) = db.from_widgets(){
+            //nodes.debug_print(0,100);
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             ironfish.settings.apply_over(cx, &nodes);
-        }*/
-        // this updates the read value to the envelope 
+        }
+        // this updates the read value to the envelope
         //disp.bind_apply(cx, db, id!(mod_envelope.a), id!(bg.attack));
     }
     

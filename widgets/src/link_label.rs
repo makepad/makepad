@@ -2,9 +2,8 @@
 use {
     crate::{
         makepad_draw_2d::*,
-        button_logic::*,
         widget::*,
-        button::Button
+        button::{Button, ButtonAction}
     }
 };
 
