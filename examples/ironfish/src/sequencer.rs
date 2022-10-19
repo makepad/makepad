@@ -94,7 +94,7 @@ pub struct SeqButton {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct SeqButtonId(pub LiveId);
 
-#[derive(Live, Widget)]
+#[derive(Live)]
 #[live_design_fn(widget_factory!(Sequencer))]
 pub struct Sequencer {
     #[rust] area: Area,
@@ -121,14 +121,8 @@ impl LiveHook for Sequencer {
 }
 
 #[derive(Clone, WidgetAction)]
-pub enum SeqButtonAction {
-    Change(bool),
-    None
-}
-
-#[derive(Clone, WidgetAction)]
 pub enum SequencerAction {
-    Change(usize, usize, bool),
+    Change,
     None
 }
 
@@ -142,12 +136,16 @@ impl SeqButton {
         self.toggle_state(cx, is, animate, id!(active.on), id!(active.off))
     }
     
+    fn is_active(&self, cx: &Cx) -> bool {
+        self.state.is_in_state(cx, id!(active.on))
+    }
+    
     pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         sweep_area: Area,
-        dispatch_action: &mut dyn FnMut(&mut Cx, SeqButtonAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, SequencerAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
             self.button.area().redraw(cx);
@@ -167,11 +165,11 @@ impl SeqButton {
             Hit::FingerSweepIn(_) => {
                 if self.state.is_in_state(cx, id!(active.on)) {
                     self.animate_state(cx, id!(active.off));
-                    dispatch_action(cx, SeqButtonAction::Change(false));
+                    dispatch_action(cx, SequencerAction::Change);
                 }
                 else {
                     self.animate_state(cx, id!(active.on));
-                    dispatch_action(cx, SeqButtonAction::Change(true));
+                    dispatch_action(cx, SequencerAction::Change);
                     
                 }
                 self.animate_state(cx, id!(hover.on));
@@ -220,10 +218,6 @@ impl Sequencer {
         self.buttons.retain_visible();
     }
     
-    pub fn area(&mut self) -> Area {
-        self.area
-    }
-    
     pub fn _set_key_focus(&self, cx: &mut Cx) {
         cx.set_key_focus(self.area);
     }
@@ -234,27 +228,8 @@ impl Sequencer {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, SequencerAction),
     ) {
-        let mut actions = Vec::new();
         for (btn_id, button) in self.buttons.iter_mut() {
-            button.handle_event_fn(cx, event, self.area, &mut | _, action | {
-                actions.push((*btn_id, action))
-            });
-        }
-        
-        for (btn_id, action) in actions {
-            let i = btn_id.0.0 as usize;
-            let x = i % self.grid_x;
-            let y = i / self.grid_x;
-            match action {
-                SeqButtonAction::Change(active) => {
-                    dispatch_action(cx, SequencerAction::Change(x, y, active));
-                }
-                _ => ()
-            }
-        }
-        
-        match event {
-            _ => ()
+            button.handle_event_fn(cx, event, self.area, dispatch_action);
         }
         
         match event.hits(cx, self.area) {
@@ -265,6 +240,84 @@ impl Sequencer {
             _ => ()
         }
     }
+    
+    pub fn get_button_state(&self, cx: &Cx) -> Vec<u32> {
+        let mut steps = Vec::new();
+        steps.resize(self.grid_y, 0u32);
+        for (btn_id, button) in self.buttons.iter() {
+            let active = button.is_active(cx);
+            let i = btn_id.0.0 as usize;
+            let x = i % self.grid_x;
+            let y = i / self.grid_x;
+            if active {steps[x] |= 1 << y};
+        }
+        steps
+    }
+    
+    pub fn set_button_state(&mut self, cx: &mut Cx, steps: &[u32]) {
+        if steps.len() != self.grid_x {
+            panic!()
+        }
+        for (btn_id, button) in self.buttons.iter_mut() {
+            let i = btn_id.0.0 as usize;
+            let x = i % self.grid_x;
+            let y = i / self.grid_x;
+            let bit = 1 << y;
+            let active = steps[x] & bit == bit;
+            button.set_is_active(cx, active, Animate::Yes);
+        }
+    }
+}
+
+
+impl Widget for Sequencer {
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+    }
+    
+    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    
+    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let uid = self.get_widget_uid();
+        self.handle_event_fn(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
+    
+    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], actions: &WidgetActions) {
+        match db {
+            DataBinding::FromWidgets(nodes) => if let Some(_) = actions.find_single_action(self.get_widget_uid()) {
+                let steps = self.get_button_state(cx);
+                let mut array = LiveNodeVec::new();
+                array.open_array(LiveId(0));
+                for step in steps{
+                    array.push(LiveNode::from_value(LiveValue::Int64(step as i64)));
+                }
+                array.close();
+                nodes.write_by_field_path(path, &array);
+            }
+            DataBinding::ToWidgets(nodes) => {
+                if let Some(mut index) = nodes.child_by_field_path(0,path) {
+                    let mut steps = Vec::new();
+                    if nodes[index].is_array(){
+                        index += 1;
+                        while !nodes[index].is_close(){
+                            steps.push(nodes[index].value.as_int().unwrap_or(0) as u32);
+                            index += 1;
+                        }
+                    }
+                    self.set_button_state(cx, &steps);
+                }
+            }
+        }
+    }
 }
 
 
@@ -272,6 +325,7 @@ impl Sequencer {
 pub struct SequencerRef(WidgetRef);
 
 impl SequencerRef {
+    /*
     pub fn buttons_clicked(&self, actions: &WidgetActions) -> Vec<(usize, usize, bool)> {
         let mut btns = Vec::new();
         for item in actions {
@@ -301,5 +355,7 @@ impl SequencerRef {
                 }
             }
         }
-    }
+    }*/
 }
+
+

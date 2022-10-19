@@ -76,6 +76,7 @@ pub use crate::{
         WidgetDrawApi,
         CreateAt,
         WidgetActions,
+        WidgetActionsApi,
         WidgetActionItem,
         WidgetRef,
         Widget,
