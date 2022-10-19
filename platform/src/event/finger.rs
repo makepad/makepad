@@ -13,7 +13,7 @@ use {
             LiveId,
             LiveModuleId,
             LiveTypeInfo,
-            LiveNodeSlice
+            LiveNodeSliceApi
         },
         live_traits::{LiveNew, LiveHook, LiveApplyValue, LiveApply, ApplyFrom},
         makepad_derive_live::*,
