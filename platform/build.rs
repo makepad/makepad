@@ -22,4 +22,11 @@ fn main() {
         println!("cargo:rustc-link-lib=static=metal_xpc");
         println!("cargo:rerun-if-changed=src/os/apple/metal_xpc.m");
     }
+    #[cfg(target_arch = "wasm32")]
+    {
+    }
+    #[cfg(any(target_os = "linux", target_os="windows"))]
+    {
+        panic!("Linux and windows support coming soon")
+    }
 }
