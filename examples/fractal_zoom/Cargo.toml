@@ -5,6 +5,8 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad fractal zoom example"
 license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "Ev1VQ4n2kANfPK7UwYzlSZYv3OU="
 
 [dependencies]
