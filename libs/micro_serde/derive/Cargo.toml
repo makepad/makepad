@@ -1,6 +1,6 @@
 [package]
 name = "makepad-micro-serde-derive"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad micro serde derive macro"
@@ -11,5 +11,5 @@ metadata.makepad-auto-version = "q3Pi3uS2uNtdZnKsf5Nt65vZWr8="
 proc-macro = true
 
 [dependencies]
-makepad-micro-proc-macro = { path = "../../micro_proc_macro", version = "0.1.0" }
+makepad-micro-proc-macro = { path = "../../micro_proc_macro", version = "0.3.0" }
 
