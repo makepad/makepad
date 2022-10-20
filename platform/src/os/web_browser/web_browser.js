@@ -297,7 +297,7 @@ export class WasmWebBrowser extends WasmBridge {
             web_socket._queue.push(this.clone_data_u8(args.data))
         }
         else {
-            web_socket.send(this.view_data_u8(args.data));
+            web_socket.send(this.clone_data_u8(args.data));
         }
         this.free_data_u8(args.data);
     }
