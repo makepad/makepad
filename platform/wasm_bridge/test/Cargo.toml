@@ -1,8 +1,0 @@
-[package]
-name = "wasm_bridge_test"
-version = "0.1.0"
-edition = "2018"
-
-[dependencies]
-makepad-wasm-bridge = { path = "../", version = "0.1" }
-

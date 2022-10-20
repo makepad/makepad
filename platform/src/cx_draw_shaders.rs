@@ -8,12 +8,15 @@ use {
         },
     },
     crate::{
+        makepad_live_compiler::{LiveValue, LiveFieldKind, LiveNode, LivePtr, LiveNodeSliceApi},
         makepad_shader_compiler::*,
         makepad_live_id::*,
         live_traits::*,
-        draw_vars::DrawVars,
-        platform::{
-            CxPlatformDrawShader,
+        draw_vars::{
+            DrawVars,
+        },
+        os::{
+            CxOsDrawShader,
         },
         cx::Cx
     }
@@ -23,8 +26,6 @@ use {
 pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
     pub debug_id: Option<LiveId>,
-    pub no_h_scroll: bool,
-    pub no_v_scroll: bool
 }
 
 impl CxDrawShaderOptions {
@@ -38,17 +39,11 @@ impl CxDrawShaderOptions {
         while let Some(node_index) = node_iter {
             let node = &doc.nodes[node_index];
             match node.id {
-                id!(draw_call_group) => if let LiveValue::Id(id) = node.value {
+                live_id!(draw_call_group) => if let LiveValue::Id(id) = node.value {
                     ret.draw_call_group = id;
                 }
-                id!(debug_id) => if let LiveValue::Id(id) = node.value {
+                live_id!(debug_id) => if let LiveValue::Id(id) = node.value {
                     ret.debug_id = Some(id);
-                }
-                id!(no_h_scroll) => if let LiveValue::Bool(v) = node.value {
-                    ret.no_h_scroll = v;
-                }
-                id!(no_v_scroll) => if let LiveValue::Bool(v) = node.value {
-                    ret.no_v_scroll = v;
                 }
                 _ => ()
             }
@@ -57,7 +52,7 @@ impl CxDrawShaderOptions {
         ret
     }
     
-    pub fn appendable_drawcall(&self, other: &Self) -> bool {
+    pub fn _appendable_drawcall(&self, other: &Self) -> bool {
         self == other
     }
 }
@@ -71,7 +66,7 @@ pub struct CxDrawShaderItem {
 #[derive(Default)]
 pub struct CxDrawShaders {
     pub shaders: Vec<CxDrawShader>,
-    pub platform: Vec<CxPlatformDrawShader>,
+    pub platform: Vec<CxOsDrawShader>,
     pub generation: u64,
     pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
     pub compile_set: BTreeSet<DrawShaderPtr>,
@@ -161,7 +156,9 @@ pub struct DrawShaderInputs {
 pub enum DrawShaderInputPacking {
     Attribute,
     UniformsGLSL,
+    #[allow(dead_code)]
     UniformsHLSL,
+    #[allow(dead_code)]
     UniformsMetal
 }
 
@@ -176,11 +173,11 @@ pub struct DrawShaderInput {
 }
 
 
-#[cfg(any(target_os = "linux", target_arch = "wasm32", test))]
+#[cfg(any(target_os = "linux", target_arch = "wasm32"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL;
 #[cfg(any(target_os = "macos", test))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows"))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
 
 impl DrawShaderInputs {
@@ -283,7 +280,8 @@ pub struct CxDrawShaderMapping {
     pub instance_enums: Vec<usize>,
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
-    pub live_uniforms_buf: Vec<f32>
+    pub draw_clip: Option<usize>,
+    pub live_uniforms_buf: Vec<f32>,
 }
 
 impl CxDrawShaderMapping {
@@ -303,6 +301,7 @@ impl CxDrawShaderMapping {
         let mut instance_enums = Vec::new();
         let mut rect_pos = None;
         let mut rect_size = None;
+        let mut draw_clip = None;
         
         for field in &draw_shader_def.fields {
             let ty = field.ty_expr.ty.borrow().as_ref().unwrap().clone();
@@ -311,11 +310,14 @@ impl CxDrawShaderMapping {
                     geometries.push(field.ident.0, ty, None);
                 }
                 DrawShaderFieldKind::Instance {var_def_ptr, live_field_kind, ..} => {
-                    if field.ident.0 == id!(rect_pos) {
+                    if field.ident.0 == live_id!(rect_pos) {
                         rect_pos = Some(instances.total_slots);
                     }
-                    if field.ident.0 == id!(rect_size) {
+                    if field.ident.0 == live_id!(rect_size) {
                         rect_size = Some(instances.total_slots);
+                    }
+                    if field.ident.0 == live_id!(draw_clip) {
+                        draw_clip = Some(instances.total_slots);
                     }
                     if var_def_ptr.is_some() {
                         var_instances.push(field.ident.0, ty.clone(), None,);
@@ -330,16 +332,16 @@ impl CxDrawShaderMapping {
                 }
                 DrawShaderFieldKind::Uniform {block_ident, ..} => {
                     match block_ident.0 {
-                        id!(draw) => {
+                        live_id!(draw) => {
                             draw_uniforms.push(field.ident.0, ty, None);
                         }
-                        id!(view) => {
+                        live_id!(view) => {
                             view_uniforms.push(field.ident.0, ty, None);
                         }
-                        id!(pass) => {
+                        live_id!(pass) => {
                             pass_uniforms.push(field.ident.0, ty, None);
                         }
-                        id!(user) => {
+                        live_id!(user) => {
                             user_uniforms.push(field.ident.0, ty, None);
                         }
                         _ => ()
@@ -364,6 +366,9 @@ impl CxDrawShaderMapping {
         view_uniforms.finalize();
         pass_uniforms.finalize();
         
+        // fill up the default values for the user uniforms
+        
+        
         // ok now the live uniforms
         for (value_node_ptr, ty) in draw_shader_def.all_live_refs.borrow().iter() {
             live_uniforms.push(LiveId(0), ty.clone(), Some(value_node_ptr.0));
@@ -386,10 +391,11 @@ impl CxDrawShaderMapping {
             textures,
             rect_pos,
             rect_size,
+            draw_clip,
         }
     }
     
-    pub fn update_live_uniforms(&mut self, cx: &mut Cx, from: ApplyFrom) {
+    pub fn update_live_and_user_uniforms(&mut self, cx: &mut Cx, from: ApplyFrom) {
         // and write em into the live_uniforms buffer
         let live_registry = cx.live_registry.clone();
         let live_registry = live_registry.borrow();

@@ -13,12 +13,16 @@ pub mod live_expander;
 pub mod live_ptr;
 pub mod live_eval;
 pub mod live_component;
+pub mod live_node_cbor;
+//pub mod live_node_cbor;
+pub mod live_node_reader;
 
 pub use makepad_math;
 pub use makepad_derive_live;
 pub use makepad_live_tokenizer;
 pub use makepad_live_tokenizer::makepad_micro_serde;
 pub use makepad_live_tokenizer::makepad_live_id;
+pub use makepad_live_id::makepad_error_log;
 
 pub use {
     makepad_live_tokenizer::{
@@ -50,6 +54,18 @@ pub use {
         live_node_vec::{
             LiveNodeSlice,
             LiveNodeVec,
+            LiveNodeSliceApi,
+            LiveNodeVecApi,
+        },
+       live_node_cbor::{
+            LiveNodeSliceToCbor,
+            LiveNodeVecFromCbor
+        },/*
+        live_node_msgpack::{
+            LiveNodeSliceToMsgPack,
+            L*iveNodeVecFromMsgPack
+        },*/
+        live_node_reader::{
             LiveNodeReader,
         },
         live_node::{
@@ -68,6 +84,7 @@ pub use {
             InlineString,
             FittedString, 
             LivePropType,
+            
             //LiveTypeKind,
         },
         live_token::{TokenWithSpan, LiveToken, LiveTokenId},

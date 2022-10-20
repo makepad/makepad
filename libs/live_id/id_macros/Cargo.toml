@@ -1,0 +1,16 @@
+[package]
+name = "makepad-live-id-macros"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad live id macros"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "HU5qh4093eOphu8AD60mdMKCdlQ="
+
+[lib]
+proc-macro = true
+
+[dependencies]
+makepad-micro-proc-macro = { path = "../../micro_proc_macro", version = "0.3.0" }
+
+

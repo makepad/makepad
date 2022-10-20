@@ -1,0 +1,17 @@
+[package]
+name = "makepad-example-numbers"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad numbers example"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "TgIwAzbc1zX5j_DWR1CNRcEDVNc="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "0.3.0" }
+ 
+[features]
+nightly = ["makepad-widgets/nightly"]
+

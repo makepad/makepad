@@ -1,0 +1,8 @@
+[package]
+name = "makepad-http"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad http utils"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "BefUyZMzPI0UEwpCL-pa9dV13mc="

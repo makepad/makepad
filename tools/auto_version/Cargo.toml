@@ -1,0 +1,18 @@
+[package]
+name = "makepad-auto-version"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad crate auto versioning"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "m8yBeDTFgP94sjS9iuzJbB6npak="
+
+[dependencies]
+makepad-digest = {path = "../../libs/digest", version = "0.3.0"}
+makepad-toml-parser = {path = "../../libs/toml_parser", version = "0.3.0"}
+makepad-base64 = {path = "../../libs/base64", version = "0.3.0"}
+
+[features]
+nightly=[]
