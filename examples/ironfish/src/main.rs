@@ -976,7 +976,7 @@ live_design!{
                         slider: {line_color: (COLOR_OSC)}
                         min: 0
                         max: 1.0
-                        label: "Harmonic"
+                        label: "Shift"
                     }
                 }
                 harmonicenv = <InstrumentBipolarSlider> {
@@ -984,7 +984,7 @@ live_design!{
                         slider: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
-                        label: "Mod -> Harmonic"
+                        label: "Env mod"
                     }
                 }
                 harmoniclfo = <InstrumentBipolarSlider> {
@@ -992,7 +992,7 @@ live_design!{
                         slider: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
-                        label: "LFO -> Harmonic"
+                        label: "LFO mod"
                     }
                 }
             }
