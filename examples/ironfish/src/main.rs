@@ -1037,6 +1037,7 @@ live_design!{
                     <Frame> {
                         walk: {width: Fill, height: Fit}
                         layout: {flow: Right, spacing: 2.0}
+                        /*
                         save1 = <FishButton> {text: "1"}
                         save2 = <FishButton> {text: "2"}
                         save3 = <FishButton> {text: "3"}
@@ -1044,10 +1045,10 @@ live_design!{
                         save5 = <FishButton> {text: "5"}
                         save6 = <FishButton> {text: "6"}
                         save7 = <FishButton> {text: "7"}
-                        save8 = <FishButton> {text: "8"}
+                        save8 = <FishButton> {text: "8"}*/
                         panic = <FishButton> {text: "Panic", walk: {width: Fit}}
                     }
-                }
+                } 
                 
                 layout: {flow: Right, spacing: 0.0, padding: {bottom: -50}, align: {x: 1.0, y: 0.0}}
                 walk: {margin: {left: 0, right: 5}, width: Fill, height: Fit}
@@ -1341,7 +1342,6 @@ impl App {
         // lets fetch and update the tick.
         
         
-        let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.get_button(id!(clear_grid)).clicked(&act) {
             sequencer.clear_grid(cx, &mut db);
         }
@@ -1353,7 +1353,8 @@ impl App {
         if ui.get_button(id!(grid_up)).clicked(&act) {
             sequencer.grid_up(cx, &mut db);
         }
-        
+        /*
+        let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.get_button(id!(save1)).clicked(&act) {self.preset(cx, 1, shift);}
         if ui.get_button(id!(save2)).clicked(&act) {self.preset(cx, 2, shift);}
         if ui.get_button(id!(save3)).clicked(&act) {self.preset(cx, 3, shift);}
@@ -1362,7 +1363,7 @@ impl App {
         if ui.get_button(id!(save6)).clicked(&act) {self.preset(cx, 6, shift);}
         if ui.get_button(id!(save7)).clicked(&act) {self.preset(cx, 7, shift);}
         if ui.get_button(id!(save8)).clicked(&act) {self.preset(cx, 8, shift);}
-        
+        */
         self.data_bind(cx, &mut db, &act);
     }
     
