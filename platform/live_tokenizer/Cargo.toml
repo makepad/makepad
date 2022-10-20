@@ -1,13 +1,13 @@
 [package]
 name = "makepad-live-tokenizer"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad platform live DSL tokenizer"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "KbrCkox3fpbHRfGA1_qTPSL0ouQ="
+metadata.makepad-auto-version = "Lbtw64Uajgi0s-chG0zl3iUwEJg="
 
 [dependencies]
-makepad-math = { path = "../../libs/math", version = "0.1.0" }
-makepad-micro-serde = { path = "../../libs/micro_serde", version = "0.1.0" }
-makepad-live-id = { path = "../../libs/live_id", version = "0.1.0"}
+makepad-math = { path = "../../libs/math", version = "0.3.0" }
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "0.3.0" }
+makepad-live-id = { path = "../../libs/live_id", version = "0.3.0"}

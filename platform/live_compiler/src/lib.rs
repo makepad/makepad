@@ -84,6 +84,7 @@ pub use {
             InlineString,
             FittedString, 
             LivePropType,
+            
             //LiveTypeKind,
         },
         live_token::{TokenWithSpan, LiveToken, LiveTokenId},

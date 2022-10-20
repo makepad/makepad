@@ -5,30 +5,28 @@ live_design!{
     FONT_LABEL = {
         font_size: 9.4,
         font: {
-            path: d"resources/IBMPlexSans-Text.ttf"
+            path: d"crate://self/resources/IBMPlexSans-Text.ttf"
         }
     }
-    
     
     FONT_DATA = {
         font_size: 9.4,
         font: {
-            path: d"resources/IBMPlexSans-Text.ttf"
+            path: d"crate://self/resources/IBMPlexSans-Text.ttf"
         }
     }
-    
     
     FONT_META = {
         font_size: 9.4,
         top_drop: 1.2,
         font: {
-            path: d"resources/IBMPlexSans-Text.ttf"
+            path: d"crate://self/resources/IBMPlexSans-Text.ttf"
         }
     }
     
     FONT_CODE = {
         font: {
-            path: d"resources/LiberationMono-Regular.ttf"
+            path: d"crate://self/resources/LiberationMono-Regular.ttf"
         }
         brightness: 1.1
         font_size: 9.0
