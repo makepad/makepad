@@ -1,6 +1,6 @@
 [package]
 name = "makepad-derive-widget"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad widget derive macros"
@@ -11,8 +11,8 @@ metadata.makepad-auto-version = "pc71rITfMBMDdAJabQqx2oGeTVo="
 proc-macro = true
 
 [dependencies]
-makepad-micro-proc-macro = { path = "../../libs/micro_proc_macro", version = "0.1.0" }
-makepad-live-id = { path = "../../libs/live_id", version = "0.1.0" }
+makepad-micro-proc-macro = { path = "../../libs/micro_proc_macro", version = "0.3.0" }
+makepad-live-id = { path = "../../libs/live_id", version = "0.3.0" }
 
 [features]
 default = ["nightly"]

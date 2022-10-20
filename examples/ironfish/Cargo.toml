@@ -1,6 +1,6 @@
 [package]
 name = "makepad-example-ironfish"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad ironfish example"
@@ -8,10 +8,10 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "HMVEfWglH6ETM-XrlBqp9bOYnlw="
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "0.1.0" }
-makepad-media = { path = "../../media", version = "0.1.0" }
-makepad-miniz = { path = "../../libs/miniz", version = "0.1.0" }
-makepad-base64 = { path = "../../libs/base64", version = "0.1.0" }
+makepad-widgets = { path = "../../widgets", version = "0.3.0" }
+makepad-media = { path = "../../media", version = "0.3.0" }
+makepad-miniz = { path = "../../libs/miniz", version = "0.3.0" }
+makepad-base64 = { path = "../../libs/base64", version = "0.3.0" }
 makepad-varint = {path = "../../code_editor/varint", version = "0.1.0"} 
 
 [features]
