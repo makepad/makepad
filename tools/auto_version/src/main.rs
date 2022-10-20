@@ -135,7 +135,7 @@ fn main() {
     // scan if any of a crates dependencies has a hash change, ifso, up the version
     for c in &ver_crates {
         fn any_dep_changed(c: &VerCrate, ver_crates: &[VerCrate]) -> bool {
-            //return true;
+            return true;
             if c.old_sha1 != c.new_sha1 {
                 return true
             }
@@ -153,7 +153,7 @@ fn main() {
             let version: u64 = ver.parse().unwrap();
             
             let next_version = format!("0.{}.0", version + 1);
-            //let next_version = format!("0.3.0");
+            let next_version = format!("0.3.0");
             
             patch_cargo(&c.cargo, "package.version", &next_version, write);
             patch_cargo(&c.cargo, "package.metadata.makepad-auto-version", &c.new_sha1, write);
