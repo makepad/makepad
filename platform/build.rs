@@ -1,10 +1,9 @@
-use std::process::Command;
-use std::env;
-use std::path::Path;
-
 fn main() {
     #[cfg(target_os = "macos")]
     {
+        use std::process::Command;
+        use std::env;
+        use std::path::Path;
         let out_dir = env::var("OUT_DIR").unwrap();
         
         if !Command::new("clang").args(&["src/os/apple/metal_xpc.m", "-c", "-o"])
