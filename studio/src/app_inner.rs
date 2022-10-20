@@ -142,7 +142,7 @@ impl AppInner {
         match event {
             Event::Construct => {
                 self.collab_client.send_request(CollabRequest::LoadFileTree {with_data: false});
-                self.create_code_editor_tab(
+                /*self.create_code_editor_tab(
                     cx,
                     state,
                     live_id!(content1).into(),
@@ -157,7 +157,8 @@ impl AppInner {
                     None,
                     state.file_path_join(&["examples/fractal_zoom/src/mandelbrot.rs"]),
                     true
-                );/*
+                );*/
+                /*
                 self.create_code_editor_tab(
                     cx,
                     state,

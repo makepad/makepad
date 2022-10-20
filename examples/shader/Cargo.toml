@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad shader example"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "_PRHHekkxowgpmC6S7hS630bxt8="
+metadata.makepad-auto-version = "shZoP-LMDS_D9QdOWJ-1eEmE1m4="
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "0.1.0" }
