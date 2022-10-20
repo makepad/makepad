@@ -1,6 +1,6 @@
 [package]
 name = "makepad-live-id"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad live id symbol interning"
@@ -8,5 +8,5 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "ccVxRFXDQC9D2ZGULHJIDuXc5yA="
 
 [dependencies]
-makepad-live-id-macros = { path = "id_macros", version = "0.1.0" }
-makepad-error-log = { path = "../error_log", version = "0.1.0" }
+makepad-live-id-macros = { path = "id_macros", version = "0.3.0" }
+makepad-error-log = { path = "../error_log", version = "0.3.0" }
