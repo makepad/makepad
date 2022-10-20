@@ -12,9 +12,13 @@ Makepad Studio is a prototype of an IDE that we've built using Makepad Framework
 
 Demos
 [makepad-example-fractal-zoom](https://makepad.nl/makepad/examples/fractal_zoom/src/index.html)
+
 [makepad-example-ironfish](https://makepad.nl/makepad/examples/ironfish/src/index.html)
+
 [makepad-example-simple](https://makepad.nl/makepad/examples/simple/src/index.html)
+
 [makepad-example-numbers](https://makepad.nl/makepad/examples/numbers/src/index.html)
+
 [makepad-studio](https://makepad.nl/makepad/studio/src/index.html)
 
 ### Prerequisites
