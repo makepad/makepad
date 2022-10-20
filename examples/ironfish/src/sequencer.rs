@@ -349,7 +349,6 @@ impl SequencerRef{
             db.set_updated(inner.get_widget_uid())
         }
     }
-
     
     pub fn grid_up(&self, cx:&mut Cx, db: &mut DataBinding){
         if let Some(mut inner) = self.inner_mut(){

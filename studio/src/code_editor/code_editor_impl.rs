@@ -41,8 +41,8 @@ live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawSelection= {{DrawSelection}} {
-        const GLOOPINESS: 8.
+    DrawSelection = {{DrawSelection}} {
+        const GLOOPINESS = 8.
         const BORDER_RADIUS = 2.
         
         fn vertex(self) -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
@@ -72,7 +72,7 @@ live_design!{
         }
     }
     
-    DrawIndentLine= {{DrawIndentLine}} {
+    DrawIndentLine = {{DrawIndentLine}} {
         fn pixel(self) -> vec4 {
             //return #f00;
             let thickness = 0.8 + self.dpi_dilate * 0.5;
@@ -83,11 +83,11 @@ live_design!{
         }
     }
     
-    DrawMsgLine= {{DrawMsgLine}} {
+    DrawMsgLine = {{DrawMsgLine}} {
         debug_id: my_id
-        const THICKNESS: 1.0
-        const WAVE_HEIGHT: 0.05
-        const WAVE_FREQ: 1.5
+        const THICKNESS = 1.0
+        const WAVE_HEIGHT = 0.05
+        const WAVE_FREQ = 1.5
         fn pixel(self) -> vec4 {
             let offset_y = 3.5;
             let pos2 = vec2(self.pos.x, self.pos.y + WAVE_HEIGHT * sin(WAVE_FREQ * self.pos.x * self.rect_size.x));
@@ -115,17 +115,18 @@ live_design!{
         }
     }
     
-    CodeEditorImpl= {{CodeEditorImpl}} {
+    CodeEditorImpl = {{CodeEditorImpl}} {
         scroll_bars: {
             scroll_bar_y: {smoothing: 0.15},
         }
         
         code_text: {
             //draw_depth: 1.0
-            text_style: FONT_CODE {}
+            text_style: <FONT_CODE> {}
         }
         
-        line_num_text: code_text {
+        line_num_text:  {
+            text_style: <FONT_CODE> {}
         }
         
         line_num_quad: {
@@ -168,14 +169,14 @@ live_design!{
                 default: on
                 on = {
                     from: {all: Forward {duration: 0.4}}
-                    ease: Ease::ExpDecay {d1: 0.96, d2: 0.97}
+                    ease: ExpDecay {d1: 0.96, d2: 0.97}
                     //from: {all: Exp {speed1: 0.96, speed2: 0.97}}
                     redraw: true
                     apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                 }
                 off = {
                     from: {all: Forward {duration: 0.2}}
-                    ease: Ease::ExpDecay {d1: 0.98, d2: 0.95}
+                    ease: ExpDecay {d1: 0.98, d2: 0.95}
                     //from: {all: Exp {speed1: 0.98, speed2: 0.95}}
                     redraw: true
                     apply: {zoom_out: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
@@ -264,7 +265,7 @@ impl From<BuildMsgLevel> for MsgLineLevel {
             BuildMsgLevel::Error => Self::Error,
             BuildMsgLevel::Log => Self::Log,
             BuildMsgLevel::Wait => Self::Wait,
-            BuildMsgLevel::Panic=> Self::Panic
+            BuildMsgLevel::Panic => Self::Panic
         }
     }
 }
@@ -334,7 +335,7 @@ impl CodeEditorImpl {
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
     {
         self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
-        self.line_num_width = self.text_glyph_size.x * 6.0;//+25.0;
+        self.line_num_width = self.text_glyph_size.x * 6.0; //+25.0;
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
         // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
@@ -474,7 +475,7 @@ impl CodeEditorImpl {
     pub fn reset_caret_blink(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.caret_blink_timer);
         self.caret_blink_timer = cx.start_interval(self.caret_blink_timeout);
-        self.cut_state(cx, ids!(caret.on));
+        self.cut_state(cx, id!(caret.on));
     }
     
     pub fn draw_selections(
@@ -656,7 +657,7 @@ impl CodeEditorImpl {
         
         //let mut start_y = lines_layout.start_y + origin.y;
         let scroll = cx.turtle().scroll();
-        let start_x = origin.x +scroll.x;
+        let start_x = origin.x + scroll.x;
         
         self.line_num_quad.draw_abs(cx, Rect {
             pos: origin + dvec2(scroll.x, scroll.y),
@@ -748,7 +749,7 @@ impl CodeEditorImpl {
                             pos: origin + start,
                             size: dvec2(end.x - start.x, layout.total_height + 1.0),
                         };
-                        self.msg_line_quad.draw_abs(cx,r);
+                        self.msg_line_quad.draw_abs(cx, r);
                     }
                     _ => ()
                 }
@@ -857,17 +858,17 @@ impl CodeEditorImpl {
         }
         
         if self.caret_blink_timer.is_event(event) {
-            if self.state.is_in_state(cx, ids!(caret.on)) {
-                self.animate_state(cx, ids!(caret.off));
+            if self.state.is_in_state(cx, id!(caret.on)) {
+                self.animate_state(cx, id!(caret.off));
                 dispatch_action(cx, CodeEditorAction::CursorBlink);
             }
             else {
-                self.animate_state(cx, ids!(caret.on));
+                self.animate_state(cx, id!(caret.on));
             }
         }
         
         match event.hits(cx, self.scroll_bars.area()) {
-            Hit::Trigger(te) => if te.0.iter().any(|t| t.id == live_id!(select_scroll)) { //
+            Hit::Trigger(te) => if te.0.iter().any( | t | t.id == live_id!(select_scroll)) { //
                 self.handle_select_scroll_in_trigger(cx, state, lines_layout);
             },
             Hit::FingerDown(fe) => {
@@ -1015,13 +1016,13 @@ impl CodeEditorImpl {
                 key_code: KeyCode::Alt,
                 ..
             }) => {
-                self.start_zoom_anim(cx, state, lines_layout, ids!(zoom.off));
+                self.start_zoom_anim(cx, state, lines_layout, id!(zoom.off));
             }
             Hit::KeyUp(KeyEvent {
                 key_code: KeyCode::Alt,
                 ..
             }) => {
-                self.start_zoom_anim(cx, state, lines_layout, ids!(zoom.on));
+                self.start_zoom_anim(cx, state, lines_layout, id!(zoom.on));
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
@@ -1152,7 +1153,7 @@ impl CodeEditorImpl {
             else {
                 select_scroll.at_end = true;
             }
-            cx.send_trigger(self.scroll_bars.area(), Trigger{id:live_id!(select_scroll), from:Area::Empty});
+            cx.send_trigger(self.scroll_bars.area(), Trigger {id: live_id!(select_scroll), from: Area::Empty});
         }
     }
     

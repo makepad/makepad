@@ -10,7 +10,7 @@ use {
 live_design!{
     import makepad_widgets::theme::*;
     App= {{App}} {
-        const FS_ROOT: ""
+        const FS_ROOT = ""
         inner: {
             window: {caption:"Makepad Studio", pass: {clear_color: (COLOR_BG_EDITOR)}}
             collab_client: {

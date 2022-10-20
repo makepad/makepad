@@ -157,7 +157,7 @@ impl AppInner {
                     None,
                     state.file_path_join(&["examples/fractal_zoom/src/mandelbrot.rs"]),
                     true
-                );
+                );/*
                 self.create_code_editor_tab(
                     cx,
                     state,
@@ -165,11 +165,11 @@ impl AppInner {
                     None,
                     state.file_path_join(&["examples/fractal_zoom/src/mandelbrot_simd.rs"]),
                     true
-                );
+                );*/
                 self.build_manager.init(cx, state);
             }
             Event::Draw(event) => {
-                return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx, state));
+                return self.draw(&mut Cx2d::new(cx, event), state);
             }
             _ => ()
         }
@@ -385,8 +385,9 @@ impl AppInner {
         path: UnixPathBuf,
         select: bool
     ) {
+       
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        
+
         let session_id = state.editor_state.create_session(path, &mut self.collab_client.request_sender());
         
         let tab_id = state.tabs.insert_unique(Tab {

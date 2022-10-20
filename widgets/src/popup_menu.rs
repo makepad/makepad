@@ -101,7 +101,7 @@ live_design!{
             padding: 5
         }
         bg: {
-            shape: Box,
+            shape: ShadowBox,
             radius: 4,
             color: #0
         }

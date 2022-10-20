@@ -44,7 +44,7 @@ live_design!{
             )
         }
         
-        text_style: FONT_DATA {
+        text_style: <FONT_DATA> {
             top_drop: 1.2,
         }
     }
@@ -178,12 +178,12 @@ live_design!{
     
     FileTree = {{FileTree}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
-        file_node: FileTreeNode {
+        file_node: <FileTreeNode> {
             is_folder: false,
             bg: {is_folder: 0.0}
             name: {is_folder: 0.0}
         }
-        folder_node: FileTreeNode {
+        folder_node: <FileTreeNode> {
             is_folder: true,
             bg: {is_folder: 1.0}
             name: {is_folder: 1.0}

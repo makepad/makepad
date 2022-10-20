@@ -72,7 +72,7 @@ live_design!{
                 }
                 Shape::ShadowBox => {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                    sdf.blur = 30.0;
+                    sdf.blur = 20.0;
                     sdf.box(
                         self.inset.x + self.border_width,
                         self.inset.y + self.border_width,
