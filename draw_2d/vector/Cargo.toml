@@ -1,0 +1,13 @@
+[package]
+name = "makepad-vector"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad vector api"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "3GWDmuzlo49-DLW_xADwmtdViPI="
+
+[dependencies]
+
