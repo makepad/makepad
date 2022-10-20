@@ -7,7 +7,7 @@ live_design!{
     import makepad_widgets::frame::*;
     registry Widget::*;
     
-    const SLIDE_WIDTH: 800
+    const SLIDE_WIDTH = 800
     
     Body = <Label> {
         label: {

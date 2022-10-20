@@ -11,10 +11,10 @@ live_design!{
     import makepad_draw_2d::shader::std::*;
     import crate::theme::*;
     
-    LinkLabel= {{LinkLabel}} {
+    LinkLabel = {{LinkLabel}} {
         button: {
             bg: {
-                const THICKNESS: 0.8
+                const THICKNESS = 0.8
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     let offset_y = 1.0
@@ -28,7 +28,7 @@ live_design!{
                 }
             }
             label: {
-                text_style:FONT_META{}
+                text_style: <FONT_META> {}
                 fn get_color(self) -> vec4 {
                     return mix(
                         mix(

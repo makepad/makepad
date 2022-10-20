@@ -20,7 +20,7 @@ live_design!{
             layout: {
                 flow: Down
             },
-            windows_buttons =? <Solid> {
+            windows_buttons = <Solid> {
                 bg: {color: (COLOR_BG_APP)}
                 walk:{height: 29},
                 caption_label = <Frame> {
