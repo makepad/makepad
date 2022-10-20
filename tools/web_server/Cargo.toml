@@ -5,7 +5,9 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad web server"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "n_STadzu8E_TkY6kTN9O5_Kk7ss="
 
 [dependencies]
 makepad-http = { path = "http", version = "0.3.0" }
