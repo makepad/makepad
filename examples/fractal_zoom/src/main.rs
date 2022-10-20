@@ -11,20 +11,13 @@ mod mandelbrot_simd;
 live_design!{
     import makepad_widgets::frame::*;
     registry Widget::*;
-    App= {{App}} {
-        frame: {
+    App = {{App}} {
+        ui: {
             walk:{width: Fill, height: Fill},
             
-            Mandelbrot{
+            <Mandelbrot> {
                 walk:{width: Fill, height: Fill}
             }
-            
-            // alright lets put a slider over the thing
-            // ok so first i want a panel
-            // something that has an icon
-            // and animates closed
-            // and open.
-            // OK go 
         }
     }
 }
@@ -32,7 +25,7 @@ main_app!(App);
  
 #[derive(Live, LiveHook)]
 pub struct App {
-    frame: Frame,
+    ui: FrameRef,
     window: BareWindow,
 }
 
@@ -43,25 +36,20 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::Draw(event) = event {
+            return self.draw(&mut Cx2d::new(cx, event));
+        }
+        
         self.window.handle_event(cx, event);
         
-        for _ in self.frame.handle_event(cx, event) {
-        }
-        
-        match event {
-            Event::Draw(event) => {
-                return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx));
-            }
-            _ => ()
-        }
+        self.ui.handle_event(cx, event);
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
         if self.window.begin(cx).not_redrawing() {
             return;
         }
-        while self.frame.draw(cx).is_not_done(){
-        };
+        while self.ui.draw(cx).is_not_done(){};
         self.window.end(cx);
     }
 }

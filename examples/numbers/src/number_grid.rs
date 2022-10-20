@@ -17,7 +17,6 @@ live_design!{
             let base = #3;
             let up = 0.0;
             if self.last_number < self.number{
-                // lets draw a tiny down arrow
                 base = #a00
                 up = -PI;
             }
@@ -31,9 +30,8 @@ live_design!{
             }
             
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            // lets darw a rect
-            sdf.box(0,0,self.rect_size.x, self.rect_size.y,2);
             
+            sdf.box(0,0,self.rect_size.x, self.rect_size.y,2);
             
             sdf.fill(mix(base, #8, self.hover));
             
@@ -106,10 +104,10 @@ live_design!{
     }
     
     NumberGrid= {{NumberGrid}} {
-        number_box: NumberBox {}
+        number_box: <NumberBox> {}
         walk: {
-            width: Size::Fill,
-            height: Size::Fill
+            width: Fill,
+            height: Fill
         }
     }
 }
@@ -162,10 +160,10 @@ impl NumberBox {
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
             },
@@ -179,12 +177,12 @@ impl NumberBox {
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos:DVec2, number:f32, fmt:&str) {
-        // lets pass the numbers into the gpu?
+        
         self.bg.last_number = self.bg.number;
         self.bg.number = number;
         self.label.last_number = self.label.number;
         self.label.number = number;
-        // ok so. we draw a box at position X, Y
+        
         self.bg.begin(cx, Walk::fit().with_abs_pos(pos), self.layout);
         self.label.draw_walk(cx, Walk::fit(),self.label_align, fmt);
         self.bg.end(cx);
@@ -197,7 +195,6 @@ pub enum NumberGridAction {
 }
 
 pub enum NumberBoxAction {
-    //None
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
@@ -258,7 +255,11 @@ impl NumberGrid{
         }
     }
     
-    pub fn handle_event(
+    pub fn area(&self)->Area{
+        self.scroll_bars.area()
+    }
+    
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -290,7 +291,6 @@ impl NumberGrid{
         
         for (_node_id, action) in actions {
             match action {
-                //NumberBoxAction::None=>()
             }
         }
     }

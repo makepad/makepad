@@ -83,7 +83,7 @@ live_design!{
         
         
         popup_menu: {
-            bg: {color: (COLOR_TODO)}
+            //bg: {color: (COLOR_TODO)}
             menu_item: {
                 indent_width: 10.0
                 layout: {
@@ -1184,7 +1184,6 @@ impl App {
 
             (id!(crushenable.checkbox), id!(bitcrush.enable)),
             (id!(crushamount.slider), id!(bitcrush.amount)),
-           
 
             (id!(delaydifference.slider), id!(delay.difference)),
             (id!(delaycross.slider), id!(delay.cross)),
@@ -1279,6 +1278,7 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+
         if let Event::Draw(event) = event {
             return self.draw(&mut Cx2d::new(cx, event));
         }
@@ -1320,7 +1320,6 @@ impl App {
         for inp in cx.handle_midi_received(event) {
             self.audio_graph.send_midi_data(inp.data);
             if let Some(note) = inp.data.decode().on_note() {
-                log!("{:?}", inp.data);
                 piano.set_note(cx, note.is_on, note.note_number)
             }
         }
@@ -1338,17 +1337,21 @@ impl App {
             self.audio_graph.all_notes_off();
         }
         
+        let sequencer = ui.get_sequencer(id!(sequencer));
+        // lets fetch and update the tick.
+        
+        
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.get_button(id!(clear_grid)).clicked(&act) {
-            ui.get_sequencer(id!(sequencer)).clear_grid(cx, &mut db);
+            sequencer.clear_grid(cx, &mut db);
         }
         
         if ui.get_button(id!(grid_down)).clicked(&act) {
-            ui.get_sequencer(id!(sequencer)).grid_down(cx, &mut db);
+            sequencer.grid_down(cx, &mut db);
         }
         
         if ui.get_button(id!(grid_up)).clicked(&act) {
-            ui.get_sequencer(id!(sequencer)).grid_up(cx, &mut db);
+            sequencer.grid_up(cx, &mut db);
         }
         
         if ui.get_button(id!(save1)).clicked(&act) {self.preset(cx, 1, shift);}
