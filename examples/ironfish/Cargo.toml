@@ -12,7 +12,6 @@ makepad-widgets = { path = "../../widgets", version = "0.3.0" }
 makepad-media = { path = "../../media", version = "0.3.0" }
 makepad-miniz = { path = "../../libs/miniz", version = "0.3.0" }
 makepad-base64 = { path = "../../libs/base64", version = "0.3.0" }
-makepad-varint = {path = "../../code_editor/varint", version = "0.1.0"} 
 
 [features]
 nightly = ["makepad-widgets/nightly", "makepad-media/nightly"]

@@ -1,6 +1,6 @@
 use crate::from_wasm::*;
 use crate::to_wasm::*;
-use crate::{LiveId,id};
+use crate::{LiveId,live_id};
 use makepad_derive_wasm_bridge::*;
 pub struct WasmDataU8(Vec<u8>);
 
