@@ -5,7 +5,7 @@ export class WasmMediaGL extends WasmWebGL {
         super (wasm, dispatch, canvas);
     }
     
-    FromWasmSpawnAudioOutput(args) {
+    FromWasmSpawnAudioOutput(args) {0
         
         if (!this.audio_context) {
             const start_audio = async () => {
