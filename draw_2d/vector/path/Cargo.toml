@@ -5,6 +5,8 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Path tools"
 license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "St9r_7l6HNEVMBaJK3xIQR-jICQ="
 
 [dependencies]

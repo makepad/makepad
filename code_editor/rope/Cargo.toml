@@ -2,6 +2,8 @@
 name = "makepad-rope"
 version = "0.1.0"
 edition = "2021"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
 
 [[bench]]
 name = "bench"

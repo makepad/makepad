@@ -5,6 +5,8 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad font data structures"
 license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ozUBY7mXcDO90346mZQsUxmDUJ8="
 
 [dependencies]
