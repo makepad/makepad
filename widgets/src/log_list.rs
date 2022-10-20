@@ -16,7 +16,7 @@ live_design!{
     import makepad_draw_2d::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawBgQuad= {{DrawBgQuad}} {
+    DrawBgQuad = {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
@@ -30,7 +30,7 @@ live_design!{
         }
     }
     
-    DrawNameText= {{DrawNameText}} {
+    DrawNameText = {{DrawNameText}} {
         fn get_color(self) -> vec4 {
             return mix(
                 COLOR_TEXT_DEFAULT,
@@ -38,11 +38,11 @@ live_design!{
                 self.selected
             );
         }
-        text_style: FONT_DATA {top_drop: 1.15},
+        text_style: <FONT_DATA> {top_drop: 1.15},
     }
     
-    LogListNode= {{LogListNode}} {
-
+    LogListNode = {{LogListNode}} {
+        
         layout: {
             align: {y: 0.5},
             padding: {left: 5},
@@ -50,7 +50,7 @@ live_design!{
         name_walk: {
             width: Fit,
             height: Fit,
-            margin:{left:5}
+            margin: {left: 5}
         }
         icon_walk: {
             width: Fixed((DIM_DATA_ICON_WIDTH)),
@@ -104,10 +104,10 @@ live_design!{
         min_drag_distance: 10.0
     }
     
-    LogList= {{LogList}} {
+    LogList = {{LogList}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
-        fold_node: LogListNode {}
-        layout: {flow: Down, clip_x:true, clip_y:true},
+        fold_node: <LogListNode> {}
+        layout: {flow: Down, clip_x: true, clip_y: true},
     }
 }
 
@@ -145,7 +145,7 @@ pub struct LogListNode {
     link_label: LinkLabel,
     
     icon_walk: Walk,
-    name_walk: Walk, 
+    name_walk: Walk,
     min_drag_distance: f64,
     
     opened: f32,
@@ -161,7 +161,7 @@ pub struct LogList {
     filler_quad: DrawBgQuad,
     layout: Layout,
     node_height: f64,
-
+    
     scroll_shadow: ScrollShadow,
     
     #[rust] selected_node_ids: HashSet<LogListNodeId>,
@@ -227,7 +227,7 @@ impl LogListNode {
         // lets draw a fold button
         self.icon.icon_type = icon_type;
         self.icon.draw_walk(cx, self.icon_walk);
-        if link.len()>0{
+        if link.len()>0 {
             self.link_label.draw_label(cx, link);
         }
         
@@ -253,9 +253,9 @@ impl LogListNode {
             self.bg.area().redraw(cx);
         }
         
-        self.fold_button.handle_event_fn(cx, event, &mut |_,_|{});
+        self.fold_button.handle_event_fn(cx, event, &mut | _, _ | {});
         
-        self.link_label.handle_event_fn(cx, event, &mut |_,_|{});
+        self.link_label.handle_event_fn(cx, event, &mut | _, _ | {});
         
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_) => {
@@ -365,19 +365,19 @@ impl LogList {
             return false
         }
     }
-   
+    
     pub fn end_folder(&mut self) {
         self.stack.pop();
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
         //let view_area = self.view_area;
-        self.scroll_bars.handle_event_fn(cx, event, &mut |_,_|{});
+        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
         
         let mut actions = Vec::new();
         for (node_id, node) in self.fold_nodes.iter_mut() {

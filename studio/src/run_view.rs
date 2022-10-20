@@ -10,18 +10,18 @@ use crate::{
 live_design!{
     import makepad_draw_2d::shader::std::*;
     
-    DrawApp= {{DrawApp}} {
+    DrawApp = {{DrawApp}} {
         texture tex: texture2d
         fn pixel(self) -> vec4 {
             //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
             let fb = sample2d_rt(self.tex, self.pos)
             if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
-                return #4
+                return #1
             }
             return fb;
         }
     }
-    RunView= {{RunView}} {
+    RunView = {{RunView}} {
         frame_delta: 0.016
     }
 }

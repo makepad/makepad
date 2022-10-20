@@ -10,8 +10,8 @@ live_design!{
     
     DrawSplitter= {{DrawSplitter}} {
         const BORDER_RADIUS = 1.0
-        const SPLITER_PAD: 1.0
-        const SPLITER_GRABBER: 110.0
+        const SPLITER_PAD = 1.0
+        const SPLITER_GRABBER = 110.0
         instance pressed: 0.0
         instance hover: 0.0
         

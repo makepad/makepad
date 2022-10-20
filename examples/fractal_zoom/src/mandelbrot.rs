@@ -15,7 +15,7 @@ live_design!{
     import makepad_draw_2d::shader::std::*;
     
     // the shader to draw the texture tiles
-    DrawTile= {{DrawTile}} {
+    DrawTile = {{DrawTile}} {
         texture tex: texture2d
         fn pixel(self) -> vec4 {
             //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
@@ -36,7 +36,7 @@ live_design!{
         }
     }
     
-    Mandelbrot= {{Mandelbrot}} {
+    Mandelbrot = {{Mandelbrot}} {
         max_iter: 320,
     }
 }
@@ -527,6 +527,10 @@ impl Mandelbrot {
                 self.render_tile(tile, zoom, is_zooming)
             }
         }
+    }
+    
+    pub fn area(&self)->Area{
+        self.view_area
     }
     
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {

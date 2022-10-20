@@ -53,8 +53,8 @@ live_design!{
             //walk: {abs_pos: vec2(0.0, 0.0)}
             //is_overlay: true
         }
-        tab_bar: TabBar {}
-        splitter: Splitter {}
+        tab_bar: <TabBar> {}
+        splitter: <Splitter> {}
     }
 }
 
