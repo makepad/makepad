@@ -8,7 +8,7 @@ use crate::makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 /// this representation is that adding two sizes is not a commutative operation:
 /// 
 /// ```
-/// use makepad_studio::code_editor::Size;
+/// use makepad_editor_core::Size;
 /// 
 /// // Moving 1 line down and 2 columns right, followed by moving 2 lines down and 1 column right,
 /// // is the same as moving 3 lines down, and 1 column right.
@@ -31,7 +31,7 @@ use crate::makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 /// the result still represents a forward difference.
 /// 
 /// ```
-/// use makepad_studio::code_editor::Size;
+/// use makepad_editor_core::Size;
 /// 
 /// // This is ok!
 /// assert_eq!(
@@ -45,9 +45,9 @@ use crate::makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, SerBin, DeBin)]
 pub struct Size {
     // The number of lines to move down.
-    pub line: usize,
+    pub line: u32,
     // The number of columns to move right.
-    pub column: usize,
+    pub column: u32,
 }
 
 impl Size {
@@ -56,7 +56,7 @@ impl Size {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::Size;
+    /// use makepad_editor_core::Size;
     /// 
     /// let size = Size::zero();
     /// ```
@@ -69,7 +69,7 @@ impl Size {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::Size;
+    /// use makepad_editor_core::Size;
     /// 
     /// let size = Size::zero();
     /// assert!(size.is_zero());

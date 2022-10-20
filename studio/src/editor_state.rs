@@ -9,7 +9,7 @@ use {
             size::Size,
             text::Text,
         },
-        builder::builder_protocol::BuilderMsg,
+        build::build_protocol::BuildMsg,
         code_editor::{
             cursor_set::CursorSet,
             indent_cache::IndentCache,
@@ -65,7 +65,7 @@ pub struct EditorState {
     /// The queue of outstanding documents for this code editor. A document is outstanding if it has
     /// been created, but we have not yet received its contents from the collab server.
     pub outstanding_document_queue: VecDeque<DocumentId>,
-    pub messages: Vec<BuilderMsg>,
+    pub messages: Vec<BuildMsg>,
 }
 
 impl EditorState {
@@ -545,9 +545,10 @@ impl EditorState {
                     //
                     // This should be refactored in the future, by in the meantime we work around
                     // the problem by only performing autoindenting if there is just a single cursor.
+                    let lines = &document_inner.text.as_lines()[cursor.start().line];
+                    
                     if session.cursors.len() == 1
-                        && document_inner.text.as_lines()[cursor.start().line]
-                    [..cursor.start().column]
+                        && lines[..cursor.start().column]
                         .iter()
                         .all( | &ch | ch.is_whitespace())
                     {
@@ -560,7 +561,7 @@ impl EditorState {
                             );
                             builder_1.delete(Size {
                                 line: 0,
-                                column: cursor.start().column,
+                                column: cursor.start().column as u32,
                             })
                         } else {
                             builder_1.retain(
@@ -572,7 +573,7 @@ impl EditorState {
                             );
                             builder_1.delete(Size {
                                 line: 1,
-                                column: cursor.start().column,
+                                column: cursor.start().column as u32,
                             });
                         }
                     } else {

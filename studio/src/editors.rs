@@ -1,10 +1,10 @@
 use {
     crate::{
-        makepad_component::{
+        makepad_widgets::{
             ComponentMap,
             tab_bar::TabId,
         },
-        makepad_platform::*,
+        makepad_draw_2d::*,
         editor_state::{
             EditorState,
             DocumentId,
@@ -19,13 +19,6 @@ use {
             CollabNotification,
             CollabRequest,
             CollabResponse,
-            unix_path::{UnixPath},
-        },
-        builder::{
-            builder_protocol::{
-                BuilderMsgWrap,
-                BuilderMsg
-            }
         },
         rust_editor::{
             rust_editor::{
@@ -71,11 +64,11 @@ impl EditorView {
         }
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
-        event: &mut Event,
+        event: &Event,
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
@@ -85,11 +78,11 @@ impl EditorView {
     }
 }
 
-live_register!{
-    use crate::rust_editor::rust_editor::RustEditor;
+live_design!{
+    import crate::rust_editor::rust_editor::RustEditor;
     
-    Editors: {{Editors}} {
-        rust_editor: RustEditor {},
+    Editors= {{Editors}} {
+        rust_editor: <RustEditor> {},
     }
 }
 
@@ -109,7 +102,7 @@ pub struct Editors {
 
 impl LiveHook for Editors {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(live_editor).as_field()) {
+        if let Some(index) = nodes.child_by_name(index, live_id!(live_editor).as_field()) {
             for editor_view in self.editor_views.values_mut() {
                 editor_view.apply(cx, from, index, nodes);
             }
@@ -167,12 +160,12 @@ impl Editors {
         cx: &mut Cx,
         state: &mut EditorState,
         view_id: EditorViewId,
-        event: &mut Event,
+        event: &Event,
         send_request: &mut dyn FnMut(CollabRequest),
     ) {
         let view = &mut self.editor_views[view_id];
         let mut actions = Vec::new();
-        view.handle_event(cx, state, event, send_request, &mut | _, action | actions.push(action));
+        view.handle_event_fn(cx, state, event, send_request, &mut | _, action | actions.push(action));
         for action in actions {
             match action {
                 CodeEditorAction::RedrawViewsForDocument(document_id) => {
@@ -214,32 +207,8 @@ impl Editors {
             CollabNotification::DeltaWasApplied(file_id, delta) => {
                 let document_id = state.handle_delta_applied_notification(file_id, delta);
                 self.redraw_views_for_document(cx, state, document_id);
+                
             }
-        }
-    }
-    
-    pub fn handle_builder_messages(
-        &mut self,
-        cx: &mut Cx,
-        state: &mut EditorState,
-        msgs: Vec<BuilderMsgWrap>,
-    ) {
-        for wrap in msgs {
-            let msg_id = state.messages.len();
-            match &wrap.msg {
-                BuilderMsg::Location(loc) => {
-                    if let Some(doc_id) = state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
-                        let doc = &mut state.documents[*doc_id];
-                        if let Some(inner) = &mut doc.inner {
-                            inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
-                        }
-                        // lets redraw this doc. with new squigglies
-                        self.redraw_views_for_document(cx, state, *doc_id);
-                    }
-                }
-                _ => ()
-            }
-            state.messages.push(wrap.msg);
         }
     }
     

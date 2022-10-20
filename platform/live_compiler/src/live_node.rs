@@ -1,7 +1,7 @@
 use {
     std::{
         fmt,
-        ops::{Deref,DerefMut},
+        ops::{Deref, DerefMut},
     },
     crate::{
         makepad_math::{
@@ -36,26 +36,28 @@ pub enum LiveValue {
     Dependency {
         string_start: usize,
         string_count: usize
-    },    // bare values
+    }, // bare values
     Bool(bool),
-    Int(i64),
-    Float(f64),
+    Int64(i64),
+    Float32(f32),
+    Float64(f64),
     Color(u32),
     Vec2(Vec2),
     Vec3(Vec3),
     Vec4(Vec4),
     Id(LiveId),
+    
     ExprBinOp(LiveBinOp),
     ExprUnOp(LiveUnOp),
     ExprMember(LiveId),
     ExprCall {ident: LiveId, args: usize},
-    // enum thing
-    BareEnum {base: LiveId, variant: LiveId},
+     // enum thing
+    BareEnum (LiveId),
     // tree items
     Array,
-    Expr{expand_index: Option<u32>},
-    TupleEnum {base: LiveId, variant: LiveId},
-    NamedEnum {base: LiveId, variant: LiveId},
+    Expr {expand_index: Option<u32>},
+    TupleEnum (LiveId),
+    NamedEnum (LiveId),
     Object,
     Clone(LiveId),
     Class {live_type: LiveType, class_parent: Option<LivePtr>},
@@ -67,8 +69,8 @@ pub enum LiveValue {
         token_count: u32,
         expand_index: Option<u32>
     },
-    Use (LiveModuleId),
-    UseComponent(LiveId)
+    Import (LiveModuleId),
+    Registry(LiveId)
 }
 
 impl LiveValue {
@@ -96,23 +98,33 @@ impl LiveValue {
                 *o = *i;
                 return true
             },
-            Self::Int(o) => {
+            Self::Int64(o) => {
                 if let LiveToken::Int(i) = token {
                     *o = *i;
                     return true
                 }
                 if let LiveToken::Float(v) = token {
-                    *self = LiveValue::Float(*v);
+                    *self = LiveValue::Float64(*v);
                     return true
                 }
             }
-            Self::Float(o) => {
+            Self::Float64(o) => {
                 if let LiveToken::Float(i) = token {
                     *o = *i;
                     return true
                 }
                 if let LiveToken::Int(v) = token {
-                    *self = LiveValue::Int(*v);
+                    *self = LiveValue::Int64(*v);
+                    return true
+                }
+            }
+            Self::Float32(o) => {
+                if let LiveToken::Float(i) = token {
+                    *o = *i as f32;
+                    return true
+                }
+                if let LiveToken::Int(v) = token {
+                    *self = LiveValue::Int64(*v);
                     return true
                 }
             }
@@ -132,14 +144,29 @@ impl LiveNode {
             value: LiveValue::None
         }
     }
-
+    pub fn from_id_value(id: LiveId, value: LiveValue) -> Self {
+        Self {
+            origin: LiveNodeOrigin::empty(),
+            id,
+            value
+        }
+    }
+    
+    pub fn from_value(value: LiveValue) -> Self {
+        Self {
+            origin: LiveNodeOrigin::empty(),
+            id: LiveId(0),
+            value
+        }
+    }
+    
     pub fn is_token_id_inside_dsl(&self, other_token: LiveTokenId) -> bool {
-        if let Some(token_id) = self.origin.token_id(){
+        if let Some(token_id) = self.origin.token_id() {
             if token_id.file_id() != other_token.file_id() {
                 return false
             }
         }
-        else{
+        else {
             return false;
         }
         match &self.value {
@@ -151,26 +178,26 @@ impl LiveNode {
         }
     }
     
-    pub fn prop(&self)->LiveProp{
+    pub fn prop(&self) -> LiveProp {
         LiveProp(self.id, self.origin.prop_type())
     }
     
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct LiveProp(pub LiveId,pub LivePropType);
-impl LiveProp{
-    pub fn field(id:LiveId)->Self{Self(id, LivePropType::Field)}
-    pub fn instance(id:LiveId)->Self{Self(id, LivePropType::Instance)}
+pub struct LiveProp(pub LiveId, pub LivePropType);
+impl LiveProp {
+    pub fn field(id: LiveId) -> Self {Self (id, LivePropType::Field)}
+    pub fn instance(id: LiveId) -> Self {Self (id, LivePropType::Instance)}
 }
 
-pub trait LiveIdAsProp{
-    fn as_field(&self)->LiveProp;
-    fn as_instance(&self)->LiveProp;
+pub trait LiveIdAsProp {
+    fn as_field(&self) -> LiveProp;
+    fn as_instance(&self) -> LiveProp;
 }
-impl LiveIdAsProp for LiveId{
-    fn as_field(&self)->LiveProp{LiveProp(*self, LivePropType::Field)}
-    fn as_instance(&self)->LiveProp{LiveProp(*self, LivePropType::Instance)}
+impl LiveIdAsProp for LiveId {
+    fn as_field(&self) -> LiveProp {LiveProp(*self, LivePropType::Field)}
+    fn as_instance(&self) -> LiveProp {LiveProp(*self, LivePropType::Instance)}
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -193,13 +220,13 @@ impl fmt::Debug for LiveNodeOrigin {
 
 // 6 bits (64) edit_info index
 // 1 bit node_has_prefix
-// 2 bits LiveAssignType
+// 2 bits LivePropType
 
 // ok if we are a DSL node then what else do we need. we need a node index pointer.
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(usize)]
-pub enum LivePropType{
+pub enum LivePropType {
     Field = 0,
     Instance = 1,
     Template = 2,
@@ -214,39 +241,40 @@ impl LiveNodeOrigin {
     pub fn field() -> Self {
         Self (0).with_prop_type(LivePropType::Field)
     }
-
+    
     pub fn instance() -> Self {
         Self (0).with_prop_type(LivePropType::Instance)
     }
-
+    
     
     pub fn from_token_id(token_id: LiveTokenId) -> Self {
-        Self( (token_id.to_bits() as u64) |  ((token_id.to_bits() as u64)<<28) )
+        Self ((token_id.to_bits() as u64) | ((token_id.to_bits() as u64) << 28))
     }
     
     pub fn token_id(&self) -> Option<LiveTokenId> {
         LiveTokenId::from_bits((self.0 & 0x0fff_ffff) as u32)
     }
-
-    pub fn set_first_def(&mut self, token_id:Option<LiveTokenId>)->&mut Self{
-        if let Some(token_id) = token_id{
-            self.0 = (self.0 &0xff00_0000_0fff_ffff) |  ((token_id.to_bits() as u64)<<28);
+    
+    
+    pub fn set_first_def(&mut self, token_id: Option<LiveTokenId>) -> &mut Self {
+        if let Some(token_id) = token_id {
+            self.0 = (self.0 & 0xff00_0000_0fff_ffff) | ((token_id.to_bits() as u64) << 28);
         }
         self
     }
-
-    pub fn first_def(&self)->Option<LiveTokenId>{
-        LiveTokenId::from_bits(((self.0>>28) & 0x0fff_ffff) as u32)
+    
+    pub fn first_def(&self) -> Option<LiveTokenId> {
+        LiveTokenId::from_bits(((self.0 >> 28) & 0x0fff_ffff) as u32)
     }
     
-    pub fn set_edit_info(&mut self, edit_info: Option<LiveEditInfo>)->&mut Self{
+    pub fn set_edit_info(&mut self, edit_info: Option<LiveEditInfo>) -> &mut Self {
         if let Some(edit_info) = edit_info {
             self.0 = (self.0 & 0xE0FF_FFFF_FFFF_FFFF) | ((edit_info.to_bits() as u64) << 56);
         }
         self
     }
     
-    pub fn with_edit_info(mut self, edit_info: Option<LiveEditInfo>)->Self{
+    pub fn with_edit_info(mut self, edit_info: Option<LiveEditInfo>) -> Self {
         self.set_edit_info(edit_info);
         self
     }
@@ -271,23 +299,23 @@ impl LiveNodeOrigin {
     }
     
     pub fn with_prop_type(mut self, prop_type: LivePropType) -> Self {
-        self.0 |= (prop_type as u64) << 62;//0x8000_0000_0000_0000;
+        self.0 |= (prop_type as u64) << 62; //0x8000_0000_0000_0000;
         self
     }
     
-    pub fn set_prop_type(&mut self, prop_type: LivePropType){
-        self.0 = (self.0 & (!0xC000_0000_0000_0000))| ((prop_type as u64) << 62);
+    pub fn set_prop_type(&mut self, prop_type: LivePropType) {
+        self.0 = (self.0 & (!0xC000_0000_0000_0000)) | ((prop_type as u64) << 62);
     }
     
     pub fn prop_type(&self) -> LivePropType {
-        LivePropType::from_usize(((self.0 & 0xC000_0000_0000_0000)>>62) as usize)
+        LivePropType::from_usize(((self.0 & 0xC000_0000_0000_0000) >> 62) as usize)
     }
     
-    pub fn has_prop_type(&self, origin:LivePropType)->bool{
+    pub fn has_prop_type(&self, origin: LivePropType) -> bool {
         (self.0 & 0xC000_0000_0000_0000) >> 62 == origin as u64
     }
     
-    pub fn inherit_origin(&mut self, origin:Self){
+    pub fn inherit_origin(&mut self, origin: Self) {
         let edit_info = origin.edit_info();
         let first_def = origin.first_def();
         let node_has_prefix = origin.node_has_prefix();
@@ -297,13 +325,13 @@ impl LiveNodeOrigin {
     }
 }
 
-impl LivePropType{
-    fn from_usize(val:usize)->Self{
-        match val{
-            0=>Self::Field,
-            1=>Self::Instance,
-            2=>Self::Template,
-            _=>Self::Nameless
+impl LivePropType {
+    pub fn from_usize(val: usize) -> Self {
+        match val {
+            0 => Self::Field,
+            1 => Self::Instance,
+            2 => Self::Template,
+            _ => Self::Nameless
         }
     }
 }
@@ -321,7 +349,7 @@ impl LiveEditInfo {
         if edit_info_index & 0xf != 0 || edit_info_index > 0x3e0 {
             panic!();
         }
-        LiveEditInfo(((edit_info_index as u32)>>4)+1)
+        LiveEditInfo(((edit_info_index as u32) >> 4) + 1)
     }
     
     pub fn edit_info_index(&self) -> usize {
@@ -347,6 +375,7 @@ pub struct LiveTypeInfo {
     pub live_type: LiveType,
     pub type_name: LiveId,
     pub module_id: LiveModuleId,
+    pub live_ignore: bool,
     pub fields: Vec<LiveTypeField>
 }
 
@@ -389,7 +418,8 @@ pub enum LiveUnOp {
 #[derive(Debug)]
 pub struct FittedString {
     buffer: *mut u8,
-    length: usize,
+    length: u32,
+    capacity: u32
 }
 
 impl PartialEq for FittedString {
@@ -403,30 +433,26 @@ impl PartialEq for FittedString {
 }
 
 impl FittedString {
-    pub fn from_string(mut inp: String) -> Self {
-        inp.shrink_to_fit();
+    pub fn from_string(inp: String) -> Self {
         let mut s = std::mem::ManuallyDrop::new(inp);
         let buffer = s.as_mut_ptr();
         let length = s.len();
         let capacity = s.capacity();
-        if length != capacity {
-            panic!()
-        }
-        FittedString {buffer, length}
+        FittedString {buffer, length: length as u32, capacity: capacity as u32}
     }
     
     pub fn to_string(self) -> String {
-        unsafe {String::from_raw_parts(self.buffer, self.length, self.length)}
+        unsafe {String::from_raw_parts(self.buffer, self.length as usize, self.capacity as usize)}
     }
     
     pub fn as_str<'a>(&'a self) -> &'a str {
-        unsafe {std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer, self.length))}
+        unsafe {std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer, self.length as usize))}
     }
 }
 
 impl Drop for FittedString {
     fn drop(&mut self) {
-        unsafe {String::from_raw_parts(self.buffer, self.length, self.length)};
+        unsafe {String::from_raw_parts(self.buffer, self.length as usize, self.capacity as usize)};
     }
 }
 
@@ -465,7 +491,7 @@ impl LiveValue {
     pub fn is_open(&self) -> bool {
         match self {
             Self::Array |
-            Self::Expr{..} |
+            Self::Expr {..} |
             Self::TupleEnum {..} |
             Self::NamedEnum {..} |
             Self::Object | // subnodes including this one
@@ -500,7 +526,7 @@ impl LiveValue {
     
     pub fn is_expr(&self) -> bool {
         match self {
-            Self::Expr{..} => true,
+            Self::Expr {..} => true,
             _ => false
         }
     }
@@ -532,45 +558,45 @@ impl LiveValue {
             _ => false
         }
     }
-    pub fn set_dsl_expand_index_if_none(&mut self, index:usize) {
+    pub fn set_dsl_expand_index_if_none(&mut self, index: usize) {
         match self {
-            Self::DSL {expand_index,..} => if expand_index.is_none(){
+            Self::DSL {expand_index, ..} => if expand_index.is_none() {
                 *expand_index = Some(index as u32)
             },
             _ => ()
         }
     }
     
-    pub fn set_expr_expand_index_if_none(&mut self, index:usize) {
+    pub fn set_expr_expand_index_if_none(&mut self, index: usize) {
         match self {
-            Self::Expr {expand_index,..} => if expand_index.is_none(){
+            Self::Expr {expand_index, ..} => if expand_index.is_none() {
                 *expand_index = Some(index as u32)
             },
             _ => ()
         }
     }
     
-    pub fn get_expr_expand_index(&self)->Option<u32>{
+    pub fn get_expr_expand_index(&self) -> Option<u32> {
         match self {
-            Self::Expr {expand_index,..} => *expand_index,
+            Self::Expr {expand_index, ..} => *expand_index,
             _ => None
         }
     }
     
-    pub fn is_id(&self)->bool{
-        match self{
-            Self::Id(_)=>true,
-            _=>false
+    pub fn is_id(&self) -> bool {
+        match self {
+            Self::Id(_) => true,
+            _ => false
         }
     }
     
     pub fn is_color(&self) -> bool {
-        match self{
-            Self::Color(_)=>true,
-            _=>false
+        match self {
+            Self::Color(_) => true,
+            _ => false
         }
     }
-
+    
     pub fn is_value_type(&self) -> bool {
         match self {
             Self::Id(_) |
@@ -579,8 +605,9 @@ impl LiveValue {
             Self::InlineString {..} |
             Self::DocumentString {..} |
             Self::Bool(_) |
-            Self::Int(_) |
-            Self::Float(_) |
+            Self::Int64(_) |
+            Self::Float64(_) |
+            Self::Float32(_) |
             Self::Color(_) |
             Self::Vec2(_) |
             Self::Vec3(_) |
@@ -600,41 +627,58 @@ impl LiveValue {
     
     pub fn is_number_type(&self) -> bool {
         match self {
-            Self::Int(_) |
-            Self::Float(_) => true,
+            Self::Int64(_) |
+            Self::Float32(_) |
+            Self::Float64(_) => true,
             _ => false
         }
     }
-
+    
     pub fn as_float(&self) -> Option<f64> {
         match self {
-            Self::Float(v) => Some(*v),
-            Self::Int(v) => Some(*v as f64),
+            Self::Float64(v) => Some(*v),
+            Self::Float32(v) => Some(*v as f64),
+            Self::Int64(v) => Some(*v as f64),
             _ => None
         }
     }
-    
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Float64(v) => Some(*v as i64),
+            Self::Float32(v) => Some(*v as i64),
+            Self::Int64(v) => Some(*v),
+            _ => None
+        }
+    }    
     pub fn as_vec2(&self) -> Option<Vec2> {
         match self {
             Self::Vec2(v) => Some(*v),
             _ => None
         }
-    }    
+    }
     pub fn as_vec3(&self) -> Option<Vec3> {
         match self {
             Self::Vec3(v) => Some(*v),
             _ => None
         }
-    }    
-
+    }
+    
     pub fn as_vec4(&self) -> Option<Vec4> {
         match self {
             Self::Vec4(v) => Some(*v),
             Self::Color(c) => Some(Vec4::from_u32(*c)),
             _ => None
         }
-    }    
-
+    }
+    
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(v) => Some(*v),
+            _ => None
+        }
+    }
+    
     /*
     pub fn named_class_id(&self) -> Option<Id> {
         match self {
@@ -642,15 +686,6 @@ impl LiveValue {
             _ => None
         }
     }*/
-    
-    pub fn enum_base_id(&self) -> Option<LiveId> {
-        match self {
-            Self::BareEnum {base, ..} => Some(*base),
-            Self::TupleEnum {base, ..} => Some(*base),
-            Self::NamedEnum {base, ..} => Some(*base),
-            _ => None
-        }
-    }
     
     pub fn set_clone_name(&mut self, name: LiveId) {
         match self {
@@ -675,31 +710,32 @@ impl LiveValue {
             Self::DocumentString {..} => 4,
             Self::Dependency {..} => 5,
             Self::Bool(_) => 6,
-            Self::Int(_) => 7,
-            Self::Float(_) => 8,
-            Self::Color(_) => 9,
-            Self::Vec2(_) => 10,
-            Self::Vec3(_) => 11,
-            Self::Vec4(_) => 12,
-            Self::Id(_) => 13,
-            Self::ExprBinOp(_) => 14,
-            Self::ExprUnOp(_) => 15,
-            Self::ExprMember(_) => 16,
-            Self::ExprCall {..} => 17,
+            Self::Int64(_) => 7,
+            Self::Float64(_) => 8,
+            Self::Float32(_) => 9,
+            Self::Color(_) => 10,
+            Self::Vec2(_) => 11,
+            Self::Vec3(_) => 12,
+            Self::Vec4(_) => 13,
+            Self::Id(_) => 14,
+            Self::ExprBinOp(_) => 15,
+            Self::ExprUnOp(_) => 16,
+            Self::ExprMember(_) => 17,
+            Self::ExprCall {..} => 18,
             
-            Self::BareEnum {..} => 18,
-            Self::Array => 19,
-            Self::Expr{..} => 20,
-            Self::TupleEnum {..} => 21,
-            Self::NamedEnum {..} => 22,
-            Self::Object => 23,
-            Self::Clone {..} => 24,
-            Self::Class {..} => 25,
-            Self::Close => 26,
+            Self::BareEnum {..} => 19,
+            Self::Array => 20,
+            Self::Expr {..} => 21,
+            Self::TupleEnum {..} => 22,
+            Self::NamedEnum {..} => 23,
+            Self::Object => 24,
+            Self::Clone {..} => 25,
+            Self::Class {..} => 26,
+            Self::Close => 27,
             
-            Self::DSL {..} => 27,
-            Self::Use {..} => 28,
-            Self::UseComponent {..} => 29
+            Self::DSL {..} => 28,
+            Self::Import {..} => 29,
+            Self::Registry {..} => 30
         }
     }
 }

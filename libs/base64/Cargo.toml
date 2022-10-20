@@ -1,0 +1,15 @@
+[package]
+name = "makepad-base64"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad base64"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "qLZbfp1JHQ1eDEBWAKXG3FKa56k="
+
+
+[features] 
+
+[dependencies]

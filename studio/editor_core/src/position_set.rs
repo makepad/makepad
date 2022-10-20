@@ -22,7 +22,7 @@ impl PositionSet {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::position_set;
+    /// use makepad_editor_core::position_set;
     /// 
     /// let positions = position_set::PositionSet::new();
     /// ```
@@ -35,7 +35,7 @@ impl PositionSet {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{position_set, Position, PositionSet};
+    /// use makepad_editor_core::{position_set, Position, PositionSet};
     /// 
     /// let positions = PositionSet::new();
     /// assert!(positions.is_empty());
@@ -53,7 +53,7 @@ impl PositionSet {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{position_set, Position, PositionSet};
+    /// use makepad_editor_core::{position_set, Position, PositionSet};
     /// 
     /// let mut builder = position_set::Builder::new();
     /// builder.insert(Position { line: 1, column: 1 });
@@ -77,7 +77,7 @@ impl PositionSet {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{position_set, Position, Size};
+    /// use makepad_editor_core::{position_set, Position, Size};
     /// 
     /// let mut builder = position_set::Builder::new();
     /// builder.insert(Position { line: 1, column: 2 });
@@ -125,7 +125,7 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::position_set::Builder;
+    /// use makepad_editor_core::position_set::Builder;
     /// 
     /// let builder = Builder::new();
     /// ```
@@ -140,7 +140,7 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{position_set::Builder, Position};
+    /// use makepad_editor_core::{position_set::Builder, Position};
     /// 
     /// let mut builder = Builder::new();
     /// builder.insert(Position { line: 1, column: 1 });
@@ -156,7 +156,7 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{position_set::Builder};
+    /// use makepad_editor_core::{position_set::Builder};
     /// 
     /// let mut builder = Builder::new();
     /// let positions = builder.build();

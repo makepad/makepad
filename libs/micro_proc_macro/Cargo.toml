@@ -1,0 +1,10 @@
+[package]
+name = "makepad-micro-proc-macro"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad micro proc macro util lib"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "luaNzmGEup83HWd8SmV57vZwP3I="

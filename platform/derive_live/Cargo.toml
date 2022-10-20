@@ -1,18 +1,20 @@
 [package]
 name = "makepad-derive-live"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad render derive macros"
-license = "MIT"
+description = "Makepad platform live DSL derive macros"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "xfXJEt-VjsFMotX6nxPX32MUQ3w="
 
 [lib]
 proc-macro = true
 
 [dependencies]
-makepad-macro-lib = { path = "../macro_lib", version = "0.1" }
-makepad-live-id = { path = "../live_id", version = "0.1" }
+makepad-micro-proc-macro = { path = "../../libs/micro_proc_macro", version = "0.3.0" }
+makepad-live-id = { path = "../../libs/live_id", version = "0.3.0" }
 
 [features]
-default = ["nightly"]
 nightly = []

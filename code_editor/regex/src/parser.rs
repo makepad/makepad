@@ -1,108 +1,276 @@
-use {crate::Ast, std::result};
+use {
+    crate::{
+        ast::{Pred, Quant},
+        Ast, CharClass, Range,
+    },
+    std::str::Chars,
+};
 
-pub fn parse(pattern: &str) -> Result<Ast> {
-    ParseContext { pattern, pos: 0 }.parse()
+#[derive(Clone, Debug)]
+pub struct Parser {
+    asts: Vec<Ast>,
+    groups: Vec<Group>,
 }
 
-pub type Result<T> = result::Result<T, Error>;
+impl Parser {
+    pub(crate) fn new() -> Self {
+        Self {
+            asts: Vec::new(),
+            groups: Vec::new(),
+        }
+    }
 
-pub struct Error {
-    pub pos: usize,
-    pub message: String,
+    pub(crate) fn parse(&mut self, pattern: &str) -> Ast {
+        let mut chars = pattern.chars();
+        ParseContext {
+            cap_count: 1,
+            ch_0: chars.next(),
+            ch_1: chars.next(),
+            chars,
+            position: 0,
+            asts: &mut self.asts,
+            groups: &mut self.groups,
+            group: Group::new(Some(0)),
+        }
+        .parse()
+    }
 }
 
+#[derive(Debug)]
 struct ParseContext<'a> {
-    pattern: &'a str,
-    pos: usize,
+    cap_count: usize,
+    ch_0: Option<char>,
+    ch_1: Option<char>,
+    chars: Chars<'a>,
+    position: usize,
+    asts: &'a mut Vec<Ast>,
+    groups: &'a mut Vec<Group>,
+    group: Group,
 }
 
 impl<'a> ParseContext<'a> {
-    fn parse(&mut self) -> Result<Ast> {
-        self.parse_alt()
-    }
-
-    fn parse_alt(&mut self) -> Result<Ast> {
-        let ast = self.parse_cat()?;
-        if self.peek_char() != Some('|') {
-            return Ok(ast);
-        }
-        let mut asts = vec![ast];
+    fn parse(&mut self) -> Ast {
         loop {
-            self.skip_char();
-            asts.push(self.parse_cat()?);
-            if self.peek_char() != Some('|') {
-                break;
-            }
-        }
-        Ok(Ast::Alt(asts))
-    }
-
-    fn parse_cat(&mut self) -> Result<Ast> {
-        let ast = self.parse_rep()?;
-        if self.peek_char().map_or(true, |c| c == '|' || c == ')') {
-            return Ok(ast);
-        }
-        let mut asts = vec![ast];
-        loop {
-            self.skip_char();
-            asts.push(self.parse_rep()?);
-            if self.peek_char().map_or(true, |c| c == '|' || c == ')') {
-                break;
-            }
-        }
-        Ok(Ast::Alt(asts))
-    }
-
-    fn parse_rep(&mut self) -> Result<Ast> {
-        let ast = self.parse_atom()?;
-        Ok(match self.peek_char() {
-            Some('?') => {
-                self.skip_char();
-                Ast::Quest(Box::new(ast))
-            }
-            Some('*') => {
-                self.skip_char();
-                Ast::Star(Box::new(ast))
-            }
-            Some('+') => {
-                self.skip_char();
-                Ast::Plus(Box::new(ast))
-            }
-            _ => ast,
-        })
-    }
-
-    fn parse_atom(&mut self) -> Result<Ast> {
-        Ok(match self.peek_char() {
-            Some('(') => {
-                self.skip_char();
-                let ast = self.parse()?;
-                if self.peek_char() != Some(')') {
-                    return Err(self.error(""));
+            match self.peek_char() {
+                Some('|') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.pop_cats();
+                    self.group.alt_count += 1;
                 }
-                self.skip_char();
-                ast
+                Some('?') => {
+                    self.skip_char();
+                    let mut lazy = false;
+                    if self.peek_char() == Some('?') {
+                        self.skip_char();
+                        lazy = true;
+                    }
+                    let ast = self.asts.pop().unwrap();
+                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Quest(lazy)));
+                }
+                Some('*') => {
+                    self.skip_char();
+                    let mut lazy = false;
+                    if self.peek_char() == Some('?') {
+                        self.skip_char();
+                        lazy = true;
+                    }
+                    let ast = self.asts.pop().unwrap();
+                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Star(lazy)));
+                }
+                Some('+') => {
+                    self.skip_char();
+                    let mut lazy = false;
+                    if self.peek_char() == Some('?') {
+                        self.skip_char();
+                        lazy = true;
+                    }
+                    let ast = self.asts.pop().unwrap();
+                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Plus(lazy)));
+                }
+                Some('^') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::Assert(Pred::IsAtStartOfText));
+                    self.group.ast_count += 1;
+                }
+                Some('$') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::Assert(Pred::IsAtEndOfText));
+                    self.group.ast_count += 1;
+                }
+                Some('(') => {
+                    self.skip_char();
+                    let cap = match self.peek_two_chars() {
+                        (Some('?'), Some(':')) => {
+                            self.skip_two_chars();
+                            false
+                        }
+                        _ => true,
+                    };
+                    self.push_group(cap);
+                }
+                Some(')') => {
+                    self.skip_char();
+                    self.pop_group();
+                }
+                Some('[') => {
+                    self.maybe_push_cat();
+                    let char_class = self.parse_char_class();
+                    self.asts.push(Ast::CharClass(char_class));
+                    self.group.ast_count += 1;
+                }
+                Some('.') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::CharClass(CharClass::any()));
+                    self.group.ast_count += 1;
+                }
+                Some(ch) => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::Char(ch));
+                    self.group.ast_count += 1;
+                }
+                None => break,
             }
-            Some(c) => {
-                self.skip_char();
-                Ast::Char(c)
-            }
-            None => return Err(self.error("")),
-        })
+        }
+        self.maybe_push_cat();
+        self.pop_alts();
+        self.asts.pop().unwrap()
     }
 
-    fn error(&self, message: &str) -> Error {
-        return Error {
-            pos: self.pos,
-            message: message.to_string(),
-        };
+    fn parse_char_class(&mut self) -> CharClass {
+        let mut char_class = CharClass::new();
+        self.skip_char();
+        let mut is_first = true;
+        loop {
+            match self.peek_char() {
+                Some(']') if !is_first => {
+                    self.skip_char();
+                    break;
+                }
+                _ => char_class.insert(self.parse_char_range()),
+            }
+            is_first = false;
+        }
+        char_class
+    }
+
+    fn parse_char_range(&mut self) -> Range<char> {
+        let start = self.parse_char();
+        match self.peek_two_chars() {
+            (Some('-'), ch) if ch != Some(']') => {
+                self.skip_char();
+                let end = self.parse_char();
+                return Range::new(start, end);
+            }
+            _ => Range::new(start, start),
+        }
+    }
+
+    fn parse_char(&mut self) -> char {
+        let ch = self.peek_char().unwrap();
+        self.skip_char();
+        ch
     }
 
     fn peek_char(&self) -> Option<char> {
-        self.pattern[self.pos..].chars().next()
+        self.ch_0
+    }
+
+    fn peek_two_chars(&self) -> (Option<char>, Option<char>) {
+        (self.ch_0, self.ch_1)
     }
 
     fn skip_char(&mut self) {
-        self.pos += self.peek_char().unwrap().len_utf8();
+        self.position += self.ch_0.unwrap().len_utf8();
+        self.ch_0 = self.ch_1;
+        self.ch_1 = self.chars.next();
+    }
+
+    fn skip_two_chars(&mut self) {
+        self.position += self.ch_1.unwrap().len_utf8();
+        self.position += self.ch_1.unwrap().len_utf8();
+        self.ch_0 = self.chars.next();
+        self.ch_1 = self.chars.next();
+    }
+
+    fn push_group(&mut self, cap: bool) {
+        use std::mem;
+
+        self.maybe_push_cat();
+        self.pop_cats();
+        let cap_index = if cap {
+            let cap_index = self.cap_count;
+            self.cap_count += 1;
+            Some(cap_index)
+        } else {
+            None
+        };
+        let group = mem::replace(&mut self.group, Group::new(cap_index));
+        self.groups.push(group);
+    }
+
+    fn pop_group(&mut self) {
+        self.maybe_push_cat();
+        self.pop_alts();
+        if let Some(index) = self.group.cap {
+            let ast = self.asts.pop().unwrap();
+            self.asts.push(Ast::Cap(Box::new(ast), index));
+        }
+        self.group = self.groups.pop().unwrap();
+        self.group.ast_count += 1;
+    }
+
+    fn maybe_push_cat(&mut self) {
+        if self.group.ast_count - self.group.alt_count - self.group.cat_count == 2 {
+            self.group.cat_count += 1;
+        }
+    }
+
+    fn pop_alts(&mut self) {
+        self.pop_cats();
+        if self.group.alt_count == 0 {
+            return;
+        }
+        let asts = self
+            .asts
+            .split_off(self.asts.len() - (self.group.alt_count + 1));
+        self.asts.push(Ast::Alt(asts));
+        self.group.ast_count -= self.group.alt_count;
+        self.group.alt_count = 0;
+    }
+
+    fn pop_cats(&mut self) {
+        if self.group.cat_count == 0 {
+            return;
+        }
+        let asts = self
+            .asts
+            .split_off(self.asts.len() - (self.group.cat_count + 1));
+        self.asts.push(Ast::Cat(asts));
+        self.group.ast_count -= self.group.cat_count;
+        self.group.cat_count = 0;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Group {
+    cap: Option<usize>,
+    ast_count: usize,
+    alt_count: usize,
+    cat_count: usize,
+}
+
+impl Group {
+    fn new(index: Option<usize>) -> Self {
+        Self {
+            cap: index,
+            ast_count: 0,
+            alt_count: 0,
+            cat_count: 0,
+        }
     }
 }

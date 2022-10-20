@@ -1,6 +1,4 @@
-
-
-pub mod platform;
+pub mod os;
 
 #[macro_use]
 mod live_prims;
@@ -12,11 +10,12 @@ mod cx_draw_shaders;
 
 pub mod live_traits;
 pub mod live_cx;
+pub mod live_atomic;
 
-mod thread;
+pub mod thread;
+mod id_pool;
 mod event;
 mod area;
-mod font;
 mod window;
 mod pass;
 mod texture;
@@ -26,15 +25,20 @@ mod state;
 mod gpu_info;
 mod draw_vars;
 mod geometry;
-mod draw_2d;
-mod draw_3d;
 mod draw_list;
-mod shader;
-pub mod audio;
-pub mod midi;
+mod debug;
+mod component_map;
+
+#[macro_use]
+mod main_app;
+//pub mod audio;
+//pub mod midi;
 
 #[cfg(target_arch = "wasm32")]
-pub use makepad_wasm_bridge::{self, console_log};
+pub use makepad_wasm_bridge;
+
+#[cfg(target_os = "macos")]
+pub use makepad_objc_sys;
 
 pub use {
     makepad_shader_compiler,
@@ -44,12 +48,16 @@ pub use {
     makepad_shader_compiler::makepad_micro_serde,
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
+    makepad_shader_compiler::makepad_error_log,
     makepad_derive_live::*,
+    makepad_error_log::*,
     makepad_math::*,
     makepad_live_id::*,
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,
+        live_eval,
+        LiveEval,
         LiveErrorOrigin,
         LiveNodeOrigin,
         LiveRegistry,
@@ -69,13 +77,19 @@ pub use {
         LivePropType,
         LiveProp,
         LiveIdAsProp,
-        //LiveTypeKind,
         LiveValue,
         FittedString,
         InlineString,
+        LiveNodeSliceToCbor,
+        LiveNodeVecFromCbor,
         LiveModuleId,
         LiveNodeSlice,
         LiveNodeVec,
+        LiveNodeSliceApi,
+        LiveNodeVecApi,
+    },
+    component_map::{
+        ComponentMap
     },
     makepad_shader_compiler::{
         ShaderRegistry,
@@ -85,37 +99,44 @@ pub use {
     },
     crate::{
         cx_api::{
-            CxPlatformApi,
-            profile_start,
-            profile_end
+            CxOsApi,
         },
-        /*cx_registries::{
-            CxRegistries,
-            CxRegistryNew,
-        },*/
-        cx_draw_shaders::{
+        draw_list::{
+            CxDrawItem,
+            CxRectArea,
+            CxDrawCall,
+            DrawList,
+            DrawListId,
+            CxDrawListPool
         },
         cx::{
             Cx,
-            PlatformType
+            OsType
         },
         area::{
             Area,
-            DrawListArea,
+            RectArea,
             InstanceArea
         },
+        menu::{
+            MenuCommand,
+        },
         event::{
+            Margin,
             KeyCode,
             Event,
-            HitEvent,
-            DragEvent,
+            Hit,
+            DragHit,
             Signal,
+            Trigger,
+            //MidiInputListEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Timer,
             NextFrame,
             KeyModifiers,
-            FingerInputType,
+            DrawEvent,
+            DigitDevice,
             FingerDownEvent,
             FingerMoveEvent,
             FingerUpEvent,
@@ -133,14 +154,13 @@ pub use {
             TextCopyEvent,
             WindowCloseRequestedEvent,
             WindowClosedEvent,
-            WindowResizeLoopEvent,
             WindowDragQueryResponse,
             WindowDragQueryEvent,
             XRButton,
             XRInput,
             XRUpdateEvent,
-            FingerDragEvent,
-            FingerDropEvent,
+            DragEvent,
+            DropEvent,
             DragState,
             DragAction,
             DraggedItem,
@@ -150,70 +170,38 @@ pub use {
             FingerHoverHitEvent,
             FingerDownHitEvent,
             FingerUpHitEvent,
-            FingerDragHitEvent,
-            FingerDropHitEvent,
+            DragHitEvent,
+            DropHitEvent,
         },
         cursor::MouseCursor,
         menu::Menu,
-        font::Font,
-        draw_2d::{
-            turtle::{
-                Axis,
-                Layout,
-                Walk,
-                Align,
-                Margin,
-                Padding,
-                Flow,
-                Size,
-                DeferWalk
-            },
-            view::{
-                View,
-                ManyInstances,
-                ViewRedraw
-            },
-            cx_2d::{
-                Cx2d
-            },
-        },
-        audio::{
-            AudioTime,
-            AudioOutputBuffer,
-            AudioBuffer
-        },
-        midi::{
-            Midi1InputData,
-            Midi1Data,
-            Midi1Note,
-            Midi1Event
-        },
+        
         window::Window,
         pass::{
+            PassId,
+            CxPassParent,
             Pass,
             PassClearColor,
             PassClearDepth
         },
-        thread::{
-            FromUIReceiver,
-            FromUISender,
-            ToUISender,
-            ToUIReceiver,
-            ThreadPool
-        },
         texture::{
             Texture,
+            TextureId,
             TextureFormat,
             TextureDesc
         },
+        live_prims::{
+            LiveDependency
+        },
         live_traits::{
+            LiveBody,
             LiveNew,
             LiveApply,
             LiveHook,
             LiveApplyValue,
+            LiveRead,
             ToLiveValue,
             ApplyFrom,
-            LiveBody,
         },
         state::{
             Ease,
@@ -225,29 +213,21 @@ pub use {
             StatePair
         },
         draw_vars::{
+            shader_enum,
             DrawVars
         },
         geometry::{
+            GeometryFingerprint,
             GeometryField,
+            GeometryFields,
+            GeometryId,
+            GeometryRef,
             Geometry,
         },
         gpu_info::{
             GpuPerformance
         },
-        draw_2d::{
-            draw_shape::{DrawShape, Shape},
-            draw_quad::DrawQuad,
-            draw_text::{
-                DrawText,
-            },
-            draw_color::DrawColor,
-        },
-        shader::{
-            geometry_gen::{
-                GeometryGen,
-                GeometryQuad2D,
-            },
-        },
+        
     },
 };
 

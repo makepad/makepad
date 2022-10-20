@@ -6,7 +6,7 @@ use{
     crate::{
         makepad_live_compiler::{
             makepad_live_id::{
-                id,
+                live_id,
                 LiveId,
             },
             LiveRegistry,
@@ -163,7 +163,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         
         self.analyse_call_tree(
             &mut Vec::new(),
-            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap(),
+            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap(),
             &mut vertex_fns,
             &mut all_fns,
         ) ?;
@@ -171,7 +171,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         let mut pixel_fns = Vec::new();
         self.analyse_call_tree(
             &mut Vec::new(),
-            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap(),
+            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap(),
             &mut pixel_fns,
             &mut all_fns,
         ) ?;
@@ -375,7 +375,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             .transpose() ?
         .unwrap_or(Ty::Void);
         
-        if def.ident == Ident(id!(vertex)) {
+        if def.ident == Ident(live_id!(vertex)) {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
@@ -388,7 +388,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                     })
                 }
             }
-        } else if def.ident == Ident(id!(pixel)) {
+        } else if def.ident == Ident(live_id!(pixel)) {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
@@ -958,7 +958,7 @@ impl<'a> FnDefAnalyser<'a> {
                 } 
                 
                 if let Some(pos) = shader_enum.variants.iter().position( | id | *id == match_item.enum_variant.0) {
-                    match_item.enum_value.set(Some(pos));
+                    match_item.enum_value.set(Some(pos + 1));
                 }
                 else{
                     return Err(LiveError {

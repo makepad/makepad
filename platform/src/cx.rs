@@ -4,75 +4,59 @@ use {
             HashMap,
             HashSet,
         },
-        time::Instant,
-        sync::Arc,
+        any::{Any, TypeId},
         rc::Rc,
         rc::Weak,
         cell::RefCell,
     },
     crate::{
-        makepad_live_id::{
-            id,
-            LiveId,
-        },
         makepad_live_compiler::{
-            LiveEditEvent,
             LiveRegistry
         },
         makepad_shader_compiler::{
             ShaderRegistry
-        },  
-        thread::{
-            ThreadPoolSender
         },
         cx_draw_shaders::{
             CxDrawShaders
         },
-        platform::{
-            CxPlatform,
-            CxPlatformTexture,
+        os::{
+            CxOs,
         },
+        debug::Debug,
         event::{
             DrawEvent,
-            CxPerFinger,
-            NUM_FINGERS,
+            CxFingers,
+            CxFingerDrag,
             Event,
             Signal,
             Trigger,
-            KeyEvent,
+            CxKeyboard,
             NextFrame,
         },
         menu::{
             CxCommandSetting,
-            Command
+            MenuCommand
         },
-        cursor::{
-            MouseCursor
-        },
+        cx_api::{CxOsOp},
         area::{
             Area,
         },
         gpu_info::GpuInfo,
         window::{
-            CxWindow,
+            CxWindowPool,
         },
-        draw_list::DrawList,
+        draw_list::{
+            CxDrawListPool
+        },
         pass::{
-            CxPass,
-        },
-        font::{
-            CxFont,
-            CxFontsAtlas,
-            CxDrawFontAtlas
+            CxPassPool,
         },
         texture::{
-            CxTexture,
-            TextureDesc,
-            TextureFormat
+            CxTexturePool
         },
         geometry::{
             Geometry,
-            CxGeometry,
+            CxGeometryPool,
             GeometryFingerprint
         },
     }
@@ -82,111 +66,94 @@ pub use makepad_shader_compiler::makepad_derive_live::*;
 pub use makepad_shader_compiler::makepad_math::*;
 
 pub struct Cx {
-    pub platform_type: PlatformType,
-    pub gpu_info: GpuInfo,
+    pub (crate) platform_type: OsType,
+    pub (crate) gpu_info: GpuInfo,
+    pub (crate) cpu_cores: usize,
     
-    pub windows: Vec<CxWindow>,
-    pub windows_free: Rc<RefCell<Vec<usize >> >,
+    pub windows: CxWindowPool,
+    pub passes: CxPassPool,
+    pub draw_lists: CxDrawListPool,
+    pub (crate) textures: CxTexturePool,
+    pub (crate) geometries: CxGeometryPool,
     
-    pub passes: Vec<CxPass>,
-    pub passes_free: Rc<RefCell<Vec<usize >> >,
-    
-    pub draw_lists: Vec<DrawList>,
-    pub draw_lists_free: Rc<RefCell<Vec<usize >> >,
-    
-    pub textures: Vec<CxTexture>,
-    pub textures_free: Arc<RefCell<Vec<usize >> >,
-    
-    pub geometries: Vec<CxGeometry>,
-    pub geometries_free: Rc<RefCell<Vec<usize >> >,
-    pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
+    pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
     pub draw_shaders: CxDrawShaders,
     
-    pub fonts: Vec<Option<CxFont >>,
-    pub fonts_atlas: CxFontsAtlas,
-    pub path_to_font_id: HashMap<String, usize>,
-    pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
-    
-    //pub registries: CxRegistries,
-    
-    pub new_draw_event: DrawEvent,
+    pub (crate) new_draw_event: DrawEvent,
     
     pub redraw_id: u64,
-    pub repaint_id: u64,
-    pub event_id: u64,
-    pub timer_id: u64,
-    pub next_frame_id: u64,
-    pub web_socket_id: u64,
+
+    pub (crate) repaint_id: u64,
+    pub (crate) event_id: u64,
+    pub (crate) timer_id: u64,
+    pub (crate) next_frame_id: u64,
     
-    pub prev_key_focus: Area,
-    pub next_key_focus: Area,
-    pub key_focus: Area,
-    pub keys_down: Vec<KeyEvent>,
+    #[allow(dead_code)]
+    pub (crate) web_socket_id: u64,
     
-    pub down_mouse_cursor: Option<MouseCursor>,
-    pub hover_mouse_cursor: Option<MouseCursor>,
-    pub fingers: Vec<CxPerFinger>,
+    pub (crate) keyboard: CxKeyboard,
+    pub (crate) fingers: CxFingers,
+    pub (crate) finger_drag: CxFingerDrag,
     
-    pub drag_area: Area,
-    pub new_drag_area: Area,
+    pub (crate) platform_ops: Vec<CxOsOp>,
     
-    pub new_next_frames: HashSet<NextFrame>,
+    pub (crate) new_next_frames: HashSet<NextFrame>,
     
-    pub dependencies: HashMap<String, CxDependency>,
+    pub (crate) dependencies: HashMap<String, CxDependency>,
     
-    pub signals: HashSet<Signal>,
-    pub triggers: HashMap<Area,HashSet<Trigger>>,
-    
-    pub profiles: HashMap<u64, Instant>,
+    pub (crate) signals: HashSet<Signal>,
+    pub (crate) triggers: HashMap<Area, Vec<Trigger >>,
     
     pub live_registry: Rc<RefCell<LiveRegistry >>,
     pub shader_registry: ShaderRegistry,
     
-    pub live_edit_event: Option<LiveEditEvent>,
+    #[allow(dead_code)]
+    pub (crate) command_settings: HashMap<MenuCommand, CxCommandSetting>,
     
-    pub command_settings: HashMap<Command, CxCommandSetting>,
-    
-    pub thread_pool_senders: Vec<Arc<RefCell<Option<ThreadPoolSender>>>>,
-    
-    pub platform: CxPlatform,
-    // this cuts the compiletime of an end-user application in half
-    pub event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
+    pub os: CxOs,
+    // (cratethis cuts the compiletime of an end-user application in half
+    pub (crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
+
+    pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
+
+    pub debug:Debug,
+
 }
 
-pub struct CxDependency{
-    pub data: Option<Result<Vec<u8>, String>>
+pub struct CxDependency {
+    pub data: Option<Result<Vec<u8>, String >>
 }
 
 
 #[derive(Clone)]
-pub enum PlatformType {
+pub enum OsType {
     Unknown,
     MsWindows,
     OSX,
     Linux {custom_window_chrome: bool},
-    WebBrowser {protocol: String, host:String, hostname: String, pathname: String, search: String, hash: String}
+    WebBrowser {protocol: String, host: String, hostname: String, pathname: String, search: String, hash: String}
 }
 
-impl PlatformType {
+impl OsType {
     pub fn is_desktop(&self) -> bool {
         match self {
-            PlatformType::Unknown => true,
-            PlatformType::MsWindows => true,
-            PlatformType::OSX => true,
-            PlatformType::Linux {..} => true,
-            PlatformType::WebBrowser {..} => false
+            OsType::Unknown => true,
+            OsType::MsWindows => true,
+            OsType::OSX => true,
+            OsType::Linux {..} => true,
+            OsType::WebBrowser {..} => false
         }
     }
 }
 
-impl Default for Cx {
-    fn default() -> Self {
-        let mut fingers = Vec::new();
-        fingers.resize(NUM_FINGERS, CxPerFinger::default());
-        
+impl Cx {
+    pub fn new(event_handler:Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::makepad_error_log::set_panic_hook();
         // the null texture
-        let textures = vec![CxTexture {
+        /*let mut textures = CxTexturePool::default();
+        textures.alloc_new(CxTexture {
             desc: TextureDesc {
                 format: TextureFormat::ImageBGRA,
                 width: Some(4),
@@ -196,66 +163,24 @@ impl Default for Cx {
             image_u32: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             //image_f32: Vec::new(),
             update_image: true,
-            platform: CxPlatformTexture::default()
-        }];
-        
-        let mut live_registry = LiveRegistry::default();
-        live_registry.add_ignore_no_dsl(&[
-            id!(Margin),
-            id!(Walk),
-            id!(Align),
-            id!(ScrollBarAxis),
-            id!(Layout),
-            id!(Padding),
-            id!(Axis),
-            id!(f32),
-            id!(usize),
-            id!(f64),
-            id!(bool),
-            id!(DrawVars),
-            id!(Vec2),
-            id!(Vec3),
-            id!(Vec4),
-            id!(LivePtr),
-            id!(String),
-            id!(View),
-            id!(States),
-            id!(Pass),
-            id!(Texture),
-            id!(Window),
-            id!(TextStyle),
-            id!(Wrapping),
-            id!(Overflow),
-            id!(SplitterAlign),
-            id!(MouseCursor)
-        ]);
+            platform: CxOsTexture::default()
+        });*/
         
         Self {
-            platform_type: PlatformType::Unknown,
+            cpu_cores: 8,
+            
+            platform_type: OsType::Unknown,
             gpu_info: GpuInfo::default(),
             
-            windows: Vec::new(),
-            windows_free: Rc::new(RefCell::new(Vec::new())),
+            windows: Default::default(),
+            passes: Default::default(),
+            draw_lists: Default::default(),
+            geometries: Default::default(),
+            textures:CxTexturePool::default(),
             
-            passes: Vec::new(),
-            passes_free: Rc::new(RefCell::new(Vec::new())),
-            
-            draw_lists: Vec::new(),
-            draw_lists_free: Rc::new(RefCell::new(Vec::new())),
-            
-            textures: textures,
-            textures_free: Arc::new(RefCell::new(Vec::new())),
-            
-            geometries: Vec::new(),
-            geometries_free: Rc::new(RefCell::new(Vec::new())),
             geometries_refs: HashMap::new(),
             
             draw_shaders: CxDrawShaders::default(),
-            
-            fonts: Vec::new(),
-            fonts_atlas: CxFontsAtlas::new(),
-            path_to_font_id: HashMap::new(),
-            draw_font_atlas: None,
             
             new_draw_event: DrawEvent::default(),
             
@@ -266,17 +191,12 @@ impl Default for Cx {
             next_frame_id: 1,
             web_socket_id: 1,
             
-            next_key_focus: Area::Empty,
-            prev_key_focus: Area::Empty,
-            key_focus: Area::Empty,
-            keys_down: Vec::new(),
+            keyboard: CxKeyboard::default(),
+            fingers: CxFingers::default(),
+            finger_drag: CxFingerDrag::default(),
             
-            down_mouse_cursor: None,
-            hover_mouse_cursor: None,
-            fingers: fingers,
+            platform_ops: Vec::new(),
             
-            drag_area: Area::Empty,
-            new_drag_area: Area::Empty,
             
             new_next_frames: HashSet::new(),
             
@@ -285,20 +205,20 @@ impl Default for Cx {
             signals: HashSet::new(),
             triggers: HashMap::new(),
             
-            profiles: HashMap::new(),
-            
-            live_registry: Rc::new(RefCell::new(live_registry)),
+            live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
             shader_registry: ShaderRegistry::new(),
             
             command_settings: HashMap::new(),
             
-            platform: CxPlatform {..Default::default()},
+            os: CxOs {..Default::default()},
             
-            thread_pool_senders: Vec::new(),
+            event_handler:Some(event_handler),
             
-            live_edit_event: None,
-            
-            event_handler: None
+            debug: Default::default(),
+
+            globals: Vec::new(),
         }
     }
 }
+
+

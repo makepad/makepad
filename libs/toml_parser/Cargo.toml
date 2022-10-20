@@ -1,0 +1,13 @@
+[package]
+name = "makepad-toml-parser"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad TOML parser"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "hS6_1QTZzqzrd_8Ph8A74hdKAM0="
+
+[dependencies]
+

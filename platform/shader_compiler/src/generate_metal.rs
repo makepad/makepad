@@ -52,8 +52,11 @@ impl<'a> DrawShaderGenerator<'a> {
         
         for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
-            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(id!(sample2d))) {
-                writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
+                writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::nearest,min_filter::nearest),pos);}}").unwrap();
+            }
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d_rt))) {
+                writeln!(self.string, "float4 sample2d_rt(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::nearest,min_filter::nearest),pos);}}").unwrap();
                 break;
             }
         };
@@ -66,8 +69,8 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_instance_struct();
         self.generate_varying_struct();
         
-        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
-        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap();
+        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
+        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
         
         for &(ty_lit, ref param_tys) in pixel_def
             .constructor_fn_deps
@@ -369,7 +372,7 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         
-        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
+        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
         write!(self.string, "    varyings.position = {}", DisplayFnName(vertex_def.fn_ptr, vertex_def.ident)).unwrap();
         
         write!(self.string, "(").unwrap();
@@ -398,7 +401,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         write!(self.string, "    return ").unwrap();
         
-        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap();
+        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
         write!(self.string, "    {}", DisplayFnName(pixel_def.fn_ptr, pixel_def.ident)).unwrap();
         
         write!(self.string, "(").unwrap();
@@ -793,7 +796,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
     
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]) {
         match ident {
-            Ident(id!(atan)) => {
+            Ident(live_id!(atan)) => {
                 if arg_exprs.len() == 2 {
                     write!(string, "atan2").unwrap();
                 }
@@ -801,13 +804,13 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                     write!(string, "atan").unwrap();
                 }
             }
-            Ident(id!(mod)) => {
+            Ident(live_id!(mod)) => {
                 write!(string, "fmod").unwrap();
             }
-            Ident(id!(dFdx)) => {
+            Ident(live_id!(dFdx)) => {
                 write!(string, "dfdx").unwrap();
             }
-            Ident(id!(dFdy)) => {
+            Ident(live_id!(dFdy)) => {
                 write!(string, "dfdy").unwrap();
             }
             _ => {
