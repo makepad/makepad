@@ -210,18 +210,12 @@ impl CxFontsAtlas {
                 Err(_) => {
                     error!("Error loading font {} ", path);
                 }
-                Ok(mut cxfont) => {
-                    if path == "resources/IBMPlexSans-Text.ttf" {
-                        cxfont.ttf_font.char_code_to_glyph_index_map['g' as usize] = 11;
-                        cxfont.ttf_font.char_code_to_glyph_index_map['9' as usize] = 70;
-                        cxfont.ttf_font.char_code_to_glyph_index_map['0' as usize] = 60;
-                        cxfont.ttf_font.char_code_to_glyph_index_map['@' as usize] = 72;
-                    }
+                Ok(cxfont) => {
                     self.fonts[font_id] = Some(cxfont);
                 }
             }
             Err(err) => {
-                error!("get_font_by_path - {}", err)
+                error!("get_font_by_path - {} {}", path, err)
             }
         }
         font_id
