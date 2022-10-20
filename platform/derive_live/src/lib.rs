@@ -27,8 +27,8 @@ use crate::generate_cast::*;
 mod derive_live_registry;
 use crate::derive_live_registry::*;
 
-#[path = "../../live_tokenizer/src/colorhex.rs"]
-mod colorhex;
+//#[path = "../../live_tokenizer/src/colorhex.rs"]
+//mod colorhex;
 
 #[proc_macro_derive(Live, attributes(
     alias,
