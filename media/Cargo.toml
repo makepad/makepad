@@ -7,7 +7,7 @@ description = "Makepad platform media extensions"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "BZrCFUdHD-c7Y5Djp5iaKagMxBE="
+metadata.makepad-auto-version = "K0G4UYCFBwjiYGsEcQcp3o7S-BM="
 
 [dependencies]
 makepad-platform = { path = "../platform", version = "0.3.0" }
