@@ -63,7 +63,7 @@ live_design!{
         label: {
             // DrawLabelText= {{DrawLabelText}} {
             // },
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}},
+            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -118,7 +118,7 @@ live_design!{
     
     FishButton = <Button> {
         label: {
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}}
+            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -182,7 +182,7 @@ live_design!{
             margin: {left: 0.0, right: 1.0, top: 0.0, bottom: 0.0},
         }
         label: "CutOff1"
-        label_text: {text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_TEXT_H2)}
+        label_text: {text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_TEXT_H2)}
         text_input: {
             cursor_margin_bottom: 3.0,
             cursor_margin_top: 4.0,
@@ -299,7 +299,7 @@ live_design!{
                 }
             }
             label_text: {
-                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}},
+                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
                 color: (COLOR_TEXT_H2)
             }
             walk: {margin: {top: 3, right: 0, bottom: 5, left: 0}}
@@ -315,7 +315,7 @@ live_design!{
             walk: {width: Fit, margin: {right: 5}},
             label: {
                 color: (COLOR_TEXT_H2)
-                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}},
+                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
             }
         }
         walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0}}
@@ -437,7 +437,7 @@ live_design!{
         layout: {padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
         label = <Label> {
             label: {
-                text_style: {font_size: (FONT_SIZE_H1), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}},
+                text_style: {font_size: (FONT_SIZE_H1), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
                 color: (COLOR_TEXT_H1)
             }
             text: "replace me!"
@@ -1052,7 +1052,7 @@ live_design!{
                 layout: {flow: Right, spacing: 0.0, padding: {bottom: -50}, align: {x: 1.0, y: 0.0}}
                 walk: {margin: {left: 0, right: 5}, width: Fill, height: Fit}
                 <Image> {
-                    image: d"resources/tinrs.png",
+                    image: d"crate://self/resources/tinrs.png",
                     walk: {width: (1000 * 0.25), height: (175 * 0.25)}
                 }
             }

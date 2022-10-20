@@ -717,7 +717,40 @@ impl ToLiveValue for &str{
 pub struct LiveDependency(String);
 
 impl LiveDependency{
+    pub fn into_string(self)->String{self.0}
     pub fn as_ref(&self)->&str{&self.0}
+    pub fn qualify(cx:&Cx, node:&LiveNode)->Self{
+        if let LiveValue::Dependency{string_start, string_count} = node.value{
+            let live_registry = cx.live_registry.borrow();
+            let origin_doc = live_registry.token_id_to_origin_doc(node.origin.token_id().unwrap());
+            let mut path = String::new();
+            origin_doc.get_string(string_start, string_count, &mut path);
+            
+            if let Some(path) = path.strip_prefix("crate://self/"){
+                let file_id = node.origin.token_id().unwrap().file_id().unwrap();
+                let manifest_path = live_registry.file_id_to_cargo_manifest_path(file_id);
+                return Self(format!("{}/{}", manifest_path, path));
+            }
+            else if let Some(path) = path.strip_prefix("crate://"){
+                let mut split = path.split('/');
+                if let Some(crate_name) = split.next(){
+                    if let Some(cmp) = live_registry.crate_name_to_cargo_manifest_path(crate_name){
+                        let mut path = cmp.to_string();
+                        path.push('/');
+                        while let Some(next) = split.next(){
+                            path.push('/');
+                            path.push_str(next);
+                        }
+                        return Self(path);
+                    }
+                }                
+            }
+            else{
+                return Self(path)
+            }
+        }
+        panic!()
+    }
 }
 
 live_primitive!(
@@ -725,11 +758,8 @@ live_primitive!(
     LiveDependency::default(),
     fn apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            
-            LiveValue::Dependency {string_start, string_count} => {
-                let live_registry = cx.live_registry.borrow();
-                let origin_doc = live_registry.token_id_to_origin_doc(nodes[index].origin.token_id().unwrap());
-                origin_doc.get_string(*string_start, *string_count, &mut self.0);
+            LiveValue::Dependency {..} => {
+                *self = LiveDependency::qualify(cx, &nodes[index]);
                 index + 1
             }
             _ => {
