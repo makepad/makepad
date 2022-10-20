@@ -12,11 +12,11 @@ pub use {
         turtle::{Walk, Layout},
         view::{ManyInstances, View, ViewRedrawingApi},
         geometry::GeometryQuad2D,
-        makepad_font::Glyph,
-        makepad_trapezoidator::Trapezoidator,
-        makepad_geometry::{AffineTransformation, Transform, Vector},
-        makepad_internal_iter::*,
-        makepad_path::PathIterator,
+        makepad_vector::font::Glyph,
+        makepad_vector::trapezoidator::Trapezoidator,
+        makepad_vector::geometry::{AffineTransformation, Transform, Vector},
+        makepad_vector::internal_iter::*,
+        makepad_vector::path::PathIterator,
     }
 };
 
@@ -471,7 +471,7 @@ impl<'a> Cx2d<'a> {
 
 #[derive(Clone)]
 pub struct CxFont {
-    pub ttf_font: makepad_font::TTFFont,
+    pub ttf_font: makepad_vector::font::TTFFont,
     pub atlas_pages: Vec<CxFontAtlasPage>,
 }
 
@@ -505,8 +505,8 @@ pub struct CxFontsAtlasTodo {
 
 
 impl CxFont {
-    pub fn load_from_ttf_bytes(bytes: &[u8]) -> makepad_ttf_parser::Result<Self> {
-        let ttf_font = makepad_ttf_parser::parse_ttf(bytes) ?;
+    pub fn load_from_ttf_bytes(bytes: &[u8]) -> makepad_vector::ttf_parser::Result<Self> {
+        let ttf_font = makepad_vector::ttf_parser::parse_ttf(bytes) ?;
         Ok(Self {
             ttf_font,
             atlas_pages: Vec::new()
