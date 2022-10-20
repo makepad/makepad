@@ -5,7 +5,9 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad wasm bridge"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "tLqdC15YWb_VBDEb0qh0db_POSo="
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "tdvEUoCXST328DBxCDK2KHJqA6o="
 
 [dependencies]
 makepad-derive-wasm-bridge = { path = "./derive", version = "0.3.0" }
