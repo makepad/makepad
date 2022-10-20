@@ -192,7 +192,7 @@ impl Slider {
         old != self.value
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
         self.state_handle_event(cx, event);
         for action in self.text_input.handle_event(cx, event) {
             match action {
@@ -207,7 +207,7 @@ impl Slider {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
-                    dispatch_action(cx, self, SliderAction::TextSlide(self.to_external()));
+                    dispatch_action(cx, SliderAction::TextSlide(self.to_external()));
                 }
                 TextInputAction::Escape => {
                     self.update_text_input(cx);
@@ -232,7 +232,7 @@ impl Slider {
                 
                 self.animate_state(cx, id!(drag.on));
                 self.dragging = Some(self.value);
-                dispatch_action(cx, self, SliderAction::StartSlide);
+                dispatch_action(cx, SliderAction::StartSlide);
             },
             Hit::FingerUp(fe) => {
                 self.text_input.read_only = false;
@@ -246,7 +246,7 @@ impl Slider {
                     self.animate_state(cx, id!(hover.off));
                 }
                 self.dragging = None;
-                dispatch_action(cx, self, SliderAction::EndSlide);
+                dispatch_action(cx, SliderAction::EndSlide);
             }
             Hit::FingerMove(fe) => {
                 let rel = fe.abs - fe.abs_start;
@@ -254,7 +254,7 @@ impl Slider {
                     self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
                     self.slider.redraw(cx);
                     self.update_text_input(cx);
-                    dispatch_action(cx, self, SliderAction::Slide(self.to_external()));
+                    dispatch_action(cx, SliderAction::Slide(self.to_external()));
                 }
             }
             _ => ()
@@ -291,7 +291,7 @@ impl Widget for Slider {
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.get_widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, _slider, action | {
+        self.handle_event_fn(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
@@ -305,15 +305,15 @@ impl Widget for Slider {
     
     fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], act: &WidgetActions,) {
         match db {
-            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
+            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
                 match item.action() {
                     SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
-                        nodes.write_by_field_path(path, LiveValue::Float64(v as f64));
+                        nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Float64(v as f64))]);
                     }
                     _ => ()
                 }
             }
-            DataBinding::ToWidgets(nodes) => {
+            DataBinding::ToWidgets{nodes,..} => {
                 if let Some(value) = nodes.read_by_field_path(path) {
                     if let Some(value) = value.as_float() {
                         if self.set_internal(value) {

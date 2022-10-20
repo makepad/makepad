@@ -66,7 +66,7 @@ pub trait LiveNodeVecApi {
     fn insert_children_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]);
     fn insert_children_from_self(&mut self, from_index: usize, insert_start: usize);
     
-    fn write_by_field_path(&mut self, path: &[LiveId], value: LiveValue);
+    fn write_by_field_path(&mut self, path: &[LiveId], values: &[LiveNode]);
     fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     
@@ -863,7 +863,7 @@ impl LiveNodeVecApi for LiveNodeVec {
         insert_point + num_nodes
     }
     
-    fn write_by_field_path(&mut self, path: &[LiveId], value: LiveValue) {
+    fn write_by_field_path(&mut self, path: &[LiveId], nodes: &[LiveNode]) {
         let mut ids = [LiveProp(LiveId(0), LivePropType::Field); 8];
         if path.len() > ids.len(){
             eprintln!("write_by_field_path too many path segs");
@@ -883,7 +883,7 @@ impl LiveNodeVecApi for LiveNodeVec {
         self.replace_or_insert_last_node_by_path(
             0,
             &ids[0..path.len()],
-            &[LiveNode::from_value(value)]
+            nodes
         );
         if was_empty {
             self.close();

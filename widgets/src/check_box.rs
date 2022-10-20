@@ -10,7 +10,7 @@ use {
 
 live_design!{
     import makepad_draw_2d::shader::std::*;
-    DrawCheckBox= {{DrawCheckBox}} {
+    DrawCheckBox = {{DrawCheckBox}} {
         uniform size: 7.0;
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -47,7 +47,7 @@ live_design!{
                     sdf.fill(#2);
                     let isz = sz * 0.5;
                     sdf.circle(left + sz + self.selected * sz, c.y, isz);
-                    sdf.circle(left + sz + self.selected * sz, c.y, 0.5 * isz );
+                    sdf.circle(left + sz + self.selected * sz, c.y, 0.5 * isz);
                     sdf.subtract();
                     sdf.circle(left + sz + self.selected * sz, c.y, isz);
                     sdf.blend(self.selected)
@@ -58,7 +58,7 @@ live_design!{
         }
     }
     
-    CheckBox= {{CheckBox}} {
+    CheckBox = {{CheckBox}} {
         label_text: {
             color: #9
         }
@@ -72,7 +72,7 @@ live_design!{
             height: Fit,
         }
         
-        check_box:{
+        check_box: {
         }
         
         label_align: {
@@ -171,7 +171,7 @@ pub enum CheckBoxAction {
 
 impl CheckBox {
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, CheckBoxAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CheckBoxAction)) {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.check_box.area()) {
@@ -185,11 +185,11 @@ impl CheckBox {
             Hit::FingerDown(_fe) => {
                 if self.state.is_in_state(cx, id!(selected.on)) {
                     self.animate_state(cx, id!(selected.off));
-                    dispatch_action(cx, self, CheckBoxAction::Change(false));
+                    dispatch_action(cx, CheckBoxAction::Change(false));
                 }
                 else {
                     self.animate_state(cx, id!(selected.on));
-                    dispatch_action(cx, self, CheckBoxAction::Change(true));
+                    dispatch_action(cx, CheckBoxAction::Change(true));
                 }
             },
             Hit::FingerUp(_fe) => {
@@ -212,19 +212,19 @@ impl CheckBox {
 impl Widget for CheckBox {
     fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
     
-    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId],  act: &WidgetActions, ) {
+    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], act: &WidgetActions,) {
         match db {
-            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
+            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
                 match item.action() {
-                    CheckBoxAction::Change(v)=> {
-                        nodes.write_by_field_path(path,  LiveValue::Bool(v));
+                    CheckBoxAction::Change(v) => {
+                        nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Bool(v))]);
                     }
                     _ => ()
                 }
             }
-            DataBinding::ToWidgets(nodes) => {
+            DataBinding::ToWidgets{nodes} => {
                 if let Some(value) = nodes.read_by_field_path(path) {
-                    if let Some(value) = value.as_bool(){
+                    if let Some(value) = value.as_bool() {
                         self.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
                     }
                 }
@@ -238,7 +238,7 @@ impl Widget for CheckBox {
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.get_widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, _checkbox, action | {
+        self.handle_event_fn(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
