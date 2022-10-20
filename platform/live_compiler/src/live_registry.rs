@@ -26,11 +26,11 @@ pub struct LiveFile {
     pub(crate) module_id: LiveModuleId,
     pub(crate) start_pos: TextPos,
     pub(crate) file_name: String,
+    pub(crate) cargo_manifest_path: String,
     pub(crate) source: String,
     pub(crate) deps: BTreeSet<LiveModuleId>,
     
     pub generation: LiveFileGeneration,
-    
     pub original: LiveOriginal,
     pub next_original: Option<LiveOriginal>,
     pub expanded: LiveExpanded,
@@ -104,6 +104,21 @@ impl LiveRegistry {
         &self.live_files[file_id.to_index()].file_name
     }
     
+    pub fn file_id_to_cargo_manifest_path(&self, file_id: LiveFileId) -> &str {
+        &self.live_files[file_id.to_index()].cargo_manifest_path
+    }
+
+    pub fn crate_name_to_cargo_manifest_path(&self, crate_name: &str) -> Option<&str> {
+        let crate_name = crate_name.replace('-',"_");
+        let base_crate = LiveId::from_str(&crate_name).unwrap();
+        for file in &self.live_files{
+            if file.module_id.0 == base_crate{
+                return Some(&file.cargo_manifest_path)
+            }
+        }
+        None
+    }
+    
     pub fn ptr_to_doc_node(&self, live_ptr: LivePtr) -> (&LiveExpanded, &LiveNode) {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation {
@@ -149,6 +164,7 @@ impl LiveRegistry {
         None
     }
     
+
     pub fn token_id_to_origin_doc(&self, token_id: LiveTokenId) -> &LiveOriginal {
         &self.live_files[token_id.file_id().unwrap().to_index()].original
     }
@@ -724,6 +740,7 @@ impl LiveRegistry {
     pub fn register_live_file(
         &mut self,
         file_name: &str,
+        cargo_manifest_path: &str,
         own_module_id: LiveModuleId,
         source: String,
         live_type_infos: Vec<LiveTypeInfo>,
@@ -793,6 +810,7 @@ impl LiveRegistry {
         }
         
         let live_file = LiveFile {
+            cargo_manifest_path:cargo_manifest_path.to_string(),
             reexpand: true,
             module_id: own_module_id,
             file_name: file_name.to_string(),

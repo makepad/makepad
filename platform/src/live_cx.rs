@@ -13,8 +13,9 @@ use {
             LiveToken,
             LivePtr,
             LiveTokenId,
-            LiveFileId
+            LiveFileId,
         },
+        live_prims::LiveDependency,
         makepad_error_log::*,
         makepad_live_compiler::LiveTypeInfo,
         makepad_math::*,
@@ -167,15 +168,9 @@ impl Cx {
         for file in &live_registry.live_files {
             for node in &file.original.nodes {
                 match &node.value {
-                    LiveValue::Dependency {string_start, string_count} => {
-                        let mut path = String::new();
-                        file.original.get_string(*string_start, *string_count, &mut path);
-                        //if path.starts_with("crate://"){
-                            
-                        //}
-                        // ok so. lets see if we start with crate://
-                        // ifso we need to get the crate root of the original file
-                        self.dependencies.insert(path, CxDependency {
+                    LiveValue::Dependency {..} => {
+                        let dep = LiveDependency::qualify(self, &node);
+                        self.dependencies.insert(dep.into_string(), CxDependency {
                             data: None
                         });
                     },
@@ -192,6 +187,7 @@ impl Cx {
         //println!("START");
         let result = self.live_registry.borrow_mut().register_live_file(
             &live_body.file,
+            &live_body.cargo_manifest_path,
             LiveModuleId::from_str(&live_body.module_path).unwrap(),
             live_body.code,
             live_body.live_type_infos,
