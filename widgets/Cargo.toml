@@ -1,6 +1,6 @@
 [package]
 name = "makepad-widgets"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad widgets"
@@ -8,8 +8,8 @@ license = "MIT OR Apache-2.0"
 metadata.makepad-auto-version = "3wXZ4mCWrFtrkr38MyxIpOySFgU="
 
 [dependencies]
-makepad-draw-2d = { path = "../draw_2d", version = "0.1.0" }
-makepad-derive-widget = {path = "./derive_widget", version="0.1.0"}
+makepad-draw-2d = { path = "../draw_2d", version = "0.3.0" }
+makepad-derive-widget = {path = "./derive_widget", version="0.3.0"}
 
 [features]
 nightly = ["makepad-draw-2d/nightly"]

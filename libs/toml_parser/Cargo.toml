@@ -1,6 +1,6 @@
 [package]
 name = "makepad-toml-parser"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad TOML parser"

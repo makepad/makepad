@@ -1,6 +1,6 @@
 [package]
 name = "makepad-editor-core"
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad editor core"
@@ -9,4 +9,4 @@ metadata.makepad-auto-version = "8ibssyxxEZtSS4CaeEZ2faYQjas="
 
 [dependencies]
 
-makepad-micro-serde = {path = "../../libs/micro_serde", version = "0.1.0"}
+makepad-micro-serde = {path = "../../libs/micro_serde", version = "0.3.0"}

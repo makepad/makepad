@@ -152,7 +152,7 @@ fn main() {
             let version: u64 = ver.parse().unwrap();
             
             //let next_version = format!("0.{}.0", version + 1);
-            let next_version = format!("0.1.0");
+            let next_version = format!("0.3.0");
             
             patch_cargo(&c.cargo, "package.version", &next_version, write);
             patch_cargo(&c.cargo, "package.metadata.makepad-auto-version", &c.new_sha1, write);
