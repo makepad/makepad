@@ -5,6 +5,8 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad studio"
 license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "wYzZ6_rSf-yOavE6qCqFfkBHIaA="
 
 [dependencies]
