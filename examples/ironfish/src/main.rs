@@ -1366,7 +1366,7 @@ impl App {
         */
         self.data_bind(cx, &mut db, &act);
     }
-    
+    /*
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
         let file_name = format!("preset_{}.txt", index);
@@ -1398,7 +1398,7 @@ impl App {
                 log!("Error base64 decoding preset");
             }
         }
-    }
+    }*/
     
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
