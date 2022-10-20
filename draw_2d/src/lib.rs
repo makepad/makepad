@@ -1,11 +1,7 @@
 pub use makepad_image_formats;
 pub use makepad_platform;
 pub use makepad_platform::*;
-pub use makepad_font;
-pub use makepad_trapezoidator;
-pub use makepad_geometry;
-pub use makepad_internal_iter;
-pub use makepad_path;
+pub use makepad_vector;
 
 pub mod overlay;
 pub mod cx_2d;
