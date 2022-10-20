@@ -6,4 +6,4 @@ description = "Makepad fork of SSheldon/rust-objc without libc dep."
 keywords = ["objective-c", "osx", "ios", "cocoa", "uikit"]
 license = "MIT"
 repository = "http://github.com/SSheldon/rust-objc"
-metadata.makepad-auto-version = "Fv-kCjCEQuT49weirwOogmiIXzI="
+metadata.makepad-auto-version = "yzmfnXSTlAOZPYuN1wrLirR-Hzg="
