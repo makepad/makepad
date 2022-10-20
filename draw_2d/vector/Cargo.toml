@@ -7,7 +7,7 @@ description = "Makepad vector api"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "ozUBY7mXcDO90346mZQsUxmDUJ8="
+metadata.makepad-auto-version = "3GWDmuzlo49-DLW_xADwmtdViPI="
 
 [dependencies]
 
