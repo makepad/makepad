@@ -26,11 +26,11 @@ pub struct ToWasmMidiInputData {
     pub data: u32,
 }
 
-impl Into<Midi1InputData> for ToWasmMidiInputData {
-    fn into(self) -> Midi1InputData {
-        Midi1InputData {
+impl Into<MidiInputData> for ToWasmMidiInputData {
+    fn into(self) -> MidiInputData {
+        MidiInputData {
             input_id: self.input_id as usize,
-            data: Midi1Data {
+            data: MidiData {
                 data0: ((self.data >> 16) & 0xff) as u8,
                 data1: ((self.data >> 8) & 0xff) as u8,
                 data2: ((self.data >> 0) & 0xff) as u8,
@@ -76,23 +76,10 @@ pub fn live_design(cx: &mut Cx) {
 
 impl CxMediaApi for Cx {
     
-    fn send_midi_1_data(&mut self, _data:Midi1Data){
+    fn send_midi_data(&mut self, _data:MidiData){
     }
     
-    fn on_midi_1_input_data(&mut self, event: &Event) -> Vec<Midi1InputData> {
-        if let Event::ToWasmMsg(event) = event {
-            match event.id{
-                live_id!(ToWasmMidiInputData)=>{
-                    let tw = ToWasmMidiInputData::read_to_wasm(&mut event.as_ref());
-                    return vec![tw.into()]
-                },
-                _=>()
-            }
-        }
-        Vec::new()
-    }
-    
-    fn on_midi_input_list(&mut self, event: &Event) -> Vec<MidiInputInfo> {
+    fn handle_midi_inputs(&mut self, event: &Event) -> Vec<MidiInputInfo> {
         if let Event::ToWasmMsg(event) = event {
             match event.id{
                 live_id!(ToWasmMidiInputList)=>{
@@ -108,6 +95,20 @@ impl CxMediaApi for Cx {
         }
         Vec::new()
     }
+    
+    fn handle_midi_received(&mut self, event: &Event) -> Vec<MidiInputData> {
+        if let Event::ToWasmMsg(event) = event {
+            match event.id{
+                live_id!(ToWasmMidiInputData)=>{
+                    let tw = ToWasmMidiInputData::read_to_wasm(&mut event.as_ref());
+                    return vec![tw.into()]
+                },
+                _=>()
+            }
+        }
+        Vec::new()
+    }
+    
     
     fn start_midi_input(&mut self) {
         self.os.from_wasm(FromWasmStartMidiInput {
