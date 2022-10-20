@@ -27,10 +27,10 @@ DRYRUN=${1:---dry-run}
 #cargo publish $DRYRUN -p makepad-derive-wasm-bridge
 #echo "---- PUBLISHING makepad-wasm-bridge ----" 56
 #cargo publish $DRYRUN -p makepad-wasm-bridge
-echo "---- PUBLISHING makepad-platform ----" 1906
-cargo publish $DRYRUN -p makepad-platform
-#echo "---- PUBLISHING makepad-vector ----" 1916
-#cargo publish $DRYRUN -p makepad-vector
+#echo "---- PUBLISHING makepad-platform ----" 1906
+#cargo publish $DRYRUN -p makepad-platform
+echo "---- PUBLISHING makepad-vector ----" 1916
+cargo publish $DRYRUN -p makepad-vector
 #echo "---- PUBLISHING makepad-image-formats ----" 1926
 #cargo publish $DRYRUN -p makepad-image-formats
 #echo "---- PUBLISHING makepad-draw-2d ----" 1936
