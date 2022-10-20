@@ -1236,6 +1236,13 @@ impl App {
             (id!(osc2.harmonic.slider), id!(osc2.harmonic)),
             (id!(osc2.harmonicenv.slider), id!(osc2.harmonicenv)),
             (id!(osc2.harmoniclfo.slider), id!(osc2.harmoniclfo)),
+          
+            (id!(osc2.supersaw.spread.slider), id!(supersaw1.spread)),
+            (id!(osc2.supersaw.diffuse.slider), id!(supersaw1.diffuse)),
+            
+            (id!(osc2.hypersaw.spread.slider), id!(supersaw2.spread)),
+            (id!(osc2.hypersaw.diffuse.slider), id!(supersaw2.diffuse)),
+          
             // sequencer
             (id!(sequencer), id!(sequencer.steps)),
         ]);
