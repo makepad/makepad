@@ -1,7 +1,7 @@
 import {WasmWebGL} from "/makepad/platform/src/os/web_browser/web_gl.js";
 
 const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
-    "/makepad/target/wasm32-unknown-unknown/release/makepad_example_fractal_zoom.wasm":
+    "/makepad/target/wasm32-unknown-unknown/release/makepad-example-fractal-zoom.wasm"
 );
 
 class MyWasmApp {
