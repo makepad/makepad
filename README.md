@@ -37,7 +37,7 @@ Make sure you have all the prerequisites above installed first!
 ### Native
 
 To build and run the native version of Ironfish, run the following command from the root directory of the repository:
-```cargo +nightly run -p makepad-example-ironfish --release```
+```cargo +nightly run -p makepad-example-ironfish --release -F nightly```
 
 ### Web
 
@@ -47,7 +47,8 @@ To build the web version of Ironfish, run the following command from the root di
 After the build is complete, run the following command to start our web server:
 ```cargo run -p makepad-web-server --release```
 
-After starting the web server, the web build of Ironfish should be available at IP address 127.0.0.1.
+After starting the web server, the web build of Ironfish should be available here:
+https://127.0.0.1/makepad/examples/ironfish/src/index.html
 
 ## Contact
 
