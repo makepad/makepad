@@ -10,7 +10,7 @@ Makepad Framework is our UI framework. It consists of multiple crates, but the t
 
 Makepad Studio is a prototype of an IDE that we've built using Makepad Framework. It's still under heavy development, but our eventual goal with Makepad Studio is to create an IDE that enables the design of an application to be changed at runtime. The main crate for Makepad Studio is [makepad-studio](https://crates.io/crates/makepad-studio). Please see the README for that crate for more.
 
-Demos links:
+Demo links:
 
 [makepad-example-fractal-zoom](https://makepad.nl/makepad/examples/fractal_zoom/src/index.html)
 
