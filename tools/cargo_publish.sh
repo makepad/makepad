@@ -27,30 +27,18 @@ DRYRUN=${1:---dry-run}
 #cargo publish $DRYRUN -p makepad-derive-wasm-bridge
 #echo "---- PUBLISHING makepad-wasm-bridge ----" 56
 #cargo publish $DRYRUN -p makepad-wasm-bridge
-echo "---- PUBLISHING makepad-platform ----" 56
+echo "---- PUBLISHING makepad-platform ----" 1906
 cargo publish $DRYRUN -p makepad-platform
-#echo "---- PUBLISHINGmakepad-internal-iter ----" 1906
-#cargo publish $DRYRUN -p makepad-internal-iter
-#echo "---- PUBLISHING makepad-geometry ----" 1906
-#cargo publish $DRYRUN -p makepad-geometry
-#echo "---- PUBLISHINGmakepad-path ----" 1906
-#cargo publish $DRYRUN -p makepad-path
-#echo "---- PUBLISHING makepad-font ----" 1906
-#cargo publish $DRYRUN -p makepad-font
-#echo "---- PUBLISHING makepad-trapezoidator ----" 1906
-#cargo publish $DRYRUN -p makepad-trapezoidator
-#echo "---- PUBLISHING makepad-font ----" 1906
-#cargo publish $DRYRUN -p makepad-font
-#echo "---- PUBLISHING makepad-ttf-parser ----" 1906
-#cargo publish $DRYRUN -p makepad-ttf-parser
-#echo "---- PUBLISHING makepad-image-formats ----" 1916
+#echo "---- PUBLISHING makepad-vector ----" 1916
+#cargo publish $DRYRUN -p makepad-vector
+#echo "---- PUBLISHING makepad-image-formats ----" 1926
 #cargo publish $DRYRUN -p makepad-image-formats
-#echo "---- PUBLISHING makepad-draw-2d ----" 1926
+#echo "---- PUBLISHING makepad-draw-2d ----" 1936
 #cargo publish $DRYRUN -p makepad-draw-2d
-#echo "---- PUBLISHING makepad-derive-widget ----" 1936
+#echo "---- PUBLISHING makepad-derive-widget ----" 1946
 #cargo publish $DRYRUN -p makepad-derive-widget
-#echo "---- PUBLISHING makepad-widgets ----" 1946
+#echo "---- PUBLISHING makepad-widgets ----" 1956
 #cargo publish $DRYRUN -p makepad-widgets
-#echo "---- PUBLISHING makepad-example-simple ----" 1956
+#echo "---- PUBLISHING makepad-example-simple ----" 2006
 #cargo publish $DRYRUN -p makepad-example-simple
 

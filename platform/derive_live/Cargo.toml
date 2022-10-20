@@ -7,7 +7,7 @@ description = "Makepad platform live DSL derive macros"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "xfXJEt-VjsFMotX6nxPX32MUQ3w="
+metadata.makepad-auto-version = "RRw-q02kBlulgVcIVqoQZz2dsy4="
 
 [lib]
 proc-macro = true
