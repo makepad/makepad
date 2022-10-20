@@ -1,12 +1,8 @@
-pub use {
-    std::{
-        any::TypeId,
-    },
+use {
     crate::{
         makepad_live_compiler::*,
         makepad_math::*,
         cx::Cx,
-        event::Event,
         live_traits::*,
         state::State
     }
@@ -26,6 +22,11 @@ macro_rules!live_primitive {
         impl ToLiveValue for $ ty {
             $ to_live_value
         }
+        impl LiveRead for $ ty {
+            fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+                out.push(LiveNode::from_id_value(id, self.to_live_value()));
+            }
+        }
         impl LiveApply for $ ty {
             //fn type_id(&self) -> TypeId {
             //    TypeId::of::< $ ty>()
@@ -43,6 +44,7 @@ macro_rules!live_primitive {
                     module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
                     live_type: LiveType::of::<Self>(),
                     fields: Vec::new(),
+                    live_ignore: true,
                     type_name: LiveId::from_str(stringify!( $ ty)).unwrap(),
                     //kind: LiveTypeKind::Primitive
                 }
@@ -109,7 +111,7 @@ live_primitive!(
                 *self = *val;
                 index + 1
             }
-            LiveValue::Int(val) => {
+            LiveValue::Int64(val) => {
                 *self = *val != 0;
                 index + 1
             }
@@ -151,19 +153,23 @@ live_primitive!(
     0.0f32,
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Float(val) => {
+            LiveValue::Float32(val) => {
+                *self = *val;
+                index + 1
+            }
+            LiveValue::Float64(val) => {
                 *self = *val as f32;
                 index + 1
             }
-            LiveValue::Int(val) => {
+            LiveValue::Int64(val) => {
                 *self = *val as f32;
                 index + 1
             }
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                        LiveEval::Float(v) => {*self = v as f32;}
-                        LiveEval::Int(v) => {*self = v as f32;}
+                        LiveEval::Float64(v) => {*self = v as f32;}
+                        LiveEval::Int64(v) => {*self = v as f32;}
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "f32", ret);
                         }
@@ -186,7 +192,7 @@ live_primitive!(
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        LiveValue::Float(*self as f64)
+        LiveValue::Float32(*self)
     }
 );
 
@@ -195,19 +201,23 @@ live_primitive!(
     0.0f64,
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Float(val) => {
+            LiveValue::Float32(val) => {
                 *self = *val as f64;
                 index + 1
             }
-            LiveValue::Int(val) => {
+            LiveValue::Float64(val) => {
+                *self = *val;
+                index + 1
+            }
+            LiveValue::Int64(val) => {
                 *self = *val as f64;
                 index + 1
             }
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                        LiveEval::Float(v) => {*self = v as f64;}
-                        LiveEval::Int(v) => {*self = v as f64;}
+                        LiveEval::Float64(v) => {*self = v as f64;}
+                        LiveEval::Int64(v) => {*self = v as f64;}
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "f64", ret);
                         }
@@ -230,7 +240,7 @@ live_primitive!(
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        LiveValue::Float(*self as f64)
+        LiveValue::Float64(*self as f64)
     }
 );
 
@@ -239,19 +249,23 @@ live_primitive!(
     0i64,
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Float(val) => {
+            LiveValue::Float32(val) => {
                 *self = *val as i64;
                 index + 1
             }
-            LiveValue::Int(val) => {
+            LiveValue::Float64(val) => {
+                *self = *val as i64;
+                index + 1
+            }
+            LiveValue::Int64(val) => {
                 *self = *val as i64;
                 index + 1
             }
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                        LiveEval::Float(v) => {*self = v as i64;}
-                        LiveEval::Int(v) => {*self = v as i64;}
+                        LiveEval::Float64(v) => {*self = v as i64;}
+                        LiveEval::Int64(v) => {*self = v as i64;}
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
                         }
@@ -274,7 +288,55 @@ live_primitive!(
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        LiveValue::Int(*self)
+        LiveValue::Int64(*self)
+    }
+);
+
+live_primitive!(
+    u32,
+    0u32,
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Float32(val) => {
+                *self = *val as u32;
+                index + 1
+            }
+            LiveValue::Float64(val) => {
+                *self = *val as u32;
+                index + 1
+            }
+            LiveValue::Int64(val) => {
+                *self = *val as u32;
+                index + 1
+            }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Float64(v) => {*self = v as u32;}
+                        LiveEval::Int64(v) => {*self = v as u32;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            },
+            LiveValue::Array => {
+                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::DSL {..} => nodes.skip_node(index),
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "i64");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::Int64(*self as i64)
     }
 );
 
@@ -283,19 +345,23 @@ live_primitive!(
     0usize,
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Float(val) => {
+            LiveValue::Float32(val) => {
                 *self = *val as usize;
                 index + 1
             }
-            LiveValue::Int(val) => {
+            LiveValue::Float64(val) => {
+                *self = *val as usize;
+                index + 1
+            }
+            LiveValue::Int64(val) => {
                 *self = *val as usize;
                 index + 1
             }
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                        LiveEval::Float(v) => {*self = v as usize;}
-                        LiveEval::Int(v) => {*self = v as usize;}
+                        LiveEval::Float64(v) => {*self = v as usize;}
+                        LiveEval::Int64(v) => {*self = v as usize;}
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "usize", ret);
                         }
@@ -318,7 +384,65 @@ live_primitive!(
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        LiveValue::Int(*self as i64)
+        LiveValue::Int64(*self as i64)
+    }
+);
+
+
+live_primitive!(
+    DVec2,
+    DVec2::default(),
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Int64(v) => {
+                *self = DVec2::all(*v as f64);
+                index + 1
+            }
+            LiveValue::Float32(v) => {
+                *self = DVec2::all(*v as f64);
+                index + 1
+            }
+            LiveValue::Float64(v) => {
+                *self = DVec2::all(*v);
+                index + 1
+            }
+            LiveValue::Vec2(val) => {
+                *self = val.clone().into();
+                index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                       LiveEval::Int64(v) => {
+                            *self = DVec2::all(v as f64);
+                        }
+                        LiveEval::Float64(v) => {
+                            *self = DVec2::all(v as f64);
+                        }
+                        LiveEval::Vec2(v) => {*self = v.into();}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::DSL {..} => nodes.skip_node(index),
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::Vec2(self.clone().into())
     }
 );
 
@@ -327,11 +451,15 @@ live_primitive!(
     Vec2::default(),
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Int(v) => {
+            LiveValue::Int64(v) => {
                 *self = Vec2::all(*v as f32);
                 index + 1
             }
-            LiveValue::Float(v) => {
+            LiveValue::Float32(v) => {
+                *self = Vec2::all(*v as f32);
+                index + 1
+            }
+            LiveValue::Float64(v) => {
                 *self = Vec2::all(*v as f32);
                 index + 1
             }
@@ -348,10 +476,10 @@ live_primitive!(
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                       LiveEval::Int(v) => {
+                       LiveEval::Int64(v) => {
                             *self = Vec2::all(v as f32);
                         }
-                        LiveEval::Float(v) => {
+                        LiveEval::Float64(v) => {
                             *self = Vec2::all(v as f32);
                         }
                         LiveEval::Vec2(v) => {*self = v;}
@@ -384,11 +512,15 @@ live_primitive!(
                 *self = Vec3{x:v.x, y:v.y, z:0.0};
                 index + 1
             }
-            LiveValue::Int(v) => {
+            LiveValue::Int64(v) => {
                 *self = Vec3::all(*v as f32);
                 index + 1
             }
-            LiveValue::Float(v) => {
+            LiveValue::Float32(v) => {
+                *self = Vec3::all(*v as f32);
+                index + 1
+            }
+            LiveValue::Float64(v) => {
                 *self = Vec3::all(*v as f32);
                 index + 1
             }
@@ -408,10 +540,10 @@ live_primitive!(
                         LiveEval::Vec2(v) => {
                             *self = Vec3{x:v.x, y:v.y, z:0.0};
                         }
-                        LiveEval::Int(v) => {
+                        LiveEval::Int64(v) => {
                             *self = Vec3::all(v as f32);
                         }
-                        LiveEval::Float(v) => {
+                        LiveEval::Float64(v) => {
                             *self = Vec3::all(v as f32);
                         }
                         LiveEval::Vec3(v) => {*self = v;}
@@ -448,11 +580,15 @@ live_primitive!(
                 *self = Vec4{x:v.x, y:v.y, z:v.z, w:1.0};
                 index + 1
             }
-            LiveValue::Int(v) => {
+            LiveValue::Int64(v) => {
                 *self = Vec4::all(*v as f32);
                 index + 1
             }
-            LiveValue::Float(v) => {
+            LiveValue::Float32(v) => {
+                *self = Vec4::all(*v as f32);
+                index + 1
+            }
+            LiveValue::Float64(v) => {
                 *self = Vec4::all(*v as f32);
                 index + 1
             }
@@ -475,10 +611,10 @@ live_primitive!(
                         LiveEval::Vec3(v) => {
                             *self = Vec4{x:v.x, y:v.y, z:v.z, w:1.0};
                         }
-                        LiveEval::Int(v) => {
+                        LiveEval::Int64(v) => {
                             *self = Vec4::all(v as f32);
                         }
-                        LiveEval::Float(v) => {
+                        LiveEval::Float64(v) => {
                             *self = Vec4::all(v as f32);
                         }
                         LiveEval::Vec4(v) => {*self = v;}
@@ -564,11 +700,57 @@ live_primitive!(
     }
 );
 
+impl ToLiveValue for &str{
+    fn to_live_value(&self) -> LiveValue {
+        // lets check our byte size and choose a storage mode appropriately.
+        //let bytes = self.as_bytes();
+        if let Some(inline_str) = InlineString::from_str(self) {
+            LiveValue::InlineString(inline_str)
+        }
+        else {
+            LiveValue::FittedString(FittedString::from_string(self.to_string()))
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct LiveDependency(String);
 
 impl LiveDependency{
+    pub fn into_string(self)->String{self.0}
     pub fn as_ref(&self)->&str{&self.0}
+    pub fn qualify(cx:&Cx, node:&LiveNode)->Self{
+        if let LiveValue::Dependency{string_start, string_count} = node.value{
+            let live_registry = cx.live_registry.borrow();
+            let origin_doc = live_registry.token_id_to_origin_doc(node.origin.token_id().unwrap());
+            let mut path = String::new();
+            origin_doc.get_string(string_start, string_count, &mut path);
+            
+            if let Some(path) = path.strip_prefix("crate://self/"){
+                let file_id = node.origin.token_id().unwrap().file_id().unwrap();
+                let manifest_path = live_registry.file_id_to_cargo_manifest_path(file_id);
+                return Self(format!("{}/{}", manifest_path, path));
+            }
+            else if let Some(path) = path.strip_prefix("crate://"){
+                let mut split = path.split('/');
+                if let Some(crate_name) = split.next(){
+                    if let Some(cmp) = live_registry.crate_name_to_cargo_manifest_path(crate_name){
+                        let mut path = cmp.to_string();
+                        path.push('/');
+                        while let Some(next) = split.next(){
+                            path.push('/');
+                            path.push_str(next);
+                        }
+                        return Self(path);
+                    }
+                }                
+            }
+            else{
+                return Self(path)
+            }
+        }
+        panic!()
+    }
 }
 
 live_primitive!(
@@ -576,11 +758,8 @@ live_primitive!(
     LiveDependency::default(),
     fn apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            
-            LiveValue::Dependency {string_start, string_count} => {
-                let live_registry = cx.live_registry.borrow();
-                let origin_doc = live_registry.token_id_to_origin_doc(nodes[index].origin.token_id().unwrap());
-                origin_doc.get_string(*string_start, *string_count, &mut self.0);
+            LiveValue::Dependency {..} => {
+                *self = LiveDependency::qualify(cx, &nodes[index]);
                 index + 1
             }
             _ => {

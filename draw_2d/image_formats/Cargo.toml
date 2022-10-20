@@ -1,0 +1,13 @@
+[package]
+name = "makepad-image-formats"
+version = "0.3.0"
+authors = ["Desmond Germans <desmond@germansmedia.nl>"]
+edition = "2018"
+description = "Makepad image formats"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "GydN_mCGhgoePI0-l-AfXJa_VkY="
+
+[features]
+nightly = []

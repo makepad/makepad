@@ -1,8 +1,8 @@
-const SOURCE: &'static str = r#"
+/*const SOURCE: &'static str = r#"
     DrawQuad: DrawShader {
         uniform uni1: float
         
-        rust_type: {{0}},
+        rust_type= {{0}},
         
         const cnst1: float = 1.0
         live: 1.0
@@ -42,8 +42,6 @@ const SOURCE: &'static str = r#"
         fn override(self) {1 + 1;}
     }
 "#;
-
-
 
 const GLSL_OUTPUT: &'static str = r#"
     VERTEXSHADER
@@ -312,11 +310,11 @@ const HLSL_OUTPUT: &'static str = r#"
     
 "#;
 
-use makepad_live_parser::*;
-use makepad_shader_compiler::shaderregistry::ShaderRegistry;
-use makepad_shader_compiler::shaderast::DrawShaderPtr;
-use makepad_shader_compiler::shaderast::DrawShaderConstTable;
-use makepad_shader_compiler::shaderast::Ty;
+use makepad_live_compiler::*;
+use makepad_shader_compiler::shader_registry::ShaderRegistry;
+use makepad_shader_compiler::shader_ast::DrawShaderPtr;
+use makepad_shader_compiler::shader_ast::DrawShaderConstTable;
+use makepad_shader_compiler::shader_ast::Ty;
 use makepad_shader_compiler::generate_glsl;
 use makepad_shader_compiler::generate_hlsl;
 use makepad_shader_compiler::generate_metal;
@@ -391,17 +389,17 @@ fn main() {
     
     let shader_ptr = DrawShaderPtr(sr.live_registry.live_ptr_from_path(
         module_path,
-        &[id!(DrawQuad2)]
+        &[live_id!(DrawQuad2)]
     ).unwrap());
     // lets just call the shader compiler on this thing
     
     let result = sr.analyse_draw_shader(shader_ptr, | span, id, _live_type, draw_shader_def | {
-        if id == id!(rust_type) {
+        if id == live_id!(rust_type) {
             draw_shader_def.add_uniform(Id::from_str("duni").unwrap(), Ty::Float, span);
             draw_shader_def.add_instance(Id::from_str("dinst").unwrap(), Ty::Float, span);
             draw_shader_def.add_instance(Id::from_str("dmat").unwrap(), Ty::Mat3, span);
         }
-        if id == id!(geometry) {
+        if id == live_id!(geometry) {
             
         }
     });
@@ -469,4 +467,8 @@ fn main() {
         assert_eq!(true, false);
     }
     
+}*/
+
+#[test]
+fn main() {
 }

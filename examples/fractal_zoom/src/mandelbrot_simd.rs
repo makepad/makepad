@@ -47,8 +47,7 @@ fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 // here we use f32x4 to compute 4 mandelbrot pixels at the same time with f32 precision.
 fn mandelbrot_pixel_f32x4(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x4) {
     let mut x = c_x;
-    let mut y = c_y;
-    
+    let mut y = c_y;  
     // in SIMD mandelbrot the loop has to continue
     // until all the 4 lanes have exitted
     // this means you need to hold onto the magsq/iter 
@@ -67,7 +66,8 @@ fn mandelbrot_pixel_f32x4(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x
         // this compares the magsq to > 4.0 and stores the result in a mask
         // masks are vectors of bools you can use to select values
         // in simd types by lane
-        let if_exit = magsq.lanes_gt(f32x4s(4.0));
+        //let if_exit = magsq.simd_gt(f32x4s(4.0));
+        let if_exit = magsq.simd_gt(f32x4s(4.0));
 
         // this boolean logic is only 1 when the value 'changed to 1'
         // and 0 otherwise. so it stores if we have a new exit on our lanes
@@ -119,7 +119,11 @@ pub fn mandelbrot_f32x4(tile: &mut Tile, max_iter: usize) {
             // scale and clamp the magnitude squared so that it can become a 
             // fixed point 16 bit value we can pack into 2x8bit components of the texture 
             let magsq = (magsq + f32x4s(127.0)) * f32x4s(256.0);
-            let magsq = magsq.clamp(f32x4s(0.0), f32x4s(65535.0));
+            
+            let magsq = magsq.simd_clamp(f32x4s(0.0), f32x4s(65535.0));
+            
+            //let magsq = magsq.simd_clamp(f32x4s(0.0), f32x4s(65535.0));
+            
             // cast our float magnitude squared into an integer simd vector
             let magsq: u32x4 = magsq.cast();
             
@@ -146,7 +150,9 @@ fn mandelbrot_pixel_f64x2(max_iter: u64, c_x: f64x2, c_y: f64x2) -> (u64x2, f64x
         let yy = y * y;
         let magsq = xx + yy;
         
-        let if_exit = magsq.lanes_gt(f64x2s(4.0));
+        //let if_exit = magsq.simd_gt(f64x2s(4.0));
+        let if_exit = magsq.simd_gt(f64x2s(4.0));
+        
         let new_exit = (if_exit ^ exitted) & if_exit;
         exitted = exitted | new_exit;
         magsq_out = new_exit.select(magsq, magsq_out);
@@ -173,7 +179,10 @@ pub fn mandelbrot_f64x2(tile: &mut Tile, max_iter: usize) {
             let fp_y = fractal_pos.1 + fractal_size.1 * pixel_pos.1 / tile_size.1;
             let (iter, magsq) = mandelbrot_pixel_f64x2(max_iter as u64, fp_x, fp_y);
             let magsq = (magsq + f64x2s(127.0)) * f64x2s(256.0);
-            let magsq = magsq.clamp(f64x2s(0.0), f64x2s(65535.0));
+            
+            //let magsq = magsq.simd_clamp(f64x2s(0.0), f64x2s(65535.0));
+            let magsq = magsq.simd_clamp(f64x2s(0.0), f64x2s(65535.0));
+           
             let magsq: u64x2 = magsq.cast();
             for i in 0..2 {
                 tile.buffer[y * TILE_SIZE_X + x + i] = iter[i] as u32 | ((magsq[i]) << 16) as u32;
@@ -184,7 +193,7 @@ pub fn mandelbrot_f64x2(tile: &mut Tile, max_iter: usize) {
 
 // 2 lane f64 antialiased by supersampling 4 pixels
 #[allow(dead_code)]
-pub fn mandelbrot_f64x2_aa(tile: &mut Tile, max_iter: usize) {
+pub fn mandelbrot_f64x2_4xaa(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
     let fractal_size = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
@@ -208,3 +217,35 @@ pub fn mandelbrot_f64x2_aa(tile: &mut Tile, max_iter: usize) {
     }
 }
 
+// 2 lane f64 antialiased by supersampling 4 pixels
+#[allow(dead_code)]
+pub fn mandelbrot_f64x2_16xaa(tile: &mut Tile, max_iter: usize) {
+    let ts = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
+    let fp = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
+    let fs = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
+    for y in 0..TILE_SIZE_Y {
+        for x in 0..TILE_SIZE_X {
+            let xf = x as f64;
+            let yf = y as f64;
+            fn kernel_2x(xf:f64, yf:f64, fp:(f64x2,f64x2), fs:(f64x2,f64x2), ts:(f64x2,f64x2), max_iter: usize)->(u64x2, f64x2){
+                let pp = (f64x2v(xf, xf + 0.25), f64x2s(yf));
+                let fp_x = fp.0 + fs.0 * pp.0 / ts.0;
+                let fp_y = fp.1 + fs.1 * pp.1 / ts.1;
+                mandelbrot_pixel_f64x2(max_iter as u64, fp_x, fp_y)
+            }
+            fn kernel_4x(xf:f64, yf:f64, fp:(f64x2,f64x2), fs:(f64x2,f64x2), ts:(f64x2,f64x2), max_iter: usize)->(u64x2, f64x2){
+                let (i1,m1) = kernel_2x(xf, yf, fp, fs, ts, max_iter);
+                let (i2,m2) = kernel_2x(xf, yf+0.25, fp, fs, ts, max_iter);
+                return (i1+i2, m1+m2)
+            }
+            let (i1, m1) = kernel_4x(xf, yf, fp, fs, ts, max_iter);
+            let (i2, m2) = kernel_4x(xf+0.5, yf, fp, fs, ts, max_iter);
+            let (i3, m3) = kernel_4x(xf, yf+0.5, fp, fs, ts, max_iter);
+            let (i4, m4) = kernel_4x(xf+0.5, yf+0.5, fp, fs, ts, max_iter);
+            let iter = (i1 + i2 + i3 + i4).reduce_sum() / 16;
+            let magsq = (m1 + m2 + m3 + m4).reduce_sum() / 16.0;
+            let magsq = ((magsq + 127.0)* 256.0).max(0.0).min(65535.0) as u32;
+            tile.buffer[y * TILE_SIZE_X + x] = iter as u32 | (magsq << 16);
+        }
+    }
+}

@@ -1,6 +1,6 @@
 use proc_macro::{TokenStream};
 
-use makepad_macro_lib::{TokenBuilder, TokenParser, error};
+use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
 
 pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
@@ -20,7 +20,7 @@ pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("impl LiveComponentRegistry for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn type_id(&self) -> LiveType {LiveType::of::<").ident(&struct_name).add(">()}");
             
-            tb.add("    fn component_type(&self) -> LiveId {id!(").ident(&trait_name).add(")}");
+            tb.add("    fn component_type(&self) -> LiveId {live_id!(").ident(&trait_name).add(")}");
             tb.add("    fn get_module_set(&self, set: &mut std::collections::BTreeSet<LiveModuleId>){");
             tb.add("        self.map.values().for_each( | (info, _) | {set.insert(info.module_id);});");
             tb.add("    }");
@@ -37,7 +37,7 @@ pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("        self.map.get(&ty).map( | (info, fac) | {");
             tb.add("            let mut ret = fac.new(cx);");
             tb.add("            let live_ptr = cx.live_registry.borrow().module_id_and_name_to_ptr(info.module_id, info.name).unwrap();");
-            tb.add("            live_traits::from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{");
+            tb.add("            cx.get_nodes_from_live_ptr(live_ptr, |cx, file_id, index, nodes|{");
             tb.add("                ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)");
             tb.add("            });");
            tb.add("             ret");

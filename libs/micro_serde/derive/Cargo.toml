@@ -1,0 +1,17 @@
+[package]
+name = "makepad-micro-serde-derive"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad micro serde derive macro"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "q3Pi3uS2uNtdZnKsf5Nt65vZWr8="
+
+[lib]
+proc-macro = true
+
+[dependencies]
+makepad-micro-proc-macro = { path = "../../micro_proc_macro", version = "0.3.0" }
+

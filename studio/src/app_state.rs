@@ -1,15 +1,14 @@
 use {
     crate::{
-        makepad_studio_component::{
+        makepad_widgets::{
             file_tree::{FileNodeId},
-        },
-        makepad_component::{
             splitter::{SplitterAlign},
             dock::{PanelId},
             tab_bar::{TabId},
         },
-        makepad_platform::*,
+        makepad_draw_2d::*,
         editor_state::{EditorState, SessionId},
+        build::build_manager::BuildState,
         makepad_collab_protocol::{
             FileNodeData, FileTreeData,
             unix_path::UnixPathBuf,
@@ -26,7 +25,10 @@ pub struct AppState {
     pub selected_panel_id: PanelId,
     
     pub path: UnixPathBuf,
+    
     pub editor_state: EditorState,
+    
+    pub build_state: BuildState
 }
 
 impl AppState {
@@ -34,7 +36,7 @@ impl AppState {
         let mut file_nodes = LiveIdMap::new();
 
         file_nodes.insert(
-            id!(root),
+            live_id!(root),
             FileNode {
                 parent_edge: None,
                 name: String::from("root"),
@@ -46,22 +48,22 @@ impl AppState {
         let mut tabs = LiveIdMap::new();
         
         panels.insert(
-            id!(log_view),
+            live_id!(log_view),
             Panel::Tab(TabPanel {
-                tab_ids: vec![id!(log_view).into(), id!(shader_view).into()],
+                tab_ids: vec![live_id!(log_view).into(), live_id!(shader_view).into()],
                 selected_tab: Some(0)
             }),
         );
         
         tabs.insert(
-            id!(log_view),
+            live_id!(log_view),
             Tab {
                 name: String::from("Log"),
                 kind: TabKind::LogView,
             },
         );
         tabs.insert(
-            id!(shader_view),
+            live_id!(shader_view),
             Tab {
                 name: String::from("Shader"),
                 kind: TabKind::ShaderView,
@@ -69,15 +71,15 @@ impl AppState {
         );
         
         panels.insert(
-            id!(file_tree),
+            live_id!(file_tree),
             Panel::Tab(TabPanel {
-                tab_ids: vec![id!(file_tree).into()],
+                tab_ids: vec![live_id!(file_tree).into()],
                 selected_tab: Some(0)
             }),
         );
         
         tabs.insert(
-            id!(file_tree),
+            live_id!(file_tree),
             Tab {
                 name: String::from("Files"),
                 kind: TabKind::FileTree,
@@ -85,46 +87,72 @@ impl AppState {
         );
         
         panels.insert(
-            id!(content),
+            live_id!(content),
+            Panel::Split(SplitPanel {
+                axis: Axis::Horizontal,
+                align: SplitterAlign::Weighted(0.5),
+                child_panel_ids: [live_id!(content1).into(), live_id!(content2).into()],
+            }),
+        );
+        
+        panels.insert(
+            live_id!(content1),
             Panel::Tab(TabPanel {
-                tab_ids: vec![id!(slides_view).into()],
+                tab_ids: vec![live_id!(slides_view).into()],
                 selected_tab: Some(0)
             }),
         );
         
         panels.insert(
-            id!(root),
-            Panel::Split(SplitPanel {
-                axis: Axis::Vertical,
-                align: SplitterAlign::FromEnd(250.0),
-                child_panel_ids: [id!(above_log).into(), id!(log_view).into()],
+            live_id!(content2),
+            Panel::Tab(TabPanel {
+                tab_ids: vec![live_id!(run_view).into()],
+                selected_tab: Some(0)
             }),
         );
         
-         tabs.insert(
-            id!(slides_view),
+        panels.insert(
+            live_id!(root),
+            Panel::Split(SplitPanel {
+                axis: Axis::Vertical,
+                align: SplitterAlign::FromEnd(250.0),
+                child_panel_ids: [live_id!(above_log).into(), live_id!(log_view).into()],
+            }),
+        );
+        
+        tabs.insert(
+            live_id!(slides_view),
             Tab {
                 name: String::from("Slides"),
                 kind: TabKind::SlidesView,
             },
         );
         
+        tabs.insert(
+            live_id!(run_view),
+            Tab {
+                name: String::from("Run"),
+                kind: TabKind::RunView,
+            },
+        );
+        
         panels.insert(
-            id!(above_log),
+            live_id!(above_log),
             Panel::Split(SplitPanel {
                 axis: Axis::Horizontal,
                 align: SplitterAlign::FromStart(200.0),
-                child_panel_ids: [id!(file_tree).into(), id!(content).into()],
+                child_panel_ids: [live_id!(file_tree).into(), live_id!(content).into()],
             }),
         );
         
         AppState { 
             panels,
             tabs,
-            selected_panel_id: id!(content).into(),
+            selected_panel_id: live_id!(content).into(),
             file_nodes,
             path: UnixPathBuf::new(),
             editor_state: EditorState::new(),
+            build_state: BuildState::default(),
         }
     }
     
@@ -196,7 +224,7 @@ impl AppState {
         self.file_nodes.clear();
 
         create_file_node(
-            Some(id!(root).into()),
+            Some(live_id!(root).into()),
             &mut self.file_nodes,
             None,
             tree_data.root,
@@ -283,6 +311,7 @@ pub enum TabKind {
     LogView,
     ShaderView,
     SlidesView,
+    RunView,
     FileTree,
     CodeEditor {session_id: SessionId},
 }

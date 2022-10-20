@@ -32,7 +32,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::Text;
+    /// use makepad_editor_core::Text;
     /// 
     /// let text = Text::new();
     /// ```
@@ -55,7 +55,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::Text;
+    /// use makepad_editor_core::Text;
     /// 
     /// let text = Text::new();
     /// assert!(text.is_empty());
@@ -71,15 +71,15 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Size, Text};
+    /// use makepad_editor_core::{Size, Text};
     /// 
     /// let text = Text::from("abc\ndef");
     /// assert!(text.len() == Size { line: 1, column: 3 });
     /// ```
     pub fn len(&self) -> Size {
         Size {
-            line: self.lines.len() - 1,
-            column: self.lines.last().unwrap().len(),
+            line: self.lines.len() as u32 - 1 ,
+            column: self.lines.last().unwrap().len() as u32,
         }
     }
 
@@ -88,7 +88,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Size, Text};
+    /// use makepad_editor_core::{Size, Text};
     /// 
     /// let text = Text::from("abc\ndef");
     /// assert_eq!(text.as_lines(), &[vec!['a', 'b', 'c'], vec!['d', 'e', 'f']]);
@@ -106,7 +106,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Position, Range, Text};
+    /// use makepad_editor_core::{Position, Range, Text};
     /// 
     /// let text = Text::from("abc\ndef");
     /// assert_eq!(
@@ -161,7 +161,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Position, Range, Text};
+    /// use makepad_editor_core::{Position, Range, Text};
     /// 
     /// let text = Text::from("abc\ndef");
     /// let mut string = String::new();
@@ -201,19 +201,19 @@ impl Text {
     /// Removes the given amount of text from the start of this text, and returns it as a new text.
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Size, Text};
+    /// use makepad_editor_core::{Size, Text};
     /// 
     /// let mut text = Text::from("abc\ndef");
     /// assert_eq!(text.take(Size { line: 1, column: 1 }), Text::from("abc\nd"));
     /// assert_eq!(text, Text::from("ef"));
     /// ```
     pub fn take(&mut self, len: Size) -> Text {
-        let mut lines = self.lines.drain(..len.line).collect::<Vec<_>>();
+        let mut lines = self.lines.drain(..len.line as usize).collect::<Vec<_>>();
         lines.push(
             self.lines
                 .first_mut()
                 .unwrap()
-                .drain(..len.column)
+                .drain(..len.column as usize)
                 .collect::<Vec<_>>(),
         );
         Text { lines }
@@ -222,15 +222,15 @@ impl Text {
     /// Removes the given amount of text from the start of this text.
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Size, Text};
+    /// use makepad_editor_core::{Size, Text};
     /// 
     /// let mut text = Text::from("abc\ndef");
     /// text.skip(Size { line: 1, column: 1 });
     /// assert_eq!(text, Text::from("ef"));
     /// ```
     pub fn skip(&mut self, len: Size) {
-        self.lines.drain(..len.line);
-        self.lines.first_mut().unwrap().drain(..len.column);
+        self.lines.drain(..len.line as usize);
+        self.lines.first_mut().unwrap().drain(..len.column as usize);
     }
 
     /// Inserts the given text at the given position in this text.
@@ -242,7 +242,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Position, Text};
+    /// use makepad_editor_core::{Position, Text};
     /// 
     /// let mut text = Text::from("abc\ndef");
     /// text.insert(Position { line: 1, column: 1 }, Text::from("xyz"));
@@ -277,7 +277,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::code_editor::{Position, Size, Text};
+    /// use makepad_editor_core::{Position, Size, Text};
     /// 
     /// let mut text = Text::from("abc\ndef");
     /// text.delete(Position { line: 0, column: 2 }, Size { line: 1, column: 1 });
@@ -286,19 +286,19 @@ impl Text {
     pub fn delete(&mut self, position: Position, count: Size) {
         if count.line == 0 {
             self.lines[position.line].splice(
-                position.column..position.column + count.column,
+                position.column..position.column + count.column as usize,
                 iter::empty(),
             );
         } else {
             let mut line = mem::replace(&mut self.lines[position.line], Vec::new());
             line.splice(
                 position.column..,
-                self.lines[position.line + count.line][count.column..]
+                self.lines[position.line + count.line as usize][count.column as usize..]
                     .iter()
                     .cloned(),
             );
             self.lines.splice(
-                position.line..position.line + count.line + 1,
+                position.line..position.line + count.line as usize + 1,
                 iter::once(line),
             );
         }

@@ -23,6 +23,7 @@ use {
         fmt,
         fs,
         mem,
+        io::prelude::*,
         path::{Path, PathBuf},
         sync::{Arc, Mutex, RwLock},
     },
@@ -310,6 +311,15 @@ impl CollabConnection {
         file_guard.our_revision += 1;
         file_guard.text.apply_delta(delta.clone());
         file_guard.outstanding_deltas.push_back(delta.clone());
+        
+        if let Ok(mut file) = fs::File::create(&file_guard.path){
+            if let Err(_) = file.write_all(format!("{}", file_guard.text).as_bytes()){
+                eprintln!("Error writing file {:?}", file_guard.path)
+            }
+        }
+        else{
+            eprintln!("Error opening file {:?}", file_guard.path)
+        }
         
         // Update the last revision that has been seen by the client.
         let participant = file_guard

@@ -1,12 +1,15 @@
 [package]
 name = "makepad-live-tokenizer"
-version = "0.1.0"
-authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-
-#See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Makepad platform live DSL tokenizer"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "Lbtw64Uajgi0s-chG0zl3iUwEJg="
 
 [dependencies]
-makepad-math = { path = "../math", version = "0.2" }
-makepad-micro-serde = { path = "../micro_serde", version = "0.1" }
-makepad-live-id = { path = "../live_id", version = "0.1"}
+makepad-math = { path = "../../libs/math", version = "0.3.0" }
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "0.3.0" }
+makepad-live-id = { path = "../../libs/live_id", version = "0.3.0"}

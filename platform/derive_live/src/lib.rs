@@ -1,20 +1,31 @@
-#![feature(proc_macro_span)]
+#![cfg_attr(feature = "nightly", feature(proc_macro_span))]
+
 use proc_macro::{TokenStream};
 
 mod derive_live;
 use crate::derive_live::*;
 
-mod live_register_macro;
-use crate::live_register_macro::*;
+mod derive_live_atomic;
+use crate::derive_live_atomic::*;
+
+mod derive_live_hook;
+use crate::derive_live_hook::*;
+
+mod derive_live_read;
+use crate::derive_live_read::*;
+
+
+mod live_design_macro;
+use crate::live_design_macro::*;
 
 mod live_macro;
 use crate::live_macro::*;
 
+mod generate_cast;
+use crate::generate_cast::*;
+
 mod derive_live_registry;
 use crate::derive_live_registry::*;
-
-mod derive_frame_component_action;
-use crate::derive_frame_component_action::*;
 
 #[path = "../../live_tokenizer/src/colorhex.rs"]
 mod colorhex;
@@ -26,7 +37,8 @@ mod colorhex;
     rust,
     pick,
     state,
-    live_register,
+    live_design_fn,
+    live_ignore,
     live_debug
 ))]
 pub fn derive_live(input: TokenStream) -> TokenStream {
@@ -38,6 +50,10 @@ pub fn derive_live_apply(input: TokenStream) -> TokenStream {
     derive_live_hook_impl(input)
 }
 
+#[proc_macro_derive(LiveRead)]
+pub fn derive_live_read(input: TokenStream) -> TokenStream {
+    derive_live_read_impl(input)
+}
 
 #[proc_macro]
 pub fn live(input: TokenStream) -> TokenStream {
@@ -60,15 +76,14 @@ pub fn generate_ref_cast_api(input: TokenStream) -> TokenStream {
     generate_ref_cast_api_impl(input)
 }
 
-
 #[proc_macro]
 pub fn generate_clone_cast_api(input: TokenStream) -> TokenStream {
     generate_clone_cast_api_impl(input)
 }
 
 #[proc_macro]
-pub fn live_register(input: TokenStream) -> TokenStream {
-    live_register_impl(input)
+pub fn live_design(input: TokenStream) -> TokenStream {
+    live_design_impl(input)
 }
 
 #[proc_macro_derive(LiveComponentRegistry)]
@@ -76,14 +91,8 @@ pub fn derive_live_component_registry(input: TokenStream) -> TokenStream {
     derive_live_component_registry_impl(input)
 }
 
-// move elsewhere
-#[proc_macro_derive(FrameComponentAction)]
-pub fn derive_frame_component_action(input: TokenStream) -> TokenStream {
-    derive_frame_component_action_impl(input)
-}
-// move elsewhere
-#[proc_macro_derive(FrameComponent)]
-pub fn derive_frame_component(input: TokenStream) -> TokenStream {
-    derive_frame_component_impl(input)
+#[proc_macro_derive(LiveAtomic)]
+pub fn derive_live_atomic(input: TokenStream) -> TokenStream {
+    derive_live_atomic_impl(input)
 }
 

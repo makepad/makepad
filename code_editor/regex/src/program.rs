@@ -1,48 +1,77 @@
-pub const NULL_INST_PTR: InstPtr = 0;
+use {
+    crate::{CharClass, Range},
+    std::fmt,
+};
 
-pub struct Program {
-    pub start: InstPtr,
-    pub insts: Vec<Inst>,
+pub(crate) const NULL_INSTR_PTR: InstrPtr = usize::MAX;
+
+#[derive(Clone)]
+pub(crate) struct Program {
+    pub(crate) slot_count: usize,
+    pub(crate) instrs: Vec<Instr>,
+    pub(crate) start: usize,
 }
 
-pub enum Inst {
-    Nop,
+impl fmt::Debug for Program {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, instr) in self.instrs.iter().enumerate() {
+            write!(f, "{:04} {:?}", index, instr)?;
+            if index == self.start {
+                write!(f, " <start>")?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum Instr {
     Match,
-    Char(InstPtr, char),
-    Split(InstPtr, InstPtr),
+    ByteRange(Range<u8>, InstrPtr),
+    Char(char, InstrPtr),
+    CharClass(CharClass, InstrPtr),
+    Nop(InstrPtr),
+    Save(usize, InstrPtr),
+    Assert(Pred, InstrPtr),
+    Split(InstrPtr, InstrPtr),
 }
 
-impl Inst {
-    pub fn char(next_0: InstPtr, c: char) -> Self {
-        Self::Char(next_0, c)
-    }
-
-    pub fn split(next_0: InstPtr, next_1: InstPtr) -> Self {
-        Self::Split(next_0, next_1)
-    }
-
-    pub fn next_0(&self) -> &InstPtr {
+impl Instr {
+    pub fn next_0(&self) -> &InstrPtr {
         match self {
-            Self::Char(next_0, _) | Self::Split(next_0, _) => next_0,
+            Self::ByteRange(_, next_0) => next_0,
+            Self::Char(_, next_0) => next_0,
+            Self::CharClass(_, next_0) => next_0,
+            Self::Nop(next_0) => next_0,
+            Self::Save(_, next_0) => next_0,
+            Self::Assert(_, next_0) => next_0,
+            Self::Split(next_0, _) => next_0,
             _ => panic!(),
         }
     }
 
-    pub fn next_1(&self) -> &InstPtr {
+    pub(crate) fn next_1(&self) -> &InstrPtr {
         match self {
             Self::Split(_, next_1) => next_1,
             _ => panic!(),
         }
     }
 
-    pub fn next_0_mut(&mut self) -> &mut InstPtr {
+    pub fn next_0_mut(&mut self) -> &mut InstrPtr {
         match self {
-            Self::Char(next_0, _) | Self::Split(next_0, _) => next_0,
+            Self::Nop(next_0) => next_0,
+            Self::ByteRange(_, next_0) => next_0,
+            Self::Char(_, next_0) => next_0,
+            Self::CharClass(_, next_0) => next_0,
+            Self::Nop(next_0) => next_0,
+            Self::Save(_, next_0) => next_0,
+            Self::Assert(_, next_0) => next_0,
+            Self::Split(next_0, _) => next_0,
             _ => panic!(),
         }
     }
 
-    pub fn next_1_mut(&mut self) -> &mut InstPtr {
+    pub(crate) fn next_1_mut(&mut self) -> &mut InstrPtr {
         match self {
             Self::Split(_, next_1) => next_1,
             _ => panic!(),
@@ -50,4 +79,10 @@ impl Inst {
     }
 }
 
-pub type InstPtr = usize;
+pub(crate) type InstrPtr = usize;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum Pred {
+    IsAtStartOfText,
+    IsAtEndOfText,
+}

@@ -21,7 +21,7 @@ impl Position {
     /// Returns the position of the start of a text.
     /// 
     /// ```
-    /// use makepad_studio::code_editor::Position;
+    /// use makepad_editor_core::Position;
     /// 
     /// let position = Position::origin();
     /// ```
@@ -32,7 +32,7 @@ impl Position {
     /// Returns `true` if this is the position of the start of a text.
     /// 
     /// ```
-    /// use makepad_studio::code_editor::Position;
+    /// use makepad_editor_core::Position;
     /// 
     /// let position = Position::origin();
     /// assert!(position.is_origin());
@@ -93,12 +93,12 @@ impl Add<Size> for Position {
         if other.line == 0 {
             Position {
                 line: self.line,
-                column: self.column + other.column,
+                column: self.column + other.column as usize,
             }
         } else {
             Position {
-                line: self.line + other.line,
-                column: other.column,
+                line: self.line + other.line as usize,
+                column: other.column as usize,
             }
         }
     }
@@ -121,12 +121,12 @@ impl Sub for Position {
         if self.line == other.line {
             Size {
                 line: 0,
-                column: self.column - other.column,
+                column: self.column as u32 - other.column as u32,
             }
         } else {
             Size {
-                line: self.line - other.line,
-                column: self.column,
+                line: self.line as u32 - other.line as u32,
+                column: self.column as u32,
             }
         }
     }

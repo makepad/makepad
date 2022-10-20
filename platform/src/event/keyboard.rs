@@ -1,4 +1,6 @@
 use {
+    std::rc::Rc,
+    std::cell::RefCell,
     crate::{
         event::{
             finger::KeyModifiers,
@@ -8,7 +10,70 @@ use {
 };
 
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
+pub struct CxKeyboard {
+    pub (crate) prev_key_focus: Area,
+    pub (crate) next_key_focus: Area,
+    pub (crate) key_focus: Area,
+    pub (crate) keys_down: Vec<KeyEvent>,
+}
+
+impl CxKeyboard {
+    
+    pub fn set_key_focus(&mut self, focus_area: Area) {
+        self.next_key_focus = focus_area;
+    }
+    
+    pub fn revert_key_focus(&mut self) {
+        self.next_key_focus = self.prev_key_focus;
+    }
+    
+    pub fn has_key_focus(&self, focus_area: Area) -> bool {
+        self.key_focus == focus_area
+    }
+    
+    pub (crate) fn update_area(&mut self, old_area: Area, new_area: Area) {
+        if self.key_focus == old_area {
+            self.key_focus = new_area
+        }
+        if self.prev_key_focus == old_area {
+            self.prev_key_focus = new_area
+        }
+        if self.next_key_focus == old_area {
+            self.next_key_focus = new_area
+        }
+    }
+    
+    pub (crate) fn all_keys_up(&mut self) -> Vec<KeyEvent> {
+        let mut keys_down = Vec::new();
+        std::mem::swap(&mut keys_down, &mut self.keys_down);
+        keys_down
+    }
+    
+    pub (crate) fn cycle_key_focus_changed(&mut self) -> Option<(Area, Area)> {
+        if self.next_key_focus != self.key_focus {
+            self.prev_key_focus = self.key_focus;
+            self.key_focus = self.next_key_focus;
+            return Some((self.prev_key_focus, self.key_focus))
+        }
+        None
+    }
+    
+    pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {
+        if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
+            return;
+        }
+        self.keys_down.push(key_event);
+    }
+    
+    pub (crate) fn process_key_up(&mut self, key_event: KeyEvent) {
+        if let Some(pos) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
+            self.keys_down.remove(pos);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct KeyEvent {
     pub key_code: KeyCode,
     pub is_repeat: bool,
@@ -16,22 +81,22 @@ pub struct KeyEvent {
     pub time: f64
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct KeyFocusEvent {
     pub prev: Area,
     pub focus: Area,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TextInputEvent {
     pub input: String,
     pub replace_last: bool,
     pub was_paste: bool
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TextCopyEvent {
-    pub response: Option<String>
+    pub response: Rc<RefCell<Option<String>>>
 }
 
 impl Default for KeyCode {
@@ -73,7 +138,7 @@ pub enum KeyCode {
     KeyP,
     LBracket,
     RBracket,
-    Return,
+    ReturnKey,
     
     KeyA,
     KeyS,
@@ -120,7 +185,7 @@ pub enum KeyCode {
     F12,
     
     PrintScreen,
-    Scrolllock,
+    ScrollLock,
     Pause,
     
     Insert,
@@ -155,6 +220,7 @@ pub enum KeyCode {
     ArrowLeft,
     ArrowRight,
     
-    Unknown
+    Unknown,
+    None
 }
 

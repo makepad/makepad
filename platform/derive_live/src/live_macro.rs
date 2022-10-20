@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 
-use makepad_macro_lib::{TokenBuilder, TokenParser, error};
+use makepad_micro_proc_macro::{TokenBuilder, TokenParser, error};
 use makepad_live_id::*;
 use crate::colorhex::*;
 
@@ -171,14 +171,14 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
         else{
             if s.chars().position(|c| c == '.').is_some(){
                 if let Ok(value) = s.parse::<f64>(){
-                    tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Float(").unsuf_f64(value).add(")},");
+                    tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Float64(").unsuf_f64(value).add(")},");
                 }
                 else{
                     return Err(error("Value cant be parsed"));
                 }
             }
             else if let Ok(value) = s.parse::<i64>(){
-                tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Int(").unsuf_i64(value).add(")},");
+                tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Int64(").unsuf_i64(value).add(")},");
             }
             else{
                 return Err(error("Value cant be parsed"));
@@ -228,64 +228,4 @@ pub fn live_array_impl(input:TokenStream)->TokenStream{
     };
     tb.add("]");
     tb.end()
-}
-
-
-pub fn generate_ref_cast_api_impl(input:TokenStream)->TokenStream{
-
-    let mut parser = TokenParser::new(input);
-    if let Some(ident) = parser.eat_any_ident(){
-        let mut tb = TokenBuilder::new();
-        tb.add("impl dyn ").ident(&ident).add(" {");
-        tb.add("    pub fn is<T: ").ident(&ident).add(" + 'static >(&self) -> bool {");
-        tb.add("        let t = std::any::TypeId::of::<T>();");
-        tb.add("        let concrete = self.type_id();");
-        tb.add("        t == concrete");
-        tb.add("    }");
-        tb.add("    pub fn cast<T: ").ident(&ident).add(" + 'static >(&self) -> Option<&T> {");
-        tb.add("        if self.is::<T>() {");
-        tb.add("            Some(unsafe {&*(self as *const dyn ").ident(&ident).add(" as *const T)})");
-        tb.add("        } else {");
-        tb.add("            None");
-        tb.add("        }");
-        tb.add("    }");
-        tb.add("    pub fn cast_mut<T: ").ident(&ident).add(" + 'static >(&mut self) -> Option<&mut T> {");
-        tb.add("        if self.is::<T>() {");
-        tb.add("            Some(unsafe {&mut *(self as *const dyn ").ident(&ident).add(" as *mut T)})");
-        tb.add("        } else {");
-        tb.add("            None");
-        tb.add("        }");
-        tb.add("    }");
-        tb.add("}");
-        tb.end()
-    }
-    else{
-        error("Expected identifier")
-    }
-}
-
-pub fn generate_clone_cast_api_impl(input:TokenStream)->TokenStream{
-
-    let mut parser = TokenParser::new(input);
-    if let Some(ident) = parser.eat_any_ident(){
-        let mut tb = TokenBuilder::new();
-        tb.add("impl dyn ").ident(&ident).add(" {");
-        tb.add("    pub fn is<T: ").ident(&ident).add(" + 'static >(&self) -> bool {");
-        tb.add("        let t = std::any::TypeId::of::<T>();");
-        tb.add("        let concrete = self.type_id();");
-        tb.add("        t == concrete");
-        tb.add("    }");
-        tb.add("    pub fn cast<T: ").ident(&ident).add(" + 'static + Default + Clone>(&self) -> T {");
-        tb.add("        if self.is::<T>() {");
-        tb.add("            unsafe {&*(self as *const dyn ").ident(&ident).add(" as *const T)}.clone()");
-        tb.add("        } else {");
-        tb.add("            T::default()");
-        tb.add("        }");
-        tb.add("    }");
-        tb.add("}");
-        tb.end()
-    }
-    else{
-        error("Expected identifier")
-    }
 }

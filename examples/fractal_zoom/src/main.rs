@@ -1,29 +1,23 @@
-#![feature(portable_simd)]
-use makepad_component::*;
-use makepad_platform::*;
+#![cfg_attr(feature = "nightly", feature(portable_simd))]
+
+pub use makepad_widgets;
+use makepad_widgets::*;
+use makepad_draw_2d::*;
 mod mandelbrot;
 
-#[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
+#[cfg(feature = "nightly")]
 mod mandelbrot_simd;
 
-live_register!{
-    use makepad_component::frame::*;
-    use FrameComponent::*;
-    App: {{App}} {
-        frame: {
-            width: Fill
-            height: Fill
+live_design!{
+    import makepad_widgets::frame::*;
+    registry Widget::*;
+    App = {{App}} {
+        ui: {
+            walk:{width: Fill, height: Fill},
             
-            Mandelbrot{
+            <Mandelbrot> {
                 walk:{width: Fill, height: Fill}
             }
-            
-            // alright lets put a slider over the thing
-            // ok so first i want a panel
-            // something that has an icon
-            // and animates closed
-            // and open.
-            // OK go 
         }
     }
 }
@@ -31,40 +25,31 @@ main_app!(App);
  
 #[derive(Live, LiveHook)]
 pub struct App {
-    frame: Frame,
-    window: DesktopWindow,
+    ui: FrameRef,
+    window: BareWindow,
 }
 
 impl App {
-    pub fn live_register(cx: &mut Cx) {
-        makepad_component::live_register(cx);
-        mandelbrot::live_register(cx);
+    pub fn live_design(cx: &mut Cx) {
+        makepad_widgets::live_design(cx);
+        mandelbrot::live_design(cx);
     }
     
-    pub fn new_app(cx: &mut Cx) -> Self {
-        Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap()
-    }
-    
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::Draw(event) = event {
+            return self.draw(&mut Cx2d::new(cx, event));
+        }
+        
         self.window.handle_event(cx, event);
         
-        for _ in self.frame.handle_event(cx, event) {
-        }
-        
-        match event {
-            Event::Draw(draw_event) => {
-                self.draw(&mut Cx2d::new(cx, draw_event));
-            }
-            _ => ()
-        }
+        self.ui.handle_event(cx, event);
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx, None).is_err() {
+        if self.window.begin(cx).not_redrawing() {
             return;
         }
-        while let Err(_child) = self.frame.draw(cx){
-        };
+        while self.ui.draw(cx).is_not_done(){};
         self.window.end(cx);
     }
 }
