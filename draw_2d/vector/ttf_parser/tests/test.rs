@@ -4,7 +4,7 @@ use std::path::Path;
 
 #[test]
 fn main() {
-    for entry in fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../resources")).unwrap() {
+    for entry in fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../widgets/resources")).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().unwrap() != "ttf" {
             continue;
