@@ -7,7 +7,7 @@ description = "Makepad 2d drawing API"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
-metadata.makepad-auto-version = "bjIeAvzAujlFJey7cX-iaeFI2So="
+metadata.makepad-auto-version = "7NALupLM0-i77IS85n9Q24oxdlU="
 
 [dependencies]
 makepad-platform = { path = "../platform", version = "0.3.0" }
