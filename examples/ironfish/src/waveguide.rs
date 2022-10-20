@@ -1,15 +1,15 @@
 const MAX_WG_DELAY: usize = 100000;
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct Waveguide {
     headposition: usize,
-    buffer: [f32; MAX_WG_DELAY+1]
+    buffer: Vec<f32>
 }
 
 impl Default for Waveguide {
     fn default() -> Self {
         Self {
-            buffer: [Default::default(); MAX_WG_DELAY+1],
+            buffer:{let mut v = Vec::new(); v.resize(MAX_WG_DELAY+1,0.0);v},
             headposition: 0,
         }
     }
