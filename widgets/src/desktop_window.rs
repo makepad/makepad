@@ -15,7 +15,7 @@ live_design!{
     
     DesktopWindow= {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
-        var caption: "Makepad"
+        var caption =  "Makepad"
         frame: {
             layout: {
                 flow: Down

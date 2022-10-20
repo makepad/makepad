@@ -943,13 +943,13 @@ impl CxOsTexture {
                 let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
                 let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
                 match desc.format {
-                    TextureFormat::SharedBGRA(shared_id) => {
+                    TextureFormat::SharedBGRA(_shared_id) => {
                         let texture: ObjcId = msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor];
                         // lets send this to the other side.
-                        let shared: ObjcId = msg_send![texture, newSharedTextureHandle];
+                        let _shared: ObjcId = msg_send![texture, newSharedTextureHandle];
                         // lets send it over
-                        log!("STORING SHARED TEXTURE {}", shared_id);
-                        store_xpc_service_texture(shared_id, shared);
+                        //log!("STORING SHARED TEXTURE {}", shared_id);
+                        //store_xpc_service_texture(shared_id, shared);
                         texture
                     }
                     _ => panic!(),
