@@ -63,7 +63,7 @@ live_design!{
         label: {
             // DrawLabelText= {{DrawLabelText}} {
             // },
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"resources/IBMPlexSans-SemiBold.ttf"}},
+            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
