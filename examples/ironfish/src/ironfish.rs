@@ -8,9 +8,13 @@
 // - regular wavetable oscs
 // - mod matrix
 // - reverb
-// - chorus
-// - predelay for mod envelope
+// - chorus 
+// - predelay for mod envelope?
 // - longer sequencer
+// - record to sequencer
+// - omnichord mode playing
+// - better arp
+// - fv1 emu? 
 
 #![allow(dead_code)]
 
@@ -164,14 +168,21 @@ pub struct TouchSettings {
 
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
-pub struct EffectSettings {
+pub struct BitCrushSettings {
+    #[live(false)] enable: boola,
+    #[live(0.8)] amount: f32a,
+  
+}
+
+
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct DelaySettings {
     #[live(0.5)] delaysend: f32a,
     #[live(0.8)] delayfeedback: f32a,
     #[live(0.0)] cross: f32a,
     #[live(0.5)] difference: f32a
     
 }
-
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct ArpSettings {
@@ -180,44 +191,11 @@ pub struct ArpSettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct SequencerSettings {
-    
-    #[live(0)] pub step0: u32a,
-    #[live(0)] pub step1: u32a,
-    #[live(0)] pub step2: u32a,
-    #[live(0)] pub step3: u32a,
-    #[live(0)] pub step4: u32a,
-    #[live(0)] pub step5: u32a,
-    #[live(0)] pub step6: u32a,
-    #[live(0)] pub step7: u32a,
-    #[live(0)] pub step8: u32a,
-    #[live(0)] pub step9: u32a,
-    #[live(0)] pub step10: u32a,
-    #[live(0)] pub step11: u32a,
-    #[live(0)] pub step12: u32a,
-    #[live(0)] pub step13: u32a,
-    #[live(0)] pub step14: u32a,
-    #[live(0)] pub step15: u32a,
+    pub steps:[u32a;16],
+
     scale: U32A<MusicalScale>,
     rootnote: U32A<RootNote>,
-    /*
-    #[live(0)] step0: u32a,
-    #[live(1)] step1: u32a,
-    #[live(0)] step2: u32a,
-    #[live(2)] step3: u32a,
-    #[live(0)] step4: u32a,
-    #[live(4)] step5: u32a,
-    #[live(0)] step6: u32a,
-    #[live(8)] step7: u32a,
-    #[live(0)] step8: u32a,
-    #[live(14)] step9: u32a,
-    #[live(0)] step10: u32a,
-    #[live(30)] step11: u32a,
-    #[live(0)] step12: u32a,
-    #[live(1)] step13: u32a,
-    #[live(0)] step14: u32a,
-    #[live(0)] step15: u32a,
-*/
-    
+
     #[live(125.0)] bpm: f32a,
     #[live(false)] playing: boola,
     
@@ -229,51 +207,12 @@ pub struct SequencerSettings {
 impl SequencerSettings {
     pub fn get_step(&self, step: usize) -> u32
     {
-        match step {
-            0 => return self.step0.get(),
-            1 => return self.step1.get(),
-            2 => return self.step2.get(),
-            3 => return self.step3.get(),
-            4 => return self.step4.get(),
-            5 => return self.step5.get(),
-            6 => return self.step6.get(),
-            7 => return self.step7.get(),
-            8 => return self.step8.get(),
-            9 => return self.step9.get(),
-            10 => return self.step10.get(),
-            11 => return self.step11.get(),
-            12 => return self.step12.get(),
-            13 => return self.step13.get(),
-            14 => return self.step14.get(),
-            15 => return self.step15.get(),
-            _ => 0
-            
-        };
-        return 0;
+        self.steps[step].get()
     }
     
     pub fn set_step(&self, step: usize, value: u32)
     {
-        match step {
-            0 => self.step0.set(value),
-            1 => self.step1.set(value),
-            2 => self.step2.set(value),
-            3 => self.step3.set(value),
-            4 => self.step4.set(value),
-            5 => self.step5.set(value),
-            6 => self.step6.set(value),
-            7 => self.step7.set(value),
-            8 => self.step8.set(value),
-            9 => self.step9.set(value),
-            10 => self.step10.set(value),
-            11 => self.step11.set(value),
-            12 => self.step12.set(value),
-            13 => self.step13.set(value),
-            14 => self.step14.set(value),
-            15 => self.step15.set(value),
-            _ => {}
-            
-        };
+        self.steps[step].set(value)
     }
 }
 
@@ -290,7 +229,8 @@ pub struct IronFishSettings {
     volume_envelope: EnvelopeSettings,
     mod_envelope: EnvelopeSettings,
     touch: TouchSettings,
-    fx: EffectSettings,
+    delay: DelaySettings,
+    bitcrush: BitCrushSettings,
     pub sequencer: SequencerSettings,
     pub arp: ArpSettings,
     chorus: ChorusSettings,
@@ -1572,20 +1512,46 @@ impl IronFishState {
         return output; // * 1000.0;
     }
     */
-    
+    pub fn apply_bitcrush(&mut self, buffer: &mut AudioBuffer) {
+        
+        if !self.settings.bitcrush.enable.get() {return;}; 
+
+        let amount = self.settings.bitcrush.amount.get();
+        let crushbits = (amount * 22.0) as i32;
+        let precrushmult = 65536.0 * 8.0;
+        let postcrushmult = (1 << crushbits) as f32 / precrushmult; 
+        let frame_count = buffer.frame_count();
+        let (left, right) = buffer.stereo_mut();
+        for i in 0..frame_count {
+            let intermediate_left = (left[i] *precrushmult) as i32 ;
+            let crushed_left = intermediate_left >> crushbits;
+            
+            left[i] = (crushed_left as f32) * postcrushmult;
+            let intermediate_right = (right[i] *precrushmult) as i32 ;
+            let crushed_right = intermediate_right >> crushbits;
+            
+            right[i] = (crushed_right as f32) * postcrushmult;
+        }
+
+    }
+
     pub fn apply_delay(&mut self, buffer: &mut AudioBuffer) {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
         
-        let icross = self.settings.fx.cross.get();
+        let icross = self.settings.delay.cross.get();
         let cross = 1.0 - icross;
         
-        let leftoffs = (self.settings.fx.difference.get() * 15000.0) as usize;
+        let leftoffs = (self.settings.delay.difference.get() * 15000.0) as usize;
         
         let mut delayreadposl = self.delaywritepos + (44100 - 15000) - leftoffs;
         let mut delayreadposr = self.delaywritepos + (44100 - 15000) + leftoffs;
         while delayreadposl >= 44100 {delayreadposl -= 44100;};
         while delayreadposr >= 44100 {delayreadposr -= 44100;};
+
+        let fb = self.settings.delay.delayfeedback.get() * 0.98;
+        let send = self.settings.delay.delaysend.get();
+
         for i in 0..frame_count {
             let rr = self.delaylineright[delayreadposr];
             let ll = self.delaylineleft[delayreadposl];
@@ -1593,11 +1559,11 @@ impl IronFishState {
             let mut r = ll * cross + rr * icross;
             let mut l = rr * cross + ll * icross;
             
-            r *= self.settings.fx.delayfeedback.get() * 0.9;
-            r += self.settings.fx.delaysend.get() * (right[i]);
+            r *= fb ;
+            r += send * (right[i]);
             
-            l *= self.settings.fx.delayfeedback.get() * 0.9;
-            l += self.settings.fx.delaysend.get() * (left[i]);
+            l *= fb;
+            l += send * (left[i]);
             
             self.delaylineright[self.delaywritepos] = r;
             self.delaylineleft[self.delaywritepos] = l;
@@ -1615,27 +1581,7 @@ impl IronFishState {
     
     pub fn get_sequencer_step(&mut self, step: usize) -> u32
     {
-        match step {
-            0 => return self.settings.sequencer.step0.get(),
-            1 => return self.settings.sequencer.step1.get(),
-            2 => return self.settings.sequencer.step2.get(),
-            3 => return self.settings.sequencer.step3.get(),
-            4 => return self.settings.sequencer.step4.get(),
-            5 => return self.settings.sequencer.step5.get(),
-            6 => return self.settings.sequencer.step6.get(),
-            7 => return self.settings.sequencer.step7.get(),
-            8 => return self.settings.sequencer.step8.get(),
-            9 => return self.settings.sequencer.step9.get(),
-            10 => return self.settings.sequencer.step10.get(),
-            11 => return self.settings.sequencer.step11.get(),
-            12 => return self.settings.sequencer.step12.get(),
-            13 => return self.settings.sequencer.step13.get(),
-            14 => return self.settings.sequencer.step14.get(),
-            15 => return self.settings.sequencer.step15.get(),
-            _ => 0
-            
-        };
-        return 0;
+        return self.settings.sequencer.steps[step].get()
     }
     
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display: &mut DisplayAudioGraph) {
@@ -1862,7 +1808,9 @@ impl IronFishState {
                 display.send_buffer(true, i, dp);
             }
         }
+        self.apply_bitcrush(buffer);
         self.chorus.apply_chorus(buffer, &self.settings.chorus, self.settings.sample_rate.get());
+        
         self.apply_delay(buffer);
     }
 }

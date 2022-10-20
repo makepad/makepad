@@ -91,20 +91,20 @@ impl ShaderView {
         
         match event.hits(cx, self.bg_quad.area()) {
             Hit::FingerHoverIn(_) => {
-                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
-                self.animate_state(cx, ids!(hover.off));
+                self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
-                self.animate_state(cx, ids!(hover.pressed));
+                self.animate_state(cx, id!(hover.pressed));
             },
             Hit::FingerUp(fe) => {
                 if fe.is_over && fe.digit.has_hovers() {
-                    self.animate_state(cx, ids!(hover.on));
+                    self.animate_state(cx, id!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, ids!(hover.off));
+                    self.animate_state(cx, id!(hover.off));
                 }
             }
             Hit::FingerMove(_) => {

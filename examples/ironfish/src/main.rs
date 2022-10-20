@@ -83,7 +83,7 @@ live_design!{
         
         
         popup_menu: {
-            bg: {color: (COLOR_TODO)}
+            //bg: {color: (COLOR_TODO)}
             menu_item: {
                 indent_width: 10.0
                 layout: {
@@ -673,7 +673,31 @@ live_design!{
             }
         }
     }
-    
+    CrushFXPanel = <FishPanel> {
+        label = {bg: {color: (COLOR_FX)}, label = {text: "Bitcrush",}}
+        body = {
+            layout: {flow: Right}
+            walk: {width: Fill, height: Fit}
+           
+            crushenable = <InstrumentCheckbox> {
+                walk: {width: Fit, height: Fill, margin: 5}
+                layout: {align: {x: 0.0, y: 0.5}}
+                checkbox = {
+                    label: "On"
+                }
+            }
+
+            crushamount = <InstrumentSlider> {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    min: 0.0
+                    max: 1.0
+                    label: "Amount"
+                    
+                }
+            }
+        }
+    }
     DelayFXPanel = <FishPanel> {
         label = {bg: {color: (COLOR_FX)}, label = {text: "Delay",}}
         body = {
@@ -899,6 +923,27 @@ live_design!{
                         }
                     }
                 }
+                hypersaw = <Frame> {
+                    layout: {flow: Right}
+                    walk: {width: Fill, height: Fit}
+                    spread = <InstrumentSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: 0.0
+                            max: 1.0
+                            label: "Spread"
+                        }
+                    }
+                    diffuse = <InstrumentSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: 0.0
+                            max: 1.0
+                            label: "Diffuse"
+                        }
+                    }
+                }
+                
             }
             
             twocol = <Frame> {
@@ -923,7 +968,7 @@ live_design!{
                 }
             }
             
-            threecol = <Frame> {
+            harmonic = <Frame> {
                 layout: {flow: Right}
                 walk: {width: Fill, height: Fit}
                 harmonic = <InstrumentSlider> {
@@ -1075,8 +1120,9 @@ live_design!{
                 }
                 <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    <DelayFXPanel> {}
+                    <CrushFXPanel> {}
                     <ChorusFXPanel> {}
+                    <DelayFXPanel> {}
                     <SequencerPanel> {}
                 }
             }
@@ -1115,7 +1161,7 @@ impl App {
         
         // TODO! we're going to make a nice macro for these tables
         // so they are easier to read and write
-        let data_table = BindDataTable(&[
+        let data_table = DataBindTable(&[
             // Touch
             (id!(touch.scale.slider), id!(touch.scale)),
             (id!(touch.curve.slider), id!(touch.curve)),
@@ -1133,10 +1179,14 @@ impl App {
             (id!(sub.slider), id!(sub_osc)),
             (id!(porta.slider), id!(portamento)),
             // DelayFX Panel
-            (id!(delaysend.slider), id!(fx.delaysend)),
-            (id!(delayfeedback.slider), id!(fx.delayfeedback)),
-            (id!(delaydifference.slider), id!(fx.difference)),
-            (id!(delaycross.slider), id!(fx.cross)),
+            (id!(delaysend.slider), id!(delay.delaysend)),
+            (id!(delayfeedback.slider), id!(delay.delayfeedback)),
+
+            (id!(crushenable.checkbox), id!(bitcrush.enable)),
+            (id!(crushamount.slider), id!(bitcrush.amount)),
+
+            (id!(delaydifference.slider), id!(delay.difference)),
+            (id!(delaycross.slider), id!(delay.cross)),
             // Chorus panel
             (id!(chorusmix.slider), id!(chorus.mix)),
             (id!(chorusdelay.slider), id!(chorus.mindelay)),
@@ -1163,11 +1213,14 @@ impl App {
             (id!(modamount.slider), id!(filter1.envelope_amount)),
             // Filter panel
             (id!(filter_type.dropdown), id!(filter1.filter_type)),
-            (id!(cutoff), id!(filter1.cutoff)),
-            (id!(resonance), id!(filter1.resonance)),
+            (id!(cutoff.slider), id!(filter1.cutoff)),
+            (id!(resonance.slider), id!(filter1.resonance)),
             // Osc1 panel
             (id!(osc1.supersaw.spread.slider), id!(supersaw1.spread)),
             (id!(osc1.supersaw.diffuse.slider), id!(supersaw1.diffuse)),
+            
+            (id!(osc1.hypersaw.spread.slider), id!(supersaw1.spread)),
+            (id!(osc1.hypersaw.diffuse.slider), id!(supersaw1.diffuse)),
             
             (id!(osc1.type.dropdown), id!(osc1.osc_type)),
             (id!(osc1.transpose.slider), id!(osc1.transpose)),
@@ -1179,16 +1232,18 @@ impl App {
             (id!(osc2.type.dropdown), id!(osc2.osc_type)),
             (id!(osc2.transpose.slider), id!(osc2.transpose)),
             (id!(osc2.detune.slider), id!(osc2.detune)),
-            (id!(osc2.harmonic.slider), id!(osc2.harmonic)), 
+            (id!(osc2.harmonic.slider), id!(osc2.harmonic)),
             (id!(osc2.harmonicenv.slider), id!(osc2.harmonicenv)),
             (id!(osc2.harmoniclfo.slider), id!(osc2.harmoniclfo)),
+            // sequencer
+            (id!(sequencer), id!(sequencer.steps)),
         ]);
         
         db.process_data_table(cx, &self.ui, data_table, act);
         
         // this maps data to the ADSR graphs
         // (widget path, widget value path, data path)
-        let  map_table = BindMapTable(&[ 
+        let map_table = MapBindTable(&[
             (id!(mod_env.display), id!(bg.attack), id!(mod_envelope.a)),
             (id!(mod_env.display), id!(bg.hold), id!(mod_envelope.h)),
             (id!(mod_env.display), id!(bg.decay), id!(mod_envelope.d)),
@@ -1201,35 +1256,39 @@ impl App {
             (id!(vol_env.display), id!(bg.release), id!(volume_envelope.r))
         ]);
         
-        // write the value 
+        // write the value
         db.process_map_table(cx, &self.ui, map_table);
-
+        
         // (widget path, widget value path, data path, enum compare, neq)
-        let tab_table = BindTabTable(&[
+        let tab_table = BoolBindTable(&[
             (id!(osc1.supersaw), id!(hidden), id!(osc1.osc_type), id!(SuperSaw), false),
             (id!(osc2.supersaw), id!(hidden), id!(osc2.osc_type), id!(SuperSaw), false),
+            (id!(osc1.hypersaw), id!(hidden), id!(osc1.osc_type), id!(HyperSaw), false),
+            (id!(osc2.hypersaw), id!(hidden), id!(osc2.osc_type), id!(HyperSaw), false),
+            (id!(osc1.harmonic), id!(hidden), id!(osc1.osc_type), id!(HarmonicSeries), false),
+            (id!(osc2.harmonic), id!(hidden), id!(osc2.osc_type), id!(HarmonicSeries), false),
         ]);
         
-        db.process_tab_table(cx, &self.ui, tab_table);
+        db.process_bool_table(cx, &self.ui, tab_table);
         
-        if let Some(nodes) = db.from_widgets(){
+        if let Some(nodes) = db.from_widgets() {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             ironfish.settings.apply_over(cx, &nodes);
         }
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let ui = self.ui.clone();
-        
-        let mut db = DataBinding::new();
-        
-        cx.handle_midi_inputs(event);
-        
+
         if let Event::Draw(event) = event {
             return self.draw(&mut Cx2d::new(cx, event));
         }
         
         self.window.handle_event(cx, event);
+        
+        let ui = self.ui.clone();
+        let mut db = DataBinding::new();
+        
+        cx.handle_midi_inputs(event);
         
         let act = ui.handle_event(cx, event);
         
@@ -1261,7 +1320,6 @@ impl App {
         for inp in cx.handle_midi_received(event) {
             self.audio_graph.send_midi_data(inp.data);
             if let Some(note) = inp.data.decode().on_note() {
-                log!("{:?}", inp.data);
                 piano.set_note(cx, note.is_on, note.note_number)
             }
         }
@@ -1275,86 +1333,35 @@ impl App {
             }.into());
         }
         
-        let sequencer = ui.get_sequencer(id!(sequencer));
-        
-        for (btn_x, btn_y, active) in sequencer.buttons_clicked(&act) {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            let _s = ironfish.settings.clone();
-            let bit = 1 << btn_y;
-            let act = if active {bit} else {0};
-            let step = ironfish.settings.sequencer.get_step(btn_x);
-            ironfish.settings.sequencer.set_step(btn_x, step ^ bit | act);
-        }
-        
         if ui.get_button(id!(panic)).clicked(&act) {
             self.audio_graph.all_notes_off();
         }
         
+        let sequencer = ui.get_sequencer(id!(sequencer));
+        // lets fetch and update the tick.
+        
+        
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.get_button(id!(clear_grid)).clicked(&act) {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            for j in 0..16 {
-                ironfish.settings.sequencer.set_step(j, 0);
-            }
-            sequencer.clear_buttons(cx);
+            sequencer.clear_grid(cx, &mut db);
         }
         
         if ui.get_button(id!(grid_down)).clicked(&act) {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            for j in 0..16 {
-                //let bv = 1<<j;
-                let step = ironfish.settings.sequencer.get_step(j);
-                let mut modstep = step << 1;
-                
-                if (modstep & 1 << 16) == 1 << 16 {modstep += 1; modstep -= 1 << 16};
-                
-                ironfish.settings.sequencer.set_step(j, modstep);
-            }
-            
-            for j in 0..16 {
-                let val = ironfish.settings.sequencer.get_step(j);
-                for i in 0..16 {
-                    let bv = 1 << i;
-                    sequencer.update_button(cx, j, i, if val & bv == bv {true} else {false});
-                }
-            }
+            sequencer.grid_down(cx, &mut db);
         }
-        
-        let mut reload_sequencer = false;
         
         if ui.get_button(id!(grid_up)).clicked(&act) {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            for j in 0..16 {
-                //let bv = 1<<j;
-                let step = ironfish.settings.sequencer.get_step(j);
-                let mut modstep = step >> 1;
-                if (step & 1) == 1 {modstep += 1 << 15;}
-                
-                ironfish.settings.sequencer.set_step(j, modstep);
-                
-            }
-            reload_sequencer = true;
+            sequencer.grid_up(cx, &mut db);
         }
         
-        if ui.get_button(id!(save1)).clicked(&act) {self.preset(cx, 1, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save2)).clicked(&act) {self.preset(cx, 2, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save3)).clicked(&act) {self.preset(cx, 3, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save4)).clicked(&act) {self.preset(cx, 4, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save5)).clicked(&act) {self.preset(cx, 5, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save6)).clicked(&act) {self.preset(cx, 6, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save7)).clicked(&act) {self.preset(cx, 7, shift); reload_sequencer = true;}
-        if ui.get_button(id!(save8)).clicked(&act) {self.preset(cx, 8, shift); reload_sequencer = true;}
-        
-        if reload_sequencer {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            for j in 0..16 {
-                let val = ironfish.settings.sequencer.get_step(j);
-                for i in 0..16 {
-                    let bv = 1 << i;
-                    sequencer.update_button(cx, j, i, if val & bv == bv {true} else {false});
-                }
-            }
-        }
+        if ui.get_button(id!(save1)).clicked(&act) {self.preset(cx, 1, shift);}
+        if ui.get_button(id!(save2)).clicked(&act) {self.preset(cx, 2, shift);}
+        if ui.get_button(id!(save3)).clicked(&act) {self.preset(cx, 3, shift);}
+        if ui.get_button(id!(save4)).clicked(&act) {self.preset(cx, 4, shift);}
+        if ui.get_button(id!(save5)).clicked(&act) {self.preset(cx, 5, shift);}
+        if ui.get_button(id!(save6)).clicked(&act) {self.preset(cx, 6, shift);}
+        if ui.get_button(id!(save7)).clicked(&act) {self.preset(cx, 7, shift);}
+        if ui.get_button(id!(save8)).clicked(&act) {self.preset(cx, 8, shift);}
         
         self.data_bind(cx, &mut db, &act);
     }
