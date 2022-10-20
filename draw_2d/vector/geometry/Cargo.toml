@@ -5,6 +5,8 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad 2d geometry tools"
 license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "gVc8W_EIUhof3cByw7z8jlU_Qig="
 
 [dependencies]
