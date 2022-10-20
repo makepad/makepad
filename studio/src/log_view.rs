@@ -22,7 +22,7 @@ use {
 };
 
 live_design!{
-    LogView= {{LogView}} {
+    LogView = {{LogView}} {
     }
 }
 
@@ -76,7 +76,7 @@ impl LogView {
         self.log_list.end(cx);
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         event: &Event,
