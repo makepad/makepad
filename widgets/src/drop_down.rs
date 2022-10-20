@@ -216,7 +216,7 @@ impl DropDown {
         self.bg.redraw(cx);
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &DropDown, DropDownAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DropDownAction)) {
         self.state_handle_event(cx, event);
         
         if self.is_open && self.popup_menu.is_some() {
@@ -233,7 +233,7 @@ impl DropDown {
                     PopupMenuAction::WasSelected(node_id) => {
                         //dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                         self.selected_item = node_id.0.0 as usize;
-                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
+                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
                         self.bg.redraw(cx);
                         close = true;
                     }
@@ -272,7 +272,7 @@ impl DropDown {
                 KeyCode::ArrowUp => {
                     if self.selected_item > 0 {
                         self.selected_item -= 1;
-                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
+                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
                         self.set_closed(cx);
                         self.bg.redraw(cx);
                     }
@@ -280,7 +280,7 @@ impl DropDown {
                 KeyCode::ArrowDown => {
                     if self.values.len() > 0 && self.selected_item < self.values.len() - 1 {
                         self.selected_item += 1;
-                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
+                        dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
                         self.set_closed(cx);
                         self.bg.redraw(cx);
                     }
@@ -363,15 +363,15 @@ impl Widget for DropDown {
     
     fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], act: &WidgetActions,) {
         match db {
-            DataBinding::FromWidgets(nodes) => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
+            DataBinding::FromWidgets{nodes,..}=> if let Some(item) = act.find_single_action(self.get_widget_uid()) {
                 match item.action() {
                     DropDownAction::Select(_, value) => {
-                        nodes.write_by_field_path(path, value.clone());
+                        nodes.write_by_field_path(path, &[LiveNode::from_value(value.clone())]);
                     }
                     _ => ()
                 }
             }
-            DataBinding::ToWidgets(nodes) => {
+            DataBinding::ToWidgets{nodes}=> {
                 if let Some(value) = nodes.read_by_field_path(path) {
                     if let Some(index) = self.values.iter().position(|v| v == value){
                         if self.selected_item != index{
@@ -393,7 +393,7 @@ impl Widget for DropDown {
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.get_widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, _drop_down, action | {
+        self.handle_event_fn(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }

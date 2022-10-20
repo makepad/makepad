@@ -11,7 +11,7 @@ live_design!{
     
     Tab= {{Tab}} {
         name: {
-            text_style: FONT_LABEL {}
+            text_style: <FONT_LABEL> {}
             instance hover: 0.0
             instance selected: 0.0
             fn get_color(self) -> vec4 {

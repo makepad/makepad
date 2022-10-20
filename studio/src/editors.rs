@@ -64,7 +64,7 @@ impl EditorView {
         }
     }
     
-    pub fn handle_event(
+    pub fn handle_event_fn(
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
@@ -82,7 +82,7 @@ live_design!{
     import crate::rust_editor::rust_editor::RustEditor;
     
     Editors= {{Editors}} {
-        rust_editor: RustEditor {},
+        rust_editor: <RustEditor> {},
     }
 }
 
