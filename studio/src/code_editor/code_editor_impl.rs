@@ -286,6 +286,9 @@ impl CodeEditorImpl {
     
     pub fn redraw(&self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx);
+        if self.scroll_bars.area().is_empty(){
+            cx.redraw_all();
+        }
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d) {

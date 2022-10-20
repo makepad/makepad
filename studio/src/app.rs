@@ -12,7 +12,7 @@ live_design!{
     App= {{App}} {
         const FS_ROOT = ""
         inner: {
-            window: {caption:"Makepad Studio", pass: {clear_color: (COLOR_BG_EDITOR)}}
+            window: {caption = "Makepad Studio", pass: {clear_color: (COLOR_BG_EDITOR)}}
             collab_client: {
                 //bind: "127.0.0.1"
                 path: (FS_ROOT)
