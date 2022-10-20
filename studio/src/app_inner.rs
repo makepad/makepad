@@ -242,7 +242,7 @@ impl AppInner {
                     let node = &state.file_nodes[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
-                        self.create_code_editor_tab(cx, state, state.selected_panel_id, None, path, true);
+                        self.create_code_editor_tab(cx, state, live_id!(content1).into(), None, path, true);
                     }
                 }
                 FileTreeAction::ShouldStartDragging(file_node_id) => {
