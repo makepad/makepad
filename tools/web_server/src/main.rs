@@ -48,7 +48,10 @@ fn main() {
     println!("Server listening on {}", addr);
     let mut clb_server = CollabServer::new("./");
     let mut clb_connections = HashMap::new();
-    
+    let prefixes = [
+        format!("/makepad/{}/",std::env::current_dir().unwrap().display()),
+        "/makepad/".to_string()
+    ];
     while let Ok(message) = rx_request.recv() {
         match message{
             HttpRequest::ConnectWebSocket {web_socket_id, response_sender, ..}=>{
@@ -102,10 +105,15 @@ fn main() {
                 else if path.ends_with(".png") {"image/png"}
                 else {continue};
                 
-                if path.contains("..") || path.contains("//") || path.contains("\\"){
+                if path.contains("..") || path.contains("\\"){
                     continue
                 }
-                if let Some(base) = path.strip_prefix("/makepad/"){
+                
+                let strip = if let Some(strip) = path.strip_prefix(&prefixes[0]){Some(strip)}
+                else if let Some(strip) = path.strip_prefix(&prefixes[1]){Some(strip)}
+                else {None};
+
+                if let Some(base) = strip{
                     if let Ok(mut file_handle) = File::open(base) {
                         let mut body = Vec::<u8>::new();
                         if file_handle.read_to_end(&mut body).is_ok() {
