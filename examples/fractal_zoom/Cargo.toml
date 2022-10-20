@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad fractal zoom example"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "gwBs-82YlWyXfhReYgcmUhbJlVE="
+metadata.makepad-auto-version = "Ev1VQ4n2kANfPK7UwYzlSZYv3OU="
 
 [dependencies]
 makepad-widgets = {path="../../widgets", version="0.1.0"}
