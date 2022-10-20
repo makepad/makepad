@@ -24,7 +24,7 @@ This crate contains a collection of basic widgets that almost every application 
 - Radio buttons
 - Color pickers
 
-In addition to these widgets, this crate also contains re-exports of two lower level crates, namely [makepad-draw-2d](https://crates.io/crates/makepad-draw-2d), which contains all code related to drawing, and [makepad-platform](https://crates.io/crates/makepad-platform), which contains all platform specific code. Finally, it contains a collection of base fonts.
+In addition to these widgets, this crate also contains re-exports of two lower level crates, namely [makepad-draw-2d](https://crates.io/crates/makepad-draw-2d), which contains all code related to drawing applications, and [makepad-platform](https://crates.io/crates/makepad-platform), which contains all platform specific code. Finally, it contains a collection of base fonts.
 
 In short, to build an application in Makepad Framework, most of the time this crate is the only one you'll need.
 
