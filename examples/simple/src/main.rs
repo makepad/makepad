@@ -2,10 +2,6 @@ use makepad_draw_2d::*;
 use makepad_widgets;
 use makepad_widgets::*;
 
-// A very simple example of a Makepad Framework application, used to illustrate the basic concepts
-// of Makepad Framework. It consists of a window with both a button and a label displaying a
-// counter. Clicking the button will increment the counter.
-
 // The live_design macro generates a function that registers a DSL code block with the global
 // context object (`Cx`).
 //

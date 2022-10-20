@@ -34,9 +34,9 @@ Although Makepad Framework is complete enough that you can write your own applic
 
 ## Examples
 
-### Basic Example
+### Simple Example
 
-A very basic example, consisting of window with a button and a counter, can be found in the [makepad-example-basic](https://crates.io/crates/makepad-example-basic) crate. It's fairly well commented, so this should be a good starting point for playing around with Makepad Framework.
+A very simple example, consisting of window with a button and a counter, can be found in the [makepad-example-simple](https://crates.io/crates/makepad-example-simple) crate. It's fairly well commented, so this should be a good starting point for playing around with Makepad Framework.
 
 ### Ironfish (Electronic Synthesizer)
 
