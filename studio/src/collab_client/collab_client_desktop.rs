@@ -15,8 +15,8 @@ use {
     },
 };
 
-live_register!{
-    CollabClient: {{CollabClient}} {}
+live_design!{
+    CollabClient= {{CollabClient}} {}
 }
 
 #[derive(Live)]
@@ -50,13 +50,13 @@ impl CollabClient {
         move | request | request_sender.send(request).unwrap()
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<CollabClientAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<CollabClientAction> {
         let mut a = Vec::new();
         self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
         a
     }
     
-    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, CollabClientAction)) {
+    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CollabClientAction)) {
         let inner = self.inner.as_ref().unwrap();
         match event {
             Event::Signal(event)
@@ -125,10 +125,10 @@ impl CollabClientInner {
 
 fn spawn_connection_listener(listener: TcpListener, mut server: CollabServer) {
     thread::spawn(move || {
-        println!("Server listening on {}", listener.local_addr().unwrap());
+        log!("Server listening on {}", listener.local_addr().unwrap());
         for stream in listener.incoming() {
             let stream = stream.unwrap();
-            println!("Incoming connection from {}", stream.peer_addr().unwrap());
+            log!("Incoming connection from {}", stream.peer_addr().unwrap());
             let (action_sender, action_receiver) = mpsc::channel();
             let connection = server.connect(Box::new({
                 let action_sender = action_sender.clone();

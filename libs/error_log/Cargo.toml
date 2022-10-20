@@ -1,0 +1,13 @@
+[package]
+name = "makepad-error-log"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad error logging"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "axopeCFMI6jWmObd84k0-zUI7kg="
+
+[features]
+nightly = []

@@ -1,17 +1,15 @@
 use {
     crate::{
-        makepad_platform::*,
-        makepad_component::{
+        makepad_draw_2d::*,
+        makepad_widgets::{
             splitter::{SplitterAlign},
             DesktopWindow,
             dock::{Dock, DockAction, DragPosition, PanelId},
             tab_bar::TabId,
-        },
-        makepad_studio_component::{
-            shader_view::ShaderView,
             slides_view::SlidesView,
             file_tree::{FileTreeAction, FileNodeId, FileTree},
         },
+        shader_view::ShaderView,
         collab_client::CollabClient,
         makepad_collab_protocol::{
             FileTreeData,
@@ -20,21 +18,22 @@ use {
             CollabClientAction,
             unix_path::{UnixPath, UnixPathBuf},
         },
-        builder::{
-            builder_client::BuilderClient,
-            builder_protocol::{
-                BuilderCmd,
-            }
+        build::{
+            build_manager::{
+                BuildManager,
+                BuildManagerAction
+            },
         },
         app_state::{TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
         log_view::{LogView},
+        run_view::RunView,
         editors::{Editors},
     },
 };
 
-live_register!{
-    AppInner: {{AppInner}} {
-       // window: {caption: "Makepad Studio"}
+live_design!{
+    AppInner= {{AppInner}} {
+        // window: {caption: "Makepad Studio"}
     }
 }
 
@@ -47,19 +46,19 @@ pub struct AppInner {
     log_view: LogView,
     shader_view: ShaderView,
     slides_view: SlidesView,
+    run_view: RunView,
     editors: Editors,
     collab_client: CollabClient,
-    builder_client: BuilderClient
+    build_manager: BuildManager,
 }
 
 impl AppInner {
     
     pub fn draw(&mut self, cx: &mut Cx2d, state: &AppState) {
-        if self.window.begin(cx, None).is_ok() {
-            if self.dock.begin(cx).is_ok() {
-                self.draw_panel(cx, state, id!(root).into());
-                self.dock.end(cx);
-            }
+        if self.window.begin(cx, None).is_redrawing() {
+            self.dock.begin(cx);
+            self.draw_panel(cx, state, live_id!(root).into());
+            self.dock.end(cx);
             self.window.end(cx);
         }
     }
@@ -76,39 +75,43 @@ impl AppInner {
             }
             Panel::Tab(TabPanel {tab_ids, selected_tab}) => {
                 self.dock.begin_tab_panel(cx, panel_id);
-                if self.dock.begin_tab_bar(cx, *selected_tab).is_ok() {
-                    for tab_id in tab_ids {
-                        let tab = &state.tabs[*tab_id];
-                        self.dock.draw_tab(cx, *tab_id, &tab.name);
-                    }
-                    self.dock.end_tab_bar(cx);
+                self.dock.begin_tab_bar(cx, *selected_tab);
+                for tab_id in tab_ids {
+                    let tab = &state.tabs[*tab_id];
+                    self.dock.draw_tab(cx, *tab_id, &tab.name);
                 }
-                if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
-                    let tab = &state.tabs[tab_id];
-                    match tab.kind {
-                        TabKind::ShaderView => {
-                            self.shader_view.draw(cx)
-                        }
-                        TabKind::SlidesView => {
-                            self.slides_view.draw(cx)
-                        }
-                        TabKind::LogView => {
-                            self.log_view.draw(cx, &state.editor_state)
-                        }
-                        TabKind::FileTree => {
-                            if self.file_tree.begin(cx).is_ok() {
-                                self.draw_file_node(cx, state, id!(root).into());
+                self.dock.end_tab_bar(cx);
+                if self.dock.begin_contents(cx).is_redrawing() {
+                    if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
+                        let tab = &state.tabs[tab_id];
+                        match tab.kind {
+                            TabKind::ShaderView => {
+                                self.shader_view.draw(cx)
+                            }
+                            TabKind::RunView => {
+                                self.run_view.draw(cx, &state.build_state)
+                            }
+                            TabKind::SlidesView => {
+                                self.slides_view.draw(cx)
+                            }
+                            TabKind::LogView => {
+                                self.log_view.draw(cx, &state.editor_state)
+                            }
+                            TabKind::FileTree => {
+                                self.file_tree.begin(cx);
+                                self.draw_file_node(cx, state, live_id!(root).into());
                                 self.file_tree.end(cx);
                             }
-                        }
-                        TabKind::CodeEditor {..} => {
-                            self.editors.draw(
-                                cx,
-                                &state.editor_state,
-                                tab_id.into(),
-                            );
+                            TabKind::CodeEditor {..} => {
+                                self.editors.draw(
+                                    cx,
+                                    &state.editor_state,
+                                    tab_id.into(),
+                                );
+                            }
                         }
                     }
+                    self.dock.end_contents(cx);
                 }
                 self.dock.end_tab_panel(cx);
             }
@@ -133,24 +136,41 @@ impl AppInner {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, state: &mut AppState) {
-        self.window.handle_event(cx, event);
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) {
+        self.window.handle_event_fn(cx, event, &mut | _, _ | {});
         
         match event {
             Event::Construct => {
                 self.collab_client.send_request(CollabRequest::LoadFileTree {with_data: false});
+                /*self.create_code_editor_tab(
+                    cx,
+                    state,
+                    live_id!(content1).into(),
+                    None,
+                    state.file_path_join(&["examples/numbers/src/main.rs"]),
+                    true
+                );
                 self.create_code_editor_tab(
                     cx,
                     state,
-                    id!(content).into(),
+                    live_id!(content1).into(),
                     None,
-                    state.file_path_join(&["studio/component/src/shader_view.rs"]),
-                    false
-                );
-                self.builder_client.send_cmd(BuilderCmd::CargoCheck);
+                    state.file_path_join(&["examples/fractal_zoom/src/mandelbrot.rs"]),
+                    true
+                );*/
+                /*
+                self.create_code_editor_tab(
+                    cx,
+                    state,
+                    live_id!(content1).into(),
+                    None,
+                    state.file_path_join(&["examples/fractal_zoom/src/mandelbrot_simd.rs"]),
+                    true
+                );*/
+                self.build_manager.init(cx, state);
             }
-            Event::Draw(draw_event) => {
-                self.draw(&mut Cx2d::new(cx, draw_event), state);
+            Event::Draw(event) => {
+                return self.draw(&mut Cx2d::new(cx, event), state);
             }
             _ => ()
         }
@@ -223,7 +243,7 @@ impl AppInner {
                     let node = &state.file_nodes[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
-                        self.create_code_editor_tab(cx, state, state.selected_panel_id, None, path, true);
+                        self.create_code_editor_tab(cx, state, live_id!(content1).into(), None, path, true);
                     }
                 }
                 FileTreeAction::ShouldStartDragging(file_node_id) => {
@@ -241,7 +261,7 @@ impl AppInner {
             }
         }
         
-        let mut panel_id_stack = vec![id!(root).into()];
+        let mut panel_id_stack = vec![live_id!(root).into()];
         while let Some(panel_id) = panel_id_stack.pop() {
             let panel = &state.panels[panel_id];
             match panel {
@@ -271,9 +291,10 @@ impl AppInner {
                 CollabClientAction::Response(response) => match response {
                     CollabResponse::LoadFileTree(response) => {
                         self.load_file_tree(cx, state, response.unwrap());
-                        self.select_tab(cx, state, id!(file_tree).into(), id!(file_tree).into(), Animate::No);
+                        self.select_tab(cx, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
-                    response => {
+                    response=>{
+                        self.build_manager.handle_collab_response(cx, state, &response);
                         self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
                     }
                 },
@@ -283,14 +304,23 @@ impl AppInner {
             }
         }
         
-        let msgs = self.builder_client.handle_event(cx, event);
-        if msgs.len()>0 {
-            self.editors.handle_builder_messages(cx, &mut state.editor_state, msgs);
-            // lets redraw the logview
-            self.log_view.redraw(cx);
+        for action in self.build_manager.handle_event(cx, event, state){
+            match action{
+                BuildManagerAction::RedrawDoc{doc_id}=>{
+                    self.editors.redraw_views_for_document(cx, &mut state.editor_state, doc_id);
+                },
+                BuildManagerAction::RedrawLog=>{
+                    self.log_view.redraw(cx);
+                    self.run_view.redraw(cx);
+                },
+                BuildManagerAction::StdinToHost{cmd_id, msg}=>{
+                    self.run_view.handle_stdin_to_host(cx, cmd_id, msg, &mut state.build_state);
+                }
+                _=>()
+            }
         }
-        
-        self.log_view.handle_event_with_fn(cx, event,&mut |_,_|{});
+        self.run_view.handle_event(cx, event, &mut state.build_state);
+        self.log_view.handle_event_fn(cx, event, &mut | _, _ | {});
         self.shader_view.handle_event(cx, event);
         self.slides_view.handle_event(cx, event);
     }
@@ -299,7 +329,7 @@ impl AppInner {
     fn load_file_tree(&mut self, cx: &mut Cx, state: &mut AppState, file_tree_data: FileTreeData) {
         self.file_tree.forget();
         state.load_file_tree(file_tree_data);
-        self.file_tree.set_folder_is_open(cx, id!(root).into(), true, Animate::No);
+        self.file_tree.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
         self.file_tree.redraw(cx);
     }
     
@@ -356,6 +386,7 @@ impl AppInner {
         path: UnixPathBuf,
         select: bool
     ) {
+       
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
 
         let session_id = state.editor_state.create_session(path, &mut self.collab_client.request_sender());
@@ -373,7 +404,7 @@ impl AppInner {
             }
             None => panel.tab_ids.push(tab_id),
         }
-        if select{
+        if select {
             self.select_tab(cx, state, panel_id, tab_id, Animate::No);
         }
     }
@@ -411,6 +442,9 @@ impl AppInner {
                 if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
                     let tab = &state.tabs[tab_id];
                     match tab.kind {
+                        TabKind::RunView => {
+                            self.run_view.redraw(cx);
+                        }
                         TabKind::ShaderView => {
                             self.shader_view.redraw(cx);
                         }

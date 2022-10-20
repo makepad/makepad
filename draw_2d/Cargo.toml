@@ -1,0 +1,24 @@
+[package]
+name = "makepad-draw-2d"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad 2d drawing API"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "bjIeAvzAujlFJey7cX-iaeFI2So="
+
+[dependencies]
+makepad-platform = { path = "../platform", version = "0.3.0" }
+makepad-image-formats = { path = "./image_formats", version = "0.3.0" }
+makepad-font = { path = "./vector/font", version = "0.3.0" }
+makepad-geometry = { path = "./vector/geometry", version = "0.3.0" }
+makepad-internal-iter = { path = "./vector/internal_iter", version = "0.3.0" }
+makepad-trapezoidator = { path = "./vector/trapezoidator", version = "0.3.0" }
+makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.3.0" }
+makepad-path = { path = "./vector/path", version = "0.3.0" }
+
+[features] 
+nightly = ["makepad-platform/nightly", "makepad-image-formats/nightly"]
+

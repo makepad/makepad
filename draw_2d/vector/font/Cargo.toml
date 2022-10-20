@@ -1,0 +1,15 @@
+[package]
+name = "makepad-font"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad font data structures"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "ozUBY7mXcDO90346mZQsUxmDUJ8="
+
+[dependencies]
+makepad-geometry = { path = "../geometry", version = "0.3.0" }
+makepad-internal-iter = { path = "../internal_iter", version = "0.3.0" }
+makepad-path = { path = "../path", version = "0.3.0" }

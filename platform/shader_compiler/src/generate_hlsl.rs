@@ -6,7 +6,7 @@ use{
     },
     crate::{
         makepad_live_id::{
-            id,
+            live_id,
             LiveId,
         },
         generate::*,
@@ -45,7 +45,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
-            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(id!(sample2d))) {
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
                 writeln!(self.string, "SamplerState default_texture_sampler{{Filter=MIN_MAX_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;}};").unwrap();
                 writeln!(self.string, "float4 sample2d(Texture2D tex, float2 pos){{return tex.Sample(default_texture_sampler,pos);}}").unwrap();
                 break;
@@ -60,8 +60,8 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_instance_struct();
         self.generate_varying_struct();
         
-        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
-        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap();
+        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
+        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
         
         for &(ty_lit, ref param_tys) in vertex_def
             .constructor_fn_deps
@@ -374,7 +374,7 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         
-        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
+        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
         write!(self.string, "    varyings.position = {}", DisplayFnName(vertex_def.fn_ptr, vertex_def.ident)).unwrap();
         
         write!(self.string, "(").unwrap();
@@ -394,7 +394,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, ") : SV_TARGET{{").unwrap();
         
         write!(self.string, "    return ").unwrap();
-        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap();
+        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
         write!(self.string, "    {}", DisplayFnName(pixel_def.fn_ptr, pixel_def.ident)).unwrap();
         write!(self.string, "(").unwrap();
         self.backend_writer.write_call_expr_hidden_args(self.string, pixel_def.hidden_args.borrow().as_ref().unwrap(), "");
@@ -763,7 +763,7 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
     
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]) {
         match ident {
-            Ident(id!(atan)) => {
+            Ident(live_id!(atan)) => {
                 if arg_exprs.len() == 2 {
                     write!(string, "atan2").unwrap();
                 }
@@ -771,19 +771,19 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                     write!(string, "atan").unwrap();
                 }
             }
-            Ident(id!(mod)) => {
+            Ident(live_id!(mod)) => {
                 write!(string, "fmod").unwrap();
             }
-            Ident(id!(dFdx)) => {
+            Ident(live_id!(dFdx)) => {
                 write!(string, "ddx").unwrap();
             }
-            Ident(id!(dFdy)) => {
+            Ident(live_id!(dFdy)) => {
                 write!(string, "ddy").unwrap();
             }
-            Ident(id!(fract)) => {
+            Ident(live_id!(fract)) => {
                 write!(string, "frac").unwrap();
             }
-            Ident(id!(mix)) => {
+            Ident(live_id!(mix)) => {
                 write!(string, "lerp").unwrap();
             }
             _ => {

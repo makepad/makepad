@@ -1,11 +1,20 @@
 [package]
-name = "makepad_studio"
-version = "0.1.0"
-authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
+name = "makepad-studio"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad studio"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "wYzZ6_rSf-yOavE6qCqFfkBHIaA="
 
 [dependencies]
-makepad-studio-component = {path="./component" , version="0.1"}
-makepad-editor-core = {path="./editor_core", version="0.1"}
-makepad-collab-protocol = {path="./collab_protocol", version="0.1"}
-makepad-collab-server = {path="./collab_server", version="0.1"}
+makepad-widgets = {path="../widgets" , version="0.3.0"}
+makepad-editor-core = {path="./editor_core", version="0.3.0"}
+makepad-collab-protocol = {path="./collab_protocol", version="0.3.0"}
+makepad-collab-server = {path="./collab_server", version="0.3.0"}
+
+[features]
+nightly = ["makepad-widgets/nightly"]
+

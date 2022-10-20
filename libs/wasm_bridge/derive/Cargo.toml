@@ -1,0 +1,20 @@
+[package]
+name = "makepad-derive-wasm-bridge"
+version = "0.3.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad wasm bridge derive macros"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+metadata.makepad-auto-version = "VmZ4l1Uf3OPQBMPOMEcEhKUVgfM="
+
+[lib]
+proc-macro = true
+
+[dependencies]
+makepad-micro-proc-macro = { path = "../../micro_proc_macro", version = "0.3.0" }
+
+[features]
+default = ["nightly"]
+nightly = []

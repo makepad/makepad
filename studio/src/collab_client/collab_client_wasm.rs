@@ -11,8 +11,8 @@ use {
     //},
 };
 
-live_register!{
-    CollabClient: {{CollabClient}} {}
+live_design!{
+    CollabClient= {{CollabClient}} {}
 }
 
 #[derive(Live)]
@@ -21,27 +21,28 @@ pub struct CollabClient {
     path: String,
     #[rust] web_socket: Option<WebSocket>,
     #[rust] requests: Rc<RefCell<Vec<CollabRequest >> >,
-    #[rust(LiveId::unique().into())] signal: Signal
+    #[rust(LiveId::unique())] signal: Signal
 }
 
 impl LiveHook for CollabClient {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.web_socket.is_none() {
             // connect websocket
-            let (host, protocol) = if let PlatformType::WebBrowser{host,protocol,..} = &cx.platform_type{(host,protocol)}else{panic!()};
-            /*
+            let (host, protocol) = if let OsType::WebBrowser{host,protocol,..} = &cx.platform_type(){(host,protocol)}else{panic!()};
+            
             self.web_socket = Some(
                 cx.web_socket_open(
                     format!("{}://{}",if protocol=="https:"{"wss"}else{"ws"}, host),
                     WebSocketAutoReconnect::Yes
                 )
-            )*/
+            )
+            /*
             self.web_socket = Some(
                 cx.web_socket_open(
                     format!("wss://makepad.nl/"),
                     WebSocketAutoReconnect::Yes
                 )
-            )
+            )*/
 
             //self.inner = Some(CollabClientInner::new_with_local_server(&self.path))
         }
@@ -63,20 +64,21 @@ impl CollabClient {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<CollabClientAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<CollabClientAction> {
         let mut a = Vec::new();
         self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
         a
     }
     
-    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, CollabClientAction)) {
+    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CollabClientAction)) {
         
         match event {
             Event::WebSocketMessage(msg) if msg.web_socket == self.web_socket.unwrap() =>{
                 let action = CollabClientAction::de_bin(&mut 0, &msg.data).unwrap();
                 dispatch_action(cx, action);
             }
-            Event::Signal(event) if event.signals.contains(&self.signal) => {
+            
+            Event::Signal(signal_event) if signal_event.signals.contains(&self.signal) => {
                 let mut requests = self.requests.borrow_mut();
                 for request in requests.iter(){
                     let mut buf = Vec::new();

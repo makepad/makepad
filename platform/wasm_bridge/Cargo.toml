@@ -1,9 +1,0 @@
-[package]
-name = "makepad-wasm-bridge"
-version = "0.1.0"
-authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
-edition = "2018"
-
-[dependencies]
-makepad-derive-wasm-bridge = { path = "./derive", version = "0.1" }
-makepad-live-id = { path = "../live_id", version = "0.1" }

@@ -1,22 +1,24 @@
-[workspace]
-
-members = [
-    "code_editor/collections",
+workspace.exclude = [
+    "code_editor/regex",
+    "code_editor/range_set",
+    "code_editor/rope",
     "code_editor/segment",
+    "code_editor/regex",
     "code_editor/ucd",
-    "examples/layout_example", 
-    "examples/fractal_zoom", 
-    "examples/cmdline_example",
-    "platform/wasm_bridge/test",
-    "examples/fun_audio",
-    "studio",
-    "tools/webserver",
-    "tools/wasm_strip",
-    "tools/brotli_check",
+    "code_editor/varint"
 ]
 
-[profile.release]
-#lto=true
-#codegen-units=1
-#panic = 'abort'
-#opt-level = 'z'
+workspace.members = [
+    "examples/numbers", 
+    "examples/fractal_zoom", 
+    "examples/cmdline_example",
+    "examples/ironfish",
+    "examples/simple",
+    "examples/shader",
+    "libs/wasm_bridge/test",
+    "studio",
+    "tools/auto_version",
+    "tools/web_server",
+    "tools/wasm_strip",
+]
+

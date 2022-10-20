@@ -18,7 +18,7 @@ use {
         full_token::{TokenWithLen, Delim, FullToken},
         colorhex,
     },
-    crate::makepad_platform::LiveId
+    crate::makepad_platform::{LiveId, LIVE_ID_SEED}
 };
 
 /// The state of the tokenizer.
@@ -45,7 +45,7 @@ impl State {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{
+    /// use makepad_studio::rust_editor::rust_tokenizer::{
     ///     full_token::{FullToken, TokenWithLen},
     ///     tokenizer::{Cursor, InitialState, State}
     /// };
@@ -559,7 +559,7 @@ impl<'a> Cursor<'a> {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::tokenizer::Cursor;
+    /// use makepad_studio::rust_editor::rust_tokenizer::tokenizer::Cursor;
     /// 
     /// let mut scratch = String::new();
     /// let cursor = Cursor::new(&['1', '2', '3'], &mut scratch);
@@ -586,20 +586,20 @@ impl<'a> Cursor<'a> {
     }
     
     fn id_from_1(&self) -> LiveId {
-        LiveId::from_bytes(&[
+        LiveId::from_bytes(LIVE_ID_SEED, &[
             self.chars[self.index + 0] as u8,
         ], 0, 1)
     }
     
     fn id_from_2(&self) -> LiveId {
-        LiveId::from_bytes(&[
+        LiveId::from_bytes(LIVE_ID_SEED, &[
             self.chars[self.index + 0] as u8,
             self.chars[self.index + 1] as u8,
         ], 0, 2)
     }
     
     fn id_from_3(&self) -> LiveId {
-        LiveId::from_bytes(&[
+        LiveId::from_bytes(LIVE_ID_SEED, &[
             self.chars[self.index + 0] as u8,
             self.chars[self.index + 1] as u8,
             self.chars[self.index + 2] as u8,

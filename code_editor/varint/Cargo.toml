@@ -1,0 +1,8 @@
+[package]
+name = "makepad-varint"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+proptest = "1.0.0"
+
