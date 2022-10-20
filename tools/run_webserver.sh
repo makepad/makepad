@@ -1,4 +1,4 @@
-cargo build -p webserver --release
-sudo setcap 'cap_net_bind_service=+ep' target/release/webserver
-target/release/webserver
+cargo build -p makepad-web-server --release
+sudo setcap 'cap_net_bind_service=+ep' target/release/makepad-web-server
+target/release/makepad-web-server
 
