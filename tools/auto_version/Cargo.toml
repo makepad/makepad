@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad crate auto versioning"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "m8yBeDTFgP94sjS9iuzJbB6npak="
+metadata.makepad-auto-version = "U641OjmjywQ_h_Ro4DvhoumkDmM="
 
 [dependencies]
 makepad-digest = {path = "../../libs/digest", version = "0.3.0"}

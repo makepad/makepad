@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad platform layer"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "VgdgYhDDBAz0pvSSEkPu6kr0XwA="
+metadata.makepad-auto-version = "91RAgo8330sHOQv6LtkxqP98Dgg="
 
 [features]
 nightly = ["makepad-shader-compiler/nightly"]
