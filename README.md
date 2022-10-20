@@ -6,7 +6,7 @@ This is the repository for Makepad, a new way to build UIs in Rust for both nati
 
 Makepad consists of Makepad Framework and Makepad Studio.
 
-Makepad Framework is our UI framework. It consists of multiple crates, but the top level crate is [makepad-widget](https://crates.io/crates/makepad-widgets). For a further explanation of Makepad Framework, please see the README for that crate.
+Makepad Framework is our UI framework. It consists of multiple crates, but the top level crate is [makepad-widgets](https://crates.io/crates/makepad-widgets). For a further explanation of Makepad Framework, please see the README for that crate.
 
 Makepad Studio is a prototype of an IDE that we've built using Makepad Framework. It's still under heavy development, but our eventual goal with Makepad Studio is to create an IDE that enables the design of an application to be changed at runtime. The main crate for Makepad Studio is [makepad-studio](https://crates.io/crates/makepad-studio). Please see the README for that crate for more.
 
