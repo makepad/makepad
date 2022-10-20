@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad platform media extensions"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "5xL_4mjtrIWha5NhOcu92xGBVuY="
+metadata.makepad-auto-version = "BZrCFUdHD-c7Y5Djp5iaKagMxBE="
 
 [dependencies]
 makepad-platform = { path = "../platform", version = "0.1.0" }
