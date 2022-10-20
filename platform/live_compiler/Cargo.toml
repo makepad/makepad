@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad platform live DSL compiler"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "gCNGEuw6Dx1AJIGrOWQqWvP9PRs="
+metadata.makepad-auto-version = "lv9Ck9H-tdFAdDRkNSdlJel7vBE="
 
 [dependencies]
 makepad-derive-live = { path = "../derive_live", version = "0.1.0" }

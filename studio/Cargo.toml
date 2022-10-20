@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad studio"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "7XSNO-tpDarsOh7AhuRDVrlc8tg="
+metadata.makepad-auto-version = "riUDqcjTALHACoZcWI84ujtQpi0="
 
 [dependencies]
 makepad-widgets = {path="../widgets" , version="0.1.0"}
