@@ -27,6 +27,6 @@ fn main() {
     }
     #[cfg(any(target_os = "linux", target_os="windows"))]
     {
-        panic!("Linux and windows support coming soon")
+        //panic!("Linux and windows support coming soon")
     }
 }
