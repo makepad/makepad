@@ -305,7 +305,7 @@ export class WasmWebBrowser extends WasmBridge {
     alloc_thread_stack(closure_ptr) {
         let tls_size = this.exports.__tls_size.value;
         tls_size += 8 - (tls_size & 7); // align it to 8 bytes
-        let stack_size = this.thread_stack_size; // 2mb
+        let stack_size = this.thread_stack_size; // 8mb
         if ((tls_size + stack_size) & 7 != 0) throw new Error("stack size not 8 byte aligned");
         let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack((tls_size + stack_size) >> 3);
         this.update_array_buffer_refs();

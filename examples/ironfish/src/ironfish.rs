@@ -3,18 +3,18 @@
 
 // TO-DO:
 // - Create 'Phase' object to keep track of, tick and sample phases
-// - Fancy XY Effects 
+// - Fancy XY Effects
 // - Actually optimize
 // - regular wavetable oscs
 // - mod matrix
 // - reverb
-// - chorus 
+// - chorus
 // - predelay for mod envelope?
 // - longer sequencer
 // - record to sequencer
 // - omnichord mode playing
 // - better arp
-// - fv1 emu? 
+// - fv1 emu?
 
 #![allow(dead_code)]
 
@@ -171,7 +171,7 @@ pub struct TouchSettings {
 pub struct BitCrushSettings {
     #[live(false)] enable: boola,
     #[live(0.8)] amount: f32a,
-  
+    
 }
 
 
@@ -191,11 +191,11 @@ pub struct ArpSettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct SequencerSettings {
-    pub steps:[u32a;16],
-
+    pub steps: [u32a; 16],
+    
     scale: U32A<MusicalScale>,
     rootnote: U32A<RootNote>,
-
+    
     #[live(125.0)] bpm: f32a,
     #[live(false)] playing: boola,
     
@@ -847,7 +847,7 @@ enum EnvelopePhase {
 
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
-pub struct ChorusSettings{
+pub struct ChorusSettings {
     #[live(0.1)] mindelay: f32a,
     #[live(0.4)] moddepth: f32a,
     #[live(0.1)] rate: f32a,
@@ -858,23 +858,23 @@ pub struct ChorusSettings{
 }
 
 #[derive(Copy, Clone)]
-pub struct SmoothVal{
+pub struct SmoothVal {
     current: f32,
     target: f32,
     rate: f32
 }
 
-impl SmoothVal{
-    pub fn get(&mut self, target:f32) -> f32{
-
-        self.target= target;
-        self.current += (self.target-self.current) * self.rate;
-
+impl SmoothVal {
+    pub fn get(&mut self, target: f32) -> f32 {
+        
+        self.target = target;
+        self.current += (self.target - self.current) * self.rate;
+        
         return self.current;
     }
-
-    pub fn ratebased(rate: f32) -> Self{
-        Self{
+    
+    pub fn ratebased(rate: f32) -> Self {
+        Self {
             current: 0.0,
             target: 0.0,
             rate: rate
@@ -882,9 +882,9 @@ impl SmoothVal{
     }
 }
 
-impl Default for SmoothVal{
+impl Default for SmoothVal {
     fn default() -> Self {
-        Self{
+        Self {
             current: 0.0,
             target: 0.0,
             rate: 0.1
@@ -892,31 +892,29 @@ impl Default for SmoothVal{
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct ChorusState{
+#[derive(Clone)]
+pub struct ChorusState {
     lines: [Waveguide; 6],
     phase: f32,
-    linephase: [f32;6],
+    linephase: [f32; 6],
     dphase: f32,
-
     feedbacksmooth: SmoothVal,
     mixsmooth: SmoothVal,
     phasediffsmooth: SmoothVal,
     mindepthsmooth: SmoothVal,
     moddepthsmooth: SmoothVal
-} 
+}
 
 impl Default for ChorusState {
     fn default() -> Self {
-        Self{
-            lines: [Default::default();6],
+        Self {
+            lines: std::array::from_fn( | _ | Waveguide::default()),
             phase: 0.0,
-            linephase: [0.0;6],
+            linephase: [0.0; 6],
             dphase: 0.0,
             feedbacksmooth: Default::default(),
             mixsmooth: Default::default(),
             phasediffsmooth: Default::default(),
-        // moddepthsmooth: Default::default(),
             mindepthsmooth: SmoothVal::ratebased(0.01),
             moddepthsmooth: SmoothVal::ratebased(0.01),
         }
@@ -924,45 +922,45 @@ impl Default for ChorusState {
 }
 
 
-impl ChorusState{
+impl ChorusState {
     pub fn apply_chorus(&mut self, buffer: &mut AudioBuffer, settings: &ChorusSettings, sample_rate: f32) {
-        if settings.mix.get() == 0.0 
+        if settings.mix.get() == 0.0
         {
             return;
         }
-
+        
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
         
         let lfofreq = 0.5 * (2.0).powf(settings.rate.get() * 8.0 - 4.0);
         let lfodphase = 1.0 / (sample_rate / lfofreq);
-       
+        
         self.phase += lfodphase * frame_count as f32;
         
-        if self.phase > 6.283 
+        if self.phase > 6.283
         {
-             self.phase = self.phase - 6.283;
+            self.phase = self.phase - 6.283;
         };
-        let mindelay = self.mindepthsmooth.get( sample_rate * 0.030 * settings.mindelay.get()) + 1.0;
-        let moddepth =self.moddepthsmooth.get( settings.moddepth.get() * sample_rate * 0.050);
+        let mindelay = self.mindepthsmooth.get(sample_rate * 0.030 * settings.mindelay.get()) + 1.0;
+        let moddepth = self.moddepthsmooth.get(settings.moddepth.get() * sample_rate * 0.050);
         let phasediff = self.phasediffsmooth.get(settings.phasediff.get());
-        for i in 0..6 
+        for i in 0..6
         {
-            self.linephase[i] = mindelay  + ((self.phase + (i as f32) * phasediff ).sin()+1.0)*moddepth;
+            self.linephase[i] = mindelay + ((self.phase + (i as f32) * phasediff).sin() + 1.0) * moddepth;
         }
-        let fb = self.feedbacksmooth.get(settings.feedback.get())*0.86;
+        let fb = self.feedbacksmooth.get(settings.feedback.get()) * 0.86;
         let mix = self.mixsmooth.get(settings.mix.get());
         let imix = 1.0 - mix;
-        for i in 0..frame_count{
-            let l1 = self.lines[0].feed(left[i], fb, self.linephase[0]);    
-            let l2 = self.lines[1].feed(right[i],fb, self.linephase[1]);    
-            let l3 = self.lines[2].feed(left[i], fb, self.linephase[2]);    
-            let l4 = self.lines[3].feed(right[i], fb, self.linephase[3]);    
-            let l5 = self.lines[4].feed(left[i], fb, self.linephase[4]);    
+        for i in 0..frame_count {
+            let l1 = self.lines[0].feed(left[i], fb, self.linephase[0]);
+            let l2 = self.lines[1].feed(right[i], fb, self.linephase[1]);
+            let l3 = self.lines[2].feed(left[i], fb, self.linephase[2]);
+            let l4 = self.lines[3].feed(right[i], fb, self.linephase[3]);
+            let l5 = self.lines[4].feed(left[i], fb, self.linephase[4]);
             let l6 = self.lines[5].feed(right[i], fb, self.linephase[5]);
             
             left[i] = mix * (l1 + l3 + l5) + left[i] * imix;
-            right[i] = mix * (l2 + l4 + l6) + right[i] * imix; 
+            right[i] = mix * (l2 + l4 + l6) + right[i] * imix;
         }
     }
 }
@@ -991,11 +989,11 @@ impl Default for EnvelopeState {
 impl EnvelopeState {
     fn get_n(&mut self, settings: &EnvelopeSettings, samplerate: f32, total: usize) -> f32 {
         let mut res = 0.0;
-        for _ in 0..total{
+        for _ in 0..total {
             res = self.get(settings, samplerate);
         }
         return res;
-
+        
     }
     fn get(&mut self, settings: &EnvelopeSettings, samplerate: f32) -> f32 {
         self.current_value = self.current_value + self.delta_value;
@@ -1120,7 +1118,7 @@ impl EnvelopeState {
 }
 
 #[derive(Copy, Clone)]
-struct FilterState { 
+struct FilterState {
     hp: f32,
     bp: f32,
     lp: f32,
@@ -1219,7 +1217,7 @@ pub struct IronFishVoice {
     tonote: f32,
     notetime: f32,
     notetimetotal: f32,
-        //sequencer: SequencerState
+    //sequencer: SequencerState
 }
 
 fn random_bit(seed: &mut u32) -> u32 {
@@ -1253,32 +1251,32 @@ impl IronFishVoice {
     
     pub fn update_note(&mut self, settings: &IronFishSettings, h: &IronFishGlobalVoiceState, sps_detune_tab: &[f32; 1024], update: bool) {
         
-            self.osc1.set_note(self.current_notefreq , settings.sample_rate.get(), &settings.osc1, &settings.supersaw1, &h.hypersaw1, sps_detune_tab, update);
-            self.osc2.set_note(self.current_notefreq , settings.sample_rate.get(), &settings.osc2, &settings.supersaw2, &h.hypersaw2, sps_detune_tab, update);
-            self.subosc.set_note(self.current_notefreq, settings.sample_rate.get());
-           
+        self.osc1.set_note(self.current_notefreq, settings.sample_rate.get(), &settings.osc1, &settings.supersaw1, &h.hypersaw1, sps_detune_tab, update);
+        self.osc2.set_note(self.current_notefreq, settings.sample_rate.get(), &settings.osc2, &settings.supersaw2, &h.hypersaw2, sps_detune_tab, update);
+        self.subosc.set_note(self.current_notefreq, settings.sample_rate.get());
+        
         
     }
     
-    pub fn note_on(&mut self, b1: u8,prev: u8, b2: u8, settings: &IronFishSettings, h: &IronFishGlobalVoiceState, sps_detune_tab: &[f32; 1024]) {
+    pub fn note_on(&mut self, b1: u8, prev: u8, b2: u8, settings: &IronFishSettings, h: &IronFishGlobalVoiceState, sps_detune_tab: &[f32; 1024]) {
         
         let velocity = (b2 as f32) / 127.0;
-
+        
         if settings.portamento.get() > 0.0 //&& prev < 128
-         {
-            self.notetimetotal = EnvelopeState::nicerange(settings.portamento.get(), settings.sample_rate.get()) ;
+        {
+            self.notetimetotal = EnvelopeState::nicerange(settings.portamento.get(), settings.sample_rate.get());
             self.notetime = self.notetimetotal;
             self.fromnote = prev as f32;
-            self.tonote = b1 as f32;           
+            self.tonote = b1 as f32;
         }
         else
-        {    
+        {
             self.fromnote = b1 as f32;
             self.tonote = b1 as f32;
             self.notetime = 0.0;
             self.notetimetotal = 0.0;
         }
-
+        
         self.volume_envelope.trigger_on(velocity, &settings.volume_envelope, settings.sample_rate.get());
         self.mod_envelope.trigger_on(velocity, &settings.mod_envelope, settings.sample_rate.get());
         self.current_notefreq = self.fromnote;
@@ -1310,17 +1308,17 @@ impl IronFishVoice {
         // apply envelope
         let output = volume_envelope * filter;
         
-        return output 
+        return output
     }
-
-    pub fn updatenote(&mut self, frame_count: usize, settings: &IronFishSettings, h: &IronFishGlobalVoiceState, sps_detune_tab: &[f32; 1024]){
+    
+    pub fn updatenote(&mut self, frame_count: usize, settings: &IronFishSettings, h: &IronFishGlobalVoiceState, sps_detune_tab: &[f32; 1024]) {
         if self.notetime >0.0 {
-        self.notetime -=frame_count as f32;
-        if self.notetime < 0.0 {self.notetime = 0.0};
-        let d = self.notetime / self.notetimetotal;
-        self.current_notefreq = self.tonote + (self.fromnote-self.tonote) * d;
-        //log!("up - {}", self.current_notefreq);
-        self.update_note(settings, h, sps_detune_tab, true);
+            self.notetime -= frame_count as f32;
+            if self.notetime < 0.0 {self.notetime = 0.0};
+            let d = self.notetime / self.notetimetotal;
+            self.current_notefreq = self.tonote + (self.fromnote - self.tonote) * d;
+            //log!("up - {}", self.current_notefreq);
+            self.update_note(settings, h, sps_detune_tab, true);
         }
     }
     
@@ -1343,13 +1341,13 @@ impl IronFishVoice {
             {
                 let proc = remaining.min(8);
                 let mod_envelope = self.mod_envelope.get_n(&settings.mod_envelope, settings.sample_rate.get(), proc);
-        
+                
                 // set up filter
                 self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
                 self.updatenote(proc, settings, state, sps_detune_tab);
                 for i in startidxmut..proc + startidxmut
                 {
-                   
+                    
                     let output = self.compute_one(state, &settings, touch, lfo, osc1_gain, osc2_gain, mod_envelope) * (6.28 * 0.006);
                     left_disp[i] = output as f32;
                     right_disp[i] = output as f32;
@@ -1362,24 +1360,24 @@ impl IronFishVoice {
         }
         else
         {
-            let remaining = frame_count;
-            let startidxmut = startidx;
+            let mut remaining = frame_count;
+            let mut startidxmut = startidx;
             while remaining > 0
             {
-                    let proc = remaining.min(8);
-
+                let proc = remaining.min(8);
                 let mod_envelope = self.mod_envelope.get_n(&settings.mod_envelope, settings.sample_rate.get(), proc);
-            
-                    // set up filter
-                    self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
-                    self.updatenote(proc,settings, state, sps_detune_tab);
-
-                    for i in startidxmut..proc + startidxmut
-                    {
+                
+                // set up filter
+                self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
+                self.updatenote(proc, settings, state, sps_detune_tab);
+                for i in startidxmut..proc + startidxmut
+                {
                     let output = self.compute_one(state, &settings, touch, lfo, osc1_gain, osc2_gain, mod_envelope) * (6.28 * 0.006);
                     left[i] += output as f32;
                     right[i] += output as f32;
                 }
+                startidxmut += proc;
+                remaining -= proc;
             }
         }
     }
@@ -1420,7 +1418,7 @@ pub struct IronFishState {
     sps_detune_tab: [f32; 1024], // FIXME: move to IronFishGlobalVoiceState
     g: IronFishGlobalVoiceState,
     chorus: ChorusState
-
+    
 }
 
 impl IronFishState {
@@ -1431,11 +1429,11 @@ impl IronFishState {
         if self.activemidinotecount >0 {
             self.activemidinotecount = self.activemidinotecount - 1;
         }
-       
+        
         self.rebuildarp();
-
-
-        if self.settings.arp.enabled.get() {           }
+        
+        
+        if self.settings.arp.enabled.get() {}
         else {
             self.internal_note_off(b1, b2);
         }
@@ -1450,14 +1448,14 @@ impl IronFishState {
                 }
             }
             self.activeinternalnotes[b1 as usize] = false;
-            self.activeinternalnotecount =  self.activeinternalnotecount - 1;
+            self.activeinternalnotecount = self.activeinternalnotecount - 1;
             if self.activeinternalnotecount <= 0 {
                 //self.lastnote = 255;
-            //    log!("last note - set to 255");
+                //    log!("last note - set to 255");
                 self.activeinternalnotecount = 0;
             }
-            else{
-          //      log!("{}", self.activeinternalnotecount);
+            else {
+                //      log!("{}", self.activeinternalnotecount);
             }
         }
     }
@@ -1467,10 +1465,10 @@ impl IronFishState {
         self.activemidinotes[b1 as usize] = true;
         self.activemidinotecount = self.activemidinotecount + 1;
         self.rebuildarp();
-
+        
         //log!("note! {} {}", b1,b2);
         if self.settings.arp.enabled.get() {
-           
+            
             
         }
         else {
@@ -1482,10 +1480,10 @@ impl IronFishState {
         for i in 0..self.voices.len() {
             if self.voices[i].active() == -1 {
                 
-                self.voices[i].note_on(b1,self.lastnote, b2, &self.settings, &self.g, &self.sps_detune_tab);
+                self.voices[i].note_on(b1, self.lastnote, b2, &self.settings, &self.g, &self.sps_detune_tab);
                 self.lastnote = b1;
                 self.activeinternalnotes[b1 as usize] = true;
-                self.activeinternalnotecount =  self.activeinternalnotecount + 1;
+                self.activeinternalnotecount = self.activeinternalnotecount + 1;
                 return;
             }
         }
@@ -1514,27 +1512,27 @@ impl IronFishState {
     */
     pub fn apply_bitcrush(&mut self, buffer: &mut AudioBuffer) {
         
-        if !self.settings.bitcrush.enable.get() {return;}; 
-
+        if !self.settings.bitcrush.enable.get() {return;};
+        
         let amount = self.settings.bitcrush.amount.get();
         let crushbits = (amount * 22.0) as i32;
         let precrushmult = 65536.0 * 8.0;
-        let postcrushmult = (1 << crushbits) as f32 / precrushmult; 
+        let postcrushmult = (1 << crushbits) as f32 / precrushmult;
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
         for i in 0..frame_count {
-            let intermediate_left = (left[i] *precrushmult) as i32 ;
+            let intermediate_left = (left[i] * precrushmult) as i32;
             let crushed_left = intermediate_left >> crushbits;
             
             left[i] = (crushed_left as f32) * postcrushmult;
-            let intermediate_right = (right[i] *precrushmult) as i32 ;
+            let intermediate_right = (right[i] * precrushmult) as i32;
             let crushed_right = intermediate_right >> crushbits;
             
             right[i] = (crushed_right as f32) * postcrushmult;
         }
-
+        
     }
-
+    
     pub fn apply_delay(&mut self, buffer: &mut AudioBuffer) {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
@@ -1548,10 +1546,10 @@ impl IronFishState {
         let mut delayreadposr = self.delaywritepos + (44100 - 15000) + leftoffs;
         while delayreadposl >= 44100 {delayreadposl -= 44100;};
         while delayreadposr >= 44100 {delayreadposr -= 44100;};
-
+        
         let fb = self.settings.delay.delayfeedback.get() * 0.98;
         let send = self.settings.delay.delaysend.get();
-
+        
         for i in 0..frame_count {
             let rr = self.delaylineright[delayreadposr];
             let ll = self.delaylineleft[delayreadposl];
@@ -1559,7 +1557,7 @@ impl IronFishState {
             let mut r = ll * cross + rr * icross;
             let mut l = rr * cross + ll * icross;
             
-            r *= fb ;
+            r *= fb;
             r += send * (right[i]);
             
             l *= fb;
@@ -1793,10 +1791,10 @@ impl IronFishState {
                 if self.voices[i].active() > -1 {
                     
                     
-
+                    
                     self.voices[i].fill_buffer(buffer, bufferidx, toprocess, self.display_buffers[i].as_mut(), &self.settings, &self.g, self.touch, self.lfovalue, &self.sps_detune_tab);
-                
-                     
+                    
+                    
                 }
             }
             bufferidx += toprocess;
@@ -1848,7 +1846,7 @@ impl Default for IronFishVoice {
 }
 
 live_design!{
-    IronFish= {{IronFish}} {
+    IronFish = {{IronFish}} {
         settings: {}
     }
 }
@@ -1871,7 +1869,7 @@ impl AudioGraphNode for IronFishState {
         }
         self.activemidinotecount = 0;
         self.lastnote = 69;
-        self.activeinternalnotecount  =0 ;
+        self.activeinternalnotecount = 0;
         self.rebuildarp();
     }
     
@@ -1904,7 +1902,6 @@ impl AudioGraphNode for IronFishState {
 impl AudioComponent for IronFish {
     fn get_graph_node(&mut self, _cx: &mut Cx) -> Box<dyn AudioGraphNode + Send> {
         // self.from_ui.new_channel();
-        
         let mut buffers = Vec::new();
         buffers.resize(16, None);
         
@@ -1948,7 +1945,6 @@ impl AudioComponent for IronFish {
             sps_detune_tab,
             g: Default::default(),
             chorus: Default::default()
-            
         })
     }
     
