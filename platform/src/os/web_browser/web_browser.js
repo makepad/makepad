@@ -228,7 +228,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmSetDocumentTitle(args) {
-        document.title = args.title
+        // document.title = args.title
     }
     
     FromWasmSetMouseCursor(args) {
