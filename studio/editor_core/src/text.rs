@@ -46,8 +46,12 @@ impl Text {
     /// 
     /// Panics if the vec is empty.
     pub fn from_lines(lines: Vec<Vec<char>>) -> Text {
-        assert!(!lines.is_empty());
-        Text { lines }
+        if lines.is_empty(){
+            Text{lines:vec![vec![' ']]}
+        }
+        else{
+            Text { lines }
+        }
     }
 
     /// Returns `true` if this text is empty.
