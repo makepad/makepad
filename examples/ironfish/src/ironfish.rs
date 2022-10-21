@@ -30,7 +30,6 @@ use {
     },
 };
 
-
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum OscType {
     #[pick] DPWSawPulse,
@@ -48,7 +47,6 @@ pub enum LFOWave {
     Pulse,
     Triangle
 }
-
 
 #[derive(Copy, Clone, Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum RootNote {
@@ -143,8 +141,7 @@ pub struct LFOSettings {
 }
 
 #[derive(Copy, Clone)]
-pub struct LFOState
-{
+pub struct LFOState{
     phase: f32
 }
 
@@ -166,14 +163,12 @@ pub struct TouchSettings {
     #[live(0.5)] curve: f32a,
 }
 
-
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct BitCrushSettings {
     #[live(false)] enable: boola,
-    #[live(0.4)] amount: f32a,
-    
-}
 
+    #[live(0.4)] amount: f32a,
+}
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct DelaySettings {
@@ -794,6 +789,7 @@ impl Default for LFOState {
         }
     }
 }
+
 impl Default for SuperSawOscillatorState {
     fn default() -> Self {
         Self {
@@ -845,7 +841,6 @@ enum EnvelopePhase {
     FastRelease
 }
 
-
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct ChorusSettings {
     #[live(0.1)] mindelay: f32a,
@@ -854,7 +849,6 @@ pub struct ChorusSettings {
     #[live(0.8)] phasediff: f32a,
     #[live(0.5)] mix: f32a,
     #[live(0.0)] feedback: f32a
-    
 }
 
 #[derive(Copy, Clone)]
@@ -866,10 +860,8 @@ pub struct SmoothVal {
 
 impl SmoothVal {
     pub fn get(&mut self, target: f32) -> f32 {
-        
         self.target = target;
         self.current += (self.target - self.current) * self.rate;
-        
         return self.current;
     }
     
@@ -920,7 +912,6 @@ impl Default for ChorusState {
         }
     }
 }
-
 
 impl ChorusState {
     pub fn apply_chorus(&mut self, buffer: &mut AudioBuffer, settings: &ChorusSettings, sample_rate: f32) {
