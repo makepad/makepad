@@ -20,8 +20,6 @@ Demo links:
 
 [makepad-example-numbers](https://makepad.nl/makepad/examples/numbers/src/index.html)
 
-[makepad-studio](https://makepad.nl/makepad/studio/src/index.html)
-
 ### Prerequisites
 
 NOTE: At the moment, we only support Mac and web. We however have most of the code for Windows and Linux already there and it will be supported in the near future.
