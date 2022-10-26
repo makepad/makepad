@@ -1,4 +1,4 @@
-pub use makepad_widgets;
+pub use makepad_media::makepad_widgets;
 pub use makepad_widgets::makepad_platform;
 pub use makepad_platform::makepad_math;
 pub use makepad_media;
@@ -677,7 +677,7 @@ live_design!{
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
-           
+            
             crushenable = <InstrumentCheckbox> {
                 walk: {width: Fit, height: Fill, margin: 5}
                 layout: {align: {x: 0.0, y: 0.5}}
@@ -685,7 +685,7 @@ live_design!{
                     label: "On"
                 }
             }
-
+            
             crushamount = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
@@ -975,7 +975,7 @@ live_design!{
                         slider: {line_color: (COLOR_OSC)}
                         min: 0
                         max: 1.0
-                        label: "Harmonic"
+                        label: "Shift"
                     }
                 }
                 harmonicenv = <InstrumentBipolarSlider> {
@@ -983,7 +983,7 @@ live_design!{
                         slider: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
-                        label: "Mod -> Harmonic"
+                        label: "Env mod"
                     }
                 }
                 harmoniclfo = <InstrumentBipolarSlider> {
@@ -991,7 +991,7 @@ live_design!{
                         slider: {line_color: (COLOR_OSC)}
                         min: -1.0
                         max: 1.0
-                        label: "LFO -> Harmonic"
+                        label: "LFO mod"
                     }
                 }
             }
@@ -1047,7 +1047,7 @@ live_design!{
                         save8 = <FishButton> {text: "8"}*/
                         panic = <FishButton> {text: "Panic", walk: {width: Fit}}
                     }
-                } 
+                }
                 
                 layout: {flow: Right, spacing: 0.0, padding: {bottom: -50}, align: {x: 1.0, y: 0.0}}
                 walk: {margin: {left: 0, right: 5}, width: Fill, height: Fit}
@@ -1074,10 +1074,14 @@ live_design!{
             }
             
             <Frame> {
-                walk: {margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)}}
+                walk: {
+                    width: Fill, height: Fill
+                    margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)}
+                }
                 layout: {flow: Right, spacing: (SPACING_PANELS)}
                 <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
+                    walk: {height: Fill, width: Fill}
                     <Frame> {
                         walk: {height: Fit, width: Fill}
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
@@ -1120,6 +1124,7 @@ live_design!{
                 }
                 <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
+                    walk: {height: Fill, width: 300}
                     <CrushFXPanel> {}
                     <ChorusFXPanel> {}
                     <DelayFXPanel> {}
@@ -1181,10 +1186,10 @@ impl App {
             // DelayFX Panel
             (id!(delaysend.slider), id!(delay.delaysend)),
             (id!(delayfeedback.slider), id!(delay.delayfeedback)),
-
+            
             (id!(crushenable.checkbox), id!(bitcrush.enable)),
             (id!(crushamount.slider), id!(bitcrush.amount)),
-
+            
             (id!(delaydifference.slider), id!(delay.difference)),
             (id!(delaycross.slider), id!(delay.cross)),
             // Chorus panel
@@ -1235,6 +1240,13 @@ impl App {
             (id!(osc2.harmonic.slider), id!(osc2.harmonic)),
             (id!(osc2.harmonicenv.slider), id!(osc2.harmonicenv)),
             (id!(osc2.harmoniclfo.slider), id!(osc2.harmoniclfo)),
+            
+            (id!(osc2.supersaw.spread.slider), id!(supersaw1.spread)),
+            (id!(osc2.supersaw.diffuse.slider), id!(supersaw1.diffuse)),
+            
+            (id!(osc2.hypersaw.spread.slider), id!(supersaw2.spread)),
+            (id!(osc2.hypersaw.diffuse.slider), id!(supersaw2.diffuse)),
+            
             // sequencer
             (id!(sequencer), id!(sequencer.steps)),
         ]);
@@ -1278,7 +1290,7 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-
+        
         if let Event::Draw(event) = event {
             return self.draw(&mut Cx2d::new(cx, event));
         }

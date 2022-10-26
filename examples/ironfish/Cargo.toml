@@ -10,11 +10,10 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "HMVEfWglH6ETM-XrlBqp9bOYnlw="
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "0.3.0" }
 makepad-media = { path = "../../media", version = "0.3.0" }
 #makepad-miniz = { path = "../../libs/miniz", version = "0.3.0" }
 #makepad-base64 = { path = "../../libs/base64", version = "0.3.0" }
 
 [features]
-nightly = ["makepad-widgets/nightly", "makepad-media/nightly"]
+nightly = ["makepad-media/nightly"]
 
