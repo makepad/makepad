@@ -1078,6 +1078,7 @@ live_design!{
                 layout: {flow: Right, spacing: (SPACING_PANELS)}
                 <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
+                    walk: {height: Fill, width: Fill}
                     <Frame> {
                         walk: {height: Fit, width: Fill}
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
@@ -1120,6 +1121,7 @@ live_design!{
                 }
                 <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
+                    walk: {height: Fill, width: 300}
                     <CrushFXPanel> {}
                     <ChorusFXPanel> {}
                     <DelayFXPanel> {}
