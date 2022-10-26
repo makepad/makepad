@@ -501,12 +501,12 @@ impl<'a> Cx2d<'a> {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
                             inst_buf[inst.instance_offset + rect_pos + 0 + i * sh.mapping.instances.total_slots] += dx as f32;
                             inst_buf[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instances.total_slots] += dy as f32;
-                            /*if let Some(draw_clip) = sh.mapping.draw_clip {
+                            if let Some(draw_clip) = sh.mapping.draw_clip {
                                 inst_buf[inst.instance_offset + draw_clip + 0 + i * sh.mapping.instances.total_slots] += dx as f32;
                                 inst_buf[inst.instance_offset + draw_clip + 1 + i * sh.mapping.instances.total_slots] += dy as f32;
                                 inst_buf[inst.instance_offset + draw_clip + 2 + i * sh.mapping.instances.total_slots] += dx as f32;
                                 inst_buf[inst.instance_offset + draw_clip + 3 + i * sh.mapping.instances.total_slots] += dy as f32;
-                            }*/
+                            }
                         }
                     }
                 },
@@ -514,8 +514,8 @@ impl<'a> Cx2d<'a> {
                     let draw_list = &mut self.cx.draw_lists[ra.draw_list_id];
                     let rect_area = &mut draw_list.rect_areas[ra.rect_id];
                     rect_area.rect.pos += d;
-                    /*rect_area.draw_clip.0 += d;
-                    rect_area.draw_clip.1 += d;*/
+                    rect_area.draw_clip.0 += d;
+                    rect_area.draw_clip.1 += d;
                 }
                 
                 _ => (),
