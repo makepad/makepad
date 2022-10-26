@@ -18,6 +18,10 @@ pub enum WidgetCache {
 #[derive(Clone, Copy, PartialEq)]
 pub struct WidgetUid(pub u64);
 
+pub trait WidgetDesign{
+    
+}
+
 pub trait Widget: LiveApply {
     fn handle_widget_event_fn(
         &mut self,

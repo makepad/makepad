@@ -5,24 +5,27 @@
 #![allow(non_snake_case)]
 
 pub use {
-    makepad_platform::{
-        os::apple::frameworks::*,
-        makepad_objc_sys::{
-            runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO},
-            declare::ClassDecl,
-            msg_send,
-            sel,
-            class,
-            sel_impl,
-            Encode,
-            Encoding
-        },
-    },
     std::{
         ffi::c_void,
         os::raw::c_ulong,
         ptr::NonNull,
     },
+    
+    crate::{
+        makepad_platform::{
+            os::apple::frameworks::*,
+            makepad_objc_sys::{
+                runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO},
+                declare::ClassDecl,
+                msg_send,
+                sel,
+                class,
+                sel_impl,
+                Encode,
+                Encoding
+            },
+        },
+    }
 };
 
 
@@ -201,7 +204,7 @@ pub struct _AudioBuffer {
     pub mData: *mut ::std::os::raw::c_void,
 }
 
-pub const MAX_AUDIO_BUFFERS:usize = 8;
+pub const MAX_AUDIO_BUFFERS: usize = 8;
 #[repr(C)]
 pub struct CAudioBufferList {
     pub mNumberBuffers: u32,
@@ -434,13 +437,13 @@ pub struct MIDIEventPacket {
     pub wordCount: u32,
     pub words: [u32; 64usize],
 }
- 
+
 #[link(name = "CoreMidi", kind = "framework")]
 extern "C" {
     pub static kMIDIPropertyManufacturer: CFStringRef;
     pub static kMIDIPropertyDisplayName: CFStringRef;
     pub static kMIDIPropertyUniqueID: CFStringRef;
-
+    
     pub fn MIDIGetNumberOfSources() -> ItemCount;
     pub fn MIDIGetSource(sourceIndex0: ItemCount) -> MIDIEndpointRef;
     
