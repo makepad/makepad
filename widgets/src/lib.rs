@@ -17,7 +17,7 @@ pub mod slides_view;
 pub mod log_list;
 pub mod log_icon;
 
-pub mod live_design;
+//pub mod live_design;
 
 pub mod drop_down;
 
