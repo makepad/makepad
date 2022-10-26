@@ -166,7 +166,8 @@ pub struct TouchSettings {
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct BitCrushSettings {
     #[live(false)] enable: boola,
-    #[live(0.8)] amount: f32a,
+
+    #[live(0.4)] amount: f32a,
 }
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]

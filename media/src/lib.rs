@@ -12,7 +12,8 @@ pub use crate::{
 };
 
 use makepad_platform::Cx;
-pub use makepad_platform;
+pub use makepad_widgets;
+pub use makepad_widgets::makepad_platform;
 pub use makepad_platform::makepad_error_log;
 
 pub fn live_design(cx:&mut Cx){
