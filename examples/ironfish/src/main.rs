@@ -922,6 +922,7 @@ live_design!{
                         }
                     }
                 }
+
                 hypersaw = <Frame> {
                     layout: {flow: Right}
                     walk: {width: Fill, height: Fit}
@@ -939,6 +940,35 @@ live_design!{
                             min: 0.0
                             max: 1.0
                             label: "Diffuse"
+                        }
+                    }
+                }
+
+                harmonic = <Frame> {
+                    layout: {flow: Right}
+                    walk: {width: Fill, height: Fit}
+                    harmonic = <InstrumentSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: 0
+                            max: 1.0
+                            label: "Shift"
+                        }
+                    }
+                    harmonicenv = <InstrumentBipolarSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: -1.0
+                            max: 1.0
+                            label: "Env mod"
+                        }
+                    }
+                    harmoniclfo = <InstrumentBipolarSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: -1.0
+                            max: 1.0
+                            label: "LFO mod"
                         }
                     }
                 }
@@ -967,34 +997,6 @@ live_design!{
                 }
             }
             
-            harmonic = <Frame> {
-                layout: {flow: Right}
-                walk: {width: Fill, height: Fit}
-                harmonic = <InstrumentSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_OSC)}
-                        min: 0
-                        max: 1.0
-                        label: "Shift"
-                    }
-                }
-                harmonicenv = <InstrumentBipolarSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_OSC)}
-                        min: -1.0
-                        max: 1.0
-                        label: "Env mod"
-                    }
-                }
-                harmoniclfo = <InstrumentBipolarSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_OSC)}
-                        min: -1.0
-                        max: 1.0
-                        label: "LFO mod"
-                    }
-                }
-            }
         }
     }
     
@@ -1124,7 +1126,6 @@ live_design!{
                 }
                 <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    walk: {height: Fill, width: 300}
                     <CrushFXPanel> {}
                     <ChorusFXPanel> {}
                     <DelayFXPanel> {}
