@@ -1171,8 +1171,8 @@ impl App {
         crate::sequencer::live_design(cx);
     }
     
-    pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions) {
-        let mut db = db.borrow_cx(cx, &self.ui, act);
+    pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, actions: &WidgetActions) {
+        let mut db = db.borrow_cx(cx, &self.ui, actions);
         // touch
         data_to_widget!(db, touch.scale => touch.scale.slider);
         data_to_widget!(db, touch.scale => touch.scale.slider);
@@ -1298,7 +1298,7 @@ impl App {
         
         cx.handle_midi_inputs(event);
         
-        let act = ui.handle_event(cx, event);
+        let actions = ui.handle_event(cx, event);
         
         if let Event::Construct = event {
             cx.start_midi_input();
@@ -1313,7 +1313,7 @@ impl App {
             id!(effects.tab2),
             id!(effects.tab3),
             id!(effects.tab4)
-        ]).apply_visible(cx, &ui, &act, &[
+        ]).selected_to_visible(cx, &ui, &actions, &[
             id!(effects.tab1_frame),
             id!(effects.tab2_frame),
             id!(effects.tab3_frame),
@@ -1344,7 +1344,7 @@ impl App {
             }
         }
         
-        for note in piano.notes_played(&act) {
+        for note in piano.notes_played(&actions) {
             self.audio_graph.send_midi_data(MidiNote {
                 channel: 0,
                 is_on: note.is_on,
@@ -1353,7 +1353,7 @@ impl App {
             }.into());
         }
         
-        if ui.get_button(id!(panic)).clicked(&act) {
+        if ui.get_button(id!(panic)).clicked(&actions) {
             self.audio_graph.all_notes_off();
         }
         
@@ -1361,19 +1361,19 @@ impl App {
         // lets fetch and update the tick.
         
         
-        if ui.get_button(id!(clear_grid)).clicked(&act) {
+        if ui.get_button(id!(clear_grid)).clicked(&actions) {
             sequencer.clear_grid(cx, &mut db);
         }
         
-        if ui.get_button(id!(grid_down)).clicked(&act) {
+        if ui.get_button(id!(grid_down)).clicked(&actions) {
             sequencer.grid_down(cx, &mut db);
         }
         
-        if ui.get_button(id!(grid_up)).clicked(&act) {
+        if ui.get_button(id!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx, &mut db);
         }
         
-        self.data_bind(cx, &mut db, &act);
+        self.data_bind(cx, &mut db, &actions);
         
         if let Some(nodes) = db.from_widgets() {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
