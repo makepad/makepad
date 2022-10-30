@@ -158,7 +158,6 @@ impl Cx {
             error!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }
         // lets dump our main doc
-        
         // ok now we scan for all dependencies and store them on Cx.
     }
     
