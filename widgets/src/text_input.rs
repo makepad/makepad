@@ -212,7 +212,7 @@ impl LiveHook for TextInput {
 }
 
 impl Widget for TextInput {
-    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
     /*fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
         
         if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
@@ -225,7 +225,7 @@ impl Widget for TextInput {
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let uid = self.get_widget_uid();
+        let uid = self.widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
