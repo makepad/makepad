@@ -242,7 +242,7 @@ impl<const N: usize> RadioGroupRef<N>{
         None
     }
     
-    pub fn apply_visible(&self, cx: &mut Cx, ui:&FrameRef, actions: &WidgetActions, paths:&[&[LiveId];N] ) {
+    pub fn selected_to_visible(&self, cx: &mut Cx, ui:&FrameRef, actions: &WidgetActions, paths:&[&[LiveId];N] ) {
         // find a widget action that is in our radiogroup
         if let Some(index) = self.clicked(cx, actions){
             // ok now we set visible
