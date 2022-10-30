@@ -929,6 +929,8 @@ function is_fullscreen() {
 }
 
 function fetch_path(base, path) {
+    
+    
     return new Promise(function(resolve, reject) {
         var req = new XMLHttpRequest()
         req.addEventListener("error", function() {
@@ -944,7 +946,12 @@ function fetch_path(base, path) {
                 buffer: req.response
             })
         })
-        req.open("GET", base + path)
+        let url = base + path;
+        if(location.hostname.startsWith("192.168") || location.hostname == "localhost"){
+            // fix this on the server next time
+            url = url.replace("/Users/admin/makepad/edit_repo","");
+        }
+        req.open("GET", url)
         req.send()
     })
 }
