@@ -256,7 +256,7 @@ impl Sequencer {
     
     pub fn set_steps(&mut self, cx: &mut Cx, steps: &[u32]) {
         if steps.len() != self.grid_x {
-            panic!()
+            panic!("Steps not correct for sequencer got {} expected {}", steps.len(), self.grid_x);
         }
         for (btn_id, button) in self.buttons.iter_mut() {
             let i = btn_id.0.0 as usize;
@@ -275,10 +275,10 @@ impl Widget for Sequencer {
         self.area.redraw(cx);
     }
     
-    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let uid = self.get_widget_uid();
+        let uid = self.widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
@@ -291,10 +291,10 @@ impl Widget for Sequencer {
         WidgetDraw::done()
     }
     
-    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], actions: &WidgetActions) {
+    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, actions: &WidgetActions, path: &[LiveId]) {
         match db {
             DataBinding::FromWidgets{nodes, updated} =>{
-                let uid = self.get_widget_uid();
+                let uid = self.widget_uid();
                 if actions.find_single_action(uid).is_some() || updated.contains(&uid){
                     let steps = self.get_steps(cx);
                     let mut array = LiveNodeVec::new();
@@ -333,7 +333,7 @@ impl SequencerRef{
             let mut steps = inner.get_steps(cx);
             for step in &mut steps{*step = 0};
             inner.set_steps(cx, &steps);
-            db.set_updated(inner.get_widget_uid())
+            db.set_updated(inner.widget_uid())
         }
     }
     
@@ -346,7 +346,7 @@ impl SequencerRef{
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            db.set_updated(inner.get_widget_uid())
+            db.set_updated(inner.widget_uid())
         }
     }
     
@@ -359,7 +359,7 @@ impl SequencerRef{
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            db.set_updated(inner.get_widget_uid())
+            db.set_updated(inner.widget_uid())
         }
     }
 }
