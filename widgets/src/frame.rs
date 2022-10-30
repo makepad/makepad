@@ -46,7 +46,7 @@ pub struct Frame { // draw info per UI element
     image_texture: Texture,
     
     has_view: bool,
-    hidden: bool,
+    #[live(true)] visible: bool,
     user_draw: bool,
     
     #[rust] find_cache: HashMap<u64, (WidgetRef, usize)>,
@@ -197,7 +197,7 @@ impl FrameRef {
 }
 
 impl Widget for Frame {
-    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
     
     fn handle_widget_event_fn(
         &mut self,
@@ -401,7 +401,7 @@ impl Frame {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
-        if self.hidden {
+        if !self.visible {
             return WidgetDraw::done()
         }
         // the beginning state

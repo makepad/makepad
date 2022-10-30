@@ -113,8 +113,6 @@ pub struct OscSettings {
     #[live(0.0)] harmonic: f32a,
     #[live(0.0)] harmonicenv: f32a,
     #[live(0.0)] harmoniclfo: f32a,
-    
-    
 }
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]

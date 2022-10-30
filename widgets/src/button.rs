@@ -206,7 +206,7 @@ pub struct ButtonRef(WidgetRef);
 
 impl ButtonRef {
     pub fn clicked(&self, actions:&WidgetActions) -> bool {
-        if let Some(item) = actions.find_single_action(self.get_widget_uid()) {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let ButtonAction::Click = item.action() {
                 return true
             }

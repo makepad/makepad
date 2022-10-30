@@ -922,6 +922,7 @@ live_design!{
                         }
                     }
                 }
+
                 hypersaw = <Frame> {
                     layout: {flow: Right}
                     walk: {width: Fill, height: Fit}
@@ -939,6 +940,35 @@ live_design!{
                             min: 0.0
                             max: 1.0
                             label: "Diffuse"
+                        }
+                    }
+                }
+
+                harmonic = <Frame> {
+                    layout: {flow: Right}
+                    walk: {width: Fill, height: Fit}
+                    harmonic = <InstrumentSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: 0
+                            max: 1.0
+                            label: "Shift"
+                        }
+                    }
+                    harmonicenv = <InstrumentBipolarSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: -1.0
+                            max: 1.0
+                            label: "Env mod"
+                        }
+                    }
+                    harmoniclfo = <InstrumentBipolarSlider> {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            min: -1.0
+                            max: 1.0
+                            label: "LFO mod"
                         }
                     }
                 }
@@ -967,34 +997,6 @@ live_design!{
                 }
             }
             
-            harmonic = <Frame> {
-                layout: {flow: Right}
-                walk: {width: Fill, height: Fit}
-                harmonic = <InstrumentSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_OSC)}
-                        min: 0
-                        max: 1.0
-                        label: "Shift"
-                    }
-                }
-                harmonicenv = <InstrumentBipolarSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_OSC)}
-                        min: -1.0
-                        max: 1.0
-                        label: "Env mod"
-                    }
-                }
-                harmoniclfo = <InstrumentBipolarSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_OSC)}
-                        min: -1.0
-                        max: 1.0
-                        label: "LFO mod"
-                    }
-                }
-            }
         }
     }
     
@@ -1075,7 +1077,8 @@ live_design!{
             
             <Frame> {
                 walk: {
-                    width: Fill, height: Fill
+                    width: Fill,
+                    height: Fill
                     margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)}
                 }
                 layout: {flow: Right, spacing: (SPACING_PANELS)}
@@ -1122,13 +1125,21 @@ live_design!{
                         }
                     }
                 }
-                <Frame> {
+                effects = <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: 300}
-                    <CrushFXPanel> {}
-                    <ChorusFXPanel> {}
-                    <DelayFXPanel> {}
-                    <SequencerPanel> {}
+                    <Frame> {
+                        layout: {flow: Right, spacing: (SPACING_PANELS)}
+                        walk: {height: Fit, width: Fit}
+                        tab1 = <RadioButton> {label: "Chrush", state:{selected={default:on}}}
+                        tab2 = <RadioButton> {label: "Chorus"}
+                        tab3 = <RadioButton> {label: "Delay"}
+                        tab4 = <RadioButton> {label: "Sequencer"}
+                    }
+                    tab1_frame = <CrushFXPanel> {visible:true}
+                    tab2_frame = <ChorusFXPanel> {visible:false}
+                    tab3_frame = <DelayFXPanel> {visible:false}
+                    tab4_frame = <SequencerPanel> {visible:false}
                 }
             }
             
@@ -1162,131 +1173,118 @@ impl App {
         crate::sequencer::live_design(cx);
     }
     
-    pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions) {
+    pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, actions: &WidgetActions) {
+        let mut db = db.borrow_cx(cx, &self.ui, actions);
+        // touch
+        data_to_widget!(db, touch.scale => touch.scale.slider);
+        data_to_widget!(db, touch.scale => touch.scale.slider);
+        data_to_widget!(db, touch.curve => touch.curve.slider);
+        data_to_widget!(db, touch.offset => touch.offset.slider);
+        data_to_widget!(db, filter1.touch_amount => touch.touchamount.slider);
         
-        // TODO! we're going to make a nice macro for these tables
-        // so they are easier to read and write
-        let data_table = DataBindTable(&[
-            // Touch
-            (id!(touch.scale.slider), id!(touch.scale)),
-            (id!(touch.curve.slider), id!(touch.curve)),
-            (id!(touch.offset.slider), id!(touch.offset)),
-            (id!(touch.touchamount.slider), id!(filter1.touch_amount)),
-            // sequencer
-            (id!(playpause.checkbox), id!(sequencer.playing)),
-            (id!(speed.slider), id!(sequencer.bpm)),
-            (id!(rootnote.dropdown), id!(sequencer.rootnote)),
-            (id!(scaletype.dropdown), id!(sequencer.scale)),
-            (id!(arp.checkbox), id!(arp.enabled)),
-            // Mixer panel
-            (id!(balance.slider), id!(osc_balance)),
-            (id!(noise.slider), id!(noise)),
-            (id!(sub.slider), id!(sub_osc)),
-            (id!(porta.slider), id!(portamento)),
-            // DelayFX Panel
-            (id!(delaysend.slider), id!(delay.delaysend)),
-            (id!(delayfeedback.slider), id!(delay.delayfeedback)),
-            
-            (id!(crushenable.checkbox), id!(bitcrush.enable)),
-            (id!(crushamount.slider), id!(bitcrush.amount)),
-            
-            (id!(delaydifference.slider), id!(delay.difference)),
-            (id!(delaycross.slider), id!(delay.cross)),
-            // Chorus panel
-            (id!(chorusmix.slider), id!(chorus.mix)),
-            (id!(chorusdelay.slider), id!(chorus.mindelay)),
-            (id!(chorusmod.slider), id!(chorus.moddepth)),
-            (id!(chorusrate.slider), id!(chorus.rate)),
-            (id!(chorusphase.slider), id!(chorus.phasediff)),
-            (id!(chorusfeedback.slider), id!(chorus.feedback)),
-            //LFO Panel
-            (id!(rate.slider), id!(lfo.rate)),
-            (id!(lfoamount.slider), id!(filter1.lfo_amount)),
-            (id!(sync.checkbox), id!(lfo.synconkey)),
-            //Volume Envelope
-            (id!(vol_env.attack.slider), id!(volume_envelope.a)),
-            (id!(vol_env.hold.slider), id!(volume_envelope.h)),
-            (id!(vol_env.decay.slider), id!(volume_envelope.d)),
-            (id!(vol_env.sustain.slider), id!(volume_envelope.s)),
-            (id!(vol_env.release.slider), id!(volume_envelope.r)),
-            //Mod Envelope
-            (id!(mod_env.attack.slider), id!(mod_envelope.a)),
-            (id!(mod_env.hold.slider), id!(mod_envelope.h)),
-            (id!(mod_env.decay.slider), id!(mod_envelope.d)),
-            (id!(mod_env.sustain.slider), id!(mod_envelope.s)),
-            (id!(mod_env.release.slider), id!(mod_envelope.r)),
-            (id!(modamount.slider), id!(filter1.envelope_amount)),
-            // Filter panel
-            (id!(filter_type.dropdown), id!(filter1.filter_type)),
-            (id!(cutoff.slider), id!(filter1.cutoff)),
-            (id!(resonance.slider), id!(filter1.resonance)),
-            // Osc1 panel
-            (id!(osc1.supersaw.spread.slider), id!(supersaw1.spread)),
-            (id!(osc1.supersaw.diffuse.slider), id!(supersaw1.diffuse)),
-            
-            (id!(osc1.hypersaw.spread.slider), id!(supersaw1.spread)),
-            (id!(osc1.hypersaw.diffuse.slider), id!(supersaw1.diffuse)),
-            
-            (id!(osc1.type.dropdown), id!(osc1.osc_type)),
-            (id!(osc1.transpose.slider), id!(osc1.transpose)),
-            (id!(osc1.detune.slider), id!(osc1.detune)),
-            (id!(osc1.harmonic.slider), id!(osc1.harmonic)),
-            (id!(osc1.harmonicenv.slider), id!(osc1.harmonicenv)),
-            (id!(osc1.harmoniclfo.slider), id!(osc1.harmoniclfo)),
-            // Osc2 panel
-            (id!(osc2.type.dropdown), id!(osc2.osc_type)),
-            (id!(osc2.transpose.slider), id!(osc2.transpose)),
-            (id!(osc2.detune.slider), id!(osc2.detune)),
-            (id!(osc2.harmonic.slider), id!(osc2.harmonic)),
-            (id!(osc2.harmonicenv.slider), id!(osc2.harmonicenv)),
-            (id!(osc2.harmoniclfo.slider), id!(osc2.harmoniclfo)),
-            
-            (id!(osc2.supersaw.spread.slider), id!(supersaw1.spread)),
-            (id!(osc2.supersaw.diffuse.slider), id!(supersaw1.diffuse)),
-            
-            (id!(osc2.hypersaw.spread.slider), id!(supersaw2.spread)),
-            (id!(osc2.hypersaw.diffuse.slider), id!(supersaw2.diffuse)),
-            
-            // sequencer
-            (id!(sequencer), id!(sequencer.steps)),
-        ]);
+        // sequencer
+        data_to_widget!(db, sequencer.playing => playpause.checkbox);
+        data_to_widget!(db, sequencer.bpm => speed.slider);
+        data_to_widget!(db, sequencer.rootnote => rootnote.dropdown);
+        data_to_widget!(db, sequencer.scale => scaletype.dropdown);
+        data_to_widget!(db, arp.enabled => arp.checkbox);
         
-        db.process_data_table(cx, &self.ui, data_table, act);
+        // Mixer panel
+        data_to_widget!(db, osc_balance => balance.slider);
+        data_to_widget!(db, noise => noise.slider);
+        data_to_widget!(db, sub_osc => sub.slider);
+        data_to_widget!(db, portamento => porta.slider);
         
-        // this maps data to the ADSR graphs
-        // (widget path, widget value path, data path)
-        let map_table = MapBindTable(&[
-            (id!(mod_env.display), id!(bg.attack), id!(mod_envelope.a)),
-            (id!(mod_env.display), id!(bg.hold), id!(mod_envelope.h)),
-            (id!(mod_env.display), id!(bg.decay), id!(mod_envelope.d)),
-            (id!(mod_env.display), id!(bg.sustain), id!(mod_envelope.s)),
-            (id!(mod_env.display), id!(bg.release), id!(mod_envelope.r)),
-            (id!(vol_env.display), id!(bg.attack), id!(volume_envelope.a)),
-            (id!(vol_env.display), id!(bg.hold), id!(volume_envelope.h)),
-            (id!(vol_env.display), id!(bg.decay), id!(volume_envelope.d)),
-            (id!(vol_env.display), id!(bg.sustain), id!(volume_envelope.s)),
-            (id!(vol_env.display), id!(bg.release), id!(volume_envelope.r))
-        ]);
+        // DelayFX Panel
+        data_to_widget!(db, delay.delaysend => delaysend.slider);
+        data_to_widget!(db, delay.delayfeedback => delayfeedback.slider);
         
-        // write the value
-        db.process_map_table(cx, &self.ui, map_table);
+        data_to_widget!(db, bitcrush.enable => crushenable.checkbox);
+        data_to_widget!(db, bitcrush.amount => crushamount.slider);
         
-        // (widget path, widget value path, data path, enum compare, neq)
-        let tab_table = BoolBindTable(&[
-            (id!(osc1.supersaw), id!(hidden), id!(osc1.osc_type), id!(SuperSaw), false),
-            (id!(osc2.supersaw), id!(hidden), id!(osc2.osc_type), id!(SuperSaw), false),
-            (id!(osc1.hypersaw), id!(hidden), id!(osc1.osc_type), id!(HyperSaw), false),
-            (id!(osc2.hypersaw), id!(hidden), id!(osc2.osc_type), id!(HyperSaw), false),
-            (id!(osc1.harmonic), id!(hidden), id!(osc1.osc_type), id!(HarmonicSeries), false),
-            (id!(osc2.harmonic), id!(hidden), id!(osc2.osc_type), id!(HarmonicSeries), false),
-        ]);
+        data_to_widget!(db, delay.difference => delaydifference.slider);
+        data_to_widget!(db, delay.cross => delaycross.slider);
         
-        db.process_bool_table(cx, &self.ui, tab_table);
+        // Chorus panel
+        data_to_widget!(db, chorus.mix => chorusmix.slider);
+        data_to_widget!(db, chorus.mindelay => chorusdelay.slider);
+        data_to_widget!(db, chorus.moddepth => chorusmod.slider);
+        data_to_widget!(db, chorus.rate => chorusrate.slider);
+        data_to_widget!(db, chorus.phasediff => chorusphase.slider);
+        data_to_widget!(db, chorus.feedback => chorusfeedback.slider);
         
-        if let Some(nodes) = db.from_widgets() {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            ironfish.settings.apply_over(cx, &nodes);
-        }
+        //LFO Panel
+        data_to_widget!(db, lfo.rate => rate.slider);
+        data_to_widget!(db, filter1.lfo_amount => lfoamount.slider);
+        data_to_widget!(db, lfo.synconkey => sync.checkbox);
+        
+        //Volume Envelope
+        data_to_widget!(db, volume_envelope.a => vol_env.attack.slider);
+        data_to_widget!(db, volume_envelope.h => vol_env.hold.slider);
+        data_to_widget!(db, volume_envelope.d => vol_env.decay.slider);
+        data_to_widget!(db, volume_envelope.s => vol_env.sustain.slider);
+        data_to_widget!(db, volume_envelope.r => vol_env.release.slider);
+        
+        //Mod Envelope
+        data_to_widget!(db, mod_envelope.a => mod_env.attack.slider);
+        data_to_widget!(db, mod_envelope.h => mod_env.hold.slider);
+        data_to_widget!(db, mod_envelope.d => mod_env.decay.slider);
+        data_to_widget!(db, mod_envelope.s => mod_env.sustain.slider);
+        data_to_widget!(db, mod_envelope.r => mod_env.release.slider);
+        data_to_widget!(db, filter1.envelope_amount => modamount.slider);
+        
+        // Filter panel
+        data_to_widget!(db, filter1.filter_type => filter_type.dropdown);
+        data_to_widget!(db, filter1.cutoff => cutoff.slider);
+        data_to_widget!(db, filter1.resonance => resonance.slider);
+        
+        // Osc1 panel
+        data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw1.spread => osc1.hypersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc1.hypersaw.diffuse.slider);
+        
+        data_to_widget!(db, osc1.osc_type => osc1.type.dropdown);
+        data_to_widget!(db, osc1.transpose => osc1.transpose.slider);
+        data_to_widget!(db, osc1.detune => osc1.detune.slider);
+        data_to_widget!(db, osc1.harmonic => osc1.harmonic.slider);
+        data_to_widget!(db, osc1.harmonicenv => osc1.harmonicenv.slider);
+        data_to_widget!(db, osc1.harmoniclfo => osc1.harmoniclfo.slider);
+        
+        // Osc2 panel
+        data_to_widget!(db, osc2.osc_type => osc2.type.dropdown);
+        data_to_widget!(db, osc2.transpose => osc2.transpose.slider);
+        data_to_widget!(db, osc2.detune => osc2.detune.slider);
+        data_to_widget!(db, osc2.harmonic => osc2.harmonic.slider);
+        data_to_widget!(db, osc2.harmonicenv => osc2.harmonicenv.slider);
+        data_to_widget!(db, osc2.harmoniclfo => osc2.harmoniclfo.slider);
+        
+        data_to_widget!(db, supersaw1.spread => osc2.supersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc2.supersaw.diffuse.slider);
+        
+        data_to_widget!(db, supersaw2.spread => osc2.hypersaw.spread.slider);
+        data_to_widget!(db, supersaw2.diffuse => osc2.hypersaw.diffuse.slider);
+        
+        // sequencer
+        data_to_widget!(db, sequencer.steps => sequencer);
+        
+        data_to_apply!(db, osc1.osc_type => osc1.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
+        data_to_apply!(db, osc2.osc_type => osc2.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
+        data_to_apply!(db, osc1.osc_type => osc1.hypersaw, visible => | v | v == id!(HyperSaw).to_enum());
+        data_to_apply!(db, osc2.osc_type => osc2.hypersaw, visible => | v | v == id!(HyperSaw).to_enum());
+        data_to_apply!(db, osc1.osc_type => osc1.harmonic, visible => | v | v == id!(HarmonicSeries).to_enum());
+        data_to_apply!(db, osc2.osc_type => osc2.harmonic, visible => | v | v == id!(HarmonicSeries).to_enum());
+        
+        data_to_apply!(db, mod_envelope.a => mod_env.display, bg.attack => | v | v);
+        data_to_apply!(db, mod_envelope.h => mod_env.display, bg.hold => | v | v);
+        data_to_apply!(db, mod_envelope.d => mod_env.display, bg.decay => | v | v);
+        data_to_apply!(db, mod_envelope.s => mod_env.display, bg.sustain => | v | v);
+        data_to_apply!(db, mod_envelope.r => mod_env.display, bg.release => | v | v);
+        data_to_apply!(db, volume_envelope.a => vol_env.display, bg.attack => | v | v);
+        data_to_apply!(db, volume_envelope.h => vol_env.display, bg.hold => | v | v);
+        data_to_apply!(db, volume_envelope.d => vol_env.display, bg.decay => | v | v);
+        data_to_apply!(db, volume_envelope.s => vol_env.display, bg.sustain => | v | v);
+        data_to_apply!(db, volume_envelope.r => vol_env.display, bg.release => | v | v);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
@@ -1302,7 +1300,7 @@ impl App {
         
         cx.handle_midi_inputs(event);
         
-        let act = ui.handle_event(cx, event);
+        let actions = ui.handle_event(cx, event);
         
         if let Event::Construct = event {
             cx.start_midi_input();
@@ -1311,6 +1309,18 @@ impl App {
             // ui.bind_read(&ironfish.settings.live_read());
             ui.get_piano(id!(piano)).set_key_focus(cx);
         }
+        
+        ui.get_radio_group(&[
+            id!(effects.tab1),
+            id!(effects.tab2),
+            id!(effects.tab3),
+            id!(effects.tab4)
+        ]).selected_to_visible(cx, &ui, &actions, &[
+            id!(effects.tab1_frame),
+            id!(effects.tab2_frame),
+            id!(effects.tab3_frame),
+            id!(effects.tab4_frame),
+        ]);
         
         let display_audio = ui.get_display_audio(id!(display_audio));
         
@@ -1336,7 +1346,7 @@ impl App {
             }
         }
         
-        for note in piano.notes_played(&act) {
+        for note in piano.notes_played(&actions) {
             self.audio_graph.send_midi_data(MidiNote {
                 channel: 0,
                 is_on: note.is_on,
@@ -1345,7 +1355,7 @@ impl App {
             }.into());
         }
         
-        if ui.get_button(id!(panic)).clicked(&act) {
+        if ui.get_button(id!(panic)).clicked(&actions) {
             self.audio_graph.all_notes_off();
         }
         
@@ -1353,29 +1363,24 @@ impl App {
         // lets fetch and update the tick.
         
         
-        if ui.get_button(id!(clear_grid)).clicked(&act) {
+        if ui.get_button(id!(clear_grid)).clicked(&actions) {
             sequencer.clear_grid(cx, &mut db);
         }
         
-        if ui.get_button(id!(grid_down)).clicked(&act) {
+        if ui.get_button(id!(grid_down)).clicked(&actions) {
             sequencer.grid_down(cx, &mut db);
         }
         
-        if ui.get_button(id!(grid_up)).clicked(&act) {
+        if ui.get_button(id!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx, &mut db);
         }
-        /*
-        let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
-        if ui.get_button(id!(save1)).clicked(&act) {self.preset(cx, 1, shift);}
-        if ui.get_button(id!(save2)).clicked(&act) {self.preset(cx, 2, shift);}
-        if ui.get_button(id!(save3)).clicked(&act) {self.preset(cx, 3, shift);}
-        if ui.get_button(id!(save4)).clicked(&act) {self.preset(cx, 4, shift);}
-        if ui.get_button(id!(save5)).clicked(&act) {self.preset(cx, 5, shift);}
-        if ui.get_button(id!(save6)).clicked(&act) {self.preset(cx, 6, shift);}
-        if ui.get_button(id!(save7)).clicked(&act) {self.preset(cx, 7, shift);}
-        if ui.get_button(id!(save8)).clicked(&act) {self.preset(cx, 8, shift);}
-        */
-        self.data_bind(cx, &mut db, &act);
+        
+        self.data_bind(cx, &mut db, &actions);
+        
+        if let Some(nodes) = db.from_widgets() {
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+            ironfish.settings.apply_over(cx, &nodes);
+        }
     }
     /*
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
