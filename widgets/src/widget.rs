@@ -1,6 +1,6 @@
 use {
     crate::makepad_draw_2d::*,
-    crate::data_binding::DataBinding,
+    crate::data_binding::{DataBinding},
     std::collections::BTreeMap,
     std::any::TypeId,
     std::cell::RefCell,
@@ -42,9 +42,9 @@ pub trait Widget: LiveApply {
         WidgetResult::not_found()
     }
     
-    fn get_widget_uid(&self)->WidgetUid;
+    fn widget_uid(&self)->WidgetUid;
     
-    fn bind_to(&mut self, _cx: &mut Cx, _db: &mut DataBinding, _path: &[LiveId],  _act: &WidgetActions, ) {}
+    fn bind_to(&mut self, _cx: &mut Cx, _db: &mut DataBinding,  _act: &WidgetActions, _data_id: &[LiveId]) {}
         
     fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw;
     fn get_walk(&self) -> Walk;
@@ -224,16 +224,16 @@ impl WidgetRef {
     }
     
     
-    pub fn get_widget_uid(&self) -> WidgetUid {
+    pub fn widget_uid(&self) -> WidgetUid {
         if let Some(inner) = self.0.borrow().as_ref() {
-            return inner.get_widget_uid()
+            return inner.widget_uid()
         }
         WidgetUid(0)
     }
 
-    pub fn bind_to(&self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId],  act: &WidgetActions, ) {
+    pub fn bind_to(&self, cx: &mut Cx, db: &mut DataBinding,  act: &WidgetActions, path: &[LiveId]) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.bind_to(cx, db, path, act);
+            return inner.bind_to(cx, db, act, path);
         }
     }
     

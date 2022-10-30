@@ -860,9 +860,9 @@ impl State {
         return 1.0
     }
     
-    pub fn is_track_animating(&self, cx: &mut Cx, track_id: LiveId) -> bool {
+    pub fn is_track_animating(&self, cx: &mut Cx, track_id: &[LiveId;1]) -> bool {
         if let Some(state) = self.state.as_ref() {
-            if let Some(LiveValue::Int64(ended)) = state.child_value_by_path(0, &[live_id!(tracks).as_field(), track_id.as_field(), live_id!(ended).as_field()]) {
+            if let Some(LiveValue::Int64(ended)) = state.child_value_by_path(0, &[live_id!(tracks).as_field(), track_id[0].as_field(), live_id!(ended).as_field()]) {
                 if *ended == 0 || *ended == cx.event_id as i64 {
                     return true
                 }
