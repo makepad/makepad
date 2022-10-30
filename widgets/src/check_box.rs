@@ -67,7 +67,7 @@ live_design!{
             height: Fit
         }
         label_walk: {
-            margin: {left: 770.0, top: 8, bottom: 8, right: 10}
+            margin: {left: 20.0, top: 8, bottom: 8, right: 10}
             width: Fit,
             height: Fit,
         }
@@ -210,11 +210,11 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
-    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
     
-    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, path: &[LiveId], act: &WidgetActions,) {
+    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions, path: &[LiveId]) {
         match db {
-            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.get_widget_uid()) {
+            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.widget_uid()) {
                 match item.action() {
                     CheckBoxAction::Change(v) => {
                         nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Bool(v))]);
@@ -237,7 +237,7 @@ impl Widget for CheckBox {
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let uid = self.get_widget_uid();
+        let uid = self.widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
