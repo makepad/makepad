@@ -191,7 +191,8 @@ pub use {
             TextureDesc
         },
         live_prims::{
-            LiveDependency
+            LiveDependency,
+            LiveIdToEnum,
         },
         live_traits::{
             LiveBody,
