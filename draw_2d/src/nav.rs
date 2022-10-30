@@ -81,7 +81,8 @@ impl<'a> Cx2d<'a> {
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
         let nav_tree = &*nav_tree_rc.0.borrow();
         let mut scroll_stack = Vec::new();
-        fn iterate_nav_stops<F>(cx: &Cx, scroll_stack: &mut Vec<Area>, nav_tree: &CxNavTree, draw_list_id: DrawListId, callback: &mut F) -> Option<Area> where F: FnMut(&Cx, &NavStop) -> Option<Area> {
+        fn iterate_nav_stops<F>(cx: &Cx, scroll_stack: &mut Vec<Area>, nav_tree: &CxNavTree, draw_list_id: DrawListId, callback: &mut F) -> Option<Area> 
+        where F: FnMut(&Cx, &NavStop) -> Option<Area> {
             
             for i in 0..nav_tree[draw_list_id].nav_list.len() {
                 let nav_item = &nav_tree[draw_list_id].nav_list[i];

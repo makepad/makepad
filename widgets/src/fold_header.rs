@@ -64,7 +64,7 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
-    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
 
     fn handle_widget_event_fn(
         &mut self,
@@ -73,13 +73,13 @@ impl Widget for FoldHeader {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            if self.state.is_track_animating(cx, live_id!(open)) {
+            if self.state.is_track_animating(cx, id!(open)) {
                 self.area.redraw(cx);
             }
         };
         
         for item in self.header.handle_widget_event(cx, event) {
-            if item.widget_uid == self.header.get_widget(id!(fold_button)).get_widget_uid(){
+            if item.widget_uid == self.header.get_widget(id!(fold_button)).widget_uid(){
                 match item.action.cast() {
                     FoldButtonAction::Opening => {
                         self.animate_state(cx, id!(open.on))

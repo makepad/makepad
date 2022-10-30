@@ -329,7 +329,7 @@ impl ListBox {
 
 
 impl Widget for ListBox {
-    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
 
     /*fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
         // lets use enum name to find a selected item here
@@ -345,7 +345,7 @@ impl Widget for ListBox {
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
-        let uid = self.get_widget_uid();
+        let uid = self.widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
