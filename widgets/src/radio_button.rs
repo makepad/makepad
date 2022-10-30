@@ -225,7 +225,7 @@ pub trait RadioGroupFrameRefExt {
 
 impl<const N: usize> RadioGroupRef<N>{
     
-    pub fn clicked(&self, cx: &mut Cx, actions: &WidgetActions)->Option<usize>{
+    pub fn selected(&self, cx: &mut Cx, actions: &WidgetActions)->Option<usize>{
         for action in actions{
             match action.action() {
                 RadioButtonAction::Clicked => if let Some(index) = self.0.iter().position(|v| v.widget_uid() == action.widget_uid){
@@ -244,7 +244,7 @@ impl<const N: usize> RadioGroupRef<N>{
     
     pub fn selected_to_visible(&self, cx: &mut Cx, ui:&FrameRef, actions: &WidgetActions, paths:&[&[LiveId];N] ) {
         // find a widget action that is in our radiogroup
-        if let Some(index) = self.clicked(cx, actions){
+        if let Some(index) = self.selected(cx, actions){
             // ok now we set visible
             for (i,path) in paths.iter().enumerate(){
                 let mut widget = ui.get_widget(path);

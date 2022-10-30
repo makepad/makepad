@@ -5,57 +5,58 @@ export class WasmMediaGL extends WasmWebGL {
         super (wasm, dispatch, canvas);
     }
     
-    FromWasmSpawnAudioOutput(args) {0
+    FromWasmSpawnAudioOutput(args) {
         
-        if (!this.audio_context) {
-            const start_audio = async () => {
-                if(this.audio_context){
-                   return 
-                }
-                let context = this.audio_context = new AudioContext();
-                
-                context.resume();
-                await context.audioWorklet.addModule("/makepad/media/src/os/web_browser/audio_worklet.js", {credentials: 'omit'});
-                
-                const audio_worklet = new AudioWorkletNode(context, 'audio-worklet', {
-                    numberOfInputs: 0,
-                    numberOfOutputs: 1,
-                    outputChannelCount: [2],
-                    processorOptions: {thread_info: this.alloc_thread_stack(args.closure_ptr)}
-                });
-                
-                audio_worklet.port.onmessage = (e) => {
-                    let data = e.data;
-                    switch (data.message_type) {
-                        case "console_log":
-                        console.log(data.value);
-                        break;
-                        
-                        case "console_error":
-                        console.error(data.value);
-                        break;
-                        
-                        case "signal":
-                        this.to_wasm.ToWasmSignal(data)
-                        this.do_wasm_pump();
-                        break;
-                    }
-                };
-                audio_worklet.onprocessorerror = (err) => {
-                    console.error(err);
-                }
-                audio_worklet.connect(context.destination);
-                
-                
-                return audio_worklet;
-            };
-            
-            let user_interact_hook = () => {
-                start_audio();
-            }
-            window.addEventListener('click', user_interact_hook)
-            window.addEventListener('touchstart', user_interact_hook)
+        if (this.audio_context) {
+            return
         }
+        const start_worklet = async () => {
+            await this.audio_context.audioWorklet.addModule("/makepad/media/src/os/web_browser/audio_worklet.js", {credentials: 'omit'});
+            
+            const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
+                numberOfInputs: 0,
+                numberOfOutputs: 1,
+                outputChannelCount: [2],
+                processorOptions: {thread_info: this.alloc_thread_stack(args.closure_ptr)}
+            });
+            
+            audio_worklet.port.onmessage = (e) => {
+                let data = e.data;
+                switch (data.message_type) {
+                    case "console_log":
+                    console.log(data.value);
+                    break;
+                    
+                    case "console_error":
+                    console.error(data.value);
+                    break;
+                    
+                    case "signal":
+                    this.to_wasm.ToWasmSignal(data)
+                    this.do_wasm_pump();
+                    break;
+                }
+            };
+            audio_worklet.onprocessorerror = (err) => {
+                console.error(err);
+            }
+            audio_worklet.connect(this.audio_context.destination);
+            
+            return audio_worklet;
+        };
+        
+        let user_interact_hook = (arg) => {
+            if(this.audio_context.state === "suspended"){
+                this.audio_context.resume();
+            }
+        }
+        this.audio_context = new AudioContext({
+            latencyHint: "interactive",
+            sampleRate: 44100
+        });
+        start_worklet();
+        window.addEventListener('mousedown', user_interact_hook)
+        window.addEventListener('touchstart', user_interact_hook)
     }
     
     FromWasmStartMidiInput() {
