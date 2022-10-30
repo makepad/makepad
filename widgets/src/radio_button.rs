@@ -10,26 +10,12 @@ use {
 
 live_design!{
     import makepad_draw_2d::shader::std::*;
-    DrawCheckBox = {{DrawCheckBox}} {
+    DrawRadioButton = {{DrawRadioButton}} {
         uniform size: 7.0;
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            match self.check_type {
-                CheckType::Check => {
-                    let left = 3;
-                    let sz = self.size;
-                    let c = vec2(left + sz, self.rect_size.y * 0.5);
-                    sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 3.0); // rounding = 3rd value
-                    sdf.fill_keep(mix(mix(#x00000077, #x00000044, pow(self.pos.y, 1.)), mix(#x000000AA, #x00000066, pow(self.pos.y, 1.0)), self.hover))
-                    sdf.stroke(#x888, 1.0) // outline
-                    let szs = sz * 0.5;
-                    let dx = 1.0;
-                    sdf.move_to(left + 4.0, c.y);
-                    sdf.line_to(c.x, c.y + szs);
-                    sdf.line_to(c.x + szs, c.y - szs);
-                    sdf.stroke(mix(#fff0, #f, self.selected), 1.25);
-                }
-                CheckType::Radio => {
+            match self.radio_type {
+                RadioType::Round => {
                     let sz = self.size;
                     let left = sz + 1.;
                     let c = vec2(left + sz, self.rect_size.y * 0.5);
@@ -39,26 +25,14 @@ live_design!{
                     sdf.circle(left, c.y, isz);
                     sdf.fill(mix(#fff0, #f, self.selected));
                 }
-                CheckType::Toggle => {
-                    let sz = self.size;
-                    let left = sz + 1.;
-                    let c = vec2(left + sz, self.rect_size.y * 0.5);
-                    sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
-                    sdf.fill(#2);
-                    let isz = sz * 0.5;
-                    sdf.circle(left + sz + self.selected * sz, c.y, isz);
-                    sdf.circle(left + sz + self.selected * sz, c.y, 0.5 * isz);
-                    sdf.subtract();
-                    sdf.circle(left + sz + self.selected * sz, c.y, isz);
-                    sdf.blend(self.selected)
-                    sdf.fill(#f);
+                RadioType::Tab => {
                 }
             }
             return sdf.result
         }
     }
     
-    CheckBox = {{CheckBox}} {
+    RadioButton = {{RadioButton}} {
         label_text: {
             color: #9
         }
@@ -72,7 +46,7 @@ live_design!{
             height: Fit,
         }
         
-        check_box: {
+        radio_button: {
         }
         
         label_align: {
@@ -85,13 +59,13 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.15}}
                     apply: {
-                        check_box: {hover: 0.0}
+                        radio_button: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        check_box: {hover: 1.0}
+                        radio_button: {hover: 1.0}
                     }
                 }
             }
@@ -100,13 +74,13 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        check_box: {focus: 0.0}
+                        radio_button: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        check_box: {focus: 1.0}
+                        radio_button: {focus: 1.0}
                     }
                 }
             }
@@ -114,12 +88,12 @@ live_design!{
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.0}}
-                    apply: {check_box: {selected: 0.0}}
+                    apply: {radio_button: {selected: 0.0}}
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
-                    apply: {check_box: {selected: 1.0}}
+                    apply: {radio_button: {selected: 1.0}}
                 }
             }
         }
@@ -128,9 +102,9 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
-pub struct DrawCheckBox {
+pub struct DrawRadioButton {
     draw_super: DrawQuad,
-    check_type: CheckType,
+    radio_type: RadioType,
     hover: f32,
     focus: f32,
     selected: f32
@@ -138,18 +112,19 @@ pub struct DrawCheckBox {
 
 #[derive(Live, LiveHook)]
 #[repr(u32)]
-pub enum CheckType {
-    #[pick] Check = shader_enum(1),
-    Radio = shader_enum(2),
-    Toggle = shader_enum(3),
+pub enum RadioType {
+    #[pick] Round = shader_enum(1),
+    Tab = shader_enum(2),
 }
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(CheckBox))]
-pub struct CheckBox {
-    check_box: DrawCheckBox,
+#[live_design_fn(widget_factory!(RadioButton))]
+pub struct RadioButton {
+    radio_button: DrawRadioButton,
     
     walk: Walk,
+    
+    value: LiveValue,
     
     layout: Layout,
     state: State,
@@ -163,18 +138,18 @@ pub struct CheckBox {
 }
 
 #[derive(Clone, WidgetAction)]
-pub enum CheckBoxAction {
-    Change(bool),
+pub enum RadioButtonAction {
+    Clicked,
     None
 }
 
 
-impl CheckBox {
+impl RadioButton {
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CheckBoxAction)) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, RadioButtonAction)) {
         self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.check_box.area()) {
+        match event.hits(cx, self.radio_button.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, id!(hover.on));
@@ -183,13 +158,9 @@ impl CheckBox {
                 self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
-                if self.state.is_in_state(cx, id!(selected.on)) {
-                    self.animate_state(cx, id!(selected.off));
-                    dispatch_action(cx, CheckBoxAction::Change(false));
-                }
-                else {
+                if self.state.is_in_state(cx, id!(selected.off)) {
                     self.animate_state(cx, id!(selected.on));
-                    dispatch_action(cx, CheckBoxAction::Change(true));
+                    dispatch_action(cx, RadioButtonAction::Clicked);
                 }
             },
             Hit::FingerUp(_fe) => {
@@ -203,37 +174,20 @@ impl CheckBox {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.check_box.begin(cx, walk, self.layout);
+        self.radio_button.begin(cx, walk, self.layout);
         self.label_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
-        self.check_box.end(cx);
+        self.radio_button.end(cx);
     }
 }
 
-impl Widget for CheckBox {
+impl Widget for RadioButton {
     fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
     
-    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions, path: &[LiveId]) {
-        match db {
-            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.widget_uid()) {
-                match item.action() {
-                    CheckBoxAction::Change(v) => {
-                        nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Bool(v))]);
-                    }
-                    _ => ()
-                }
-            }
-            DataBinding::ToWidgets{nodes} => {
-                if let Some(value) = nodes.read_by_field_path(path) {
-                    if let Some(value) = value.as_bool() {
-                        self.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
-                    }
-                }
-            }
-        }
+    fn bind_to(&mut self, _cx: &mut Cx, _db: &mut DataBinding, _act: &WidgetActions, _path: &[LiveId]) {
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
-        self.check_box.redraw(cx);
+        self.radio_button.redraw(cx);
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
@@ -252,4 +206,60 @@ impl Widget for CheckBox {
 }
 
 #[derive(Clone, PartialEq, WidgetRef)]
-pub struct CheckBoxRef(WidgetRef);
+pub struct RadioButtonRef(WidgetRef);
+
+impl RadioButtonRef{
+    fn unselect(&self, cx:&mut Cx){
+        if let Some(mut inner) = self.inner_mut(){
+            inner.animate_state(cx, id!(selected.off));
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct RadioGroupRef<const N: usize>([RadioButtonRef; N]);
+
+pub trait RadioGroupFrameRefExt {
+    fn get_radio_group<'a, const N: usize>(&self, paths: &[&[LiveId]; N]) -> RadioGroupRef<N>;
+}
+
+impl<const N: usize> RadioGroupRef<N>{
+    
+    pub fn clicked(&self, cx: &mut Cx, actions: &WidgetActions)->Option<usize>{
+        for action in actions{
+            match action.action() {
+                RadioButtonAction::Clicked => if let Some(index) = self.0.iter().position(|v| v.widget_uid() == action.widget_uid){
+                    for i in 0..self.0.len(){
+                        if i != index{
+                            self.0[i].unselect(cx);
+                        }
+                    }
+                    return Some(index);
+                }
+                _ => ()
+            }
+        }
+        None
+    }
+    
+    pub fn apply_visible(&self, cx: &mut Cx, ui:&FrameRef, actions: &WidgetActions, paths:&[&[LiveId];N] ) {
+        // find a widget action that is in our radiogroup
+        if let Some(index) = self.clicked(cx, actions){
+            // ok now we set visible
+            for (i,path) in paths.iter().enumerate(){
+                let mut widget = ui.get_widget(path);
+                widget.apply_over(cx, live!{visible:(i == index)});
+                widget.redraw(cx);
+            }
+        }
+    }
+}
+
+impl RadioGroupFrameRefExt for FrameRef{
+    fn get_radio_group<const N: usize>(&self, paths: &[&[LiveId]; N]) -> RadioGroupRef<N> {
+        // lets return a radio group
+        RadioGroupRef(core::array::from_fn( | i | {
+            RadioButtonRef(self.get_widget(paths[i]))
+        }))
+    }
+}

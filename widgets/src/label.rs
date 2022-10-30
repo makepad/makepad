@@ -36,7 +36,7 @@ pub struct Label {
 }
 
 impl Widget for Label {
-    fn get_widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
+    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
 
     fn redraw(&mut self, cx:&mut Cx){
         self.label.redraw(cx)
