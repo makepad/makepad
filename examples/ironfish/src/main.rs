@@ -25,6 +25,7 @@ use crate::display_audio::*;
 live_design!{
     registry AudioComponent::*;
     registry Widget::*;
+    
     import makepad_widgets::theme::*;
     import makepad_widgets::frame::*;
     import makepad_draw_2d::shader::std::*;
@@ -922,7 +923,7 @@ live_design!{
                         }
                     }
                 }
-
+                
                 hypersaw = <Frame> {
                     layout: {flow: Right}
                     walk: {width: Fill, height: Fit}
@@ -943,7 +944,7 @@ live_design!{
                         }
                     }
                 }
-
+                
                 harmonic = <Frame> {
                     layout: {flow: Right}
                     walk: {width: Fill, height: Fit}
@@ -1131,15 +1132,15 @@ live_design!{
                     <Frame> {
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         walk: {height: Fit, width: Fit}
-                        tab1 = <RadioButton> {label: "Chrush", state:{selected={default:on}}}
+                        tab1 = <RadioButton> {label: "Chrush", state: {selected = {default: on}}}
                         tab2 = <RadioButton> {label: "Chorus"}
                         tab3 = <RadioButton> {label: "Delay"}
                         tab4 = <RadioButton> {label: "Sequencer"}
                     }
-                    tab1_frame = <CrushFXPanel> {visible:true}
-                    tab2_frame = <ChorusFXPanel> {visible:false}
-                    tab3_frame = <DelayFXPanel> {visible:false}
-                    tab4_frame = <SequencerPanel> {visible:false}
+                    tab1_frame = <CrushFXPanel> {visible: true}
+                    tab2_frame = <ChorusFXPanel> {visible: true}
+                    tab3_frame = <DelayFXPanel> {visible: true}
+                    tab4_frame = <SequencerPanel> {visible: true}
                 }
             }
             
@@ -1297,7 +1298,7 @@ impl App {
         
         let ui = self.ui.clone();
         let mut db = DataBinding::new();
-        
+
         cx.handle_midi_inputs(event);
         
         let actions = ui.handle_event(cx, event);
@@ -1306,7 +1307,6 @@ impl App {
             cx.start_midi_input();
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             db.to_widgets(ironfish.settings.live_read());
-            // ui.bind_read(&ironfish.settings.live_read());
             ui.get_piano(id!(piano)).set_key_focus(cx);
         }
         
@@ -1362,7 +1362,6 @@ impl App {
         let sequencer = ui.get_sequencer(id!(sequencer));
         // lets fetch and update the tick.
         
-        
         if ui.get_button(id!(clear_grid)).clicked(&actions) {
             sequencer.clear_grid(cx, &mut db);
         }
@@ -1376,11 +1375,11 @@ impl App {
         }
         
         self.data_bind(cx, &mut db, &actions);
-        
         if let Some(nodes) = db.from_widgets() {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             ironfish.settings.apply_over(cx, &nodes);
         }
+        
     }
     /*
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {

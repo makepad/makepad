@@ -86,7 +86,6 @@ class AudioWorklet extends AudioWorkletProcessor {
     process(inputs, outputs, parameters) {
         if (this._context !== undefined) {
             let context = this._context;
-            
             context.flush_signals_in_audio_flow();
             
             let frames = outputs[0][0].length;
