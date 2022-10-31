@@ -1,5 +1,5 @@
 use crate::{
-    makepad_draw_2d::*,
+    makepad_draw::*,
     debug_view::DebugView,
     nav_control::NavControl,
 };

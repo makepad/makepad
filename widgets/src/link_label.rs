@@ -1,14 +1,14 @@
 #![allow(unused)]
 use {
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         widget::*,
         button::{Button, ButtonAction}
     }
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import crate::theme::*;
     
     LinkLabel = {{LinkLabel}} {

@@ -1,5 +1,5 @@
 use crate::{
-    makepad_draw_2d::*,
+    makepad_draw::*,
     scroll_bar::*
 };
 

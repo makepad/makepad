@@ -4,7 +4,7 @@ pub use makepad_platform::makepad_math;
 pub use makepad_media;
 
 use makepad_widgets::*;
-use makepad_draw_2d::*;
+use makepad_draw::*;
 use makepad_media::*;
 use makepad_media::audio_graph::*;
 
@@ -28,7 +28,7 @@ live_design!{
     
     import makepad_widgets::theme::*;
     import makepad_widgets::frame::*;
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     
     const SPACING_PANELS = 10.0
     const SPACING_CONTROLS = 4.0

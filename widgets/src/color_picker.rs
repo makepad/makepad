@@ -1,8 +1,8 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     
     DrawColorWheel= {{DrawColorWheel}} {
         instance hover: float

@@ -1,6 +1,6 @@
 use crate::{
     makepad_derive_widget::*,
-    makepad_draw_2d::*,
+    makepad_draw::*,
     widget::*,
     fold_button::*
 };

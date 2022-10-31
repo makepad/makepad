@@ -1,6 +1,6 @@
 use crate::{
     debug_view::DebugView,
-    makepad_draw_2d::*,
+    makepad_draw::*,
     nav_control::NavControl,
     window_menu::*,
     button::*,
