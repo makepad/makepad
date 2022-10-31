@@ -1,4 +1,4 @@
-use makepad_draw_2d::*;
+use makepad_draw::*;
 use makepad_widgets;
 use makepad_widgets::*;
 

@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         makepad_editor_core::{
             text::{Text},
         },
@@ -28,7 +28,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::fold_button::FoldButton;
     
     RustEditor= {{RustEditor}} {

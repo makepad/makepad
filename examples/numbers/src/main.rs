@@ -1,6 +1,6 @@
 use makepad_widgets;
 use makepad_widgets::*;
-use makepad_draw_2d::*;
+use makepad_draw::*;
 mod number_grid;
 
 live_design!{

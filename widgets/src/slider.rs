@@ -3,14 +3,14 @@ use {
         makepad_derive_widget::*,
         frame::*,
         data_binding::DataBinding,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         widget::*,
         text_input::{TextInput, TextInputAction}
     }
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     DrawSlider = {{DrawSlider}} {
         instance hover: float
         instance focus: float

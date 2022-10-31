@@ -7,13 +7,13 @@ use {
         fold_button::FoldButton,
         scroll_bars::ScrollBars,
         link_label::LinkLabel,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         log_icon::{DrawLogIconQuad, LogIconType}
     },
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     DrawBgQuad = {{DrawBgQuad}} {

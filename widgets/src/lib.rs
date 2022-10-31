@@ -1,6 +1,6 @@
-pub use makepad_draw_2d::makepad_platform;
-pub use makepad_draw_2d::makepad_image_formats;
-pub use makepad_draw_2d;
+pub use makepad_draw::makepad_platform;
+pub use makepad_draw::makepad_image_formats;
+pub use makepad_draw;
 
 pub use makepad_derive_widget;
 pub use makepad_platform::*;
@@ -84,7 +84,7 @@ pub use crate::{
 
 
 pub fn live_design(cx: &mut Cx) {
-    makepad_draw_2d::live_design(cx);
+    makepad_draw::live_design(cx);
     crate::log_list::live_design(cx);
     crate::log_icon::live_design(cx);
     crate::debug_view::live_design(cx);

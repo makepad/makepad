@@ -4,7 +4,7 @@ use {
             ComponentMap,
             tab_bar::TabId,
         },
-        makepad_draw_2d::*,
+        makepad_draw::*,
         editor_state::{
             EditorState,
             DocumentId,
