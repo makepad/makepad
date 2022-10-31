@@ -1,13 +1,13 @@
 use {
     crate::{
         makepad_derive_widget::*,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         widget::*,
     },
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     DrawBgQuad = {{DrawBgQuad}} {

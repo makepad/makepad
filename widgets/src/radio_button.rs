@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_derive_widget::*,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         widget::*,
         data_binding::DataBinding,
         frame::*,
@@ -9,7 +9,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     DrawRadioButton = {{DrawRadioButton}} {
         uniform size: 7.0;
         fn pixel(self) -> vec4 {

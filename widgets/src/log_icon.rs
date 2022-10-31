@@ -1,7 +1,7 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     DrawLogIconQuad= {{DrawLogIconQuad}} {

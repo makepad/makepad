@@ -1,7 +1,7 @@
 
 use {
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         makepad_math::complex::*,
         makepad_widgets::*,
         makepad_media::*,
@@ -9,7 +9,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     DrawFFT = {{DrawFFT}} {

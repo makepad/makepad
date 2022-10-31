@@ -6,7 +6,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     DrawShape= {{DrawShape}} {
         texture image: texture2d
         

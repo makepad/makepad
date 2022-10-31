@@ -4,7 +4,7 @@ use {
     crate::{
         makepad_derive_widget::*,
         popup_menu::{PopupMenu, PopupMenuAction},
-        makepad_draw_2d::*,
+        makepad_draw::*,
         data_binding::DataBinding,
         widget::*,
         frame::*,
@@ -12,7 +12,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::popup_menu::PopupMenu;
     
     DrawLabelText = {{DrawLabelText}} {

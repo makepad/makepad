@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         makepad_widgets::{
             splitter::{SplitterAlign},
             DesktopWindow,

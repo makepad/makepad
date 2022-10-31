@@ -1,5 +1,5 @@
 use crate::{
-    makepad_draw_2d::*,
+    makepad_draw::*,
     build::build_manager::BuildState,
     makepad_platform::os::cx_stdin::*,
     build::{
@@ -8,7 +8,7 @@ use crate::{
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     
     DrawApp = {{DrawApp}} {
         texture tex: texture2d
