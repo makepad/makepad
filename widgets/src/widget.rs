@@ -1,5 +1,5 @@
 use {
-    crate::makepad_draw_2d::*,
+    crate::makepad_draw::*,
     crate::data_binding::{DataBinding},
     std::collections::BTreeMap,
     std::any::TypeId,

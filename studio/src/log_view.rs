@@ -13,7 +13,7 @@ use {
             log_icon::LogIconType,
             log_list::{LogList, LogListAction}
         },
-        makepad_draw_2d::*,
+        makepad_draw::*,
         editor_state::EditorState,
         //builder::{
         //    builder_protocol::BuilderMsg,

@@ -1,13 +1,13 @@
 use {
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
     },
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import crate::tab_bar::TabBar
     import makepad_widgets::splitter::Splitter
     import makepad_widgets::theme::*;

@@ -1,13 +1,13 @@
 use {
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         makepad_widgets::*,
     },
     std::fmt::Write,
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     DrawBg= {{DrawBg}} {
         instance hover: float
         instance focus: float
