@@ -58,11 +58,11 @@ impl Cx {
     pub fn stdin_post_signal(signal: Signal) {
         let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-signal\", \"signal\":{}}}\n", signal.0.0).as_bytes());
     }
-
+    
     pub fn stdin_render_done(buffer: u32) {
         let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-render\", \"buffer\":{}}}\n", buffer).as_bytes());
     }
-
+    
     
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
@@ -82,7 +82,9 @@ impl Cx {
                 let parsed: Result<HostToStdin, DeJsonErr> = DeJson::deserialize_json(&line);
                 match parsed {
                     Ok(msg) => match msg {
-                        HostToStdin::FingerDown(fe) => {
+                        HostToStdin::MouseDown(e) => {
+                            self.call_event_handler(&Event::MouseDown(e.into()));
+                            /*
                             let digit_id = LiveId(fe.digit_id).into();
                             self.fingers.alloc_digit(digit_id);
                             self.fingers.process_tap_count(
@@ -93,22 +95,26 @@ impl Cx {
                             self.call_event_handler(&Event::FingerDown(
                                 fe.into_finger_down_event(&self.fingers)
                             ));
-                            self.fingers.cycle_hover_area(digit_id);
+                            self.fingers.cycle_hover_area(digit_id);*/
                         }
-                        HostToStdin::FingerMove(fe) => {
+                        HostToStdin::MouseMove(e) => {
+                            self.call_event_handler(&Event::MouseMove(e.into()));
+                            /*
                             let digit_id = LiveId(fe.digit_id).into();
                             // lets grab the captured area
                             self.call_event_handler(&Event::FingerMove(
                                 fe.into_finger_move_event(&self.fingers)
                             ));
-                            self.fingers.cycle_hover_area(digit_id);
+                            self.fingers.cycle_hover_area(digit_id);*/
                         }
-                        HostToStdin::FingerUp(fe) => {
+                        HostToStdin::MouseUp(e) => {
+                            self.call_event_handler(&Event::MouseUp(e.into()));
+                            /*
                             let digit_id = LiveId(fe.digit_id).into();
                             self.call_event_handler(&Event::FingerUp(
                                 fe.into_finger_up_event(&self.fingers)
                             ));
-                            self.fingers.free_digit(digit_id);
+                            self.fingers.free_digit(digit_id);*/
                         }
                         HostToStdin::WindowSize(ws) => {
                             if window_size.is_none() {

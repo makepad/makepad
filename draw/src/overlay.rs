@@ -48,10 +48,9 @@ impl Overlay {
         let area = self.sweep_lock.borrow().clone();
         if !area.is_empty(){
             match event{
-                Event::FingerMove(fe)=>fe.sweep_lock.set(area),
-                Event::FingerDown(fe)=>fe.sweep_lock.set(area),
-                Event::FingerHover(fe)=>fe.sweep_lock.set(area),
-                Event::FingerScroll(fe)=>fe.sweep_lock.set(area),
+                Event::MouseMove(e)=>e.sweep_lock.set(area),
+                Event::MouseDown(e)=>e.sweep_lock.set(area),
+                Event::Scroll(e)=>e.sweep_lock.set(area),
                 _=>()
             }
         }
