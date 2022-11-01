@@ -1132,7 +1132,7 @@ live_design!{
                     <Frame> {
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         walk: {height: Fit, width: Fit}
-                        tab1 = <RadioButton> {label: "Chrush", state: {selected = {default: on}}}
+                        tab1 = <RadioButton> {label: "Crush", state: {selected = {default: on}}}
                         tab2 = <RadioButton> {label: "Chorus"}
                         tab3 = <RadioButton> {label: "Delay"}
                         tab4 = <RadioButton> {label: "Sequencer"}

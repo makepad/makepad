@@ -10,7 +10,6 @@ use {
         sel_impl,
     },
     crate::{
-        makepad_live_id::*,
         makepad_math::*,
         os::{
             apple::frameworks::*,
@@ -93,10 +92,10 @@ impl Cx {
                         if drawable == nil {
                             return
                         }
-                        if metal_window.is_resizing{
+                        if metal_window.is_resizing {
                             self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::Resizing(drawable));
                         }
-                        else{
+                        else {
                             self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::Drawable(drawable));
                         }
                     }
@@ -209,7 +208,9 @@ impl Cx {
                     
                     self.handle_repaint(metal_windows, metal_cx);
                 }
-                CocoaEvent::MouseDown(md) => {
+                CocoaEvent::MouseDown(e) => {
+                    self.call_event_handler(&Event::MouseDown(e.into()))
+                    /*
                     if self.os.last_mouse_button == None ||
                     self.os.last_mouse_button == Some(md.button) {
                         self.os.last_mouse_button = Some(md.button);
@@ -223,9 +224,11 @@ impl Cx {
                         self.call_event_handler(&Event::FingerDown(
                             md.into_finger_down_event(&self.fingers, digit_id)
                         ));
-                    }
+                    }*/
                 }
-                CocoaEvent::MouseMove(mm) => {
+                CocoaEvent::MouseMove(e) => {
+                    self.call_event_handler(&Event::MouseMove(e.into()))
+                    /*
                     let digit_id = live_id!(mouse).into();
                     
                     if !self.fingers.is_digit_allocated(digit_id) {
@@ -247,9 +250,11 @@ impl Cx {
                             )
                         ));
                     }
-                    self.fingers.cycle_hover_area(digit_id);
+                    self.fingers.cycle_hover_area(digit_id);*/
                 }
-                CocoaEvent::MouseUp(md) => {
+                CocoaEvent::MouseUp(e) => {
+                    self.call_event_handler(&Event::MouseUp(e.into()))
+                    /*
                     if self.os.last_mouse_button == Some(md.button) {
                         self.os.last_mouse_button = None;
                         let digit_id = live_id!(mouse).into();
@@ -260,12 +265,10 @@ impl Cx {
                             )
                         ));
                         self.fingers.free_digit(digit_id);
-                    }
+                    }*/
                 }
                 CocoaEvent::Scroll(e) => {
-                    self.call_event_handler(&Event::FingerScroll(
-                        e.into_finger_scroll_event(live_id!(mouse).into())
-                    ))
+                    self.call_event_handler(&Event::Scroll(e.into()))
                 }
                 CocoaEvent::WindowDragQuery(e) => {
                     self.call_event_handler(&Event::WindowDragQuery(e))
@@ -326,7 +329,7 @@ impl Cx {
                         window_id,
                         &metal_cx,
                         cocoa_app,
-                        window.create_inner_size.unwrap_or(dvec2(800.,600.)),
+                        window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
                         &window.create_title
                     );

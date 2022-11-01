@@ -297,22 +297,22 @@ impl ScrollBar {
     }
     
     pub fn handle_scroll_event(&mut self, cx: &mut Cx, event: &Event, scroll_area: Area, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
-        if let Event::FingerScroll(fe) = event {
-            if scroll_area.get_rect(cx).contains(fe.abs) {
+        if let Event::Scroll(e) = event {
+            if scroll_area.get_rect(cx).contains(e.abs) {
                 if !match self.axis {
-                    Axis::Horizontal => fe.handled_x.get(),
-                    Axis::Vertical => fe.handled_y.get()
+                    Axis::Horizontal => e.handled_x.get(),
+                    Axis::Vertical => e.handled_y.get()
                 } {
                     let scroll = match self.axis {
-                        Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
-                        Axis::Vertical => fe.scroll.y
+                        Axis::Horizontal => if self.use_vertical_finger_scroll {e.scroll.y}else {e.scroll.x},
+                        Axis::Vertical => e.scroll.y
                     };
-                    if !self.smoothing.is_none() && fe.device.is_mouse() {
+                    if !self.smoothing.is_none() && e.is_mouse {
                         let scroll_pos_target = self.get_scroll_target();
                         if self.set_scroll_target(cx, scroll_pos_target + scroll) {
                             match self.axis {
-                                Axis::Horizontal => fe.handled_x.set(true),
-                                Axis::Vertical => fe.handled_y.set(true)
+                                Axis::Horizontal => e.handled_x.set(true),
+                                Axis::Vertical => e.handled_y.set(true)
                             }
                         };
                         self.move_towards_scroll_target(cx); // take the first step now
@@ -322,8 +322,8 @@ impl ScrollBar {
                         let scroll_pos = self.get_scroll_pos();
                         if self.set_scroll_pos(cx, scroll_pos + scroll) {
                             match self.axis {
-                                Axis::Horizontal => fe.handled_x.set(true),
-                                Axis::Vertical => fe.handled_y.set(true)
+                                Axis::Horizontal => e.handled_x.set(true),
+                                Axis::Vertical => e.handled_y.set(true)
                             }
                         }
                         return dispatch_action(cx, self.make_scroll_action());
