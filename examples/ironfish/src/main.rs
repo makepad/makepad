@@ -21,7 +21,6 @@ use crate::display_audio::*;
 
 //use std::fs::File;
 //use std::io::prelude::*;
-
 live_design!{
     registry AudioComponent::*;
     registry Widget::*;
@@ -58,6 +57,19 @@ live_design!{
         layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
     }
     
+
+    FishTab = <RadioButton> {
+        walk: {margin: 5}
+        label_text: {
+            color: #f00,
+            label_text:{text_style:{font_size:15}}
+        }
+        radio_button: {
+            radio_type: Tab,
+        }
+    }
+
+
     FishDropDown = <DropDown> {
         walk: {margin: {left: 5.0, right: 0.0, top: 0.0, bottom: 0.0}}
         layout: {padding: 6.0}
@@ -674,7 +686,7 @@ live_design!{
         }
     }
     CrushFXPanel = <FishPanel> {
-        label = {bg: {color: (COLOR_FX)}, label = {text: "Bitcrush",}}
+        label = {bg: {color: (COLOR_HIDDEN_WHITE)}, label = {text: "Bitcrush",}}
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
@@ -1083,7 +1095,7 @@ live_design!{
                     margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)}
                 }
                 layout: {flow: Right, spacing: (SPACING_PANELS)}
-                <Frame> {
+                column1 = <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: Fill}
                     <Frame> {
@@ -1126,21 +1138,27 @@ live_design!{
                         }
                     }
                 }
-                effects = <Frame> {
+                column2 = <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    walk: {height: Fill, width: 300}
-                    <Frame> {
-                        layout: {flow: Right, spacing: (SPACING_PANELS)}
-                        walk: {height: Fit, width: Fit}
-                        tab1 = <RadioButton> {label: "Chrush", state: {selected = {default: on}}}
-                        tab2 = <RadioButton> {label: "Chorus"}
-                        tab3 = <RadioButton> {label: "Delay"}
-                        tab4 = <RadioButton> {label: "Sequencer"}
+                    walk: {height: Fill}
+                    effects = <Frame> {
+                        layout: {flow: Down, spacing: 0}
+                        walk: {height: Fill, width: Fill}
+                        <FishHeader> {label = {text: "Effects", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_FX)}}
+                        <Frame> {
+                            layout: {flow: Right, spacing: 0}
+                            walk: {height: Fit, width: Fit}
+                            tab1 = <FishTab> {label: "Bitcrush" }
+                            tab2 = <FishTab> {label: "Chorus" }
+                            tab3 = <FishTab> {label: "Delay" }
+                        }
+                        tab1_frame = <CrushFXPanel> {visible: true}
+                        tab2_frame = <ChorusFXPanel> {visible: false}
+                        tab3_frame = <DelayFXPanel> {visible: false}
                     }
-                    tab1_frame = <CrushFXPanel> {visible: true}
-                    tab2_frame = <ChorusFXPanel> {visible: true}
-                    tab3_frame = <DelayFXPanel> {visible: true}
-                    tab4_frame = <SequencerPanel> {visible: true}
+                    <SequencerPanel> {
+                        walk: {height: 600}
+                    }
                 }
             }
             
@@ -1314,12 +1332,12 @@ impl App {
             id!(effects.tab1),
             id!(effects.tab2),
             id!(effects.tab3),
-            id!(effects.tab4)
+            // id!(effects.tab4),
         ]).selected_to_visible(cx, &ui, &actions, &[
             id!(effects.tab1_frame),
             id!(effects.tab2_frame),
             id!(effects.tab3_frame),
-            id!(effects.tab4_frame),
+            // id!(effects.tab4_frame),
         ]);
         
         let display_audio = ui.get_display_audio(id!(display_audio));
