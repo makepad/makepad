@@ -10,7 +10,29 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
+
+    DrawLabelText = {{DrawLabelText}} {
+        text_style: {
+            font: {
+                //path: d"resources/ibmplexsans-semibold.ttf"
+            }
+            font_size: 9.5
+        }
+        fn get_color(self) -> vec4 {
+            return mix(
+                mix(
+                    #x888,
+                    #x000,
+                    self.hover
+                ),
+                #xFFF,
+                self.focus
+            )
+        }
+    }
+
     DrawRadioButton = {{DrawRadioButton}} {
+
         uniform size: 7.0;
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -26,22 +48,37 @@ live_design!{
                     sdf.fill(mix(#fff0, #f, self.selected));
                 }
                 RadioType::Tab => {
+                    let sz = self.size;
+                    let left = 0.;
+                    let c = vec2(left, self.rect_size.y);
+                    sdf.box(
+                        0., 0.,
+                        self.rect_size.x,
+                        self.rect_size.y,
+                        1.0 
+                    );
+                    sdf.fill(mix(#x99EEFFFF, #x99EEFF00, self.selected));
                 }
             }
             return sdf.result
         }
+
+
     }
     
     RadioButton = {{RadioButton}} {
         label_text: {
             color: #9
+
         }
+        
         walk: {
             width: Fit,
             height: Fit
         }
+
         label_walk: {
-            margin: {left: 20.0, top: 8, bottom: 8, right: 10}
+            margin: {top: 4.5, bottom: 4.5, left: 8, right: 8}
             width: Fit,
             height: Fit,
         }
@@ -131,7 +168,7 @@ pub struct RadioButton {
     
     label_walk: Walk,
     label_align: Align,
-    label_text: DrawText,
+    label_text: DrawLabelText,
     label: String,
     
     bind: String,
@@ -143,6 +180,13 @@ pub enum RadioButtonAction {
     None
 }
 
+#[derive(Live, LiveHook)]#[repr(C)]
+struct DrawLabelText {
+    draw_super: DrawText,
+    hover: f32,
+    focus: f32,
+    selected: f32,
+}
 
 impl RadioButton {
     
