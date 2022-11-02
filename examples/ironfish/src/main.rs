@@ -1316,7 +1316,7 @@ impl App {
         data_to_widget!(db, osc1.osc_type => osc1.type.dropdown);
         data_to_widget!(db, osc1.transpose => osc1.transpose.slider);
         data_to_widget!(db, osc1.detune => osc1.detune.slider);
-        data_to_widget!(db, osc1.harmonic => osc1.harmonic.slider);
+        data_to_widget!(db, osc1.harmonic => osc1.harmonicshift.slider);
         data_to_widget!(db, osc1.harmonicenv => osc1.harmonicenv.slider);
         data_to_widget!(db, osc1.harmoniclfo => osc1.harmoniclfo.slider);
         
@@ -1324,7 +1324,7 @@ impl App {
         data_to_widget!(db, osc2.osc_type => osc2.type.dropdown);
         data_to_widget!(db, osc2.transpose => osc2.transpose.slider);
         data_to_widget!(db, osc2.detune => osc2.detune.slider);
-        data_to_widget!(db, osc2.harmonic => osc2.harmonic.slider);
+        data_to_widget!(db, osc2.harmonic => osc2.harmonicshift.slider);
         data_to_widget!(db, osc2.harmonicenv => osc2.harmonicenv.slider);
         data_to_widget!(db, osc2.harmoniclfo => osc2.harmoniclfo.slider);
         
