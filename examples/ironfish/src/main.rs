@@ -61,10 +61,37 @@ live_design!{
     FishTab = <RadioButton> {
         walk: {margin: 5}
         label_text: {
-            color: #f00,
-            label_text:{text_style:{font_size:15}}
+            color: (COLOR_TEXT_H2),
+            text_style: 
+                {
+                    font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"},
+                    font_size: (FONT_SIZE_H2)
+                }
         }
         radio_button: {
+            // bg: { color: #f00
+                // fn get_bg(self, inout sdf: Sdf2d) {
+                //     sdf.box(
+                //         1,
+                //         1,
+                //         self.rect_size.x - 2,
+                //         self.rect_size.y - 2,
+                //         3
+                //     )
+                //     sdf.stroke_keep(mix(mix((COLOR_BEVEL_HIGHLIGHT), (COLOR_BEVEL_SHADOW), pow(self.pos.y, 1.0)), mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 5.0)), self.pressed), 1.);
+                //     sdf.fill(
+                //         mix(
+                //             mix(
+                //                 mix((COLOR_CONTROL_OUTSET), (COLOR_HIDDEN_WHITE), pow(self.pos.y, 0.075)),
+                //                 mix(#xFFFFFF20, #xFFFFFF10, pow(self.pos.y, 0.2)),
+                //                 self.hover
+                //             ),
+                //             mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 0.3)),
+                //             self.pressed
+                //         )
+                //     );
+                // }
+            // }
             radio_type: Tab,
         }
     }
@@ -483,6 +510,15 @@ live_design!{
         }
     }
     
+    FishTabContainer = <Frame> {
+        layout: {flow: Down, flow: Down, clip_y: true, clip_x: true}
+        walk: {width: Fill, height: Fit}
+        body = <Box> {
+            layout: {flow: Down, padding: {top: (SPACING_CONTROLS), left: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
+            walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
+        }
+    }
+
     TouchPanel = <FishPanel> {
         label = {bg: {color: (COLOR_TOUCH)}, label = {text: "Touch"}}
         body = {
@@ -685,12 +721,11 @@ live_design!{
             }
         }
     }
-    CrushFXPanel = <FishPanel> {
-        label = {bg: {color: (COLOR_HIDDEN_WHITE)}, label = {text: "Bitcrush",}}
+    CrushFXPanel = <FishTabContainer> {
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
-            
+            bg: {color: #xffffff00}        
             crushenable = <InstrumentCheckbox> {
                 walk: {width: Fit, height: Fill, margin: 5}
                 layout: {align: {x: 0.0, y: 0.5}}
@@ -710,11 +745,11 @@ live_design!{
             }
         }
     }
-    DelayFXPanel = <FishPanel> {
-        label = {bg: {color: (COLOR_FX)}, label = {text: "Delay",}}
+    DelayFXPanel = <FishTabContainer> {
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
+            bg: {color: #xffffff00}        
             delaysend = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
@@ -751,11 +786,11 @@ live_design!{
         }
     }
     
-    ChorusFXPanel = <FishPanel> {
-        label = {bg: {color: (COLOR_FX)}, label = {text: "Chorus",}}
+    ChorusFXPanel = <FishTabContainer> {
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
+            bg: {color: #xffffff00}        
             chorusmix = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
@@ -960,7 +995,7 @@ live_design!{
                 harmonic = <Frame> {
                     layout: {flow: Right}
                     walk: {width: Fill, height: Fit}
-                    harmonic = <InstrumentSlider> {
+                    harmonicshift = <InstrumentSlider> {
                         slider = {
                             slider: {line_color: (COLOR_OSC)}
                             min: 0
@@ -1141,9 +1176,24 @@ live_design!{
                 column2 = <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     walk: {height: Fill}
-                    effects = <Frame> {
+                    effects = <Box> {
                         layout: {flow: Down, spacing: 0}
-                        walk: {height: Fill, width: Fill}
+                        walk: {height: Fit, width: Fill}
+                        bg: { color: #FFFFFF00
+                            fn pixel(self) -> vec4 {
+                                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                let edge = 8.0;
+                                sdf.move_to(1.0, 1.0);
+                                sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                                sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                                sdf.line_to(1.0, self.rect_size.y - 2.0);
+                                sdf.close_path();
+                                sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                                sdf.stroke(self.color, 1.0)
+                                return sdf.result
+                            }
+                        }
                         <FishHeader> {label = {text: "Effects", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_FX)}}
                         <Frame> {
                             layout: {flow: Right, spacing: 0}
@@ -1157,7 +1207,7 @@ live_design!{
                         tab3_frame = <DelayFXPanel> {visible: false}
                     }
                     <SequencerPanel> {
-                        walk: {height: 600}
+                        walk: {height: 620}
                     }
                 }
             }
