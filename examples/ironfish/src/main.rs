@@ -59,40 +59,15 @@ live_design!{
     
 
     FishTab = <RadioButton> {
-        walk: {margin: 5}
+        radio_button: {
+            radio_type: Tab,
+        }
         label_text: {
-            color: (COLOR_TEXT_H2),
             text_style: 
                 {
                     font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"},
                     font_size: (FONT_SIZE_H2)
                 }
-        }
-        radio_button: {
-            // bg: { color: #f00
-                // fn get_bg(self, inout sdf: Sdf2d) {
-                //     sdf.box(
-                //         1,
-                //         1,
-                //         self.rect_size.x - 2,
-                //         self.rect_size.y - 2,
-                //         3
-                //     )
-                //     sdf.stroke_keep(mix(mix((COLOR_BEVEL_HIGHLIGHT), (COLOR_BEVEL_SHADOW), pow(self.pos.y, 1.0)), mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 5.0)), self.pressed), 1.);
-                //     sdf.fill(
-                //         mix(
-                //             mix(
-                //                 mix((COLOR_CONTROL_OUTSET), (COLOR_HIDDEN_WHITE), pow(self.pos.y, 0.075)),
-                //                 mix(#xFFFFFF20, #xFFFFFF10, pow(self.pos.y, 0.2)),
-                //                 self.hover
-                //             ),
-                //             mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 0.3)),
-                //             self.pressed
-                //         )
-                //     );
-                // }
-            // }
-            radio_type: Tab,
         }
     }
 
@@ -1194,20 +1169,25 @@ live_design!{
                                 return sdf.result
                             }
                         }
-                        <FishHeader> {label = {text: "Effects", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_FX)}}
                         <Frame> {
                             layout: {flow: Right, spacing: 0}
-                            walk: {height: Fit, width: Fit}
-                            tab1 = <FishTab> {label: "Bitcrush" }
-                            tab2 = <FishTab> {label: "Chorus" }
-                            tab3 = <FishTab> {label: "Delay" }
+                            walk: {height: Fit, width: Fill}
+                            bg: {color: #f00}
+                            <FishHeader> {label = {text: "Effects", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_FX)}}
+                            <Frame> {
+                                layout: {flow: Right, spacing: 0}
+                                walk: {height: Fit, width: Fit}
+                                tab1 = <FishTab> {label: "Bitcrush" }
+                                tab2 = <FishTab> {label: "Chorus" }
+                                tab3 = <FishTab> {label: "Delay" }
+                            }
                         }
                         tab1_frame = <CrushFXPanel> {visible: true}
                         tab2_frame = <ChorusFXPanel> {visible: false}
                         tab3_frame = <DelayFXPanel> {visible: false}
                     }
                     <SequencerPanel> {
-                        walk: {height: 620}
+                        walk: {height: Fill}
                     }
                 }
             }
