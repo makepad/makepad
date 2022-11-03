@@ -1335,6 +1335,8 @@ impl App {
         data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
         data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
         data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw1.spread => osc1.hypersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc1.hypersaw.diffuse.slider);
         
         data_to_widget!(db, osc1.osc_type => osc1.type.dropdown);
         data_to_widget!(db, osc1.transpose => osc1.transpose.slider);
@@ -1348,6 +1350,8 @@ impl App {
         data_to_widget!(db, supersaw1.diffuse => osc2.supersaw.diffuse.slider);
         data_to_widget!(db, supersaw2.spread => osc2.supersaw.spread.slider);
         data_to_widget!(db, supersaw2.diffuse => osc2.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw2.spread => osc2.hypersaw.spread.slider);
+        data_to_widget!(db, supersaw2.diffuse => osc2.hypersaw.diffuse.slider);
 
         data_to_widget!(db, osc2.osc_type => osc2.type.dropdown);
         data_to_widget!(db, osc2.transpose => osc2.transpose.slider);
