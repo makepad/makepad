@@ -485,7 +485,7 @@ live_design!{
         }
     }
     
-    FishTabContainer = <Frame> {
+    FishTabPanel = <Frame> {
         layout: {flow: Down, flow: Down, clip_y: true, clip_x: true}
         walk: {width: Fill, height: Fit}
         body = <Box> {
@@ -696,7 +696,7 @@ live_design!{
             }
         }
     }
-    CrushFXPanel = <FishTabContainer> {
+    CrushFXPanel = <FishTabPanel> {
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
@@ -720,7 +720,7 @@ live_design!{
             }
         }
     }
-    DelayFXPanel = <FishTabContainer> {
+    DelayFXPanel = <FishTabPanel> {
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
@@ -761,7 +761,7 @@ live_design!{
         }
     }
     
-    ChorusFXPanel = <FishTabContainer> {
+    ChorusFXPanel = <FishTabPanel> {
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
@@ -850,11 +850,11 @@ live_design!{
         }
     }
     
-    VolumeEnvelopePanel = <FishPanel> {
-        label = {bg: {color: (COLOR_ENV)}, label = {text: "Volume Env"}}
+    VolumeEnvelopePanel = <FishTabPanel> {
         body = {
             layout: {flow: Down}
             walk: {width: Fill, height: Fill}
+            bg: {color: #xffffff00}        
             vol_env = <EnvelopePanel> {
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fill}
@@ -862,11 +862,11 @@ live_design!{
         }
     }
     
-    ModEnvelopePanel = <FishPanel> {
-        label = {bg: {color: (COLOR_ENV)}, label = {text: "Modulation Env"}}
+    ModEnvelopePanel = <FishTabPanel> {
         body = {
             layout: {flow: Down}
             walk: {width: Fill, height: Fill}
+            bg: {color: #xffffff00}        
             mod_env = <EnvelopePanel> {
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fit}
@@ -1127,13 +1127,55 @@ live_design!{
                     <Frame> {
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         walk: {height: Fill, width: Fill}
-                        <ModEnvelopePanel> {
-                            layout: {flow: Down, clip_y: true}
-                            walk: {width: Fill, height: Fill}
-                        }
-                        <VolumeEnvelopePanel> {
-                            layout: {flow: Down}
-                            walk: {width: Fill, height: Fill}
+                        <Frame> {
+                            layout: {flow: Down, spacing: (SPACING_PANELS)}
+                            walk: {height: Fill}
+                            envelopes = <Box> {
+                                layout: {flow: Down, spacing: 0}
+                                walk: {height: Fill, width: Fill}
+                                bg: { color: #FFFFFF00
+                                    fn pixel(self) -> vec4 {
+                                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                        let edge = 8.0;
+                                        sdf.move_to(1.0, 1.0);
+                                        sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                                        sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                                        sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                                        sdf.line_to(1.0, self.rect_size.y - 2.0);
+                                        sdf.close_path();
+                                        sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                                        sdf.stroke(self.color, 1.0)
+                                        return sdf.result
+                                    }
+                                }
+                                <Frame> {
+                                    layout: {flow: Right, spacing: 0}
+                                    walk: {height: Fit, width: Fill}
+                                    bg: {color: #f00}
+                                    <FishHeader> {label = {text: "Envelopes", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_ENV)}}
+                                    <Frame> {
+                                        layout: {flow: Right, spacing: 0}
+                                        walk: {height: Fit, width: Fit, margin: {left: -2, top: -0}}
+                                        tab1 = <FishTab> {
+                                            label: "Modulation", state: {selected = {default: on}},
+                                            radio_button: { instance color_inactive: (COLOR_ENV) }
+                                        }
+                                        tab2 = <FishTab> {label: "Volume",
+                                            radio_button: { instance color_inactive: (COLOR_ENV) }
+                                        }
+                                    }
+                                }
+                                tab1_frame = <ModEnvelopePanel> {
+                                    visible: true,
+                                    layout: {flow: Down, clip_y: true}
+                                    walk: {width: Fill, height: 350}
+                                }
+                                tab2_frame = <VolumeEnvelopePanel> {
+                                    visible: false
+                                    layout: {flow: Down}
+                                    walk: {width: Fill, height: 350}
+                                }
+                            }
                         }
                         <Frame> {
                             walk: {height: Fill, width: Fill}
@@ -1176,8 +1218,9 @@ live_design!{
                             <FishHeader> {label = {text: "Effects", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_FX)}}
                             <Frame> {
                                 layout: {flow: Right, spacing: 0}
-                                walk: {height: Fit, width: Fit}
-                                tab1 = <FishTab> {label: "Bitcrush" }
+                                walk: {height: Fit, width: Fit, margin: {left: -2, top: -0}}
+                                tab1 = <FishTab> {label: "Bitcrush", state: {selected = {default: on}}}
+                                
                                 tab2 = <FishTab> {label: "Chorus" }
                                 tab3 = <FishTab> {label: "Delay" }
                             }
@@ -1359,17 +1402,23 @@ impl App {
         }
         
         ui.get_radio_group(&[
+            id!(envelopes.tab1),
+            id!(envelopes.tab2),
+        ]).selected_to_visible(cx, &ui, &actions, &[
+            id!(envelopes.tab1_frame),
+            id!(envelopes.tab2_frame),
+        ]);
+        
+        ui.get_radio_group(&[
             id!(effects.tab1),
             id!(effects.tab2),
             id!(effects.tab3),
-            // id!(effects.tab4),
         ]).selected_to_visible(cx, &ui, &actions, &[
             id!(effects.tab1_frame),
             id!(effects.tab2_frame),
             id!(effects.tab3_frame),
-            // id!(effects.tab4_frame),
         ]);
-        
+
         let display_audio = ui.get_display_audio(id!(display_audio));
         
         let mut buffers = 0;
