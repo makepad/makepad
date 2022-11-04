@@ -13,6 +13,9 @@ pub mod live_cx;
 pub mod live_atomic;
 
 pub mod thread;
+pub mod audio;
+pub mod midi;
+
 mod id_pool;
 mod event;
 mod area;
@@ -29,10 +32,10 @@ mod draw_list;
 mod debug;
 mod component_map;
 
+mod media_api;
+
 #[macro_use]
 mod main_app;
-//pub mod audio;
-//pub mod midi;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
@@ -100,6 +103,9 @@ pub use {
     crate::{
         cx_api::{
             CxOsApi,
+        },
+        media_api::{
+            CxMediaApi
         },
         draw_list::{
             CxDrawItem,

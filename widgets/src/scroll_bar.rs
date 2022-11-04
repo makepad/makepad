@@ -371,7 +371,7 @@ impl ScrollBar {
                 },
                 Hit::FingerUp(fe) => {
                     self.drag_point = None;
-                    if fe.is_over && fe.digit.has_hovers() {
+                    if fe.is_over && fe.device.has_hovers() {
                         self.animate_state(cx, id!(hover.on));
                     }
                     else {

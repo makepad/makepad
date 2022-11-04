@@ -224,7 +224,7 @@ impl PopupMenuItem {
                 self.animate_state(cx, id!(select.on));
             }
             Hit::FingerSweepOut(se) => {
-                if se.is_finger_up() {
+                if se.is_finger_up {
                     if se.was_tap() { // ok this only goes for the first time
                         dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
                     }

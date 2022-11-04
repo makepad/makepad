@@ -228,7 +228,7 @@ impl PianoKey {
                 dispatch_action(cx, PianoKeyAction::Pressed(127));
             }
             Hit::FingerSweepOut(se) => {
-                if se.is_finger_up() && se.digit.has_hovers(){
+                if se.is_finger_up && se.device.has_hovers(){
                     self.animate_state(cx, id!(hover.on));
                 }
                 else{

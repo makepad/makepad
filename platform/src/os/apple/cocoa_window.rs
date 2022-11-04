@@ -16,14 +16,15 @@ use {
                 str_to_nsstring,
             },
             cocoa_event::{
-                CocoaMouseUpEvent,
-                CocoaMouseDownEvent,
-                CocoaMouseMoveEvent,
                 CocoaEvent,
             },
             cocoa_app::{CocoaApp, get_cocoa_class_global, get_cocoa_app_global},
         },
+        area::Area,
         event::{
+            MouseUpEvent,
+            MouseDownEvent,
+            MouseMoveEvent,
             WindowGeom,
             WindowDragQueryResponse,
             WindowGeomChangeEvent,
@@ -340,17 +341,19 @@ impl CocoaWindow {
     
     pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
         let () = unsafe {msg_send![self.window, makeFirstResponder: self.view]};
-        self.do_callback(vec![CocoaEvent::MouseDown(CocoaMouseDownEvent {
+        self.do_callback(vec![CocoaEvent::MouseDown(MouseDownEvent {
             button,
             modifiers,
             window_id: self.window_id,
             abs: self.last_mouse_pos,
-            time: self.time_now()
+            time: self.time_now(),
+            handled: Cell::new(Area::Empty),
+            sweep_lock: Cell::new(Area::Empty),
         })]);
     }
     
     pub fn send_mouse_up(&mut self, button: usize, modifiers: KeyModifiers) {
-        self.do_callback(vec![CocoaEvent::MouseUp(CocoaMouseUpEvent {
+        self.do_callback(vec![CocoaEvent::MouseUp(MouseUpEvent {
             button,
             modifiers,
             window_id: self.window_id,
@@ -365,11 +368,13 @@ impl CocoaWindow {
         
         get_cocoa_app_global().startup_focus_hack();
         
-        events.push(CocoaEvent::MouseMove(CocoaMouseMoveEvent {
+        events.push(CocoaEvent::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
             abs: pos,
             modifiers: modifiers,
-            time: self.time_now()
+            time: self.time_now(),
+            handled: Cell::new(Area::Empty),
+            sweep_lock: Cell::new(Area::Empty),
         }));
         
         //get_cocoa_app_global().ns_event = event;

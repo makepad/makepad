@@ -1,6 +1,7 @@
 use {
     std::{
         rc::Rc,
+        sync::{Arc,Mutex},
         cell::{RefCell},
     },
     makepad_objc_sys::{
@@ -10,6 +11,7 @@ use {
         sel_impl,
     },
     crate::{
+        makepad_live_id::*,
         makepad_math::*,
         os::{
             apple::frameworks::*,
@@ -22,6 +24,7 @@ use {
                 get_cocoa_app_global,
                 init_cocoa_globals
             },
+            core_midi::*,
             metal::{MetalCx, MetalWindow, DrawPassMode},
         },
         pass::{CxPassParent},
@@ -31,6 +34,7 @@ use {
             Signal,
             Event,
         },
+        midi::*,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx, OsType},
     }
@@ -209,63 +213,24 @@ impl Cx {
                     self.handle_repaint(metal_windows, metal_cx);
                 }
                 CocoaEvent::MouseDown(e) => {
+                    let digit_id = live_id_num!(mouse, e.button as u64).into();
+                    
+                    self.fingers.process_tap_count(
+                        digit_id,
+                        e.abs,
+                        e.time
+                    );
+                    self.fingers.mouse_down(e.button);
                     self.call_event_handler(&Event::MouseDown(e.into()))
-                    /*
-                    if self.os.last_mouse_button == None ||
-                    self.os.last_mouse_button == Some(md.button) {
-                        self.os.last_mouse_button = Some(md.button);
-                        let digit_id = live_id!(mouse).into();
-                        self.fingers.alloc_digit(digit_id);
-                        self.fingers.process_tap_count(
-                            digit_id,
-                            md.abs,
-                            md.time
-                        );
-                        self.call_event_handler(&Event::FingerDown(
-                            md.into_finger_down_event(&self.fingers, digit_id)
-                        ));
-                    }*/
                 }
                 CocoaEvent::MouseMove(e) => {
-                    self.call_event_handler(&Event::MouseMove(e.into()))
-                    /*
-                    let digit_id = live_id!(mouse).into();
-                    
-                    if !self.fingers.is_digit_allocated(digit_id) {
-                        let area = self.fingers.get_hover_area(digit_id);
-                        self.call_event_handler(&Event::FingerHover(
-                            mm.into_finger_hover_event(
-                                digit_id,
-                                area,
-                                self.os.last_mouse_button.unwrap_or(0)
-                            )
-                        ));
-                    }
-                    else {
-                        self.call_event_handler(&mut Event::FingerMove(
-                            mm.into_finger_move_event(
-                                &self.fingers,
-                                digit_id,
-                                self.os.last_mouse_button.unwrap_or(0)
-                            )
-                        ));
-                    }
-                    self.fingers.cycle_hover_area(digit_id);*/
+                    self.call_event_handler(&Event::MouseMove(e.into()));
+                    self.fingers.cycle_hover_area(live_id!(mouse).into());
                 }
                 CocoaEvent::MouseUp(e) => {
-                    self.call_event_handler(&Event::MouseUp(e.into()))
-                    /*
-                    if self.os.last_mouse_button == Some(md.button) {
-                        self.os.last_mouse_button = None;
-                        let digit_id = live_id!(mouse).into();
-                        self.call_event_handler(&Event::FingerUp(
-                            md.into_finger_up_event(
-                                &self.fingers,
-                                digit_id,
-                            )
-                        ));
-                        self.fingers.free_digit(digit_id);
-                    }*/
+                    let button = e.button;
+                    self.call_event_handler(&Event::MouseUp(e.into()));
+                    self.fingers.mouse_up(button);
                 }
                 CocoaEvent::Scroll(e) => {
                     self.call_event_handler(&Event::Scroll(e.into()))
@@ -401,29 +366,6 @@ impl Cx {
             }
         }
     }
-    /*
-    fn handle_core_midi_signals(&mut self, se: &SignalEvent) {
-        
-        if self.platform.midi_access.is_some() {
-            if se.signals.contains(&live_id!(CoreMidiInputData).into()) {
-                let out_data = if let Ok(data) = self.platform.midi_input_data.lock() {
-                    let mut data = data.borrow_mut();
-                    let out_data = data.clone();
-                    data.clear();
-                    out_data
-                }
-                else {
-                    panic!();
-                };
-                self.call_event_handler(&mut Event::Midi1InputData(out_data));
-            }
-            else if se.signals.contains(&live_id!(CoreMidiInputsChanged).into()) {
-                let inputs = self.platform.midi_access.as_ref().unwrap().connect_all_inputs();
-                self.call_event_handler(&mut Event::MidiInputList(MidiInputListEvent {inputs}));
-            }
-        }
-    }*/
-    
 }
 
 impl CxOsApi for Cx {
@@ -453,61 +395,13 @@ impl CxOsApi for Cx {
     fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
         todo!()
     }
-    /*
-    fn start_midi_input(&mut self) {
-        let midi_input_data = self.platform.midi_input_data.clone();
-        
-        if self.platform.midi_access.is_none() {
-            if let Ok(ma) = CoreMidiAccess::new_midi_1_input(
-                move | datas | {
-                    if let Ok(midi_input_data) = midi_input_data.lock() {
-                        let mut midi_input_data = midi_input_data.borrow_mut();
-                        midi_input_data.extend_from_slice(&datas);
-                        Cx::post_signal(live_id!(CoreMidiInputData).into());
-                    }
-                },
-                move || {
-                    Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
-                }
-            ) {
-                self.platform.midi_access = Some(ma);
-            }
-        }
-        Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
-    }*/
-    /*
-    
-    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static {
-        let fbox = std::sync::Arc::new(std::sync::Mutex::new(Box::new(f)));
-        std::thread::spawn(move || {
-            let out = &AudioUnitFactory::query_audio_units(AudioUnitType::DefaultOutput)[0];
-            let fbox = fbox.clone();
-            AudioUnitFactory::new_audio_unit(out, move | result | {
-                match result {
-                    Ok(audio_unit) => {
-                        let fbox = fbox.clone();
-                        audio_unit.set_input_callback(move | time, output | {
-                            if let Ok(mut fbox) = fbox.lock() {
-                                fbox(time, output);
-                            }
-                        });
-                        loop {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                    }
-                    Err(err) => error!("spawn_audio_output Error {:?}", err)
-                }
-            });
-        });
-    }*/
 }
 
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) keep_alive_counter: usize,
-    //pub (crate)midi_access: Option<CoreMidiAccess>,
-    //pub (crate)midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData >> >>,
-    pub (crate)last_mouse_button: Option<usize>,
+    pub (crate) midi_access: Option<CoreMidiAccess>,
+    pub (crate) midi_input_data: Arc<Mutex<RefCell<Vec<MidiInputData>>>>,    
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
 }
