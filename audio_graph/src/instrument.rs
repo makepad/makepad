@@ -1,10 +1,11 @@
 use {
     crate::{
-        audio::*,
         makepad_platform::*,
         makepad_platform::thread::*,
-        midi::*,
-        audio_graph::*,
+        makepad_platform::audio::*,
+        makepad_platform::midi::*,
+        audio_component,
+        audio_traits::*
     },
 };
 

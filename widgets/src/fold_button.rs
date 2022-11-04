@@ -135,7 +135,7 @@ impl FoldButton {
                 self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => if fe.is_over {
-                if fe.digit.has_hovers() {
+                if fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else{

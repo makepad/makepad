@@ -749,7 +749,7 @@ impl LiveRegistry {
         
         // lets register our live_type_infos
         if self.file_ids.get(file_name).is_some() {
-            panic!("cant register same file twice");
+            panic!("cant register same file twice {}", file_name);
         }
         let file_id = LiveFileId::new(self.live_files.len());
         
