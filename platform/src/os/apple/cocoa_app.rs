@@ -2,7 +2,7 @@
 use {
     std::{
         rc::Rc,
-        cell::RefCell,
+        cell::{Cell,RefCell},
         sync::Mutex,
         ptr,
         time::Instant,
@@ -18,7 +18,6 @@ use {
             cocoa_delegate::*,
             cocoa_event::{
                 CocoaEvent,
-                CocoaScrollEvent
             },
             cocoa_window::CocoaWindow,
             apple_util::{
@@ -32,6 +31,7 @@ use {
         menu::{
             CxCommandSetting
         },
+        area::Area,
         //turtle::{
         //    Rect
         //},
@@ -44,7 +44,8 @@ use {
             Signal,
             SignalEvent,
             DraggedItem,
-            KeyModifiers
+            KeyModifiers,
+            ScrollEvent,
         },
         cursor::MouseCursor,
         menu::{
@@ -511,22 +512,30 @@ impl CocoaApp {
                 let has_prec: BOOL = msg_send![ns_event, hasPreciseScrollingDeltas];
                 return if has_prec == YES {
                     self.do_callback(vec![
-                        CocoaEvent::Scroll(CocoaScrollEvent {
+                        CocoaEvent::Scroll(ScrollEvent {
                             window_id: cocoa_window.window_id,
                             scroll: DVec2 {x: -dx, y: -dy},
                             abs: cocoa_window.last_mouse_pos,
                             modifiers: get_event_key_modifier(ns_event),
-                            time: self.time_now()
+                            time: self.time_now(),
+                            is_mouse: false,
+                            sweep_lock: Cell::new(Area::Empty),
+                            handled_x: Cell::new(false),
+                            handled_y: Cell::new(false),
                         })
                     ]);
                 } else {
                     self.do_callback(vec![
-                        CocoaEvent::Scroll(CocoaScrollEvent {
+                        CocoaEvent::Scroll(ScrollEvent {
                             window_id: cocoa_window.window_id,
                             scroll: DVec2 {x: -dx * 32., y: -dy * 32.},
                             abs: cocoa_window.last_mouse_pos,
                             modifiers: get_event_key_modifier(ns_event),
-                            time: self.time_now()
+                            time: self.time_now(),
+                            is_mouse: true,
+                            sweep_lock: Cell::new(Area::Empty),
+                            handled_x: Cell::new(false),
+                            handled_y: Cell::new(false),
                         })
                     ]);
                 }

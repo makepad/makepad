@@ -47,9 +47,6 @@ pub trait CxOsApi {
     
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);
-    
-    //fn start_midi_input(&mut self);
-    //fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static;
 }
 
 #[derive(PartialEq)]

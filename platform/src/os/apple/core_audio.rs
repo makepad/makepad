@@ -12,18 +12,16 @@ pub use {
     },
     
     crate::{
-        makepad_platform::{
-            os::apple::frameworks::*,
-            makepad_objc_sys::{
-                runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO},
-                declare::ClassDecl,
-                msg_send,
-                sel,
-                class,
-                sel_impl,
-                Encode,
-                Encoding
-            },
+        os::apple::frameworks::*,
+        makepad_objc_sys::{
+            runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO},
+            declare::ClassDecl,
+            msg_send,
+            sel,
+            class,
+            sel_impl,
+            Encode,
+            Encoding
         },
     }
 };

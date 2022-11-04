@@ -18,7 +18,7 @@ workspace.members = [
     "libs/wasm_bridge/test",
     "studio",
     "tools/auto_version",
-    "tools/web_server",
+    "tools/web_server", 
     "tools/wasm_strip",
 ]
 
