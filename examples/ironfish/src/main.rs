@@ -19,7 +19,6 @@ use crate::display_audio::*;
 
 //use std::fs::File;
 //use std::io::prelude::*;
-
 live_design!{
     registry AudioComponent::*;
     registry Widget::*;
@@ -56,6 +55,21 @@ live_design!{
         layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
     }
     
+
+    FishTab = <RadioButton> {
+        radio_button: {
+            radio_type: Tab,
+        }
+        label_text: {
+            text_style: 
+                {
+                    font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"},
+                    font_size: (FONT_SIZE_H2)
+                }
+        }
+    }
+
+
     FishDropDown = <DropDown> {
         walk: {margin: {left: 5.0, right: 0.0, top: 0.0, bottom: 0.0}}
         layout: {padding: 6.0}
@@ -469,6 +483,15 @@ live_design!{
         }
     }
     
+    FishTabPanel = <Frame> {
+        layout: {flow: Down, flow: Down, clip_y: true, clip_x: true}
+        walk: {width: Fill, height: Fit}
+        body = <Box> {
+            layout: {flow: Down, padding: {top: (SPACING_CONTROLS), left: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
+            walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
+        }
+    }
+
     TouchPanel = <FishPanel> {
         label = {bg: {color: (COLOR_TOUCH)}, label = {text: "Touch"}}
         body = {
@@ -671,12 +694,11 @@ live_design!{
             }
         }
     }
-    CrushFXPanel = <FishPanel> {
-        label = {bg: {color: (COLOR_FX)}, label = {text: "Bitcrush",}}
+    CrushFXPanel = <FishTabPanel> {
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
-            
+            bg: {color: #xffffff00}        
             crushenable = <InstrumentCheckbox> {
                 walk: {width: Fit, height: Fill, margin: 5}
                 layout: {align: {x: 0.0, y: 0.5}}
@@ -696,11 +718,11 @@ live_design!{
             }
         }
     }
-    DelayFXPanel = <FishPanel> {
-        label = {bg: {color: (COLOR_FX)}, label = {text: "Delay",}}
+    DelayFXPanel = <FishTabPanel> {
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
+            bg: {color: #xffffff00}        
             delaysend = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
@@ -737,11 +759,11 @@ live_design!{
         }
     }
     
-    ChorusFXPanel = <FishPanel> {
-        label = {bg: {color: (COLOR_FX)}, label = {text: "Chorus",}}
+    ChorusFXPanel = <FishTabPanel> {
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
+            bg: {color: #xffffff00}        
             chorusmix = <InstrumentSlider> {
                 slider = {
                     slider: {line_color: (COLOR_FX)}
@@ -826,11 +848,11 @@ live_design!{
         }
     }
     
-    VolumeEnvelopePanel = <FishPanel> {
-        label = {bg: {color: (COLOR_ENV)}, label = {text: "Volume Env"}}
+    VolumeEnvelopePanel = <FishTabPanel> {
         body = {
             layout: {flow: Down}
             walk: {width: Fill, height: Fill}
+            bg: {color: #xffffff00}        
             vol_env = <EnvelopePanel> {
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fill}
@@ -838,11 +860,11 @@ live_design!{
         }
     }
     
-    ModEnvelopePanel = <FishPanel> {
-        label = {bg: {color: (COLOR_ENV)}, label = {text: "Modulation Env"}}
+    ModEnvelopePanel = <FishTabPanel> {
         body = {
             layout: {flow: Down}
             walk: {width: Fill, height: Fill}
+            bg: {color: #xffffff00}        
             mod_env = <EnvelopePanel> {
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fit}
@@ -946,7 +968,7 @@ live_design!{
                 harmonic = <Frame> {
                     layout: {flow: Right}
                     walk: {width: Fill, height: Fit}
-                    harmonic = <InstrumentSlider> {
+                    harmonicshift = <InstrumentSlider> {
                         slider = {
                             slider: {line_color: (COLOR_OSC)}
                             min: 0
@@ -1080,7 +1102,7 @@ live_design!{
                     margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)}
                 }
                 layout: {flow: Right, spacing: (SPACING_PANELS)}
-                <Frame> {
+                column1 = <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: Fill}
                     <Frame> {
@@ -1102,13 +1124,55 @@ live_design!{
                     <Frame> {
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         walk: {height: Fill, width: Fill}
-                        <ModEnvelopePanel> {
-                            layout: {flow: Down, clip_y: true}
-                            walk: {width: Fill, height: Fill}
-                        }
-                        <VolumeEnvelopePanel> {
-                            layout: {flow: Down}
-                            walk: {width: Fill, height: Fill}
+                        <Frame> {
+                            layout: {flow: Down, spacing: (SPACING_PANELS)}
+                            walk: {height: Fill}
+                            envelopes = <Box> {
+                                layout: {flow: Down, spacing: 0}
+                                walk: {height: Fill, width: Fill}
+                                bg: { color: #FFFFFF00
+                                    fn pixel(self) -> vec4 {
+                                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                        let edge = 8.0;
+                                        sdf.move_to(1.0, 1.0);
+                                        sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                                        sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                                        sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                                        sdf.line_to(1.0, self.rect_size.y - 2.0);
+                                        sdf.close_path();
+                                        sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                                        sdf.stroke(self.color, 1.0)
+                                        return sdf.result
+                                    }
+                                }
+                                <Frame> {
+                                    layout: {flow: Right, spacing: 0}
+                                    walk: {height: Fit, width: Fill}
+                                    bg: {color: #f00}
+                                    <FishHeader> {label = {text: "Envelopes", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_ENV)}}
+                                    <Frame> {
+                                        layout: {flow: Right, spacing: 0}
+                                        walk: {height: Fit, width: Fit, margin: {left: -2, top: -0}}
+                                        tab1 = <FishTab> {
+                                            label: "Modulation", state: {selected = {default: on}},
+                                            radio_button: { instance color_inactive: (COLOR_ENV) }
+                                        }
+                                        tab2 = <FishTab> {label: "Volume",
+                                            radio_button: { instance color_inactive: (COLOR_ENV) }
+                                        }
+                                    }
+                                }
+                                tab1_frame = <ModEnvelopePanel> {
+                                    visible: true,
+                                    layout: {flow: Down, clip_y: true}
+                                    walk: {width: Fill, height: 350}
+                                }
+                                tab2_frame = <VolumeEnvelopePanel> {
+                                    visible: false
+                                    layout: {flow: Down}
+                                    walk: {width: Fill, height: 350}
+                                }
+                            }
                         }
                         <Frame> {
                             walk: {height: Fill, width: Fill}
@@ -1123,21 +1187,49 @@ live_design!{
                         }
                     }
                 }
-                effects = <Frame> {
+                column2 = <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    walk: {height: Fill, width: 300}
-                    <Frame> {
-                        layout: {flow: Right, spacing: (SPACING_PANELS)}
-                        walk: {height: Fit, width: Fit}
-                        tab1 = <RadioButton> {label: "Crush", state: {selected = {default: on}}}
-                        tab2 = <RadioButton> {label: "Chorus"}
-                        tab3 = <RadioButton> {label: "Delay"}
-                        tab4 = <RadioButton> {label: "Sequencer"}
+
+                    walk: {height: Fill}
+                    effects = <Box> {
+                        layout: {flow: Down, spacing: 0}
+                        walk: {height: Fit, width: Fill}
+                        bg: { color: #FFFFFF00
+                            fn pixel(self) -> vec4 {
+                                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                                let edge = 8.0;
+                                sdf.move_to(1.0, 1.0);
+                                sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                                sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                                sdf.line_to(1.0, self.rect_size.y - 2.0);
+                                sdf.close_path();
+                                sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                                sdf.stroke(self.color, 1.0)
+                                return sdf.result
+                            }
+                        }
+                        <Frame> {
+                            layout: {flow: Right, spacing: 0}
+                            walk: {height: Fit, width: Fill}
+                            bg: {color: #f00}
+                            <FishHeader> {label = {text: "Effects", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_FX)}}
+                            <Frame> {
+                                layout: {flow: Right, spacing: 0}
+                                walk: {height: Fit, width: Fit, margin: {left: -2, top: -0}}
+                                tab1 = <FishTab> {label: "Bitcrush", state: {selected = {default: on}}}
+                                
+                                tab2 = <FishTab> {label: "Chorus" }
+                                tab3 = <FishTab> {label: "Delay" }
+                            }
+                        }
+                        tab1_frame = <CrushFXPanel> {visible: true}
+                        tab2_frame = <ChorusFXPanel> {visible: false}
+                        tab3_frame = <DelayFXPanel> {visible: false}
                     }
-                    tab1_frame = <CrushFXPanel> {visible: true}
-                    tab2_frame = <ChorusFXPanel> {visible: true}
-                    tab3_frame = <DelayFXPanel> {visible: true}
-                    tab4_frame = <SequencerPanel> {visible: true}
+                    <SequencerPanel> {
+                        walk: {height: Fill}
+                    }
                 }
             }
             
@@ -1237,29 +1329,32 @@ impl App {
         // Osc1 panel
         data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
         data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
         data_to_widget!(db, supersaw1.spread => osc1.hypersaw.spread.slider);
         data_to_widget!(db, supersaw1.diffuse => osc1.hypersaw.diffuse.slider);
         
         data_to_widget!(db, osc1.osc_type => osc1.type.dropdown);
         data_to_widget!(db, osc1.transpose => osc1.transpose.slider);
         data_to_widget!(db, osc1.detune => osc1.detune.slider);
-        data_to_widget!(db, osc1.harmonic => osc1.harmonic.slider);
+        data_to_widget!(db, osc1.harmonic => osc1.harmonicshift.slider);
         data_to_widget!(db, osc1.harmonicenv => osc1.harmonicenv.slider);
         data_to_widget!(db, osc1.harmoniclfo => osc1.harmoniclfo.slider);
         
         // Osc2 panel
+        data_to_widget!(db, supersaw1.spread => osc2.supersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc2.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw2.spread => osc2.supersaw.spread.slider);
+        data_to_widget!(db, supersaw2.diffuse => osc2.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw2.spread => osc2.hypersaw.spread.slider);
+        data_to_widget!(db, supersaw2.diffuse => osc2.hypersaw.diffuse.slider);
+
         data_to_widget!(db, osc2.osc_type => osc2.type.dropdown);
         data_to_widget!(db, osc2.transpose => osc2.transpose.slider);
         data_to_widget!(db, osc2.detune => osc2.detune.slider);
-        data_to_widget!(db, osc2.harmonic => osc2.harmonic.slider);
+        data_to_widget!(db, osc2.harmonic => osc2.harmonicshift.slider);
         data_to_widget!(db, osc2.harmonicenv => osc2.harmonicenv.slider);
         data_to_widget!(db, osc2.harmoniclfo => osc2.harmoniclfo.slider);
-        
-        data_to_widget!(db, supersaw1.spread => osc2.supersaw.spread.slider);
-        data_to_widget!(db, supersaw1.diffuse => osc2.supersaw.diffuse.slider);
-        
-        data_to_widget!(db, supersaw2.spread => osc2.hypersaw.spread.slider);
-        data_to_widget!(db, supersaw2.diffuse => osc2.hypersaw.diffuse.slider);
         
         // sequencer
         data_to_widget!(db, sequencer.steps => sequencer);
@@ -1306,17 +1401,23 @@ impl App {
         }
         
         ui.get_radio_group(&[
+            id!(envelopes.tab1),
+            id!(envelopes.tab2),
+        ]).selected_to_visible(cx, &ui, &actions, &[
+            id!(envelopes.tab1_frame),
+            id!(envelopes.tab2_frame),
+        ]);
+        
+        ui.get_radio_group(&[
             id!(effects.tab1),
             id!(effects.tab2),
             id!(effects.tab3),
-            id!(effects.tab4)
         ]).selected_to_visible(cx, &ui, &actions, &[
             id!(effects.tab1_frame),
             id!(effects.tab2_frame),
             id!(effects.tab3_frame),
-            id!(effects.tab4_frame),
         ]);
-        
+
         let display_audio = ui.get_display_audio(id!(display_audio));
         
         let mut buffers = 0;
