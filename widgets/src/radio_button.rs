@@ -10,7 +10,10 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
+
+
     DrawRadioButton = {{DrawRadioButton}} {
+
         uniform size: 7.0;
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -26,27 +29,65 @@ live_design!{
                     sdf.fill(mix(#fff0, #f, self.selected));
                 }
                 RadioType::Tab => {
+                    let sz = self.size;
+                    let left = 0.;
+                    let c = vec2(left, self.rect_size.y);
+                    sdf.rect(
+                        -1., 0.,
+                        self.rect_size.x + 2.0,
+                        self.rect_size.y
+                    );
+                    sdf.fill(mix(self.color_inactive, self.color_active, self.selected));
                 }
             }
             return sdf.result
         }
+
+
     }
     
     RadioButton = {{RadioButton}} {
         label_text: {
+            instance hover: 0.0
+            instance focus: 0.0
+            instance selected: 0.0
+            instance color_unselected: #x00000088
+            instance color_unselected_hover: #x000000CC
+            instance color_selected: #xFFFFFF66
             color: #9
+            text_style: {
+                font: {
+                    //path: d"resources/ibmplexsans-semibold.ttf"
+                }
+                font_size: 9.5
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        self.color_unselected,
+                        self.color_unselected_hover,
+                        self.hover
+                    ),
+                    self.color_selected,
+                    self.selected
+                )
+            }
         }
+        
         walk: {
             width: Fit,
             height: Fit
         }
+
         label_walk: {
-            margin: {left: 20.0, top: 8, bottom: 8, right: 10}
+            margin: {top: 4.5, bottom: 4.5, left: 8, right: 8}
             width: Fit,
             height: Fit,
         }
         
         radio_button: {
+            instance color_active: #00000000
+            instance color_inactive: #x99EEFF
         }
         
         label_align: {
@@ -60,12 +101,14 @@ live_design!{
                     from: {all: Forward {duration: 0.15}}
                     apply: {
                         radio_button: {hover: 0.0}
+                        label_text: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         radio_button: {hover: 1.0}
+                        label_text: {hover: 1.0}
                     }
                 }
             }
@@ -75,12 +118,14 @@ live_design!{
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         radio_button: {focus: 0.0}
+                        label_text: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         radio_button: {focus: 1.0}
+                        label_text: {focus: 1.0}
                     }
                 }
             }
@@ -88,12 +133,18 @@ live_design!{
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.0}}
-                    apply: {radio_button: {selected: 0.0}}
+                    apply: {
+                        radio_button: {selected: 0.0}
+                        label_text: {selected: 0.0}
+                    }
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
-                    apply: {radio_button: {selected: 1.0}}
+                    apply: {
+                        radio_button: {selected: 1.0}
+                        label_text: {selected: 1.0}
+                    }
                 }
             }
         }
@@ -109,6 +160,7 @@ pub struct DrawRadioButton {
     focus: f32,
     selected: f32
 }
+
 
 #[derive(Live, LiveHook)]
 #[repr(u32)]
@@ -151,10 +203,11 @@ impl RadioButton {
         
         match event.hits(cx, self.radio_button.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Arrow);
+                cx.set_cursor(MouseCursor::Hand);
                 self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, id!(hover.off));
             },
             Hit::FingerDown(_fe) => {
