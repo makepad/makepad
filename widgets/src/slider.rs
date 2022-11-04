@@ -239,7 +239,7 @@ impl Slider {
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.create_external_undo();
                 self.animate_state(cx, id!(drag.off));
-                if fe.is_over && fe.digit.has_hovers() {
+                if fe.is_over && fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else {
