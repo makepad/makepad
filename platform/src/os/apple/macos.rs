@@ -213,10 +213,7 @@ impl Cx {
                     self.handle_repaint(metal_windows, metal_cx);
                 }
                 CocoaEvent::MouseDown(e) => {
-                    let digit_id = live_id_num!(mouse, e.button as u64).into();
-                    
                     self.fingers.process_tap_count(
-                        digit_id,
                         e.abs,
                         e.time
                     );
@@ -226,6 +223,7 @@ impl Cx {
                 CocoaEvent::MouseMove(e) => {
                     self.call_event_handler(&Event::MouseMove(e.into()));
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
+                    self.fingers.move_captures();
                 }
                 CocoaEvent::MouseUp(e) => {
                     let button = e.button;

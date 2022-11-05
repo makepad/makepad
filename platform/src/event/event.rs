@@ -33,7 +33,6 @@ pub enum Event {
     NextFrame(NextFrameEvent),
     XRUpdate(XRUpdateEvent),
     
-    //WindowSetHoverCursor(MouseCursor),
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
@@ -42,12 +41,8 @@ pub enum Event {
     MouseDown(MouseDownEvent),
     MouseMove(MouseMoveEvent),
     MouseUp(MouseUpEvent),
+    TouchUpdateEvent(TouchUpdateEvent),
     Scroll(ScrollEvent),
-    /*FingerDown(FingerDownEvent),
-    FingerMove(FingerMoveEvent),
-    FingerHover(FingerHoverEvent),
-    FingerUp(FingerUpEvent),
-    FingerScroll(FingerScrollEvent),*/
     
     Timer(TimerEvent),
     
@@ -72,8 +67,6 @@ pub enum Event {
     
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
-    //Midi1InputData(Vec<Midi1InputData>),
-    //MidiInputList(MidiInputListEvent),
 }
 
 pub enum Hit{
@@ -93,9 +86,6 @@ pub enum Hit{
     FingerHoverOut(FingerHoverEvent),
     FingerUp(FingerUpEvent),
     
-    FingerSweep(FingerSweepEvent),
-    FingerSweepIn(FingerSweepEvent),
-    FingerSweepOut(FingerSweepEvent),
     Nothing
 }
 
