@@ -256,7 +256,7 @@ impl Splitter {
         dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
         self.state_handle_event(cx, event);
-        match event.hits_with_options(cx, self.bar.area(), HitOptions::margin(self.margin())) {
+        match event.hits_with_options(cx, self.bar.area(), HitOptions::new().with_margin(self.margin())) {
         Hit::FingerHoverIn(_) => {
             match self.axis {
                 Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
