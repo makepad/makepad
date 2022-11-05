@@ -244,14 +244,14 @@ impl DropDown {
                 self.set_closed(cx);
             }
             // check if we clicked outside of the popup menu
-            if let Event::FingerDown(fd) = event {
-                if !menu.menu_contains_pos(cx, fd.abs) {
+            if let Event::MouseDown(e) = event {
+                if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
                     self.animate_state(cx, id!(hover.off));
                 }
             }
-            if let Event::FingerUp(fd) = event {
-                if !menu.menu_contains_pos(cx, fd.abs) {
+            if let Event::MouseUp(e) = event {
+                if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
                     self.animate_state(cx, id!(hover.off));
                 }
@@ -301,7 +301,7 @@ impl DropDown {
             }
             Hit::FingerUp(fe) => {
                 if fe.is_over {
-                    if fe.digit.has_hovers() {
+                    if fe.device.has_hovers() {
                         self.animate_state(cx, id!(hover.on));
                     }
                 }

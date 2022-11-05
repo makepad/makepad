@@ -171,7 +171,7 @@ impl Button {
             }
             Hit::FingerUp(fe) => if fe.is_over {
                 dispatch_action(cx, ButtonAction::Click);
-                if fe.digit.has_hovers() {
+                if fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else{

@@ -580,7 +580,7 @@ impl TextInput {
             },
             Hit::FingerUp(fe) => {
                 self.double_tap_start = None;
-                if fe.is_over && fe.digit.has_hovers() {
+                if fe.is_over && fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else {
