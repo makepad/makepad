@@ -4,7 +4,6 @@ use {
     std::cell::RefCell,
     crate::{
         makepad_live_id::*,
-        makepad_math::DVec2,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         os::{
             web_browser::{
@@ -26,6 +25,12 @@ use {
             XRInput,
             TextCopyEvent,
             TimerEvent,
+            MouseDownEvent,
+            MouseMoveEvent,
+            MouseUpEvent,
+            TouchState,
+            TouchUpdateEvent,
+            ScrollEvent,
             WindowGeom,
             WindowGeomChangeEvent
         },
@@ -119,116 +124,54 @@ impl Cx {
                     }
                 }
                 
-                live_id!(ToWasmTouchStart) => {
-                    let tw = ToWasmTouchStart::read_to_wasm(&mut to_wasm);
-                    //log!("{:?}", tw);
-                    // lets get a unique digit
-                    let digit_id = id_num!(touch, tw.touch.uid as u64).into();
-                    self.fingers.alloc_digit(digit_id);
-                    
-                    self.fingers.process_tap_count(
-                        digit_id,
-                        DVec2 {x: tw.touch.x, y: tw.touch.y},
-                        tw.touch.time
-                    );
-                    self.call_event_handler(&Event::FingerDown(
-                        tw.into_finger_down_event(&self.fingers, digit_id,)
-                    ));
-                    self.fingers.cycle_hover_area(digit_id);
-                }
-                
-                live_id!(ToWasmTouchMove) => {
-                    let tw = ToWasmTouchMove::read_to_wasm(&mut to_wasm);
-                    //log!("{:?}", tw);
-                    let digit_id = id_num!(touch, tw.touch.uid as u64).into();
-                    // lets grab the captured area
-                    self.call_event_handler(&Event::FingerMove(
-                        tw.into_finger_move_event(&self.fingers, digit_id)
-                    ));
-                    self.fingers.cycle_hover_area(digit_id);
-                }
-                
-                live_id!(ToWasmTouchEnd) => {
-                    let tw = ToWasmTouchEnd::read_to_wasm(&mut to_wasm);
-                    //log!("{:?}", tw);
-                    let digit_id = id_num!(touch, tw.touch.uid as u64).into();
-                    self.call_event_handler(&Event::FingerUp(
-                        tw.into_finger_up_event(&self.fingers, digit_id)
-                    ));
-                    
-                    self.fingers.free_digit(digit_id);
+                live_id!(ToWasmTouchUpdate) => {
+                    let e: TouchUpdateEvent = ToWasmTouchUpdate::read_to_wasm(&mut to_wasm).into();
+                    for touch in &e.touches{
+                        if let TouchState::Start = touch.state{
+                            self.fingers.process_tap_count(touch.abs, e.time);
+                        }
+                    }
+                    let e = Event::TouchUpdateEvent(e);
+                    self.call_event_handler(&e);
+                    let e = if let Event::TouchUpdateEvent(e) = e{e}else{panic!()};
+                    for touch in &e.touches{
+                        let digit_id = live_id_num!(touch, touch.uid).into();
+                        match touch.state{
+                            TouchState::Stop=>{
+                                self.fingers.release_digit(digit_id);
+                                self.fingers.remove_hover(digit_id);
+                            }
+                            TouchState::Start | TouchState::Move | TouchState::Stable =>{
+                                self.fingers.cycle_hover_area(digit_id);
+                            }
+                        }
+                    }
+                    self.fingers.move_captures();
                 }
                 
                 live_id!(ToWasmMouseDown) => {
-                    let tw = ToWasmMouseDown::read_to_wasm(&mut to_wasm);
-                    
-                    if self.os.last_mouse_button == None ||
-                    self.os.last_mouse_button == Some(tw.mouse.button) {
-                        self.os.last_mouse_button = Some(tw.mouse.button);
-                        // lets get a unique digit
-                        let digit_id = live_id!(mouse).into();
-                        self.fingers.alloc_digit(digit_id);
-                        
-                        self.fingers.process_tap_count(
-                            digit_id,
-                            DVec2 {x: tw.mouse.x, y: tw.mouse.y},
-                            tw.mouse.time
-                        );
-                        
-                        self.call_event_handler(&Event::FingerDown(
-                            tw.into_finger_down_event(&self.fingers, digit_id)
-                        ));
-                    }
+                    let e: MouseDownEvent = ToWasmMouseDown::read_to_wasm(&mut to_wasm).into();
+                    self.fingers.process_tap_count(e.abs, e.time);
+                    self.fingers.mouse_down(e.button);
+                    self.call_event_handler(&Event::MouseDown(e))
                 }
                 
                 live_id!(ToWasmMouseMove) => {
-                    let digit_id = live_id!(mouse).into();
-                    let tw = ToWasmMouseMove::read_to_wasm(&mut to_wasm);
-                    // ok so. what do we do without a captured area
-                    // if our digit is NOT down we send hovers.
-                    if !self.fingers.is_digit_allocated(digit_id) {
-                        self.call_event_handler(&Event::FingerHover(
-                            tw.into_finger_hover_event(
-                                &self.fingers,
-                                digit_id,
-                                self.os.last_mouse_button.unwrap_or(0) as usize
-                            )
-                        ));
-                    }
-                    else {
-                        self.call_event_handler(&Event::FingerMove(
-                            tw.into_finger_move_event(
-                                &self.fingers,
-                                digit_id,
-                                self.os.last_mouse_button.unwrap_or(0) as usize
-                            )
-                        ));
-                    }
-                    self.fingers.cycle_hover_area(digit_id);
+                    let e: MouseMoveEvent = ToWasmMouseMove::read_to_wasm(&mut to_wasm).into();
+                    self.call_event_handler(&Event::MouseMove(e.into()));
+                    self.fingers.cycle_hover_area(live_id!(mouse).into());
                 }
                 
                 live_id!(ToWasmMouseUp) => {
-                    let tw = ToWasmMouseUp::read_to_wasm(&mut to_wasm);
-                    
-                    if self.os.last_mouse_button == Some(tw.mouse.button) {
-                        self.os.last_mouse_button = None;
-                        let digit_id = live_id!(mouse).into();
-                        self.call_event_handler(&Event::FingerUp(
-                            tw.into_finger_up_event(
-                                &self.fingers,
-                                digit_id,
-                            )
-                        ));
-                        self.fingers.free_digit(digit_id);
-                    }
+                    let e: MouseUpEvent = ToWasmMouseUp::read_to_wasm(&mut to_wasm).into();
+                    let button = e.button;
+                    self.call_event_handler(&Event::MouseUp(e.into()));
+                    self.fingers.mouse_up(button);
                 }
                 
                 live_id!(ToWasmScroll) => {
-                    let tw = ToWasmScroll::read_to_wasm(&mut to_wasm);
-                    let digit_id = live_id!(mouse).into();
-                    self.call_event_handler(&Event::FingerScroll(
-                        tw.into_finger_scroll_event(digit_id)
-                    ));
+                    let e: ScrollEvent = ToWasmScroll::read_to_wasm(&mut to_wasm).into();
+                    self.call_event_handler(&Event::Scroll(e.into()));
                 }
                 
                 live_id!(ToWasmKeyDown) => {
@@ -347,10 +290,10 @@ impl Cx {
                     // swap the message into an event to avoid a copy
                     let offset = to_wasm.u32_offset;
                     drop(to_wasm);
-                    let event = Event::ToWasmMsg(ToWasmMsgEvent{id: msg_id, msg: to_wasm_msg, offset});
+                    let event = Event::ToWasmMsg(ToWasmMsgEvent {id: msg_id, msg: to_wasm_msg, offset});
                     self.call_event_handler(&event);
                     // and swap it back
-                    if let Event::ToWasmMsg(ToWasmMsgEvent{msg, ..}) = event{to_wasm_msg = msg}else{panic!()};
+                    if let Event::ToWasmMsg(ToWasmMsgEvent {msg, ..}) = event {to_wasm_msg = msg}else {panic!()};
                     to_wasm = to_wasm_msg.as_ref();
                 }
             };
@@ -449,7 +392,7 @@ impl Cx {
 
 
 impl CxOsApi for Cx {
-    fn init(&mut self){
+    fn init(&mut self) {
         self.live_expand();
         self.live_scan_dependencies();
         
@@ -459,9 +402,7 @@ impl CxOsApi for Cx {
             ToWasmResizeWindow::to_string(),
             ToWasmAnimationFrame::to_string(),
             
-            ToWasmTouchStart::to_string(),
-            ToWasmTouchMove::to_string(),
-            ToWasmTouchEnd::to_string(),
+            ToWasmTouchUpdate::to_string(),
             ToWasmMouseDown::to_string(),
             ToWasmMouseMove::to_string(),
             ToWasmMouseUp::to_string(),
@@ -484,7 +425,7 @@ impl CxOsApi for Cx {
             ToWasmWebSocketMessage::to_string(),
         ]);
         
-         self.os.append_from_wasm_js(&[
+        self.os.append_from_wasm_js(&[
             FromWasmLoadDeps::to_string(),
             FromWasmStartTimer::to_string(),
             FromWasmStopTimer::to_string(),
@@ -513,7 +454,7 @@ impl CxOsApi for Cx {
             FromWasmDrawCall::to_string(),
         ]);
     }
-
+    
     fn post_signal(signal: Signal,) {
         unsafe {js_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
     }
@@ -581,25 +522,25 @@ pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
 // storage buffers for graphics API related platform
 #[derive(Default)]
 pub struct CxOs {
-    pub(crate) window_geom: WindowGeom,
-    pub(crate) last_mouse_button: Option<u32>,
-    pub(crate) from_wasm: Option<FromWasmMsg>,
-    pub(crate) vertex_buffers: usize,
-    pub(crate) index_buffers: usize,
-    pub(crate) vaos: usize,
-    pub(crate) xr_last_inputs: Option<Vec<XRInput >>,
+    pub (crate) window_geom: WindowGeom,
     
-    pub(crate) to_wasm_js: Vec<String>,
-    pub(crate) from_wasm_js: Vec<String>
+    pub (crate) from_wasm: Option<FromWasmMsg>,
+    pub (crate) vertex_buffers: usize,
+    pub (crate) index_buffers: usize,
+    pub (crate) vaos: usize,
+    pub (crate) xr_last_inputs: Option<Vec<XRInput >>,
+    
+    pub (crate) to_wasm_js: Vec<String>,
+    pub (crate) from_wasm_js: Vec<String>
 }
 
 impl CxOs {
     
-    pub fn append_to_wasm_js(&mut self, strs: &[String]){
+    pub fn append_to_wasm_js(&mut self, strs: &[String]) {
         self.to_wasm_js.extend_from_slice(strs);
     }
-
-    pub fn append_from_wasm_js(&mut self, strs: &[String]){
+    
+    pub fn append_from_wasm_js(&mut self, strs: &[String]) {
         self.from_wasm_js.extend_from_slice(strs);
     }
     
@@ -617,12 +558,12 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
     
     out.push_str("return {\n");
     out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
-    for to_wasm in &cx.os.to_wasm_js{
+    for to_wasm in &cx.os.to_wasm_js {
         out.push_str(to_wasm);
     }
     out.push_str("},\n");
     out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
-    for from_wasm in &cx.os.from_wasm_js{
+    for from_wasm in &cx.os.from_wasm_js {
         out.push_str(from_wasm);
     }
     out.push_str("}\n");

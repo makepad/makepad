@@ -301,6 +301,97 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.free_data_u8(args.data);
     }
+      
+    FromWasmSpawnAudioOutput(args) {
+        
+        if (this.audio_context) {
+            return
+        }
+        const start_worklet = async () => {
+            await this.audio_context.audioWorklet.addModule("/makepad/media/src/os/web_browser/audio_worklet.js", {credentials: 'omit'});
+            
+            const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
+                numberOfInputs: 0,
+                numberOfOutputs: 1,
+                outputChannelCount: [2],
+                processorOptions: {thread_info: this.alloc_thread_stack(args.closure_ptr)}
+            });
+            
+            audio_worklet.port.onmessage = (e) => {
+                let data = e.data;
+                switch (data.message_type) {
+                    case "console_log":
+                    console.log(data.value);
+                    break;
+                    
+                    case "console_error":
+                    console.error(data.value);
+                    break;
+                    
+                    case "signal":
+                    this.to_wasm.ToWasmSignal(data)
+                    this.do_wasm_pump();
+                    break;
+                }
+            };
+            audio_worklet.onprocessorerror = (err) => {
+                console.error(err);
+            }
+            audio_worklet.connect(this.audio_context.destination);
+            
+            return audio_worklet;
+        };
+        
+        let user_interact_hook = (arg) => {
+            if(this.audio_context.state === "suspended"){
+                this.audio_context.resume();
+            }
+        }
+        this.audio_context = new AudioContext({
+            latencyHint: "interactive",
+            sampleRate: 44100
+        });
+        start_worklet();
+        window.addEventListener('mousedown', user_interact_hook)
+        window.addEventListener('touchstart', user_interact_hook)
+    }
+    
+    FromWasmStartMidiInput() {
+        if(navigator.requestMIDIAccess){
+            navigator.requestMIDIAccess().then((midi) => {
+                let reload_midi_ports = () => {
+                    
+                    let inputs = [];
+                    let input_id = 0;
+                    for (let input_pair of midi.inputs) {
+                        let input = input_pair[1];
+                        inputs.push({
+                            uid: "" + input.id,
+                            name: input.name,
+                            manufacturer: input.manufacturer,
+                        });
+                        input.onmidimessage = (e) => {
+                            let data = e.data;
+                            this.to_wasm.ToWasmMidiInputData({
+                                input_id: input_id,
+                                data: (data[0] << 16) | (data[1] << 8) | data[2],
+                            });
+                            this.do_wasm_pump();
+                        }
+                        input_id += 1;
+                    }
+                    this.to_wasm.ToWasmMidiInputList({inputs});
+                    this.do_wasm_pump();
+                }
+                midi.onstatechange = (e) => {
+                    reload_midi_ports();
+                }
+                reload_midi_ports();
+            }, () => {
+                console.error("Cannot open midi");
+            });
+        }
+    }
     
     alloc_thread_stack(closure_ptr) {
         let tls_size = this.exports.__tls_size.value;
@@ -607,48 +698,75 @@ export class WasmWebBrowser extends WasmBridge {
         
         canvas.addEventListener('contextmenu', e => this.handlers.on_contextmenu(e))
 
-        function touches_to_wasm_wtouches(e) {
-            var f = []
-            for (let i = 0; i < e.changedTouches.length; i ++) {
-                var t = e.changedTouches[i]
-                f.push({
-                    x: t.pageX,
-                    y: t.pageY,
-                    uid: t.identifier === undefined? i: t.identifier,
-                    time: e.timeStamp / 1000.0,
-                    modifiers: 0,
-                    touch: true,
-                })
+        function touch_to_wasm_wtouch(t, state) {
+            return {
+                state,
+                x: t.pageX,
+                y: t.pageY,
+                radius_x: t.radiusX,
+                radius_y: t.radiusY,
+                rotation_angle: t.rotationAngle,
+                force: t.force,
+                uid: t.identifier === undefined? i: t.identifier,
             }
+        }
+
+        function touches_to_wasm_wtouches(e, state) {
+            let f = [];
+            
+            for (let i = 0; i < e.changedTouches.length; i ++) {
+                f.push(touch_to_wasm_wtouch(e.changedTouches[i], state));
+            }
+            
+            touch_loop:
+            for (let i = 0; i < e.touches.length; i ++) {
+                let t = e.touches[i];
+                for(let j = 0; j < e.changedTouches.length; j++){
+                    if(e.changedTouches[j].identifier == t.identifier){
+                        continue touch_loop;
+                    }
+                }
+                f.push(touch_to_wasm_wtouch(t, 0));
+            }
+            /*
+            let dump = "";
+            let statev = ["stable","start","move","stop"]
+            for( let i = 0; i<f.length;i++){
+                dump += statev[f[i].state] +"("+(-f[i].uid%10)+"), "
+            }
+            console.log(dump);*/
             return f
         }
         
         this.handlers.on_touchstart = e => {
             e.preventDefault()
-            let touches = touches_to_wasm_wtouches(e);
-            for (let i = 0; i < touches.length; i ++) {
-                this.to_wasm.ToWasmTouchStart({touch: touches[i]});
-            }
+            this.to_wasm.ToWasmTouchUpdate({
+                time: e.timeStamp,
+                modifiers: pack_key_modifier(e),
+                touches:touches_to_wasm_wtouches(e, 1)
+            });
             this.do_wasm_pump();
             return false
         }
         
         this.handlers.on_touchmove = e => {
-            //e.preventDefault();
-            let touches = touches_to_wasm_wtouches(e);
-            for (let i = 0; i < touches.length; i ++) {
-                this.to_wasm.ToWasmTouchMove({touch: touches[i]});
-            }
+            e.preventDefault();
+            this.to_wasm.ToWasmTouchUpdate({
+                time: e.timeStamp,
+                modifiers: pack_key_modifier(e),
+                touches:touches_to_wasm_wtouches(e, 2)
+            });
             this.do_wasm_pump();
             return false
         }
         
         this.handlers.on_touch_end_cancel_leave = e => {
             e.preventDefault();
-            let touches = touches_to_wasm_wtouches(e);
-            for (let i = 0; i < touches.length; i ++) {
-                this.to_wasm.ToWasmTouchEnd({touch: touches[i]});
-            }
+            this.to_wasm.ToWasmTouchUpdate({
+                time: e.timeStamp,
+                modifiers: pack_key_modifier(e),
+                touches:touches_to_wasm_wtouches(e, 3)
+            });
             this.do_wasm_pump();
             return false
         }

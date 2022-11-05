@@ -1,4 +1,5 @@
-use makepad_widgets;
+use makepad_audio_graph;
+use makepad_audio_graph::makepad_widgets;
 use makepad_widgets::*;
 use makepad_draw::*;
 
@@ -20,6 +21,7 @@ live_design!{
                     }
                 }
             }
+            piano = <Piano>{walk:{abs_pos:vec2(100,100)}}
         }
     }
 }
@@ -33,14 +35,14 @@ pub struct App {
 
 impl App {
     pub fn live_design(cx: &mut Cx) {
-        makepad_widgets::live_design(cx);
+        makepad_audio_graph::live_design(cx);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Draw(event) = event {
             return self.draw(&mut Cx2d::new(cx, event));
         }
-        
+        self.ui.handle_event(cx, event);
         self.window.handle_event(cx, event);
     }
     

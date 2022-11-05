@@ -20,6 +20,7 @@ pub use crate::audio_graph::*;
 pub use crate::audio_traits::*;
 
 pub fn live_design(cx:&mut Cx){
+    self::makepad_widgets::live_design(cx);
     self::audio_graph::live_design(cx);
     self::piano::live_design(cx);
     self::display_audio::live_design(cx);
