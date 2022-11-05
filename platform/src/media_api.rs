@@ -1,6 +1,8 @@
-use crate::audio::{AudioTime, AudioOutputBuffer};
-use crate::makepad_platform::*;
-use crate::midi::*;
+use crate::{
+    audio::{AudioTime, AudioOutputBuffer},
+    midi::*,
+    event::Event
+};
 
 pub trait CxMediaApi {
     fn send_midi_data(&mut self, data:MidiData);

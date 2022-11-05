@@ -1,15 +1,16 @@
 use {
     crate::{
-        audio::*,
         makepad_platform::*,
         makepad_platform::thread::*,
-        audio_graph::*,
-        midi::*,
+        makepad_platform::audio::*,
+        makepad_platform::midi::*,
+        audio_component,
+        audio_traits::*
     },
 };
 
 live_design!{
-    Mixer= {{Mixer}} {
+    Mixer = {{Mixer}} {
     }
 }
 
@@ -46,13 +47,13 @@ struct Node {
 // ok so how do we spawn this shit up.
 
 impl AudioGraphNode for Node {
-    fn all_notes_off(&mut self){
+    fn all_notes_off(&mut self) {
         for i in 0..self.inputs.len() {
             let input = &mut self.inputs[i];
             input.all_notes_off();
         }
     }
-
+    
     fn handle_midi_data(&mut self, data: MidiData) {
         for input in &mut self.inputs {
             input.handle_midi_data(data);

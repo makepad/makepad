@@ -24,8 +24,9 @@ use {
     std::sync::Arc,
     crate::{
         makepad_platform::live_atomic::*,
-        makepad_media::*,
-        makepad_media::audio_graph::*,
+        makepad_platform::audio::*,
+        makepad_platform::midi::*,
+        makepad_audio_graph::*,
         makepad_draw::*
     },
 };

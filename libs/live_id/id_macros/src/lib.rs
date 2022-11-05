@@ -82,7 +82,7 @@ pub fn id(item: TokenStream) -> TokenStream {
 
 // absolutely a very bad idea but lets see if we can do this.
 #[proc_macro]
-pub fn id_num(item: TokenStream) -> TokenStream {
+pub fn live_id_num(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
 
     let mut parser = TokenParser::new(item);
@@ -101,9 +101,8 @@ pub fn id_num(item: TokenStream) -> TokenStream {
     }
 }
 
-
 #[proc_macro]
-pub fn id_from_str(item: TokenStream) -> TokenStream {
+pub fn live_id_from_str(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
 
     let mut parser = TokenParser::new(item);

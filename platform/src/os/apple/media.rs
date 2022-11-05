@@ -1,9 +1,11 @@
 
 use{
-    std::cell::RefCell,
-    std::sync::{Arc,Mutex},
     crate::{
-        makepad_platform::*,
+        makepad_live_id::*,
+        makepad_error_log::*,
+        cx::Cx,
+        cx_api::CxOsApi,
+        event::Event,
         audio::*,
         midi::*,
         media_api::CxMediaApi,
@@ -12,27 +14,16 @@ use{
     }
 };
 
-pub fn live_design(_cx:&Cx){
-}
-
-#[derive(Default)]
-struct CxMediaApple{
-    pub midi_access: Option<CoreMidiAccess>,
-    pub midi_input_data: Arc<Mutex<RefCell<Vec<MidiInputData>>>>,    
-}
-
 impl CxMediaApi for Cx{
     
     fn send_midi_data(&mut self, data:MidiData){
-         let media = self.get_global::<CxMediaApple>();
-         media.midi_access.as_ref().unwrap().send_midi_1_data(data);
+         self.os.midi_access.as_ref().unwrap().send_midi_1_data(data);
     }
     
     fn handle_midi_received(&mut self, event:&Event)->Vec<MidiInputData>{
         if let Event::Signal(se) = event{
             if se.signals.contains(&live_id!(CoreMidiInputData).into()) {
-                let media = self.get_global::<CxMediaApple>();
-                let out_data = if let Ok(data) = media.midi_input_data.lock() {
+               let out_data = if let Ok(data) = self.os.midi_input_data.lock() {
                     let mut data = data.borrow_mut();
                     let out_data = data.clone();
                     data.clear();
@@ -50,9 +41,8 @@ impl CxMediaApi for Cx{
     fn handle_midi_inputs(&mut self, event:&Event)->Vec<MidiInputInfo>{
         if let Event::Signal(se) = event{
             if se.signals.contains(&live_id!(CoreMidiInputsChanged).into()) {
-                let media = self.get_global::<CxMediaApple>();
-                let inputs = media.midi_access.as_ref().unwrap().connect_all_inputs();
-                media.midi_access.as_mut().unwrap().update_destinations();
+                let inputs = self.os.midi_access.as_ref().unwrap().connect_all_inputs();
+                self.os.midi_access.as_mut().unwrap().update_destinations();
                 return inputs
             }
         }
@@ -60,24 +50,20 @@ impl CxMediaApi for Cx{
     }
     
     fn start_midi_input(&mut self) {
-        if !self.has_global::<CxMediaApple>() {
-            let mut media = CxMediaApple::default();
-            let midi_input_data = media.midi_input_data.clone();
-            if let Ok(ma) = CoreMidiAccess::new_midi_input(
-                move | datas | {
-                    if let Ok(midi_input_data) = midi_input_data.lock() {
-                        let mut midi_input_data = midi_input_data.borrow_mut();
-                        midi_input_data.extend_from_slice(&datas);
-                        Cx::post_signal(live_id!(CoreMidiInputData).into());
-                    }
-                },
-                move || {
-                    Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
+        let midi_input_data = self.os.midi_input_data.clone();
+        if let Ok(ma) = CoreMidiAccess::new_midi_input(
+            move | datas | {
+                if let Ok(midi_input_data) = midi_input_data.lock() {
+                    let mut midi_input_data = midi_input_data.borrow_mut();
+                    midi_input_data.extend_from_slice(&datas);
+                    Cx::post_signal(live_id!(CoreMidiInputData).into());
                 }
-            ) {
-                media.midi_access = Some(ma);
+            },
+            move || {
+                Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
             }
-            self.set_global(media);
+        ) {
+            self.os.midi_access = Some(ma);
         }
         Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
     }
