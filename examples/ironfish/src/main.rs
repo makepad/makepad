@@ -1,16 +1,14 @@
-pub use makepad_media::makepad_widgets;
+pub use makepad_audio_graph::makepad_widgets;
 pub use makepad_widgets::makepad_platform;
 pub use makepad_platform::makepad_math;
-pub use makepad_media;
+pub use makepad_audio_graph;
 
 use makepad_widgets::*;
 use makepad_draw::*;
-use makepad_media::*;
-use makepad_media::audio_graph::*;
+use makepad_audio_graph::*;
+use makepad_platform::midi::*;
 
 mod sequencer;
-mod display_audio;
-mod piano;
 mod ironfish;
 mod waveguide;
 
@@ -1054,7 +1052,6 @@ live_design!{
                         }
                     }
                 }
-                
             }
             
             twocol = <Frame> {
@@ -1334,6 +1331,7 @@ live_design!{
                 }
                 column2 = <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
+
                     walk: {height: Fill}
                     <SequencerPanel> {
                         walk: {height: Fill}
@@ -1364,10 +1362,8 @@ impl LiveHook for App {
 impl App {
     pub fn live_design(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
-        makepad_media::live_design(cx);
-        crate::display_audio::live_design(cx);
+        makepad_audio_graph::live_design(cx);
         crate::ironfish::live_design(cx);
-        crate::piano::live_design(cx);
         crate::sequencer::live_design(cx);
     }
     

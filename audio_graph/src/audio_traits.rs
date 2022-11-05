@@ -2,11 +2,9 @@ use {
     std::collections::BTreeMap,
     crate::{
         makepad_platform::*,
+        makepad_platform::audio::*,
+        makepad_platform::midi::*,
         makepad_platform::thread::*,
-        audio_graph::*,
-        audio::*,
-        midi::*,
-        //audio_engine::AudioEngine
     }
 };
 
