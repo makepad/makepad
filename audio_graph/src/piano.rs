@@ -108,7 +108,7 @@ live_design!{
     
     Piano= {{Piano}} {
         piano_key: <PianoKey> {}
-        white_size: vec2(80.0, 275.0),
+        white_size: vec2(20.0, 75.0),
         black_size: vec2(15.0, 50.0),
         walk: {
             width: Fit,
