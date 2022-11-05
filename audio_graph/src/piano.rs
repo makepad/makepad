@@ -108,7 +108,7 @@ live_design!{
     
     Piano= {{Piano}} {
         piano_key: <PianoKey> {}
-        white_size: vec2(20.0, 75.0),
+        white_size: vec2(80.0, 275.0),
         black_size: vec2(15.0, 50.0),
         walk: {
             width: Fit,
@@ -210,11 +210,7 @@ impl PianoKey {
         if self.state_handle_event(cx, event).must_redraw() {
             self.draw_key.area().redraw(cx);
         }
-        match event.hits_with_options(
-            cx,
-            self.draw_key.area(),
-            HitOptions::with_sweep_area(sweep_area)
-        ) {
+        match event.hits_with_sweep_area(cx, self.draw_key.area(), sweep_area) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animate_state(cx, id!(hover.on));
@@ -222,13 +218,13 @@ impl PianoKey {
             Hit::FingerHoverOut(_) => {
                 self.animate_state(cx, id!(hover.off));
             }
-            Hit::FingerSweepIn(_) => {
+            Hit::FingerDown(_) => {
                 self.animate_state(cx, id!(hover.on));
                 self.animate_state(cx, id!(pressed.on));
                 dispatch_action(cx, PianoKeyAction::Pressed(127));
             }
-            Hit::FingerSweepOut(se) => {
-                if se.is_finger_up && se.device.has_hovers(){
+            Hit::FingerUp(e) => {
+                if !e.is_sweep && e.device.has_hovers(){
                     self.animate_state(cx, id!(hover.on));
                 }
                 else{
@@ -334,7 +330,7 @@ impl Piano {
     ) {
         let mut actions = Vec::new();
         for (key_id, piano_key) in self.black_keys.iter_mut().chain(self.white_keys.iter_mut()) {
-            piano_key.handle_event_fn(cx, event, self.area, &mut | _, action | {
+            piano_key.handle_event_fn(cx, event, self.area,  &mut | _, action | {
                 actions.push((*key_id, action))
             });
         }

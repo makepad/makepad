@@ -91,15 +91,15 @@ class AudioWorklet extends AudioWorkletProcessor {
             let frames = outputs[0][0].length;
             let channels = outputs[0].length;
             
-            let ptr = context.exports.wasm_audio_entrypoint(context.closure_ptr, frames, channels);
+            let output_ptr = context.exports.wasm_audio_entrypoint(context.closure_ptr, frames, channels);
             if (context.buffer_ref_len_check != context.memory.buffer.byteLength) {
                 context.f32 = new Float32Array(context.memory.buffer);
                 context.buffer_ref_len_check = context.memory.buffer.byteLength;
             }
             
-            let ptr_f32 = ptr >> 2;
+            let ptr_f32 = output_ptr >> 2;
             let f32 = context.f32;
-            // lets copy the values
+            // lets copy the values from wasm to the output buffer
             for (let c = 0; c < channels; c ++) {
                 let base = c * frames + ptr_f32;
                 let out = outputs[0][c];

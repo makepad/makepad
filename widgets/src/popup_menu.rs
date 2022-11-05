@@ -210,7 +210,7 @@ impl PopupMenuItem {
         match event.hits_with_options(
             cx,
             self.bg.area(),
-            HitOptions::with_sweep_area(sweep_area)
+            HitOptions::new().with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
@@ -218,13 +218,13 @@ impl PopupMenuItem {
             Hit::FingerHoverOut(_) => {
                 self.animate_state(cx, id!(hover.off));
             }
-            Hit::FingerSweepIn(_) => {
+            Hit::FingerDown(_) => {
                 dispatch_action(cx, PopupMenuItemAction::WasSweeped);
                 self.animate_state(cx, id!(hover.on));
                 self.animate_state(cx, id!(select.on));
             }
-            Hit::FingerSweepOut(se) => {
-                if se.is_finger_up {
+            Hit::FingerUp(se) => {
+                if !se.is_sweep {
                     if se.was_tap() { // ok this only goes for the first time
                         dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
                     }

@@ -1255,7 +1255,6 @@ impl LiveHook for App {
 
 impl App {
     pub fn live_design(cx: &mut Cx) {
-        makepad_widgets::live_design(cx);
         makepad_audio_graph::live_design(cx);
         crate::ironfish::live_design(cx);
         crate::sequencer::live_design(cx);
