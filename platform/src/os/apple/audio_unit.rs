@@ -5,13 +5,12 @@ use {
         audio::*,
         midi::*,
         os::apple::frameworks::*,
-        makepad_platform::{
-            os::apple::cocoa_delegate::*,
-            os::apple::cocoa_app::*,
-            os::apple::apple_util::*,
-            objc_block,
-            objc_block_invoke,
-        }
+        os::apple::core_audio::*,
+        os::apple::cocoa_delegate::*,
+        os::apple::cocoa_app::*,
+        os::apple::apple_util::*,
+        objc_block,
+        objc_block_invoke,
     },
 };
 

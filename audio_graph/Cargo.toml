@@ -1,9 +1,9 @@
 [package]
-name = "makepad-media"
+name = "makepad-audio-graph" 
 version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad platform media extensions"
+description = "Makepad audio graph"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"

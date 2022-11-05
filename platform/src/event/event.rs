@@ -13,6 +13,7 @@ use {
             keyboard::*,
             window::*,
             xr::*,
+            drag_drop::*,
         },
         draw_list::DrawListId,
         menu::MenuCommand,
@@ -38,11 +39,16 @@ pub enum Event {
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
     
-    FingerDown(FingerDownEvent),
+    MouseDown(MouseDownEvent),
+    MouseMove(MouseMoveEvent),
+    MouseUp(MouseUpEvent),
+    Scroll(ScrollEvent),
+    /*FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
     FingerHover(FingerHoverEvent),
     FingerUp(FingerUpEvent),
-    FingerScroll(FingerScrollEvent),
+    FingerScroll(FingerScrollEvent),*/
+    
     Timer(TimerEvent),
     
     Signal(SignalEvent),
@@ -78,13 +84,14 @@ pub enum Hit{
     Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    FingerScroll(FingerScrollHitEvent),
-    FingerDown(FingerDownHitEvent),
-    FingerMove(FingerMoveHitEvent),
-    FingerHoverIn(FingerHoverHitEvent),
-    FingerHoverOver(FingerHoverHitEvent),
-    FingerHoverOut(FingerHoverHitEvent),
-    FingerUp(FingerUpHitEvent),
+    
+    FingerScroll(FingerScrollEvent),
+    FingerDown(FingerDownEvent),
+    FingerMove(FingerMoveEvent),
+    FingerHoverIn(FingerHoverEvent),
+    FingerHoverOver(FingerHoverEvent),
+    FingerHoverOut(FingerHoverEvent),
+    FingerUp(FingerUpEvent),
     
     FingerSweep(FingerSweepEvent),
     FingerSweepIn(FingerSweepEvent),

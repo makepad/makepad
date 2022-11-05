@@ -161,11 +161,10 @@ impl DesktopWindow {
                 }
                 true
             }
-            Event::FingerDown(ev) => ev.window_id != self.window.window_id(),
-            Event::FingerMove(ev) => ev.window_id != self.window.window_id(),
-            Event::FingerHover(ev) => ev.window_id != self.window.window_id(),
-            Event::FingerUp(ev) => ev.window_id != self.window.window_id(),
-            Event::FingerScroll(ev) => ev.window_id != self.window.window_id(),
+            Event::MouseDown(ev) => ev.window_id != self.window.window_id(),
+            Event::MouseMove(ev) => ev.window_id != self.window.window_id(),
+            Event::MouseUp(ev) => ev.window_id != self.window.window_id(),
+            Event::Scroll(ev) => ev.window_id != self.window.window_id(),
             _ => false
         };
         if is_for_other_window {

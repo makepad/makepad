@@ -498,15 +498,15 @@ impl ShaderRegistry {
         let mut draw_shader_def = DrawShaderDef::default();
         
         // lets insert the 2D drawshader uniforms
-        draw_shader_def.add_uniform(id_from_str!(camera_projection).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(camera_view).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(camera_inv).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(dpi_factor).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(dpi_dilate).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(view_transform).unwrap(), id_from_str!(view).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(camera_projection).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(camera_view).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(camera_inv).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(dpi_factor).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(dpi_dilate).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(view_transform).unwrap(), live_id_from_str!(view).unwrap(), Ty::Mat4, TokenSpan::default());
         //draw_shader_def.add_uniform(id_from_str!(draw_clip).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
         //raw_shader_def.add_uniform(id_from_str!(draw_scroll).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(draw_zbias).unwrap(), id_from_str!(draw).unwrap(), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(draw_zbias).unwrap(), live_id_from_str!(draw).unwrap(), Ty::Float, TokenSpan::default());
         
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
 

@@ -1,11 +1,10 @@
 use {
     crate::{
-        audio::*,
-        midi::*,
-        audio_graph::*,
-        media_api::*,
         makepad_platform::thread::*,
         makepad_platform::*,
+        makepad_platform::audio::*,
+        makepad_platform::midi::*,
+        audio_traits::*,
     },
     std::any::TypeId,
     std::sync::{Arc, Mutex},
