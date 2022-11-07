@@ -49,13 +49,14 @@ live_design!{
     const FONT_SIZE_H1 = 11.0
     const FONT_SIZE_H2 = 9.5
     
+
+    // WIDGETS
     ElementBox = <Frame> {
         bg: {color: #4}
         walk: {width: Fill, height: Fit}
         layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
     }
     
-
     FishTab = <RadioButton> {
         radio_button: {
             radio_type: Tab,
@@ -68,7 +69,6 @@ live_design!{
                 }
         }
     }
-
 
     FishDropDown = <DropDown> {
         walk: {margin: {left: 5.0, right: 0.0, top: 0.0, bottom: 0.0}}
@@ -382,6 +382,71 @@ live_design!{
             }
         }
     }
+    
+    FishHeader = <Solid> {
+        bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let edge = 5.0;
+                sdf.move_to(1.0 + edge, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - 2.0)
+                sdf.line_to(1.0, self.rect_size.y - 2.0);
+                sdf.line_to(1.0, 1.0 + edge);
+                sdf.close_path();
+                sdf.fill(self.color);
+                return sdf.result
+            }
+        }
+        walk: {width: Fill, height: Fit}
+        layout: {padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
+        label = <Label> {
+            label: {
+                text_style: {font_size: (FONT_SIZE_H1), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                color: (COLOR_TEXT_H1)
+            }
+            text: "replace me!"
+        }
+    }
+    
+    FishPanel = <Frame> {
+        layout: {flow: Down, flow: Down, clip_y: true, clip_x: true}
+        walk: {width: Fill, height: Fit}
+        label = <FishHeader> {label = {text: "ReplaceMe", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
+        body = <Box> {
+            layout: {flow: Down, padding: {top: (SPACING_CONTROLS), left: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
+            walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
+            bg: {
+                color: #FFFFFF00
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    let edge = 8.0;
+                    sdf.move_to(1.0, 1.0);
+                    sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                    sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                    sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                    sdf.line_to(1.0, self.rect_size.y - 2.0);
+                    sdf.close_path();
+                    sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                    sdf.stroke(self.color, 1.0)
+                    return sdf.result
+                }
+            }
+        }
+    }
+
+    FishTabPanel = <Frame> {
+        layout: {flow: Down, flow: Down, clip_y: true, clip_x: true}
+        walk: {width: Fill, height: Fit}
+        body = <Box> {
+            layout: {flow: Down, padding: {top: (SPACING_CONTROLS), left: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
+            walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
+        }
+    }
+
+
+
+    // PANELS    
     EnvelopePanel = <Frame> {
         layout: {flow: Down}
         walk: {width: Fill, height: Fill}
@@ -429,114 +494,6 @@ live_design!{
             }
         }
     }
-    
-    FishHeader = <Solid> {
-        bg: {
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let edge = 5.0;
-                sdf.move_to(1.0 + edge, 1.0);
-                sdf.line_to(self.rect_size.x - 2.0, 1.0);
-                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - 2.0)
-                sdf.line_to(1.0, self.rect_size.y - 2.0);
-                sdf.line_to(1.0, 1.0 + edge);
-                sdf.close_path();
-                sdf.fill(self.color);
-                return sdf.result
-            }
-        }
-        walk: {width: Fill, height: Fit}
-        layout: {padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
-        label = <Label> {
-            label: {
-                text_style: {font_size: (FONT_SIZE_H1), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-                color: (COLOR_TEXT_H1)
-            }
-            text: "replace me!"
-        }
-    }
-    
-    
-    FishPanel = <Frame> {
-        layout: {flow: Down, flow: Down, clip_y: true, clip_x: true}
-        walk: {width: Fill, height: Fit}
-        label = <FishHeader> {label = {text: "ReplaceMe", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
-        body = <Box> {
-            layout: {flow: Down, padding: {top: (SPACING_CONTROLS), left: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
-            walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
-            bg: {
-                color: #FFFFFF00
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    let edge = 8.0;
-                    sdf.move_to(1.0, 1.0);
-                    sdf.line_to(self.rect_size.x - 2.0, 1.0);
-                    sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
-                    sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
-                    sdf.line_to(1.0, self.rect_size.y - 2.0);
-                    sdf.close_path();
-                    sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
-                    sdf.stroke(self.color, 1.0)
-                    return sdf.result
-                }
-            }
-        }
-    }
-    
-    FishTabPanel = <Frame> {
-        layout: {flow: Down, flow: Down, clip_y: true, clip_x: true}
-        walk: {width: Fill, height: Fit}
-        body = <Box> {
-            layout: {flow: Down, padding: {top: (SPACING_CONTROLS), left: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
-            walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
-        }
-    }
-
-    // TouchPanel = <FishPanel> {
-    //     label = {bg: {color: (COLOR_TOUCH)}, label = {text: "Touch"}}
-    //     body = {
-    //         <Frame> {
-    //             layout: {flow: Right}
-    //             walk: {width: Fill, height: Fit}
-    //             scale = <InstrumentBipolarSlider> {
-    //                 slider = {
-    //                     slider: {line_color: (COLOR_TOUCH)}
-    //                     min: -1.0
-    //                     max: 1.0
-    //                     label: "Scale"
-    //                 }
-    //             }
-    //             curve = <InstrumentSlider> {
-    //                 slider = {
-    //                     slider: {line_color: (COLOR_TOUCH)}
-    //                     min: 0.0
-    //                     max: 1.0
-    //                     label: "Curvature"
-    //                 }
-    //             }
-    //         }
-    //         twocol = <Frame> {
-    //             layout: {flow: Right}
-    //             walk: {width: Fill, height: Fit}
-    //             offset = <InstrumentBipolarSlider> {
-    //                 slider = {
-    //                     slider: {line_color: (COLOR_TOUCH)}
-    //                     min: -1.0
-    //                     max: 1.0
-    //                     label: "Offset"
-    //                 }
-    //             }
-    //             touchamount = <InstrumentBipolarSlider> {
-    //                 slider = {
-    //                     slider: {line_color: (COLOR_TOUCH)}
-    //                     min: -1.0
-    //                     max: 1.0
-    //                     label: "Touch -> Cutoff"
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
     
     SequencerPanel = <FishPanel> {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
@@ -652,56 +609,6 @@ live_design!{
         }
     }
     
-    
-    MixerPanel = <FishTabPanel> {
-        // label = {bg: {color: (COLOR_MIX)}, label = {text: "Mixer"}}
-        body = {
-            bg: { color: #ffffff00 }
-            layout: {flow: Down}
-            walk: {width: Fill, height: Fit}
-            <Frame> {
-                layout: {flow: Right}
-                walk: {width: Fill, height: Fit}
-                balance = <InstrumentBipolarSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_MIX)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Oscillator 1/2 Balance"
-                    }
-                }
-                noise = <InstrumentSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_MIX)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Noise"
-                    }
-                }
-            }
-            <Frame> {
-                layout: {flow: Right}
-                walk: {width: Fill, height: Fit}
-                sub = <InstrumentSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_MIX)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Sub"
-                    }
-                }
-                porta = <InstrumentSlider> {
-                    slider = {
-                        slider: {line_color: (COLOR_MIX)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Portamento"
-                    }
-                }
-            }
-        }
-    }
-
     CrushFXPanel = <FishTabPanel> {
         body = {
             layout: {flow: Down}
@@ -726,6 +633,7 @@ live_design!{
             }
         }
     }
+    
     DelayFXPanel = <FishTabPanel> {
         body = {
             layout: {flow: Down}
@@ -845,37 +753,6 @@ live_design!{
         }
     }
     
-    // LFOPanel = <FishPanel> {
-    //     label = {bg: {color: (COLOR_LFO)}, label = {text: "LFO"}}
-    //     body = {
-    //         layout: {flow: Down}
-    //         walk: {width: Fill, height: Fit}
-    //         rate = <InstrumentSlider> {
-    //             slider = {
-    //                 slider: {line_color: (COLOR_LFO)}
-    //                 min: 0.0
-    //                 max: 1.0
-    //                 label: "Rate"
-    //             }
-    //         }
-    //         lfoamount = <InstrumentBipolarSlider> {
-    //             slider = {
-    //                 slider: {line_color: (COLOR_LFO)}
-    //                 min: -1.0
-    //                 max: 1.0
-    //                 label: "LFO -> Cutoff"
-    //             }
-    //         }
-    //         sync = <InstrumentCheckbox> {
-    //             walk: {height: Fit, margin: 3.0}
-    //             layout: {flow: Down, spacing: 0.0, align: {x: 0.0, y: 1.0}}
-    //             checkbox = {
-    //                 label: "Key sync"
-    //             }
-    //         }
-    //     }
-    // }
-    
     VolumeEnvelopePanel = <FishTabPanel> {
         body = {
             layout: {flow: Down}
@@ -970,7 +847,7 @@ live_design!{
             }
         }
     }
-    
+
     OscPanel = <FishTabPanel> {
         // label = {bg: {color: (COLOR_OSC)}, label = {text: "Oscillator ?"}}
         body = {
@@ -1078,10 +955,134 @@ live_design!{
             
         }
     }
+
+
+
+    // TABS
+    EnvelopeTabs = <Box> {
+        layout: {flow: Down, spacing: 0}
+        walk: {height: Fit, width: Fill}
+        bg: { color: #FFFFFF00
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let edge = 8.0;
+                sdf.move_to(1.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                sdf.line_to(1.0, self.rect_size.y - 2.0);
+                sdf.close_path();
+                sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                sdf.stroke(self.color, 1.0)
+                return sdf.result
+            }
+        }
+        <Frame> {
+            layout: {flow: Right, spacing: 0}
+            walk: {height: Fit, width: Fill}
+            <FishHeader> {label = {text: "Envelopes", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_ENV)}}
+            <Frame> {
+                layout: {flow: Right, spacing: 0}
+                walk: {height: Fit, width: Fill, margin: {left: -2, top: -0}}
+                tab1 = <FishTab> {
+                    label: "Modulation", state: {selected = {default: on}},
+                    radio_button: { instance color_inactive: (COLOR_ENV) }
+                }
+                tab2 = <FishTab> {label: "Volume",
+                    radio_button: { instance color_inactive: (COLOR_ENV) }
+                }
+            }
+        }
+        tab1_frame = <ModEnvelopePanel> {
+            visible: true,
+            layout: {flow: Down, clip_y: true}
+            walk: {width: Fill, height: Fit}
+        }
+        tab2_frame = <VolumeEnvelopePanel> {
+            visible: false
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fit}
+        }
+    }
+
+    OscillatorTabs = <Box> {
+        layout: {flow: Down, spacing: 0}
+        walk: {height: Fit, width: Fill}
+        bg: { color: #FFFFFF00
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let edge = 8.0;
+                sdf.move_to(1.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                sdf.line_to(1.0, self.rect_size.y - 2.0);
+                sdf.close_path();
+                sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                sdf.stroke(self.color, 1.0)
+                return sdf.result
+            }
+        }
+        <Frame> {
+            layout: {flow: Right, spacing: 0}
+            walk: {height: Fit, width: Fill}
+            bg: {color: #f00}
+            <FishHeader> {label = {text: "Sound Sources", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_OSC)}}
+            <Frame> {
+                layout: {flow: Right, spacing: 0}
+                walk: {height: Fit, width: Fill, margin: {left: -2, top: -0}}
+                tab1 = <FishTab> { label: "Osc 1", state: {selected = {default: on}}, radio_button: { instance color_inactive: (COLOR_OSC) } }
+                tab2 = <FishTab> { label: "Osc 2", radio_button: { instance color_inactive: (COLOR_OSC) } }
+                tab3 = <FishTab> { label: "Mixer", radio_button: { instance color_inactive: (COLOR_OSC) }
+                }
+            }
+        }
+        osc1 = <OscPanel> { visible: true }
+        osc2 = <OscPanel> { visible: false }
+    }
+
+    EffectsTabs = <Box> {
+        layout: {flow: Down, spacing: 0}
+        walk: {height: Fit, width: Fill}
+        bg: { color: #FFFFFF00
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let edge = 8.0;
+                sdf.move_to(1.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                sdf.line_to(1.0, self.rect_size.y - 2.0);
+                sdf.close_path();
+                sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                sdf.stroke(self.color, 1.0)
+                return sdf.result
+            }
+        }
+        <Frame> {
+            layout: {flow: Right, spacing: 0}
+            walk: {height: Fit, width: Fill}
+            bg: {color: #f00}
+            <FishHeader> {label = {text: "Effects", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_FX)}}
+            <Frame> {
+                layout: {flow: Right, spacing: 0}
+                walk: {height: Fit, width: Fit, margin: {left: -2, top: -0}}
+                tab1 = <FishTab> {label: "Bitcrush", state: {selected = {default: on}}}
+                tab2 = <FishTab> {label: "Chorus" }
+                tab3 = <FishTab> {label: "Delay" }
+            }
+        }
+        tab1_frame = <CrushFXPanel> {visible: true}
+        tab2_frame = <ChorusFXPanel> {visible: false}
+        tab3_frame = <DelayFXPanel> {visible: false}
+    }
+
     
+
+    // APP
     App = {{App}} {
         window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: #3}}
-        
+
         audio_graph: {
             root: <Mixer> {
                 c1 = <Instrument> {
@@ -1103,39 +1104,28 @@ live_design!{
             design_mode: false,
             bg: {color: #f00},
             walk: {width: Fill, height: Fill}
-            layout: {
-                padding: 0
-                align: {x: 0.0, y: 0.0}
-                spacing: 0.,
-                flow: Down
-            },
+            layout: { padding: 0, align: {x: 0.0, y: 0.0}, spacing: 0., flow: Down}
+
+            // APPLICATION HEADER
             <Frame> {
-                <Frame> {
-                    walk: {width: Fill, height: Fit, margin: {bottom: 5, left: 80, top: 10}}
-                    bg: {color: #f00}
-                    layout: {flow: Down, spacing: 8.0, align: {x: 1.0, y: 1.0}}
-                    <Frame> {
-                        walk: {width: Fill, height: Fit}
-                        layout: {flow: Right, spacing: 2.0}
-                        /*
-                        save1 = <FishButton> {text: "1"}
-                        save2 = <FishButton> {text: "2"}
-                        save3 = <FishButton> {text: "3"}
-                        save4 = <FishButton> {text: "4"}
-                        save5 = <FishButton> {text: "5"}
-                        save6 = <FishButton> {text: "6"}
-                        save7 = <FishButton> {text: "7"}
-                        save8 = <FishButton> {text: "8"}*/
-                        panic = <FishButton> {text: "Panic", walk: {width: Fit}}
-                    }
-                }
-                
-                layout: {flow: Right, spacing: 0.0, padding: {bottom: -50}, align: {x: 1.0, y: 0.0}}
                 walk: {margin: {left: 0, right: 5}, width: Fill, height: Fit}
-                <Image> {
-                    image: d"crate://self/resources/tinrs.png",
-                    walk: {width: (1000 * 0.25), height: (175 * 0.25)}
+                layout: {flow: Right, spacing: 0.0, padding: {bottom: -50}, align: {x: 1.0, y: 0.0}}
+                
+                <Frame> {
+                    walk: {width: Fill, height: Fit}
+                    layout: {flow: Right, spacing: 2.0}
+                    /*
+                    save1 = <FishButton> {text: "1"}
+                    save2 = <FishButton> {text: "2"}
+                    save3 = <FishButton> {text: "3"}
+                    save4 = <FishButton> {text: "4"}
+                    save5 = <FishButton> {text: "5"}
+                    save6 = <FishButton> {text: "6"}
+                    save7 = <FishButton> {text: "7"}
+                    save8 = <FishButton> {text: "8"}*/
+                    panic = <FishButton> {text: "Panic", walk: {width: Fit}}
                 }
+                <Image> { image: d"crate://self/resources/tinrs.png", walk: {width: (1000 * 0.25), height: (175 * 0.25)} }
             }
             <GradientY> {
                 walk: {width: Fill, height: 150, margin: {top: 0, right: 0, bottom: 0, left: 0}}
@@ -1144,194 +1134,53 @@ live_design!{
                     walk: {height: Fill, width: Fill}
                 }
             }
+
+            <GradientY> {
+                walk: {width: Fill, height: 15, margin: {top: 0, left: 0}}
+                bg: {color: #131820FF, color2: #13182000}
+            }
+
             
             piano = <Piano> {
                 walk: {width: Fill, height: Fit, margin: 0.0}
             }
             
-            <GradientY> {
-                walk: {width: Fill, height: 15, margin: {top: 0, left: 0}}
-                bg: {color: #131820FF, color2: #13182000}
-            }
-            
+
             <Frame> {
                 // scroll_bars: {show_scroll_x: true, show_scroll_y: true }
-                walk: {
-                    width: Fill,
-                    height: Fill
-                    margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)}
-                }
+                walk: { width: Fill, height: Fill, margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)} }
                 layout: {flow: Right, spacing: (SPACING_PANELS)}
                 column1 = <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: Fill}
-                    // <Frame> {
-                    //     walk: {height: Fit, width: Fill}
-                    //     layout: {flow: Right, spacing: (SPACING_PANELS)}
-                        // touch = <TouchPanel> {}
-                    // }
                     <Frame> {
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         walk: {height: Fill, width: Fill}
-                        <Frame> {
-                            walk: {height: Fill, width: Fill}
-                            layout: {flow: Down, spacing: (SPACING_PANELS)}
-                            <Frame> {
-                                walk: {height: Fit, width: Fill}
-                                layout: {flow: Right, spacing: (SPACING_PANELS)}
 
-                                oscillators = <Box> {
-                                    layout: {flow: Down, spacing: 0}
-                                    walk: {height: Fit, width: Fill}
-                                    bg: { color: #FFFFFF00
-                                        fn pixel(self) -> vec4 {
-                                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                            let edge = 8.0;
-                                            sdf.move_to(1.0, 1.0);
-                                            sdf.line_to(self.rect_size.x - 2.0, 1.0);
-                                            sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
-                                            sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
-                                            sdf.line_to(1.0, self.rect_size.y - 2.0);
-                                            sdf.close_path();
-                                            sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
-                                            sdf.stroke(self.color, 1.0)
-                                            return sdf.result
-                                        }
-                                    }
-                                    <Frame> {
-                                        layout: {flow: Right, spacing: 0}
-                                        walk: {height: Fit, width: Fill}
-                                        bg: {color: #f00}
-                                        <FishHeader> {label = {text: "Sound Sources", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_OSC)}}
-                                        <Frame> {
-                                            layout: {flow: Right, spacing: 0}
-                                            walk: {height: Fit, width: Fit, margin: {left: -2, top: -0}}
-                                            tab1 = <FishTab> {
-                                                label: "Osc 1", state: {selected = {default: on}},
-                                                radio_button: { instance color_inactive: (COLOR_OSC) }
-                                            }
-                                            tab2 = <FishTab> {
-                                                label: "Osc 2",
-                                                radio_button: { instance color_inactive: (COLOR_OSC) }
-                                            }
-                                            tab3 = <FishTab> {
-                                                label: "Mixer",
-                                                radio_button: { instance color_inactive: (COLOR_OSC) }
-                                            }
-                                        }
-                                    }
-                                    // tab1_frame = <CrushFXPanel> {visible: true}
-                                    osc1 = <OscPanel> {
-                                        // label = {label = {text: "Oscillator 1"}}
-                                        visible: true 
-                                    }
-                                    osc2 = <OscPanel> {
-                                        // label = {label = {text: "Oscillator 2"}},
-                                        visible: false
-                                    }
-                                    mixer = <MixerPanel> {
-                                        walk: {width: Fill, height: Fit}
-                                        visible: false
-                                    }
-                                }
-                            }
-                            // <LFOPanel> {
-                            //     walk: {width: Fill, height: Fit}
-                            // }
-                            envelopes = <Box> {
-                                layout: {flow: Down, spacing: 0}
-                                walk: {height: Fit, width: Fill}
-                                bg: { color: #FFFFFF00
-                                    fn pixel(self) -> vec4 {
-                                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                        let edge = 8.0;
-                                        sdf.move_to(1.0, 1.0);
-                                        sdf.line_to(self.rect_size.x - 2.0, 1.0);
-                                        sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
-                                        sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
-                                        sdf.line_to(1.0, self.rect_size.y - 2.0);
-                                        sdf.close_path();
-                                        sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
-                                        sdf.stroke(self.color, 1.0)
-                                        return sdf.result
-                                    }
-                                }
-                                <Frame> {
-                                    layout: {flow: Right, spacing: 0}
-                                    walk: {height: Fit, width: Fill}
-                                    <FishHeader> {label = {text: "Envelopes", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_ENV)}}
-                                    <Frame> {
-                                        layout: {flow: Right, spacing: 0}
-                                        walk: {height: Fit, width: Fill, margin: {left: -2, top: -0}}
-                                        tab1 = <FishTab> {
-                                            label: "Modulation", state: {selected = {default: on}},
-                                            radio_button: { instance color_inactive: (COLOR_ENV) }
-                                        }
-                                        tab2 = <FishTab> {label: "Volume",
-                                            radio_button: { instance color_inactive: (COLOR_ENV) }
-                                        }
-                                    }
-                                }
-                                tab1_frame = <ModEnvelopePanel> {
-                                    visible: true,
-                                    layout: {flow: Down, clip_y: true}
-                                    walk: {width: Fill, height: Fit}
-                                }
-                                tab2_frame = <VolumeEnvelopePanel> {
-                                    visible: false
-                                    layout: {flow: Down}
-                                    walk: {width: Fill, height: Fit}
-                                }
-                            }
-                            <FilterPanel> {
-                                layout: {flow: Down}
-                                walk: {width: Fill, height: Fit}
-                            }
-                            effects = <Box> {
-                                layout: {flow: Down, spacing: 0}
-                                walk: {height: Fit, width: Fill}
-                                bg: { color: #FFFFFF00
-                                    fn pixel(self) -> vec4 {
-                                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                        let edge = 8.0;
-                                        sdf.move_to(1.0, 1.0);
-                                        sdf.line_to(self.rect_size.x - 2.0, 1.0);
-                                        sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
-                                        sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
-                                        sdf.line_to(1.0, self.rect_size.y - 2.0);
-                                        sdf.close_path();
-                                        sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
-                                        sdf.stroke(self.color, 1.0)
-                                        return sdf.result
-                                    }
-                                }
-                                <Frame> {
-                                    layout: {flow: Right, spacing: 0}
-                                    walk: {height: Fit, width: Fill}
-                                    bg: {color: #f00}
-                                    <FishHeader> {label = {text: "Effects", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, bg: {color: (COLOR_FX)}}
-                                    <Frame> {
-                                        layout: {flow: Right, spacing: 0}
-                                        walk: {height: Fit, width: Fit, margin: {left: -2, top: -0}}
-                                        tab1 = <FishTab> {label: "Bitcrush", state: {selected = {default: on}}}
-                                        tab2 = <FishTab> {label: "Chorus" }
-                                        tab3 = <FishTab> {label: "Delay" }
-                                    }
-                                }
-                                tab1_frame = <CrushFXPanel> {visible: true}
-                                tab2_frame = <ChorusFXPanel> {visible: false}
-                                tab3_frame = <DelayFXPanel> {visible: false}
-                            }
-                        }
+
+                        // COLUMN 1-1
                         <Frame> {
                             walk: {height: Fill, width: Fill}
                             layout: {flow: Down, spacing: (SPACING_PANELS)}
+                        
+                            oscillators = <OscillatorTabs> {layout: {flow: Down}, walk: {width: Fill, height: Fit}}
+                            envelopes = <EnvelopeTabs> {layout: {flow: Down}, walk: {width: Fill, height: Fit}}
+                            <FilterPanel> { layout: {flow: Down}, walk: {width: Fill, height: Fit} }
+                        }
+
+                        // COLUMN 1-2
+                        <Frame> {
+                            walk: {height: Fill, width: Fill}
+                            layout: {flow: Down, spacing: (SPACING_PANELS)}
+
+                            effects = <EffectsTabs> {}
                         }
                     }
                 }
-                column2 = <Frame> {
+                
+                // COLUMN 2
+                <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-
                     walk: {height: Fill}
                     <SequencerPanel> {
                         walk: {height: Fill}
