@@ -348,7 +348,6 @@ impl CocoaWindow {
             abs: self.last_mouse_pos,
             time: self.time_now(),
             handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
         })]);
     }
     
@@ -374,7 +373,6 @@ impl CocoaWindow {
             modifiers: modifiers,
             time: self.time_now(),
             handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
         }));
         
         //get_cocoa_app_global().ns_event = event;
