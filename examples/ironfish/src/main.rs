@@ -450,8 +450,9 @@ live_design!{
     EnvelopePanel = <Frame> {
         layout: {flow: Down}
         walk: {width: Fill, height: Fill}
-        display = <GraphPaper> {
-        }
+
+        display = <GraphPaper> {}
+
         attack = <InstrumentSlider> {
             slider = {
                 slider: {line_color: (COLOR_ENV)}
@@ -460,6 +461,7 @@ live_design!{
                 label: "A"
             }
         }
+
         hold = <InstrumentSlider> {
             slider = {
                 slider: {line_color: (COLOR_ENV)}
@@ -469,6 +471,7 @@ live_design!{
                 label: "H"
             }
         }
+
         decay = <InstrumentSlider> {
             slider = {
                 slider: {line_color: (COLOR_ENV)}
@@ -477,6 +480,7 @@ live_design!{
                 label: "D"
             }
         }
+
         sustain = <InstrumentSlider> {
             slider = {
                 slider: {line_color: (COLOR_ENV)}
@@ -485,12 +489,48 @@ live_design!{
                 label: "S"
             }
         }
+
         release = <InstrumentSlider> {
             slider = {
                 slider: {line_color: (COLOR_ENV)}
                 min: 0.0
                 max: 1.0
                 label: "R"
+            }
+        }
+    }
+
+    VolumeEnvelopePanel = <FishTabPanel> {
+        body = {
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fit}
+            bg: {color: #xffffff00}        
+
+            vol_env = <EnvelopePanel> {
+                layout: {flow: Down}
+                walk: {width: Fill, height: Fit}
+            }
+        }
+    }
+
+    ModEnvelopePanel = <FishTabPanel> {
+        body = {
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fit}
+            bg: {color: #xffffff00}        
+
+            mod_env = <EnvelopePanel> {
+                layout: {flow: Down}
+                walk: {width: Fill, height: Fit}
+            }
+
+            modamount = <InstrumentBipolarSlider> {
+                slider = {
+                    slider: {line_color: (COLOR_ENV)}
+                    min: -1.0
+                    max: 1.0
+                    label: "Modulation Cutoff Amount"
+                }
             }
         }
     }
@@ -613,23 +653,28 @@ live_design!{
         body = {
             layout: {flow: Down}
             walk: {width: Fill, height: Fit}
-            bg: {color: #xffffff00}        
-            crushenable = <InstrumentCheckbox> {
-                walk: {width: Fit, height: Fill, margin: 5}
-                layout: {align: {x: 0.0, y: 0.5}}
-                checkbox = {
-                    label: "On"
+            bg: {color: #xffffff00}
+
+            <Frame> {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+
+                crushamount = <InstrumentSlider> {
+                    walk: {width: Fill, height: Fit}
+                    slider = {
+                        slider: {line_color: (COLOR_FX)}
+                        min: 0.0
+                        max: 1.0
+                        label: "Amount"
+                        
+                    }
                 }
-            }
-            
-            crushamount = <InstrumentSlider> {
-                slider = {
-                    slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Amount"
-                    
+
+                crushenable = <InstrumentCheckbox> {
+                    walk: {width: Fit, height: Fill, margin: 5}
+                    checkbox = { label: "On" }
                 }
+
             }
         }
     }
@@ -691,6 +736,7 @@ live_design!{
             <Frame> {
                 layout: {flow: Right}
                 walk: {width: Fill, height: Fit}
+
                 chorusmix = <InstrumentSlider> {
                     slider = {
                         slider: {line_color: (COLOR_FX)}
@@ -753,37 +799,6 @@ live_design!{
         }
     }
     
-    VolumeEnvelopePanel = <FishTabPanel> {
-        body = {
-            layout: {flow: Down}
-            walk: {width: Fill, height: Fill}
-            bg: {color: #xffffff00}        
-            vol_env = <EnvelopePanel> {
-                layout: {flow: Down}
-                walk: {width: Fill, height: Fill}
-            }
-        }
-    }
-    
-    ModEnvelopePanel = <FishTabPanel> {
-        body = {
-            layout: {flow: Down}
-            walk: {width: Fill, height: Fill}
-            bg: {color: #xffffff00}        
-            mod_env = <EnvelopePanel> {
-                layout: {flow: Down}
-                walk: {width: Fill, height: Fit}
-            }
-            modamount = <InstrumentBipolarSlider> {
-                slider = {
-                    slider: {line_color: (COLOR_ENV)}
-                    min: -1.0
-                    max: 1.0
-                    label: "Modulation Cutoff Amount"
-                }
-            }
-        }
-    }
     
     FilterPanel = <FishPanel> {
         label = {bg: {color: (COLOR_FILTER)}, label = {text: "Filter"}}
@@ -956,7 +971,54 @@ live_design!{
         }
     }
 
-
+    MixerPanel = <FishTabPanel> {
+        // label = {bg: {color: (COLOR_MIX)}, label = {text: "Mixer"}}
+        body = {
+            bg: { color: #ffffff00 }
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fit}
+            <Frame> {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                balance = <InstrumentBipolarSlider> {
+                    slider = {
+                        slider: {line_color: (COLOR_MIX)}
+                        min: 0.0
+                        max: 1.0
+                        label: "Oscillator 1/2 Balance"
+                    }
+                }
+                noise = <InstrumentSlider> {
+                    slider = {
+                        slider: {line_color: (COLOR_MIX)}
+                        min: 0.0
+                        max: 1.0
+                        label: "Noise"
+                    }
+                }
+            }
+            <Frame> {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                sub = <InstrumentSlider> {
+                    slider = {
+                        slider: {line_color: (COLOR_MIX)}
+                        min: 0.0
+                        max: 1.0
+                        label: "Sub"
+                    }
+                }
+                porta = <InstrumentSlider> {
+                    slider = {
+                        slider: {line_color: (COLOR_MIX)}
+                        min: 0.0
+                        max: 1.0
+                        label: "Portamento"
+                    }
+                }
+            }
+        }
+    }
 
     // TABS
     EnvelopeTabs = <Box> {
@@ -1039,7 +1101,8 @@ live_design!{
         }
         osc1 = <OscPanel> { visible: true }
         osc2 = <OscPanel> { visible: false }
-    }
+        mixer = <MixerPanel> { walk: {width: Fill, height: Fit}, visible: false }
+        }                                    
 
     EffectsTabs = <Box> {
         layout: {flow: Down, spacing: 0}
@@ -1086,16 +1149,7 @@ live_design!{
         audio_graph: {
             root: <Mixer> {
                 c1 = <Instrument> {
-                    /*  AudioUnitInstrument {
-                        plugin: "Kontakt"
-                    }*/
-                    <IronFish> {
-                    }
-                    //key_range: {start: 34, end: 47 shift: 30}
-                    /*
-                    AudioUnitInstrument {
-                        plugin: "Kontakt"
-                    }*/
+                    <IronFish> {}
                 }
             }
         }
@@ -1114,16 +1168,9 @@ live_design!{
                 <Frame> {
                     walk: {width: Fill, height: Fit}
                     layout: {flow: Right, spacing: 2.0}
-                    /*
-                    save1 = <FishButton> {text: "1"}
-                    save2 = <FishButton> {text: "2"}
-                    save3 = <FishButton> {text: "3"}
-                    save4 = <FishButton> {text: "4"}
-                    save5 = <FishButton> {text: "5"}
-                    save6 = <FishButton> {text: "6"}
-                    save7 = <FishButton> {text: "7"}
-                    save8 = <FishButton> {text: "8"}*/
+
                     panic = <FishButton> {text: "Panic", walk: {width: Fit}}
+                    // save1 = <FishButton> {text: "1"}
                 }
                 <Image> { image: d"crate://self/resources/tinrs.png", walk: {width: (1000 * 0.25), height: (175 * 0.25)} }
             }
@@ -1135,24 +1182,23 @@ live_design!{
                 }
             }
 
-            <GradientY> {
-                walk: {width: Fill, height: 15, margin: {top: 0, left: 0}}
-                bg: {color: #131820FF, color2: #13182000}
-            }
-
             
             piano = <Piano> {
                 walk: {width: Fill, height: Fit, margin: 0.0}
             }
             
-
+            // CONTROLS
             <Frame> {
-                // scroll_bars: {show_scroll_x: true, show_scroll_y: true }
                 walk: { width: Fill, height: Fill, margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)} }
                 layout: {flow: Right, spacing: (SPACING_PANELS)}
+                
+                // COLUMNS CONTAINER
                 column1 = <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: Fill}
+
+
+                    // COLUMN 1
                     <Frame> {
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         walk: {height: Fill, width: Fill}
@@ -1168,6 +1214,7 @@ live_design!{
                             <FilterPanel> { layout: {flow: Down}, walk: {width: Fill, height: Fit} }
                         }
 
+
                         // COLUMN 1-2
                         <Frame> {
                             walk: {height: Fill, width: Fill}
@@ -1181,9 +1228,9 @@ live_design!{
                 // COLUMN 2
                 <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    walk: {height: Fill}
+                    walk: {height: Fill, width: Fill}
                     <SequencerPanel> {
-                        walk: {height: Fill}
+                        walk: {height: Fill, width: Fill}
                     }
                 }
             }
