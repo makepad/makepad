@@ -1,8 +1,8 @@
 use {
-    std::{
+    /*std::{
         rc::Rc,
         cell::{RefCell},        
-    },
+    },*/
     crate::{
         makepad_platform::*,
         cx_2d::Cx2d,
@@ -12,7 +12,7 @@ use {
 #[derive(Debug)]
 pub struct Overlay { // draw info per UI element
     pub (crate) draw_list: DrawList,
-    pub (crate) sweep_lock: Rc<RefCell<Area>>, 
+    //pub (crate) sweep_lock: Rc<RefCell<Area>>, 
 }
 
 impl LiveHook for Overlay {}
@@ -21,7 +21,7 @@ impl LiveNew for Overlay {
         let draw_list = cx.draw_lists.alloc();
         //cx.draw_lists[draw_list.id()].unclipped = true;
         Self {
-            sweep_lock: Rc::new(RefCell::new(Area::Empty)),
+            //sweep_lock: Rc::new(RefCell::new(Area::Empty)),
             draw_list,
         }
     }
@@ -44,8 +44,8 @@ impl LiveApply for Overlay {
 }
 
 impl Overlay {
-    pub fn handle_event(&self, _cx:&Cx, event:&Event){
-        let area = self.sweep_lock.borrow().clone();
+    pub fn handle_event(&self, _cx:&Cx, _event:&Event){
+        /*let area = self.sweep_lock.borrow().clone();
         if !area.is_empty(){
             match event{
                 Event::MouseMove(e)=>e.sweep_lock.set(area),
@@ -53,13 +53,13 @@ impl Overlay {
                 Event::Scroll(e)=>e.sweep_lock.set(area),
                 _=>()
             }
-        }
+        }*/
     }
     
     pub fn begin(&self, cx:&mut Cx2d){
         // mark our overlay_id on cx
         cx.overlay_id = Some(self.draw_list.id());
-        cx.overlay_sweep_lock = Some(self.sweep_lock.clone());
+       // cx.overlay_sweep_lock = Some(self.sweep_lock.clone());
     }
     
     pub fn end(&self, cx:&mut Cx2d){

@@ -48,7 +48,6 @@ pub struct MouseDownEvent {
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub handled: Cell<Area>,
-    pub sweep_lock: Cell<Area>,
     pub time: f64
 }
 
@@ -59,7 +58,6 @@ pub struct MouseMoveEvent {
     pub modifiers: KeyModifiers,
     pub time: f64,
     pub handled: Cell<Area>,
-    pub sweep_lock: Cell<Area>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,11 +75,41 @@ pub struct ScrollEvent {
     pub scroll: DVec2,
     pub abs: DVec2,
     pub modifiers: KeyModifiers,
-    pub sweep_lock: Cell<Area>,
     pub handled_x: Cell<bool>,
     pub handled_y: Cell<bool>,
     pub is_mouse: bool,
     pub time: f64
+}
+
+
+// Touch events
+
+#[derive(Clone, Debug)]
+pub enum TouchState {
+    Start,
+    Stop,
+    Move,
+    Stable
+}
+
+#[derive(Clone, Debug)]
+pub struct TouchPoint {
+    pub state: TouchState,
+    pub abs: DVec2,
+    pub uid: u64,
+    pub rotation_angle: f64,
+    pub force: f64,
+    pub radius: DVec2,
+    pub handled: Cell<Area>,
+    pub sweep_lock: Cell<Area>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TouchUpdateEvent {
+    pub time: f64,
+    pub window_id: WindowId,
+    pub modifiers: KeyModifiers,
+    pub touches: Vec<TouchPoint>,
 }
 
 
@@ -151,6 +179,8 @@ pub struct DigitId(pub LiveId);
 pub struct CxDigitCapture {
     digit_id: DigitId,
     pub area: Area,
+    pub sweep_area: Area,
+    pub move_capture: Option<Area>,
     pub time: f64,
     pub abs_start: DVec2,
 }
@@ -174,12 +204,12 @@ pub struct CxDigitHover {
 pub struct CxFingers {
     pub first_mouse_button: Option<usize>,
     captures: Vec<CxDigitCapture>,
-    taps: Vec<CxDigitTap>,
+    tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
 }
 
 impl CxFingers {
-
+    
     pub (crate) fn get_captured_area(&self, digit_id: DigitId) -> Area {
         if let Some(cxdigit) = self.captures.iter().find( | v | v.digit_id == digit_id) {
             cxdigit.area
@@ -214,7 +244,9 @@ impl CxFingers {
         for capture in &mut self.captures {
             if capture.area == old_area {
                 capture.area = new_area;
-                return
+            }
+            if capture.sweep_area == old_area {
+                capture.sweep_area = new_area;
             }
         }
     }
@@ -249,7 +281,7 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn capture_digit(&mut self, digit_id: DigitId, area: Area, time: f64, abs_start: DVec2) {
+    pub (crate) fn capture_digit(&mut self, digit_id: DigitId, area: Area, sweep_area: Area, time: f64, abs_start: DVec2) {
         if let Some(capture) = self.captures.iter_mut().find( | v | v.digit_id == digit_id) {
             capture.area = area;
             capture.time = time;
@@ -257,16 +289,18 @@ impl CxFingers {
         }
         else {
             self.captures.push(CxDigitCapture {
+                sweep_area,
                 digit_id,
                 area,
                 time,
                 abs_start,
+                move_capture: None
             })
         }
     }
     
-    pub (crate) fn get_digit_capture(&mut self, digit_id: DigitId) -> Option<&CxDigitCapture> {
-        self.captures.iter().find( | v | v.digit_id == digit_id)
+    pub (crate) fn get_digit_capture(&mut self, digit_id: DigitId) -> Option<&mut CxDigitCapture> {
+        self.captures.iter_mut().find( | v | v.digit_id == digit_id)
     }
     
     pub (crate) fn release_digit(&mut self, digit_id: DigitId) {
@@ -275,43 +309,42 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn get_tap_count(&self, digit_id: DigitId) -> u32 {
-        if let Some(tap) = self.taps.iter().find( | v | v.digit_id == digit_id) {
-            tap.count
-        }
-        else {
-            0
+    pub (crate) fn remove_hover(&mut self, digit_id: DigitId) {
+        if let Some(index) = self.hovers.iter_mut().position( | v | v.digit_id == digit_id) {
+            self.hovers.remove(index);
         }
     }
     
-    pub (crate) fn process_tap_count(&mut self, digit_id: DigitId, pos: DVec2, time: f64) -> u32 {
-        self.taps.retain( | tap | (time - tap.last_time) < TAP_COUNT_TIME);
-        
-        if let Some(tap) = self.taps.iter_mut().find( | v | v.digit_id == digit_id) {
-            if pos.distance(&tap.last_pos) < TAP_COUNT_DISTANCE {
-                tap.count += 1;
-            }
-            else {
-                tap.count = 1;
-            }
-            tap.last_pos = pos;
-            tap.last_time = time;
-            return tap.count
+    pub (crate) fn get_tap_count(&self) -> u32 {
+        self.tap.count
+    }
+    
+    pub (crate) fn process_tap_count(&mut self, pos: DVec2, time: f64) -> u32 {
+        if (time - self.tap.last_time) < TAP_COUNT_TIME
+            && pos.distance(&self.tap.last_pos) < TAP_COUNT_DISTANCE {
+            self.tap.count += 1;
         }
-        self.taps.push(CxDigitTap {
-            digit_id,
-            last_pos: pos,
-            last_time: time,
-            count: 1
-        });
-        1
+        else {
+            self.tap.count = 1;
+        }
+        self.tap.last_pos = pos;
+        self.tap.last_time = time;
+        return self.tap.count
     }
     
     pub (crate) fn mouse_down(&mut self, button: usize) {
         if self.first_mouse_button.is_none() {
             self.first_mouse_button = Some(button);
         }
-        
+    }
+    
+    pub (crate) fn move_captures(&mut self) {
+        for capture in &mut self.captures {
+            if let Some(area) = capture.move_capture {
+                capture.area = area;
+                capture.move_capture = None;
+            }
+        }
     }
     
     pub (crate) fn mouse_up(&mut self, button: usize) {
@@ -383,36 +416,6 @@ pub struct FingerMoveEvent {
     pub is_over: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct FingerSweepEvent {
-    pub abs: DVec2,
-    pub abs_start: DVec2,
-    pub rect: Rect,
-    
-    pub window_id: WindowId,
-    
-    pub digit_id: DigitId,
-    pub device: DigitDevice,
-    
-    pub capture_time: f64,
-    
-    pub is_finger_up: bool,
-    
-    pub tap_count: u32,
-    pub modifiers: KeyModifiers,
-    pub time: f64,
-}
-
-impl FingerSweepEvent {
-    pub fn was_tap(&self) -> bool {
-        if !self.is_finger_up{
-            return false
-        }
-        self.time - self.capture_time < TAP_COUNT_TIME &&
-        (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
-    }
-}
-
 impl FingerMoveEvent {
     pub fn move_distance(&self) -> f64 {
         ((self.abs_start.x - self.abs.x).powf(2.) + (self.abs_start.y - self.abs.y).powf(2.)).sqrt()
@@ -434,6 +437,7 @@ pub struct FingerUpEvent {
     pub abs_start: DVec2,
     pub rect: Rect,
     pub is_over: bool,
+    pub is_sweep: bool
 }
 
 impl FingerUpEvent {
@@ -491,31 +495,25 @@ pub enum HitTouch {
 
 #[derive(Clone, Debug, Default)]
 pub struct HitOptions {
-    pub use_multi_touch: bool,
     pub margin: Option<Margin>,
     pub sweep_area: Area
 }
 
 impl HitOptions {
-    pub fn with_sweep_area(sweep_area: Area) -> Self {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    pub fn with_sweep_area(self, area: Area) -> Self {
         Self {
-            use_multi_touch: false,
-            sweep_area,
-            margin: None
+            sweep_area: area,
+            ..self
         }
     }
-    pub fn margin(margin: Margin) -> Self {
+    pub fn with_margin(self, margin: Margin) -> Self {
         Self {
-            use_multi_touch: false,
-            sweep_area: Area::Empty,
-            margin: Some(margin)
-        }
-    }
-    pub fn with_multi_touch() -> Self {
-        Self {
-            use_multi_touch: true,
-            sweep_area: Area::Empty,
-            margin: None
+            margin: Some(margin),
+            ..self
         }
     }
 }
@@ -525,6 +523,10 @@ impl Event {
     
     pub fn hits(&self, cx: &mut Cx, area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::default())
+    }
+    
+    pub fn hits_with_sweep_area(&self, cx: &mut Cx, area: Area, sweep_area:Area) -> Hit {
+        self.hits_with_options(cx, area, HitOptions::new().with_sweep_area(sweep_area))
     }
     
     pub fn hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> Hit {
@@ -562,15 +564,12 @@ impl Event {
             },
             Event::Scroll(e) => {
                 let digit_id = live_id!(mouse).into();
-                let sweep_lock = e.sweep_lock.get();
-                if !sweep_lock.is_empty() && sweep_lock != options.sweep_area {
-                    return Hit::Nothing
-                }
+
                 let rect = area.get_clipped_rect(&cx);
                 if Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
                     //fe.handled = true;
                     let device = DigitDevice::Mouse {
-                        button:0,
+                        button: 0,
                     };
                     return Hit::FingerScroll(FingerScrollEvent {
                         abs: e.abs,
@@ -584,13 +583,147 @@ impl Event {
                     })
                 }
             },
+            Event::TouchUpdateEvent(e) => {
+                // ok so .. lets iterate touches
+                // and lets look at touch starts, touch moves and touch stops
+                for t in &e.touches {
+                    let digit_id = live_id_num!(touch, t.uid).into();
+                    let device = DigitDevice::Touch {
+                        uid: t.uid,
+                    };
+                    
+                    match t.state {
+                        TouchState::Start => {
+                            if !t.handled.get().is_empty() {
+                                continue;
+                            }
+                            
+                            let rect = area.get_clipped_rect(&cx);
+                            if !Margin::rect_contains_with_margin(&rect, t.abs, &options.margin) {
+                                continue;
+                            }
+                            
+                            cx.fingers.capture_digit(digit_id, area, options.sweep_area, e.time, t.abs);
+                            
+                            t.handled.set(area);
+                            return Hit::FingerDown(FingerDownEvent {
+                                window_id: e.window_id,
+                                abs: t.abs,
+                                digit_id,
+                                device,
+                                tap_count: cx.fingers.get_tap_count(),
+                                modifiers: e.modifiers.clone(),
+                                time: e.time,
+                                rect,
+                            })
+                        }
+                        TouchState::Stop => {
+                            let tap_count = cx.fingers.get_tap_count();
+                            let rect = area.get_clipped_rect(&cx);
+                            if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
+                                if capture.area == area {
+                                    return Hit::FingerUp(FingerUpEvent {
+                                        abs_start: capture.abs_start,
+                                        rect: rect,
+                                        window_id: e.window_id,
+                                        abs: t.abs,
+                                        digit_id,
+                                        device,
+                                        tap_count,
+                                        capture_time: capture.time,
+                                        modifiers: e.modifiers.clone(),
+                                        time: e.time,
+                                        is_over: rect.contains(t.abs),
+                                        is_sweep: false,
+                                    })
+                                }
+                            }
+                        }
+                        TouchState::Move => {
+                            let tap_count = cx.fingers.get_tap_count();
+                            let hover_last = cx.fingers.get_hover_area(digit_id);
+                            let rect = area.get_clipped_rect(&cx);
+                            
+                            if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
+                                let handled_area = t.handled.get();
+                                if !options.sweep_area.is_empty() {
+                                    if capture.move_capture.is_none()
+                                        && Margin::rect_contains_with_margin(&rect, t.abs, &options.margin) {
+                                        if t.handled.get().is_empty() {
+                                            t.handled.set(area);
+                                            if capture.area == area {
+                                                return Hit::FingerMove(FingerMoveEvent {
+                                                    window_id: e.window_id,
+                                                    abs: t.abs,
+                                                    digit_id,
+                                                    device,
+                                                    tap_count,
+                                                    modifiers: e.modifiers.clone(),
+                                                    time: e.time,
+                                                    abs_start: capture.abs_start,
+                                                    rect,
+                                                    is_over: true,
+                                                })
+                                            }
+                                            else if capture.sweep_area == options.sweep_area { // take over the capture
+                                                capture.move_capture = Some(area);
+                                                return Hit::FingerDown(FingerDownEvent {
+                                                    window_id: e.window_id,
+                                                    abs: t.abs,
+                                                    digit_id,
+                                                    device,
+                                                    tap_count: cx.fingers.get_tap_count(),
+                                                    modifiers: e.modifiers.clone(),
+                                                    time: e.time,
+                                                    rect: rect,
+                                                })
+                                            }
+                                        }
+                                    }
+                                    else if capture.area == area { // we are not over the area
+                                        if capture.move_capture.is_none() {
+                                            capture.move_capture = Some(Area::Empty);
+                                        }
+                                        return Hit::FingerUp(FingerUpEvent {
+                                            abs_start: capture.abs_start,
+                                            rect: rect,
+                                            window_id: e.window_id,
+                                            abs: t.abs,
+                                            digit_id,
+                                            device,
+                                            tap_count,
+                                            capture_time: capture.time,
+                                            modifiers: e.modifiers.clone(),
+                                            time: e.time,
+                                            is_sweep: true,
+                                            is_over: false,
+                                        });
+                                    }
+                                }
+                                else if capture.area == area {
+                                    return Hit::FingerMove(FingerMoveEvent {
+                                        window_id: e.window_id,
+                                        abs: t.abs,
+                                        digit_id,
+                                        device,
+                                        tap_count,
+                                        modifiers: e.modifiers.clone(),
+                                        time: e.time,
+                                        abs_start: capture.abs_start,
+                                        rect,
+                                        is_over: Margin::rect_contains_with_margin(&rect, t.abs, &options.margin),
+                                    })
+                                }
+                            }
+                        }
+                        TouchState::Stable => {}
+                    }
+                }
+            }
             Event::MouseMove(e) => { // ok so we dont get hovers
                 let digit_id = live_id!(mouse).into();
-                let sweep_lock = e.sweep_lock.get();
-                if !sweep_lock.is_empty() && sweep_lock != options.sweep_area {
-                    return Hit::Nothing
-                }
-                let tap_count = cx.fingers.get_tap_count(digit_id);
+                
+                let tap_count = cx.fingers.get_tap_count();
                 let hover_last = cx.fingers.get_hover_area(digit_id);
                 let rect = area.get_clipped_rect(&cx);
                 
@@ -600,47 +733,63 @@ impl Event {
                     };
                     
                     if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
-                        if capture.area == options.sweep_area {
-                            
-                            let abs_start = capture.abs_start;
-                            
-                            let fse = FingerSweepEvent {
-                                abs_start,
-                                rect,
-                                window_id: e.window_id,
-                                abs: e.abs,
-                                digit_id,
-                                device,
-                                tap_count,
-                                capture_time: capture.time,
-                                is_finger_up: false,
-                                modifiers: e.modifiers.clone(),
-                                time: e.time,
-                            };
-                            
-                            if hover_last == area {
-                                let handled_area = e.handled.get();
-                                
-                                if handled_area.is_empty() && Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
+                        let handled_area = e.handled.get();
+                        if !options.sweep_area.is_empty() {
+                            if capture.move_capture.is_none()
+                                && Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
+                                if e.handled.get().is_empty() {
                                     e.handled.set(area);
-                                    cx.fingers.new_hover_area(digit_id, area);
-                                    return Hit::FingerSweep(fse)
-                                }
-                                else {
-                                    return Hit::FingerSweepOut(fse)
+                                    if capture.area == area {
+                                        return Hit::FingerMove(FingerMoveEvent {
+                                            window_id: e.window_id,
+                                            abs: e.abs,
+                                            digit_id,
+                                            device,
+                                            tap_count,
+                                            modifiers: e.modifiers.clone(),
+                                            time: e.time,
+                                            abs_start: capture.abs_start,
+                                            rect,
+                                            is_over: true,
+                                        })
+                                    }
+                                    else if capture.sweep_area == options.sweep_area { // take over the capture
+                                        capture.move_capture = Some(area);
+                                        return Hit::FingerDown(FingerDownEvent {
+                                            window_id: e.window_id,
+                                            abs: e.abs,
+                                            digit_id,
+                                            device,
+                                            tap_count: cx.fingers.get_tap_count(),
+                                            modifiers: e.modifiers.clone(),
+                                            time: e.time,
+                                            rect,
+                                        })
+                                    }
                                 }
                             }
-                            else {
-                                let handled_area = e.handled.get();
-                                if handled_area.is_empty() && Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
-                                    cx.fingers.new_hover_area(digit_id, area);
-                                    e.handled.set(area);
-                                    return Hit::FingerSweepIn(fse)
+                            else if capture.area == area { // we are not over the area
+                                if capture.move_capture.is_none() {
+                                    capture.move_capture = Some(Area::Empty);
                                 }
+                                return Hit::FingerUp(FingerUpEvent {
+                                    abs_start: capture.abs_start,
+                                    rect,
+                                    window_id: e.window_id,
+                                    abs: e.abs,
+                                    digit_id,
+                                    device,
+                                    tap_count,
+                                    capture_time: capture.time,
+                                    modifiers: e.modifiers.clone(),
+                                    time: e.time,
+                                    is_sweep: true,
+                                    is_over: false,
+                                });
+                                
                             }
                         }
                         else if capture.area == area {
-                            
                             return Hit::FingerMove(FingerMoveEvent {
                                 window_id: e.window_id,
                                 abs: e.abs,
@@ -657,7 +806,6 @@ impl Event {
                     }
                 }
                 else {
-                    
                     let device = DigitDevice::Mouse {
                         button: 0,
                     };
@@ -696,12 +844,6 @@ impl Event {
             },
             Event::MouseDown(e) => {
                 let digit_id = live_id!(mouse).into();
-                // alright we get a mouse down. so now what.
-                // we're now going to unify this into the finger api
-                let sweep_lock = e.sweep_lock.get();
-                if !sweep_lock.is_empty() && sweep_lock != options.sweep_area {
-                    return Hit::Nothing
-                }
                 
                 if !e.handled.get().is_empty() {
                     return Hit::Nothing
@@ -712,89 +854,48 @@ impl Event {
                 }
                 
                 let rect = area.get_clipped_rect(&cx);
-                if Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
-                    
-                    let device = DigitDevice::Mouse {
-                        button: e.button,
-                    };
-                    
-                    // if the area is already captured by some other digit, dont send anything
-                    // if we have a sweep area, capture that one
-                    if options.sweep_area.is_empty() {
-                        if cx.fingers.get_digit_for_captured_area(area).is_some() {
-                            return Hit::Nothing;
-                        }
-                        cx.fingers.capture_digit(digit_id, area, e.time, e.abs);
-                        e.handled.set(area);
-                        return Hit::FingerDown(FingerDownEvent {
-                            window_id: e.window_id,
-                            abs: e.abs,
-                            digit_id,
-                            device,
-                            tap_count: cx.fingers.get_tap_count(digit_id),
-                            modifiers: e.modifiers.clone(),
-                            time: e.time,
-                            rect: rect,
-                        })
-                    }
-                    else {
-                        if cx.fingers.get_digit_for_captured_area(area).is_some() {
-                            return Hit::Nothing;
-                        }
-                        
-                        cx.fingers.capture_digit(digit_id, options.sweep_area, e.time, e.abs);
-                        cx.fingers.new_hover_area(digit_id, area);
-                        e.handled.set(area);
-                        
-                        return Hit::FingerSweepIn(FingerSweepEvent {
-                            abs_start: e.abs,
-                            rect: rect,
-                            window_id: e.window_id,
-                            abs: e.abs,
-                            digit_id,
-                            device,
-                            tap_count: cx.fingers.get_tap_count(digit_id),
-                            modifiers: e.modifiers.clone(),
-                            time: e.time,
-                            capture_time: e.time,
-                            is_finger_up: false,
-                        })
-                    };
+                if !Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
+                    return Hit::Nothing
                 }
+                
+                let device = DigitDevice::Mouse {
+                    button: e.button,
+                };
+                
+                if cx.fingers.get_digit_for_captured_area(area).is_some() {
+                    return Hit::Nothing;
+                }
+                
+                cx.fingers.capture_digit(digit_id, area, options.sweep_area, e.time, e.abs);
+                e.handled.set(area);
+                
+                return Hit::FingerDown(FingerDownEvent {
+                    window_id: e.window_id,
+                    abs: e.abs,
+                    digit_id,
+                    device,
+                    tap_count: cx.fingers.get_tap_count(),
+                    modifiers: e.modifiers.clone(),
+                    time: e.time,
+                    rect: rect,
+                })
             },
             Event::MouseUp(e) => {
                 if cx.fingers.first_mouse_button != Some(e.button) {
                     return Hit::Nothing
                 }
-
+                
                 let digit_id = live_id!(mouse).into();
                 
                 let device = DigitDevice::Mouse {
                     button: e.button,
                 };
-                let tap_count = cx.fingers.get_tap_count(digit_id);
+                let tap_count = cx.fingers.get_tap_count();
                 let rect = area.get_clipped_rect(&cx);
                 if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
-                    if capture.area == options.sweep_area {
-                        if rect.contains(e.abs) {
-                            return Hit::FingerSweepOut(FingerSweepEvent {
-                                abs_start:capture.abs_start,
-                                rect: rect,
-                                window_id: e.window_id,
-                                abs: e.abs,
-                                digit_id,
-                                device,
-                                tap_count,
-                                modifiers: e.modifiers.clone(),
-                                time: e.time,
-                                capture_time: capture.time,
-                                is_finger_up: true,
-                            })
-                        }
-                    }
-                    else if capture.area == area {
+                    if capture.area == area {
                         return Hit::FingerUp(FingerUpEvent {
-                            abs_start:capture.abs_start,
+                            abs_start: capture.abs_start,
                             rect: rect,
                             window_id: e.window_id,
                             abs: e.abs,
@@ -805,6 +906,7 @@ impl Event {
                             modifiers: e.modifiers.clone(),
                             time: e.time,
                             is_over: rect.contains(e.abs),
+                            is_sweep: false,
                         })
                     }
                 }

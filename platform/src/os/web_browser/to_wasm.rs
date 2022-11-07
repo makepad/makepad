@@ -4,25 +4,23 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_wasm_bridge::*,
-        makepad_math::{DVec2, Vec3, Quat, Transform},
+        makepad_math::{dvec2, DVec2, Vec3, Quat, Transform},
         cx::{OsType},
         window::CxWindowPool,
         area::Area,
         event::{
-            CxFingers,
-            DigitInfo,
-            DigitId,
-            DigitDevice,
             XRButton,
             XRInput,
             XRUpdateEvent,
             KeyCode,
             KeyModifiers,
-            FingerDownEvent,
-            FingerUpEvent,
-            FingerMoveEvent,
-            FingerHoverEvent,
-            FingerScrollEvent,
+            MouseDownEvent,
+            MouseMoveEvent,
+            MouseUpEvent,
+            TouchPoint,
+            TouchState,
+            TouchUpdateEvent,
+            ScrollEvent,
             KeyEvent,
             TextInputEvent,
             WindowGeom
@@ -117,24 +115,74 @@ pub struct ToWasmAnimationFrame {
     pub time: f64
 }
 
+#[derive(ToWasm)]
+pub struct ToWasmTimerFired {
+    pub timer_id: usize
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmPaintDirty {
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmRedrawAll {}
 
 
-// Finger API
 
 
 
-#[derive(ToWasm, Debug)]
-pub struct WTouch {
+// Touch API
+
+
+
+#[derive(ToWasm, Clone, Debug)]
+pub struct WTouchPoint {
+    pub state: u32, // 0 stable, 1 start, 2 end, 3 move
     pub x: f64,
     pub y: f64,
+    pub radius_x: f64,
+    pub radius_y: f64,
+    pub rotation_angle: f64,
+    pub force: f64,
     pub uid: u32,
-    pub modifiers: u32,
-    pub time: f64,
+}
+
+impl From<WTouchPoint> for TouchPoint {
+    fn from(v:WTouchPoint) -> Self {
+        Self {
+            abs: dvec2(v.x, v.y),
+            state: match v.state{
+                0=>TouchState::Stable,
+                1=>TouchState::Start,
+                2=>TouchState::Move,
+                _=>TouchState::Stop,
+            },
+            uid: v.uid as u64,
+            force: v.force,
+            radius: dvec2(v.radius_x, v.radius_y),
+            rotation_angle: v.rotation_angle,
+            sweep_lock: Cell::new(Area::Empty),
+            handled: Cell::new(Area::Empty),
+        }
+    }
 }
 
 #[derive(ToWasm, Debug)]
-pub struct ToWasmTouchStart {
-    pub touch: WTouch,
+pub struct ToWasmTouchUpdate {
+    pub modifiers: u32,
+    pub time: f64,
+    pub touches: Vec<WTouchPoint>,
+}
+
+impl From<ToWasmTouchUpdate> for TouchUpdateEvent {
+    fn from(v:ToWasmTouchUpdate) -> Self {
+        Self {
+            time: v.time,
+            window_id: CxWindowPool::id_zero(),
+            modifiers: unpack_key_modifier(v.modifiers),
+            touches: v.touches.iter().map(|v| v.clone().into()).collect()
+        }
+    }
 }
 
 fn unpack_key_modifier(modifiers: u32) -> KeyModifiers {
@@ -143,78 +191,6 @@ fn unpack_key_modifier(modifiers: u32) -> KeyModifiers {
         control: (modifiers & 2) != 0,
         alt: (modifiers & 4) != 0,
         logo: (modifiers & 8) != 0
-    }
-}
-
-impl ToWasmTouchStart {
-    pub fn into_finger_down_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerDownEvent {
-        FingerDownEvent {
-            window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.touch.x, y: self.touch.y},
-            handled: Cell::new(Area::Empty),
-            digit: DigitInfo {
-                id: digit_id,
-                index: fingers.get_digit_index(digit_id),
-                count: fingers.get_digit_count(),
-                device: DigitDevice::Touch(self.touch.uid as u64),
-            },
-            sweep_lock: Cell::new(Area::Empty),
-            modifiers: KeyModifiers::default(),
-            time: self.touch.time,
-            tap_count: fingers.get_tap_count(digit_id)
-        }
-    }
-}
-
-#[derive(ToWasm, Debug)]
-pub struct ToWasmTouchMove {
-    pub touch: WTouch,
-}
-
-impl ToWasmTouchMove {
-    pub fn into_finger_move_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerMoveEvent {
-        FingerMoveEvent {
-            window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.touch.x, y: self.touch.y},
-            tap_count: fingers.get_tap_count(digit_id),
-            handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
-            digit: DigitInfo {
-                id: digit_id,
-                index: fingers.get_digit_index(digit_id),
-                count: fingers.get_digit_count(),
-                device: DigitDevice::Touch(self.touch.uid as u64),
-            },
-            hover_last: fingers.get_hover_area(digit_id),
-            //captured: fingers.get_captured_area(digit_id),
-            modifiers: KeyModifiers::default(),
-            time: self.touch.time,
-        }
-    }
-}
-
-#[derive(ToWasm, Debug)]
-pub struct ToWasmTouchEnd {
-    pub touch: WTouch,
-}
-
-impl ToWasmTouchEnd {
-    pub fn into_finger_up_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerUpEvent {
-        FingerUpEvent {
-            window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.touch.x, y: self.touch.y},
-            tap_count: fingers.get_tap_count(digit_id),
-            digit: DigitInfo {
-                id: digit_id,
-                index: fingers.get_digit_index(digit_id),
-                count: fingers.get_digit_count(),
-                device: DigitDevice::Touch(self.touch.uid as u64),
-            },
-            capture_time: fingers.get_capture_time(digit_id),
-            captured: fingers.get_captured_area(digit_id),
-            modifiers: KeyModifiers::default(),
-            time: self.touch.time,
-        }
     }
 }
 
@@ -235,22 +211,16 @@ pub struct WMouse {
 pub struct ToWasmMouseDown {
     pub mouse: WMouse,
 }
-impl ToWasmMouseDown {
-    pub fn into_finger_down_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerDownEvent {
-        FingerDownEvent {
+
+impl From<ToWasmMouseDown> for MouseDownEvent {
+    fn from(v:ToWasmMouseDown) -> Self {
+        Self {
+            abs: dvec2(v.mouse.x, v.mouse.y),
+            button: v.mouse.button as usize,
             window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.mouse.x, y: self.mouse.y},
+            modifiers: unpack_key_modifier(v.mouse.modifiers),
             handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
-            digit: DigitInfo {
-                id: digit_id,
-                index: fingers.get_digit_index(digit_id),
-                count: fingers.get_digit_count(),
-                device: DigitDevice::Mouse(self.mouse.button as usize),
-            },
-            modifiers: unpack_key_modifier(self.mouse.modifiers),
-            time: self.mouse.time,
-            tap_count: fingers.get_tap_count(digit_id)
+            time: v.mouse.time
         }
     }
 }
@@ -261,65 +231,32 @@ pub struct ToWasmMouseMove {
     pub mouse: WMouse,
 }
 
-impl ToWasmMouseMove {
-    pub fn into_finger_move_event(self, fingers: &CxFingers, digit_id: DigitId, button: usize) -> FingerMoveEvent {
-        FingerMoveEvent {
+impl From<ToWasmMouseMove> for MouseMoveEvent {
+    fn from(v:ToWasmMouseMove) -> Self {
+        Self {
+            abs: dvec2(v.mouse.x, v.mouse.y),
             window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.mouse.x, y: self.mouse.y},
-            sweep_lock: Cell::new(Area::Empty),
-            digit: DigitInfo {
-                id: digit_id,
-                index: fingers.get_digit_index(digit_id),
-                count: fingers.get_digit_count(),
-                device: DigitDevice::Mouse(button),
-            },
+            modifiers: unpack_key_modifier(v.mouse.modifiers),
             handled: Cell::new(Area::Empty),
-            hover_last: fingers.get_hover_area(digit_id),
-            tap_count: fingers.get_tap_count(digit_id),
-            //captured: fingers.get_captured_area(digit_id),
-            modifiers: unpack_key_modifier(self.mouse.modifiers),
-            time: self.mouse.time,
+            time: v.mouse.time
         }
     }
 }
 
-impl ToWasmMouseMove {
-    pub fn into_finger_hover_event(self, fingers: &CxFingers, digit_id: DigitId,  button: usize) -> FingerHoverEvent {
-        FingerHoverEvent {
-            window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.mouse.x, y: self.mouse.y},
-            handled: Cell::new(false),
-            hover_last: fingers.get_hover_area(digit_id),
-            digit_id,
-            sweep_lock: Cell::new(Area::Empty),
-            device: DigitDevice::Mouse(button),
-            modifiers: unpack_key_modifier(self.mouse.modifiers),
-            time: self.mouse.time,
-        }
-    }
-}
 
 #[derive(ToWasm)]
 pub struct ToWasmMouseUp {
     pub mouse: WMouse,
 }
 
-impl ToWasmMouseUp {
-    pub fn into_finger_up_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerUpEvent {
-        FingerUpEvent {
+impl From<ToWasmMouseUp> for MouseUpEvent {
+    fn from(v:ToWasmMouseUp) -> Self {
+        Self {
+            abs: dvec2(v.mouse.x, v.mouse.y),
+            button: v.mouse.button as usize,
             window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.mouse.x, y: self.mouse.y},
-            tap_count: fingers.get_tap_count(digit_id),
-            captured: fingers.get_captured_area(digit_id),
-            digit: DigitInfo {
-                id: digit_id,
-                index: fingers.get_digit_index(digit_id),
-                count: fingers.get_digit_count(),
-                device: DigitDevice::Mouse(self.mouse.button as usize),
-            },
-            capture_time: fingers.get_capture_time(digit_id),
-            modifiers: unpack_key_modifier(self.mouse.modifiers),
-            time: self.mouse.time,
+            modifiers: unpack_key_modifier(v.mouse.modifiers),
+            time: v.mouse.time
         }
     }
 }
@@ -337,22 +274,23 @@ pub struct ToWasmScroll {
     pub time: f64
 }
 
-impl ToWasmScroll {
-    pub fn into_finger_scroll_event(self, digit_id: DigitId) -> FingerScrollEvent {
-        FingerScrollEvent {
+impl From<ToWasmScroll> for ScrollEvent {
+    fn from(v:ToWasmScroll) -> Self {
+        Self {
             window_id: CxWindowPool::id_zero(),
-            digit_id,
-            abs: DVec2 {x: self.x, y: self.y},
-            scroll: DVec2 {x: self.scroll_x, y: self.scroll_y},
-            device: if self.is_touch {DigitDevice::Touch(0)} else {DigitDevice::Mouse(0)},
+            scroll: dvec2(v.scroll_x, v.scroll_y),
+            abs: dvec2(v.x, v.y),
+            modifiers: unpack_key_modifier(v.modifiers),
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),
-            sweep_lock: Cell::new(Area::Empty),
-            modifiers: unpack_key_modifier(self.modifiers),
-            time: self.time,
+            is_mouse: true,
+            time: v.time,
         }
     }
 }
+
+// Keyboard API
+
 
 fn web_to_key_code(key_code: u32) -> KeyCode {
     match key_code {
@@ -534,17 +472,9 @@ impl Into<TextInputEvent> for ToWasmTextInput {
 pub struct ToWasmTextCopy {
 }
 
-#[derive(ToWasm)]
-pub struct ToWasmTimerFired {
-    pub timer_id: usize
-}
+// Keyboard API
 
-#[derive(ToWasm)]
-pub struct ToWasmPaintDirty {
-}
 
-#[derive(ToWasm)]
-pub struct ToWasmRedrawAll {}
 
 #[derive(ToWasm, Clone)]
 pub struct WVec3 {

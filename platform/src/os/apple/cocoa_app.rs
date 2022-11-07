@@ -31,7 +31,6 @@ use {
         menu::{
             CxCommandSetting
         },
-        area::Area,
         //turtle::{
         //    Rect
         //},
@@ -519,7 +518,6 @@ impl CocoaApp {
                             modifiers: get_event_key_modifier(ns_event),
                             time: self.time_now(),
                             is_mouse: false,
-                            sweep_lock: Cell::new(Area::Empty),
                             handled_x: Cell::new(false),
                             handled_y: Cell::new(false),
                         })
@@ -533,7 +531,6 @@ impl CocoaApp {
                             modifiers: get_event_key_modifier(ns_event),
                             time: self.time_now(),
                             is_mouse: true,
-                            sweep_lock: Cell::new(Area::Empty),
                             handled_x: Cell::new(false),
                             handled_y: Cell::new(false),
                         })
