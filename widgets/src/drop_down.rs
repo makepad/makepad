@@ -258,7 +258,7 @@ impl DropDown {
             }
         }
         
-        match event.hits(cx, self.bg.area()) {
+        match event.hits_with_sweep_area(cx, self.bg.area(), self.bg.area()) {
             Hit::KeyFocusLost(_) => {
                 self.animate_state(cx, id!(focus.off));
                 self.set_closed(cx);
@@ -320,7 +320,7 @@ impl DropDown {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        cx.clear_sweep_lock(self.bg.area());
+        //cx.clear_sweep_lock(self.bg.area());
         
         self.bg.begin(cx, walk, self.layout);
         //let start_pos = cx.turtle().rect().pos;
@@ -336,7 +336,7 @@ impl DropDown {
         
         if self.is_open && self.popup_menu.is_some() {
             let last_rect = self.last_rect.unwrap_or(Rect::default());
-            cx.set_sweep_lock(self.bg.area());
+            //cx.set_sweep_lock(self.bg.area());
             // ok so if self was not open, we need to
             // ok so how will we solve this one
             let global = cx.global::<PopupMenuGlobal>().clone();
@@ -363,7 +363,7 @@ impl Widget for DropDown {
     
     fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions, path: &[LiveId]) {
         match db {
-            DataBinding::FromWidgets{nodes,..}=> if let Some(item) = act.find_single_action(self.widget_uid()) {
+            DataBinding::FromWidgets {nodes, ..} => if let Some(item) = act.find_single_action(self.widget_uid()) {
                 match item.action() {
                     DropDownAction::Select(_, value) => {
                         nodes.write_by_field_path(path, &[LiveNode::from_value(value.clone())]);
@@ -371,15 +371,15 @@ impl Widget for DropDown {
                     _ => ()
                 }
             }
-            DataBinding::ToWidgets{nodes}=> {
+            DataBinding::ToWidgets {nodes} => {
                 if let Some(value) = nodes.read_by_field_path(path) {
-                    if let Some(index) = self.values.iter().position(|v| v == value){
-                        if self.selected_item != index{
+                    if let Some(index) = self.values.iter().position( | v | v == value) {
+                        if self.selected_item != index {
                             self.selected_item = index;
                             self.redraw(cx);
                         }
                     }
-                    else{
+                    else {
                         error!("Value not in values list {:?}", value);
                     }
                 }
