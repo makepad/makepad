@@ -58,7 +58,7 @@ After the build is complete, run the following command to start our web server:
 ```cargo run -p makepad-web-server --release```
 
 After starting the web server, the web build of Ironfish should be available here:
-https://127.0.0.1/makepad/examples/ironfish/src/index.html
+https://127.0.0.1:8080/makepad/examples/ironfish/src/index.html
 
 ## Contact
 
