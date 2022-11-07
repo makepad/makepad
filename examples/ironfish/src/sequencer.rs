@@ -153,7 +153,7 @@ impl SeqButton {
         match event.hits_with_options(
             cx,
             self.button.area(),
-            HitOptions::with_sweep_area(sweep_area)
+            HitOptions::new().with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
@@ -162,7 +162,7 @@ impl SeqButton {
             Hit::FingerHoverOut(_) => {
                 self.animate_state(cx, id!(hover.off));
             }
-            Hit::FingerSweepIn(_) => {
+            Hit::FingerDown(_) => {
                 if self.state.is_in_state(cx, id!(active.on)) {
                     self.animate_state(cx, id!(active.off));
                     dispatch_action(cx, SequencerAction::Change);
@@ -174,8 +174,8 @@ impl SeqButton {
                 }
                 self.animate_state(cx, id!(hover.on));
             }
-            Hit::FingerSweepOut(se) => {
-                if se.is_finger_up && se.device.has_hovers() {
+            Hit::FingerUp(se) => {
+                if !se.is_sweep && se.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else {

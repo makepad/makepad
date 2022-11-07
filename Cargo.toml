@@ -14,7 +14,7 @@ workspace.members = [
     "examples/cmdline_example",
     "examples/ironfish",
     "examples/simple",
-    "examples/shader",
+    "examples/touch",
     "libs/wasm_bridge/test",
     "studio",
     "tools/auto_version",

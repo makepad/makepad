@@ -39,7 +39,6 @@ impl From<StdinMouseDown> for MouseDownEvent {
             modifiers: Default::default(),
             time: v.time,
             handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
         }
     }
 }
@@ -59,7 +58,6 @@ impl From<StdinMouseMove> for MouseMoveEvent {
             modifiers: Default::default(),
             time: v.time,
             handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
         }
     }
 }
