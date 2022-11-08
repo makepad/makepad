@@ -31,8 +31,10 @@ live_design!{
     const SPACING_CONTROLS = 4.0
     const COLOR_OSC = #xFFFF99FF // yellow
     const COLOR_MIX = #xC // gray
-    const COLOR_ENV = #xFFC499 // light red
-    const COLOR_FILTER = #xA7BEF2 // indigo
+    const COLOR_ENV = #xFF8888 // light red
+    // const COLOR_ENV = #xFFC499 // light red
+    const COLOR_FILTER = #x88FF88 // green
+    // const COLOR_FILTER = #xA7BEF2 // indigo
     const COLOR_LFO = #xFF9999 // red
     const COLOR_TOUCH = #xBBFF99 // light green
     const COLOR_FX = #x99EEFF // light green
@@ -571,13 +573,13 @@ live_design!{
         }
     }
     
-    SequencerPanel = <FishPanel> {
-        label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
+    SequencerPanel = <FishTabPanel> {
+        // label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
         walk: {width: Fill, height: Fill}
         body = {
             walk: {width: Fill, height: Fill}
             <Frame> {
-                walk: {height: Fit}
+                walk: {height: Fit, margin: 5.0}
                 layout: {flow: Right}
                 
                 playpause = <InstrumentCheckbox> {
@@ -1044,7 +1046,7 @@ live_design!{
                 walk: {width: Fill, height: Fit}
                 balance = <InstrumentBipolarSlider> {
                     slider = {
-                        slider: {line_color: (COLOR_MIX)}
+                        slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         label: "Oscillator 1/2 Balance"
@@ -1052,7 +1054,7 @@ live_design!{
                 }
                 noise = <InstrumentSlider> {
                     slider = {
-                        slider: {line_color: (COLOR_MIX)}
+                        slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         label: "Noise"
@@ -1064,7 +1066,7 @@ live_design!{
                 walk: {width: Fill, height: Fit}
                 sub = <InstrumentSlider> {
                     slider = {
-                        slider: {line_color: (COLOR_MIX)}
+                        slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         label: "Sub"
@@ -1072,7 +1074,7 @@ live_design!{
                 }
                 porta = <InstrumentSlider> {
                     slider = {
-                        slider: {line_color: (COLOR_MIX)}
+                        slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         label: "Portamento"
@@ -1231,7 +1233,7 @@ live_design!{
 
             
             piano = <Piano> {
-                walk: {width: Fill, height: Fit, margin: 0.0}
+                walk: {width: Fill, height: Fit, margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}}
             }
             
             // CONTROLS
