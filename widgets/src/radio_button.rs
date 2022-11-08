@@ -35,7 +35,7 @@ live_design!{
                     sdf.rect(
                         -1., 0.,
                         self.rect_size.x + 2.0,
-                        self.rect_size.y
+                        self.rect_size.y 
                     );
                     sdf.fill(mix(self.color_inactive, self.color_active, self.selected));
                 }
