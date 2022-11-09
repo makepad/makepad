@@ -28,7 +28,7 @@ live_design!{
         }
     }
     
-    DrawNameText = {{DrawNameText}} {
+    DrawName = {{DrawName}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -56,7 +56,7 @@ live_design!{
                     apply: {
                         hover: 0.0,
                         bg_quad: {hover: (hover)}
-                        name_text: {hover: (hover)}
+                        draw_name: {hover: (hover)}
                     }
                 }
                 on = {
@@ -73,7 +73,7 @@ live_design!{
                     apply: {
                         selected: 0.0,
                         bg_quad: {selected: (selected)}
-                        name_text: {selected: (selected)}
+                        draw_name: {selected: (selected)}
                     }
                 }
                 on = {
@@ -106,7 +106,7 @@ struct DrawBgQuad {
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
-struct DrawNameText {
+struct DrawName {
     draw_super: DrawText,
     is_even: f32,
     selected: f32,
@@ -116,8 +116,8 @@ struct DrawNameText {
 #[derive(Live, LiveHook)]
 pub struct ListBoxItem {
     
-    bg_quad: DrawBgQuad,
-    name_text: DrawNameText,
+    draw_bg: DrawBgQuad,
+    draw_name: DrawName,
     
     layout: Layout,
     state: State,
@@ -137,7 +137,7 @@ pub struct ListBox {
     scroll_bars: ScrollBars,
     list_item: Option<LivePtr>,
     
-    filler_quad: DrawBgQuad,
+    draw_filler: DrawBgQuad,
     layout: Layout,
     node_height: f64,
     multi_select: bool,
@@ -181,8 +181,8 @@ pub struct ListBoxItemId(pub LiveId);
 
 impl ListBoxItem {
     pub fn set_draw_state(&mut self, is_even: f32) {
-        self.bg_quad.is_even = is_even;
-        self.name_text.is_even = is_even;
+        self.draw_bg.is_even = is_even;
+        self.draw_name.is_even = is_even;
     }
     
     pub fn draw_item(
@@ -193,9 +193,9 @@ impl ListBoxItem {
         node_height: f64,
     ) {
         self.set_draw_state(is_even);
-        self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
-        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.bg_quad.end(cx);
+        self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
+        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_bg.end(cx);
     }
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
@@ -209,10 +209,10 @@ impl ListBoxItem {
         dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg_quad.area().redraw(cx);
+            self.draw_bg.area().redraw(cx);
         }
         
-        match event.hits(cx, self.bg_quad.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
             }
@@ -246,8 +246,8 @@ impl ListBox {
         let mut walk = 0.0;
         while walk < height_left {
             self.count += 1;
-            self.filler_quad.is_even = Self::is_even(self.count);
-            self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
+            self.draw_filler.is_even = Self::is_even(self.count);
+            self.draw_filler.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
         

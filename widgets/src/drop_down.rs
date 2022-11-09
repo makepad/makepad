@@ -34,7 +34,7 @@ live_design!{
     }
     
     DropDown = {{DropDown}} {
-        bg: {
+        draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
             instance focus: 0.0,
@@ -91,8 +91,8 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        bg: {pressed: 0.0, hover: 0.0}
-                        label: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_label: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -102,16 +102,16 @@ live_design!{
                         pressed: Forward {duration: 0.01}
                     }
                     apply: {
-                        bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
                 
                 pressed = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
             }
@@ -120,15 +120,15 @@ live_design!{
                 off = {
                     from: {all: Snap}
                     apply: {
-                        bg: {focus: 0.0},
-                        label: {focus: 0.0}
+                        draw_bg: {focus: 0.0},
+                        draw_label: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        bg: {focus: 1.0},
-                        label: {focus: 1.0}
+                        draw_bg: {focus: 1.0},
+                        draw_label: {focus: 1.0}
                     }
                 }
             }
@@ -141,8 +141,8 @@ live_design!{
 pub struct DropDown {
     state: State,
     
-    bg: DrawQuad,
-    label: DrawLabelText,
+    draw_bg: DrawQuad,
+    draw_label: DrawLabelText,
     
     walk: Walk,
     
@@ -202,18 +202,18 @@ impl DropDown {
     
     pub fn set_open(&mut self, cx: &mut Cx) {
         self.is_open = true;
-        self.bg.redraw(cx);
+        self.draw_bg.redraw(cx);
         let global = cx.global::<PopupMenuGlobal>().clone();
         let mut map = global.map.borrow_mut();
         let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
         let node_id = LiveId(self.selected_item as u64).into();
         lb.init_select_item(node_id);
-        self.last_rect = Some(self.bg.area().get_rect(cx));
+        self.last_rect = Some(self.draw_bg.area().get_rect(cx));
     }
     
     pub fn set_closed(&mut self, cx: &mut Cx) {
         self.is_open = false;
-        self.bg.redraw(cx);
+        self.draw_bg.redraw(cx);
     }
     
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DropDownAction)) {
@@ -225,7 +225,7 @@ impl DropDown {
             let mut map = global.map.borrow_mut();
             let menu = map.get_mut(&self.popup_menu.unwrap()).unwrap();
             let mut close = false;
-            menu.handle_event_fn(cx, event, self.bg.area(), &mut | cx, action | {
+            menu.handle_event_fn(cx, event, self.draw_bg.area(), &mut | cx, action | {
                 match action {
                     PopupMenuAction::WasSweeped(_node_id) => {
                         //dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
@@ -234,7 +234,7 @@ impl DropDown {
                         //dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                         self.selected_item = node_id.0.0 as usize;
                         dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
-                        self.bg.redraw(cx);
+                        self.draw_bg.redraw(cx);
                         close = true;
                     }
                     _ => ()
@@ -258,12 +258,12 @@ impl DropDown {
             }
         }
         
-        match event.hits_with_sweep_area(cx, self.bg.area(), self.bg.area()) {
+        match event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
             Hit::KeyFocusLost(_) => {
                 self.animate_state(cx, id!(focus.off));
                 self.set_closed(cx);
                 self.animate_state(cx, id!(hover.off));
-                self.bg.redraw(cx);
+                self.draw_bg.redraw(cx);
             }
             Hit::KeyFocus(_) => {
                 self.animate_state(cx, id!(focus.on));
@@ -274,7 +274,7 @@ impl DropDown {
                         self.selected_item -= 1;
                         dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
                         self.set_closed(cx);
-                        self.bg.redraw(cx);
+                        self.draw_bg.redraw(cx);
                     }
                 }
                 KeyCode::ArrowDown => {
@@ -282,13 +282,13 @@ impl DropDown {
                         self.selected_item += 1;
                         dispatch_action(cx, DropDownAction::Select(self.selected_item, self.values[self.selected_item].clone()));
                         self.set_closed(cx);
-                        self.bg.redraw(cx);
+                        self.draw_bg.redraw(cx);
                     }
                 },
                 _ => ()
             }
             Hit::FingerDown(_fe) => {
-                cx.set_key_focus(self.bg.area());
+                cx.set_key_focus(self.draw_bg.area());
                 self.set_open(cx);
                 self.animate_state(cx, id!(hover.pressed));
             },
@@ -314,29 +314,29 @@ impl DropDown {
     }
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
-        self.bg.begin(cx, self.walk, self.layout);
-        self.label.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.bg.end(cx);
+        self.draw_bg.begin(cx, self.walk, self.layout);
+        self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_bg.end(cx);
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        //cx.clear_sweep_lock(self.bg.area());
+        //cx.clear_sweep_lock(self.draw_bg.area());
         
-        self.bg.begin(cx, walk, self.layout);
+        self.draw_bg.begin(cx, walk, self.layout);
         //let start_pos = cx.turtle().rect().pos;
         if let Some(val) = self.labels.get(self.selected_item) {
-            self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
+            self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
         else {
-            self.label.draw_walk(cx, Walk::fit(), Align::default(), " ");
+            self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), " ");
         }
-        self.bg.end(cx);
+        self.draw_bg.end(cx);
         
-        cx.add_nav_stop(self.bg.area(), NavRole::DropDown, Margin::default());
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Margin::default());
         
         if self.is_open && self.popup_menu.is_some() {
             let last_rect = self.last_rect.unwrap_or(Rect::default());
-            //cx.set_sweep_lock(self.bg.area());
+            //cx.set_sweep_lock(self.draw_bg.area());
             // ok so if self was not open, we need to
             // ok so how will we solve this one
             let global = cx.global::<PopupMenuGlobal>().clone();
@@ -388,7 +388,7 @@ impl Widget for DropDown {
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
-        self.bg.redraw(cx);
+        self.draw_bg.redraw(cx);
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {

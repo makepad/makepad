@@ -64,7 +64,7 @@ pub use crate::{
     link_label::{LinkLabel},
     desktop_window::{DesktopWindow},
     scroll_bars::{ScrollBars},
-    scroll_shadow::{ScrollShadow},
+    scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
     widget::{
         WidgetUid,

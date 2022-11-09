@@ -95,7 +95,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        bg: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -105,7 +105,7 @@ live_design!{
                         state_down: Snap
                     }
                     apply: {
-                        bg: {
+                        draw_bg: {
                             pressed: 0.0,
                             hover: 1.0,
                         }
@@ -115,7 +115,7 @@ live_design!{
                 pressed = {
                     from: {all: Snap}
                     apply: {
-                        bg: {
+                        draw_bg: {
                             pressed: 1.0,
                             hover: 1.0,
                         }
@@ -131,8 +131,8 @@ live_design!{
 pub struct DesktopButton {
     state: State,
     walk: Walk,
-    #[alias(button_type, bg.button_type)]
-    pub bg: DrawDesktopButton,
+    #[alias(button_type, draw_bg.button_type)]
+    pub draw_bg: DrawDesktopButton,
 }
 
 #[derive(Live, LiveHook)]
@@ -157,7 +157,7 @@ pub struct DrawDesktopButton {
 
 impl LiveHook for DesktopButton {
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        let (w, h) = match self.bg.button_type {
+        let (w, h) = match self.draw_bg.button_type {
             DesktopButtonType::WindowsMin
                 | DesktopButtonType::WindowsMax
                 | DesktopButtonType::WindowsMaxToggled
@@ -173,7 +173,7 @@ impl DesktopButton {
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.state_handle_event(cx, event);
 
-        match event.hits(cx, self.bg.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 dispatch_action(cx, ButtonAction::Press);
                 self.animate_state(cx, id!(hover.pressed));
@@ -203,10 +203,10 @@ impl DesktopButton {
     }
     
     pub fn area(&mut self)->Area{
-        self.bg.area()
+        self.draw_bg.area()
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
-        self.bg.draw_walk(cx, walk);
+        self.draw_bg.draw_walk(cx, walk);
     }
 }
