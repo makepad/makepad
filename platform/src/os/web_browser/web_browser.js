@@ -3,10 +3,10 @@ import {WasmBridge} from "/makepad/libs/wasm_bridge/src/wasm_bridge.js"
 export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
         super (wasm, dispatch);
-        if(wasm === undefined){
+        if (wasm === undefined) {
             return
         }
-
+        
         window.onbeforeunload = _ => {
             this.clear_memory_refs();
             for (let worker of this.workers) {
@@ -25,20 +25,29 @@ export class WasmWebBrowser extends WasmBridge {
         this.text_copy_response = "";
         this.web_sockets = [];
         this.window_info = {}
+        this.xr_capabilities = {
+            vr_supported: false,
+            ar_supported: false
+        };
         this.signals_lo = [];
         this.signals_hi = [];
+        this.xr_supported = false;
         this.signal_timeout = null;
         this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.init_detection();
     }
     
-    load_deps() {
+    async load_deps() {
+        
         this.to_wasm = this.new_to_wasm();
-         
+        
+        await this.query_xr_capabilities();
+        
         this.to_wasm.ToWasmGetDeps({
             gpu_info: this.gpu_info,
             cpu_cores: navigator.hardwareConcurrency,
+            xr_capabilities: this.xr_capabilities,
             browser_info: {
                 protocol: location.protocol + "",
                 host: location.host + "",
@@ -51,56 +60,52 @@ export class WasmWebBrowser extends WasmBridge {
         });
         
         this.do_wasm_pump();
-       
-        this.load_deps_promise.then(
-            results => {
-                let deps = [];
-                for (let result of results) {
-                    deps.push({
-                        path: result.path,
-                        data: result.buffer
-                    })
-                }
-                this.update_window_info();
-                this.to_wasm.ToWasmInit({
-                    window_info: this.window_info,
-                    deps: deps
-                });
-                this.do_wasm_pump();
-                // only bind the event handlers now
-                // to stop them firing into wasm early
-                this.bind_mouse_and_touch();
-                this.bind_keyboard();
-                this.bind_screen_resize();
-                this.focus_keyboard_input();
-                this.to_wasm.ToWasmRedrawAll();
-                
-                this.do_wasm_pump();
-                                 
-
-                var loaders = document.getElementsByClassName('canvas_loader');
-                for (var i = 0; i < loaders.length; i ++) {
-                    loaders[i].parentNode.removeChild(loaders[i])
-                }
-            },
-            error => {
-                console.error("Error loading dep", error)
+        let results = await this.load_deps_promise;
+        let deps = [];
+        for (let result of results) {
+            if(result !== undefined){
+                deps.push({
+                    path: result.path,
+                    data: result.buffer
+                })
             }
-        )
+        }
+        this.update_window_info();
+
+        this.to_wasm.ToWasmInit({
+            xr_capabilities: this.xr_capabilities,
+            window_info: this.window_info,
+            deps: deps
+        });
+        this.do_wasm_pump();
+        // only bind the event handlers now
+        // to stop them firing into wasm early
+        this.bind_mouse_and_touch();
+        this.bind_keyboard();
+        this.bind_screen_resize();
+        this.focus_keyboard_input();
+        this.to_wasm.ToWasmRedrawAll();
+        
+        this.do_wasm_pump();
+        
+        var loaders = document.getElementsByClassName('canvas_loader');
+        for (var i = 0; i < loaders.length; i ++) {
+            loaders[i].parentNode.removeChild(loaders[i])
+        }
     }
     
     // from_wasm dispatch_on_app interface
     
     post_signal_to_wasm(signal_hi, signal_lo) {
         let found = false;
-        for (let i = 0; i < this.signals_lo.length; i++){
+        for (let i = 0; i < this.signals_lo.length; i ++) {
             let sl = this.signals_lo[i];
             let sh = this.signals_hi[i];
-            if(sh == signal_hi && sl == signal_lo){
+            if (sh == signal_hi && sl == signal_lo) {
                 found = true
             }
         }
-        if(!found){
+        if (!found) {
             this.signals_lo.push(signal_lo);
             this.signals_hi.push(signal_hi);
         }
@@ -124,7 +129,6 @@ export class WasmWebBrowser extends WasmBridge {
         for (let path of args.deps) {
             promises.push(fetch_path("/makepad/", path))
         }
-        
         this.load_deps_promise = Promise.all(promises);
     }
     
@@ -208,7 +212,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmRequestAnimationFrame() {
-        if (this.window_info.xr_is_presenting || this.req_anim_frame_id) {
+        if (this.xr !== undefined || this.req_anim_frame_id) {
             return;
         }
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
@@ -217,7 +221,7 @@ export class WasmWebBrowser extends WasmBridge {
                 return
             }
             this.req_anim_frame_id = 0;
-            if (this.xr_is_presenting) {
+            if (this.xr !== undefined) {
                 return
             }
             this.to_wasm.ToWasmAnimationFrame({time: time / 1000.0});
@@ -245,7 +249,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmHideTextIME() {
-        this.update_text_area_pos({x:-3000,y:-3000});
+        this.update_text_area_pos({x: -3000, y: -3000});
     }
     
     FromWasmWebSocketOpen(args) {
@@ -301,7 +305,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.free_data_u8(args.data);
     }
-      
+    
     FromWasmSpawnAudioOutput(args) {
         
         if (this.audio_context) {
@@ -343,7 +347,7 @@ export class WasmWebBrowser extends WasmBridge {
         };
         
         let user_interact_hook = (arg) => {
-            if(this.audio_context.state === "suspended"){
+            if (this.audio_context.state === "suspended") {
                 this.audio_context.resume();
             }
         }
@@ -357,7 +361,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmStartMidiInput() {
-        if(navigator.requestMIDIAccess){
+        if (navigator.requestMIDIAccess) {
             navigator.requestMIDIAccess().then((midi) => {
                 let reload_midi_ports = () => {
                     
@@ -391,6 +395,10 @@ export class WasmWebBrowser extends WasmBridge {
                 console.error("Cannot open midi");
             });
         }
+    }
+    
+    FromWasmStartPresentingXR() {
+        
     }
     
     alloc_thread_stack(closure_ptr) {
@@ -477,8 +485,9 @@ export class WasmWebBrowser extends WasmBridge {
             is_mobile_safari: window.navigator.platform.match(/iPhone|iPad/i),
             is_touch_device: ('ontouchstart' in window || navigator.maxTouchPoints),
             is_firefox: navigator.userAgent.toLowerCase().indexOf('firefox') > -1,
-            use_touch_scroll_overlay: window.ontouchstart === null
-        }
+            use_touch_scroll_overlay: window.ontouchstart === null,
+        };
+        
         this.detect.is_android = this.detect.user_agent.match(/Android/i)
         this.detect.is_add_to_homescreen_safari = this.is_mobile_safari && navigator.standalone
     }
@@ -489,50 +498,56 @@ export class WasmWebBrowser extends WasmBridge {
         var h;
         var canvas = this.canvas;
         
-        if (this.window_info.xr_is_presenting) {
-            let xr_webgllayer = this.xr_session.renderState.baseLayer;
-            this.dpi_factor = 3.0;
-            this.width = 2560.0 / this.dpi_factor;
-            this.height = 2000.0 / this.dpi_factor;
-        }
-        else {
-            if (canvas.getAttribute("fullpage")) {
-                if (this.detect.is_add_to_homescreen_safari) { // extremely ugly. but whatever.
-                    if (window.orientation == 90 || window.orientation == -90) {
-                        h = screen.width;
-                        w = screen.height - 90;
-                    }
-                    else {
-                        w = screen.width;
-                        h = screen.height - 80;
-                    }
+        if (canvas.getAttribute("fullpage")) {
+            if (this.detect.is_add_to_homescreen_safari) { // extremely ugly. but whatever.
+                if (window.orientation == 90 || window.orientation == -90) {
+                    h = screen.width;
+                    w = screen.height - 90;
                 }
                 else {
-                    w = window.innerWidth;
-                    h = window.innerHeight;
+                    w = screen.width;
+                    h = screen.height - 80;
                 }
             }
             else {
-                w = canvas.offsetWidth;
-                h = canvas.offsetHeight;
+                w = window.innerWidth;
+                h = window.innerHeight;
             }
-            var sw = canvas.width = w * dpi_factor;
-            var sh = canvas.height = h * dpi_factor;
-            
-            this.gl.viewport(0, 0, sw, sh);
-            
-            this.window_info.dpi_factor = dpi_factor;
-            this.window_info.inner_width = canvas.offsetWidth;
-            this.window_info.inner_height = canvas.offsetHeight;
-            // send the wasm a screenresize event
         }
+        else {
+            w = canvas.offsetWidth;
+            h = canvas.offsetHeight;
+        }
+        var sw = canvas.width = w * dpi_factor;
+        var sh = canvas.height = h * dpi_factor;
+        
+        this.gl.viewport(0, 0, sw, sh);
+        
+        this.window_info.dpi_factor = dpi_factor;
+        this.window_info.inner_width = canvas.offsetWidth;
+        this.window_info.inner_height = canvas.offsetHeight;
         this.window_info.is_fullscreen = is_fullscreen();
         this.window_info.can_fullscreen = can_fullscreen();
     }
     
+    query_xr_capabilities(){
+        let promises = [];
+        if (navigator.xr !== undefined) {
+            promises.push(navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+                if (supported) {
+                    this.xr_capabilities.vr_supported = true;
+                }
+            }));
+            promises.push(navigator.xr.isSessionSupported('immersive-ar').then(supported => {
+                if (supported) {
+                    this.xr_capabilities.ar_supported = true;
+                }
+            }));
+        }
+        return Promise.all(promises);
+    }
+    
     bind_screen_resize() {
-        this.window_info = {};
-        
         this.handlers.on_screen_resize = () => {
             this.update_window_info();
             if (this.to_wasm !== undefined) {
@@ -585,18 +600,18 @@ export class WasmWebBrowser extends WasmBridge {
                 + "height:400000px;\n"
                 + "background-color:transparent\n"
                 + "}\n"
-            
+           
             document.body.appendChild(style)
             ts.appendChild(ts_inner);
             document.body.appendChild(ts);
             canvas = ts;
-            
+           
             ts.scrollTop = 200000;
             ts.scrollLeft = 200000;
             let last_scroll_top = ts.scrollTop;
             let last_scroll_left = ts.scrollLeft;
             let scroll_timeout = null;
-            
+           
             this.handlers.on_overlay_scroll = e => {
                 let new_scroll_top = ts.scrollTop;
                 let new_scroll_left = ts.scrollLeft;
@@ -604,16 +619,16 @@ export class WasmWebBrowser extends WasmBridge {
                 let dy = new_scroll_top - last_scroll_top;
                 last_scroll_top = new_scroll_top;
                 last_scroll_left = new_scroll_left;
-                
+               
                 window.clearTimeout(scroll_timeout);
-                
+               
                 scroll_timeout = window.setTimeout(_ => {
                     ts.scrollTop = 200000;
                     ts.scrollLeft = 200000;
                     last_scroll_top = ts.scrollTop;
                     last_scroll_left = ts.scrollLeft;
                 }, 200);
-                
+               
                 let finger = overlay_scroll_pointer;
                 if (overlay_scroll_pointer) {
                     this.to_wasm.ToWasmScroll({
@@ -628,7 +643,7 @@ export class WasmWebBrowser extends WasmBridge {
                     this.do_wasm_pump();
                 }
             }
-            
+           
             ts.addEventListener('scroll', e => this.handlers.on_overlay_scroll(e))
         }*/
         
@@ -677,12 +692,12 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_mouse_move = e => {
             document.body.scrollTop = 0;
             document.body.scrollLeft = 0;
-            this.to_wasm.ToWasmMouseMove({was_out: false, mouse:mouse_to_wasm_wmouse(e)});
+            this.to_wasm.ToWasmMouseMove({was_out: false, mouse: mouse_to_wasm_wmouse(e)});
             this.do_wasm_pump();
         }
         
         this.handlers.on_mouse_out = e => {
-            this.to_wasm.ToWasmMouseMove({was_out: true, mouse:mouse_to_wasm_wmouse(e)});
+            this.to_wasm.ToWasmMouseMove({was_out: true, mouse: mouse_to_wasm_wmouse(e)});
             this.do_wasm_pump();
         }
         
@@ -697,7 +712,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         
         canvas.addEventListener('contextmenu', e => this.handlers.on_contextmenu(e))
-
+        
         function touch_to_wasm_wtouch(t, state) {
             return {
                 state,
@@ -710,7 +725,7 @@ export class WasmWebBrowser extends WasmBridge {
                 uid: t.identifier === undefined? i: t.identifier,
             }
         }
-
+        
         function touches_to_wasm_wtouches(e, state) {
             let f = [];
             
@@ -721,8 +736,8 @@ export class WasmWebBrowser extends WasmBridge {
             touch_loop:
             for (let i = 0; i < e.touches.length; i ++) {
                 let t = e.touches[i];
-                for(let j = 0; j < e.changedTouches.length; j++){
-                    if(e.changedTouches[j].identifier == t.identifier){
+                for (let j = 0; j < e.changedTouches.length; j ++) {
+                    if (e.changedTouches[j].identifier == t.identifier) {
                         continue touch_loop;
                     }
                 }
@@ -743,7 +758,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmTouchUpdate({
                 time: e.timeStamp,
                 modifiers: pack_key_modifier(e),
-                touches:touches_to_wasm_wtouches(e, 1)
+                touches: touches_to_wasm_wtouches(e, 1)
             });
             this.do_wasm_pump();
             return false
@@ -754,7 +769,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmTouchUpdate({
                 time: e.timeStamp,
                 modifiers: pack_key_modifier(e),
-                touches:touches_to_wasm_wtouches(e, 2)
+                touches: touches_to_wasm_wtouches(e, 2)
             });
             this.do_wasm_pump();
             return false
@@ -765,7 +780,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmTouchUpdate({
                 time: e.timeStamp,
                 modifiers: pack_key_modifier(e),
-                touches:touches_to_wasm_wtouches(e, 3)
+                touches: touches_to_wasm_wtouches(e, 3)
             });
             this.do_wasm_pump();
             return false
@@ -862,8 +877,8 @@ export class WasmWebBrowser extends WasmBridge {
         document.body.appendChild(style)
         ta.style.left = -100 + 'px'
         ta.style.top = -100 + 'px'
-        ta.style.height = 1+'px'
-        ta.style.width = 1+'px'
+        ta.style.height = 1 + 'px'
+        ta.style.width = 1 + 'px'
         
         //document.addEventListener('focusout', this.onFocusOut.bind(this))
         var was_paste = false;
@@ -1027,7 +1042,7 @@ export class WasmWebBrowser extends WasmBridge {
         if (this.text_area && pos) {
             //this.text_area.style.left = (Math.round(pos.x) -2) + "px";
             //this.text_area.style.top = (Math.round(pos.y) + 4) + "px"
-            this.text_area.style.left = (Math.round(pos.x) -2) + "px";
+            this.text_area.style.left = (Math.round(pos.x) - 2) + "px";
             this.text_area.style.top = (Math.round(pos.y) + 4) + "px"
         }
     }
@@ -1065,9 +1080,9 @@ function fetch_path(base, path) {
             })
         })
         let url = base + path;
-        if(location.hostname.startsWith("192.168") || location.hostname == "localhost"){
+        if (location.hostname.startsWith("192.168") || location.hostname == "localhost") {
             // fix this on the server next time
-            url = url.replace("/Users/admin/makepad/edit_repo","");
+            url = url.replace("/Users/admin/makepad/edit_repo", "");
         }
         req.open("GET", url)
         req.send()
