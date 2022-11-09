@@ -38,12 +38,12 @@ live_design!{
                 default: off,
                 off = {
                     from: {all: Forward {duration: 0.2}}
-                    apply: {button: {hover: 0.0}}
+                    apply: {draw_button: {hover: 0.0}}
                 }
                 
                 on = {
                     from: {all: Snap}
-                    apply: {button: {hover: 1.0}}
+                    apply: {draw_button: {hover: 1.0}}
                 }
             }
             
@@ -51,12 +51,12 @@ live_design!{
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.15}}
-                    apply: {button: {active: 0.0}}
+                    apply: {draw_button: {active: 0.0}}
                 }
                 
                 on = {
                     from: {all: Snap}
-                    apply: {button: {active: 1.0}}
+                    apply: {draw_button: {active: 1.0}}
                 }
             }
         }
@@ -85,7 +85,7 @@ struct DrawButton {
 
 #[derive(Live, LiveHook)]
 pub struct SeqButton {
-    button: DrawButton,
+    draw_button: DrawButton,
     state: State,
     x: usize,
     y: usize
@@ -129,7 +129,7 @@ pub enum SequencerAction {
 impl SeqButton {
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect) {
-        self.button.draw_abs(cx, rect);
+        self.draw_button.draw_abs(cx, rect);
     }
     
     fn set_is_active(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
@@ -148,11 +148,11 @@ impl SeqButton {
         dispatch_action: &mut dyn FnMut(&mut Cx, SequencerAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.button.area().redraw(cx);
+            self.draw_button.area().redraw(cx);
         }
         match event.hits_with_options(
             cx,
-            self.button.area(),
+            self.draw_button.area(),
             HitOptions::new().with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {

@@ -81,7 +81,7 @@ struct DrawFFT {
 pub struct DisplayAudio {
     //view: View,
     walk: Walk,
-    fft: DrawFFT,
+    draw_fft: DrawFFT,
     #[rust] area: Area,
     #[rust] layers: Vec<DisplayAudioLayer>
 }
@@ -237,11 +237,11 @@ impl DisplayAudio {
             if !layer.active || layer.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y {
                 continue
             }
-            self.fft.layer = index as f32 / self.layers.len() as f32;
-            self.fft.shift_fft = layer.fft_slot as f32 / FFT_SIZE_Y as f32;
-            self.fft.draw_vars.set_texture(0, &layer.wave_texture);
-            self.fft.draw_vars.set_texture(1, &layer.fft_texture);
-            self.fft.draw_abs(cx, rect);
+            self.draw_fft.layer = index as f32 / self.layers.len() as f32;
+            self.draw_fft.shift_fft = layer.fft_slot as f32 / FFT_SIZE_Y as f32;
+            self.draw_fft.draw_vars.set_texture(0, &layer.wave_texture);
+            self.draw_fft.draw_vars.set_texture(1, &layer.fft_texture);
+            self.draw_fft.draw_abs(cx, rect);
         }
         //self.view.end(cx);
     }

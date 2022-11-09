@@ -10,7 +10,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawBgQuad = {{DrawBgQuad}} {
+    DrawBg = {{DrawBg}} {
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             
@@ -33,7 +33,7 @@ live_design!{
         }
     }
     
-    DrawNameText = {{DrawNameText}} {
+    DrawName = {{DrawName}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -64,8 +64,8 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         hover: 0.0,
-                        bg: {hover: (hover)}
-                        name: {hover: (hover)}
+                        draw_bg: {hover: (hover)}
+                        draw_name: {hover: (hover)}
                     }
                 }
                 on = {
@@ -81,8 +81,8 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         selected: 0.0,
-                        bg: {selected: (selected)}
-                        name: {selected: (selected)}
+                        draw_bg: {selected: (selected)}
+                        draw_name: {selected: (selected)}
                     }
                 }
                 on = {
@@ -100,7 +100,7 @@ live_design!{
             flow: Down,
             padding: 5
         }
-        bg: {
+        draw_bg: {
             shape: ShadowBox,
             radius: 4,
             color: #0
@@ -110,14 +110,14 @@ live_design!{
 
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
-struct DrawBgQuad {
+struct DrawBg {
     draw_super: DrawQuad,
     selected: f32,
     hover: f32,
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
-struct DrawNameText {
+struct DrawName {
     draw_super: DrawText,
     selected: f32,
     hover: f32,
@@ -126,8 +126,8 @@ struct DrawNameText {
 #[derive(Live, LiveHook)]
 pub struct PopupMenuItem {
     
-    bg: DrawBgQuad,
-    name: DrawNameText,
+    draw_bg: DrawBg,
+    draw_name: DrawName,
     
     layout: Layout,
     state: State,
@@ -146,7 +146,7 @@ pub struct PopupMenu {
     view: View,
     menu_item: Option<LivePtr>,
     
-    bg: DrawShape,
+    draw_bg: DrawShape,
     layout: Layout,
     items: Vec<String>,
     #[rust] first_tap: bool,
@@ -191,9 +191,9 @@ impl PopupMenuItem {
         cx: &mut Cx2d,
         label: &str,
     ) {
-        self.bg.begin(cx, self.walk, self.layout);
-        self.name.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.bg.end(cx);
+        self.draw_bg.begin(cx, self.walk, self.layout);
+        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_bg.end(cx);
     }
     
     pub fn handle_event_fn(
@@ -204,12 +204,12 @@ impl PopupMenuItem {
         dispatch_action: &mut dyn FnMut(&mut Cx, PopupMenuItemAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg.area().redraw(cx);
+            self.draw_bg.area().redraw(cx);
         }
         
         match event.hits_with_options(
             cx,
-            self.bg.area(),
+            self.draw_bg.area(),
             HitOptions::new().with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {
@@ -245,7 +245,7 @@ impl PopupMenuItem {
 impl PopupMenu {
     
     pub fn menu_contains_pos(&self, cx: &mut Cx, pos: DVec2) -> bool {
-        self.bg.area().get_clipped_rect(cx).contains(pos)
+        self.draw_bg.area().get_clipped_rect(cx).contains(pos)
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d, width: f64) {
@@ -254,7 +254,7 @@ impl PopupMenu {
         cx.begin_overlay_turtle(Layout::flow_down());
         
         // ok so. this thing needs a complete position reset
-        self.bg.begin(cx, Walk::size(Size::Fixed(width), Size::Fit), self.layout);
+        self.draw_bg.begin(cx, Walk::size(Size::Fixed(width), Size::Fit), self.layout);
         self.count = 0;
     }
     
@@ -264,10 +264,10 @@ impl PopupMenu {
         let pass_rect = Rect {pos: dvec2(0.0, 0.0), size: cx.current_pass_size()};
         let menu_rect2 = pass_rect.add_margin(-dvec2(10.0, 10.0)).contain(menu_rect1);
         cx.turtle_mut().set_shift(shift + (menu_rect2.pos - menu_rect1.pos));
-        self.bg.end(cx);
+        self.draw_bg.end(cx);
         
         cx.end_overlay_turtle();
-        //cx.debug.rect_r(self.bg.area().get_rect(cx));
+        //cx.debug.rect_r(self.draw_bg.area().get_rect(cx));
         self.view.end(cx);
         self.menu_items.retain_visible();
         if let Some(init_select_item) = self.init_select_item.take() {

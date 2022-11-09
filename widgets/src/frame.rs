@@ -15,17 +15,17 @@ live_design!{
     
     Frame = {{Frame}} {}
     
-    Solid = <Frame> {bg: {shape: Solid}}
-    Rect = <Frame> {bg: {shape: Rect}}
-    Box = <Frame> {bg: {shape: Box}}
-    BoxX = <Frame> {bg: {shape: BoxX}}
-    BoxY = <Frame> {bg: {shape: BoxY}}
-    BoxAll = <Frame> {bg: {shape: BoxAll}}
-    Circle = <Frame> {bg: {shape: Circle}}
-    Hexagon = <Frame> {bg: {shape: Hexagon}}
-    GradientX = <Frame> {bg: {shape: Solid, fill: GradientX}}
-    GradientY = <Frame> {bg: {shape: Solid, fill: GradientY}}
-    Image = <Frame> {bg: {shape: Solid, fill: Image}}
+    Solid = <Frame> {draw_bg: {shape: Solid}}
+    Rect = <Frame> {draw_bg: {shape: Rect}}
+    Box = <Frame> {draw_bg: {shape: Box}}
+    BoxX = <Frame> {draw_bg: {shape: BoxX}}
+    BoxY = <Frame> {draw_bg: {shape: BoxY}}
+    BoxAll = <Frame> {draw_bg: {shape: BoxAll}}
+    Circle = <Frame> {draw_bg: {shape: Circle}}
+    Hexagon = <Frame> {draw_bg: {shape: Hexagon}}
+    GradientX = <Frame> {draw_bg: {shape: Solid, fill: GradientX}}
+    GradientY = <Frame> {draw_bg: {shape: Solid, fill: GradientY}}
+    Image = <Frame> {draw_bg: {shape: Solid, fill: Image}}
     UserDraw = <Frame> {user_draw: true}
     ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
@@ -35,7 +35,7 @@ live_design!{
 #[derive(Live)]
 #[live_design_fn(widget_factory!(Frame))]
 pub struct Frame { // draw info per UI element
-    bg: DrawShape,
+    draw_bg: DrawShape,
     
     pub layout: Layout,
     
@@ -430,11 +430,11 @@ impl Frame {
                 self.layout.scroll
             };
             
-            if self.bg.shape != Shape::None {
-                if self.bg.fill == Fill::Image {
-                    self.bg.draw_vars.set_texture(0, &self.image_texture);
+            if self.draw_bg.shape != Shape::None {
+                if self.draw_bg.fill == Fill::Image {
+                    self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
                 }
-                self.bg.begin(cx, walk, self.layout.with_scroll(scroll));
+                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
             }
             else {
                 cx.begin_turtle(walk, self.layout.with_scroll(scroll));
@@ -478,9 +478,9 @@ impl Frame {
                     scroll_bars.draw_scroll_bars(cx);
                 };
                 
-                if self.bg.shape != Shape::None {
-                    self.bg.end(cx);
-                    self.area = self.bg.area();
+                if self.draw_bg.shape != Shape::None {
+                    self.draw_bg.end(cx);
+                    self.area = self.draw_bg.area();
                 }
                 else {
                     cx.end_turtle_with_area(&mut self.area);

@@ -4,7 +4,7 @@ use {
     },
     crate::{
         makepad_draw::*,
-        scroll_shadow::ScrollShadow,
+        scroll_shadow::DrawScrollShadow,
         scroll_bars::ScrollBars
     }
 };
@@ -94,9 +94,9 @@ live_design!{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         hover: 0.0,
-                        bg: {hover: (hover)}
-                        name: {hover: (hover)}
-                        icon: {hover: (hover)}
+                        draw_bg: {hover: (hover)}
+                        draw_name: {hover: (hover)}
+                        draw_icon: {hover: (hover)}
                     }
                 }
                 
@@ -126,9 +126,9 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         selected: 0.0,
-                        bg: {selected: (selected)}
-                        name: {selected: (selected)}
-                        icon: {selected: (selected)}
+                        draw_bg: {selected: (selected)}
+                        draw_name: {selected: (selected)}
+                        draw_icon: {selected: (selected)}
                     }
                 }
                 on = {
@@ -151,9 +151,9 @@ live_design!{
                     //ease: Ease::OutExp
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                        bg: {opened: (opened)}
-                        name: {opened: (opened)}
-                        icon: {opened: (opened)}
+                        draw_bg: {opened: (opened)}
+                        draw_name: {opened: (opened)}
+                        draw_icon: {opened: (opened)}
                     }
                 }
                 
@@ -180,12 +180,12 @@ live_design!{
         node_height: (DIM_DATA_ITEM_HEIGHT),
         file_node: <FileTreeNode> {
             is_folder: false,
-            bg: {is_folder: 0.0}
+            draw_bg: {is_folder: 0.0}
             name: {is_folder: 0.0}
         }
         folder_node: <FileTreeNode> {
             is_folder: true,
-            bg: {is_folder: 1.0}
+            draw_bg: {is_folder: 1.0}
             name: {is_folder: 1.0}
         }
         layout: {flow: Down, clip_x: true, clip_y: true},
@@ -232,9 +232,9 @@ struct DrawIconQuad {
 
 #[derive(Live, LiveHook)]
 pub struct FileTreeNode {
-    bg: DrawBgQuad,
-    icon: DrawIconQuad,
-    name: DrawNameText,
+    draw_bg: DrawBgQuad,
+    draw_icon: DrawIconQuad,
+    draw_name: DrawNameText,
     layout: Layout,
     
     state: State,
@@ -262,7 +262,7 @@ pub struct FileTree {
     
     node_height: f64,
     
-    scroll_shadow: ScrollShadow,
+    draw_scroll_shadow: DrawScrollShadow,
     
     #[rust] dragging_node_id: Option<FileNodeId>,
     #[rust] selected_node_id: Option<FileNodeId>,
@@ -300,37 +300,37 @@ pub enum FileTreeNodeAction {
 
 impl FileTreeNode {
     pub fn set_draw_state(&mut self, is_even: f32, scale: f64) {
-        self.bg.scale = scale as f32;
-        self.bg.is_even = is_even;
-        self.name.scale = scale as f32;
-        self.name.is_even = is_even;
-        self.icon.scale = scale as f32;
-        self.icon.is_even = is_even;
-        self.name.font_scale = scale;
+        self.draw_bg.scale = scale as f32;
+        self.draw_bg.is_even = is_even;
+        self.draw_name.scale = scale as f32;
+        self.draw_name.is_even = is_even;
+        self.draw_icon.scale = scale as f32;
+        self.draw_icon.is_even = is_even;
+        self.draw_name.font_scale = scale;
     }
     
     pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
         self.set_draw_state(is_even, scale);
         
-        self.bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
+        self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
         
         cx.walk_turtle(self.indent_walk(depth));
         
-        self.icon.draw_walk(cx, self.icon_walk);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         
-        self.name.draw_walk(cx, Walk::fit(), Align::default(), name);
-        self.bg.end(cx);
+        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.draw_bg.end(cx);
     }
     
     pub fn draw_file(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
         self.set_draw_state(is_even, scale);
         
-        self.bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
+        self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
         
         cx.walk_turtle(self.indent_walk(depth));
         
-        self.name.draw_walk(cx, Walk::fit(), Align::default(), name);
-        self.bg.end(cx);
+        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.draw_bg.end(cx);
     }
     
     fn indent_walk(&self, depth: usize) -> Walk {
@@ -366,9 +366,9 @@ impl FileTreeNode {
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg.redraw(cx);
+            self.draw_bg.redraw(cx);
         }
-        match event.hits(cx, self.bg.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
             }
@@ -419,7 +419,7 @@ impl FileTree {
             walk += self.node_height.max(1.0);
         }
         
-        self.scroll_shadow.draw(cx, dvec2(0., 0.));
+        self.draw_scroll_shadow.draw(cx, dvec2(0., 0.));
         self.scroll_bars.end(cx);
         
         let selected_node_id = self.selected_node_id;
