@@ -41,19 +41,11 @@ use {
 
 impl Cx {
     
-    
-    pub fn process_to_wasm(&mut self, msg_ptr: u32) -> u32
-    //where F: FnMut(&mut Cx, &Event),
-    {
-        //self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &Event) as *mut dyn FnMut(&mut Cx, &Event));
-        let ret = self.event_loop_core(ToWasmMsg::take_ownership(msg_ptr));
-        //self.event_handler = None;
-        ret
-    }
-    
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
-    pub fn event_loop_core(&mut self, mut to_wasm_msg: ToWasmMsg) -> u32 {
+    pub fn process_to_wasm(&mut self, msg_ptr: u32) -> u32 {
+        
+        let mut to_wasm_msg = ToWasmMsg::take_ownership(msg_ptr);
         
         self.os.from_wasm = Some(FromWasmMsg::new());
         let mut to_wasm = to_wasm_msg.as_ref();
@@ -71,7 +63,7 @@ impl Cx {
                         tw.gpu_info.renderer
                     );
                     self.platform_type = tw.browser_info.into();
-                    
+                    self.xr_capabilities = tw.xr_capabilities.into();
                     let mut deps = Vec::<String>::new();
                     for (path, _) in &self.dependencies {
                         deps.push(path.to_string());
@@ -160,6 +152,7 @@ impl Cx {
                     let e: MouseMoveEvent = ToWasmMouseMove::read_to_wasm(&mut to_wasm).into();
                     self.call_event_handler(&Event::MouseMove(e.into()));
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
+                    self.fingers.move_captures();
                 }
                 
                 live_id!(ToWasmMouseUp) => {
@@ -275,16 +268,6 @@ impl Cx {
                         data: tw.data.into_vec_u8()
                     }));
                 }
-                /*
-                live_id!(ToWasmMidiInputData) => {
-                    let tw = ToWasmMidiInputData::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&Event::Midi1InputData(vec![tw.into()]));
-                }
-                
-                live_id!(ToWasmMidiInputList) => {
-                    let tw = ToWasmMidiInputList::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&Event::MidiInputList(tw.into()));
-                }*/
                 
                 msg_id => {
                     // swap the message into an event to avoid a copy
@@ -351,10 +334,10 @@ impl Cx {
                 CxOsOp::SetTopmost(_window_id, _is_topmost) => {
                     todo!()
                 }
-                CxOsOp::XrStartPresenting(_) => {
+                CxOsOp::XrStartPresenting => {
                     self.os.from_wasm(FromWasmXrStartPresenting {});
                 },
-                CxOsOp::XrStopPresenting(_) => {
+                CxOsOp::XrStopPresenting => {
                     self.os.from_wasm(FromWasmXrStopPresenting {});
                 },
                 CxOsOp::ShowTextIME(area, pos) => {

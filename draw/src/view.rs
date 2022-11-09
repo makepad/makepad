@@ -134,6 +134,8 @@ impl View {
         if let Some(parent_id) = codeflow_parent_id {
             let parent = &mut cx.cx.draw_lists[parent_id];
             parent.append_sub_list(redraw_id, self.draw_list.id());
+            // here we could chain the matrix...
+            
             cx.nav_list_item_push(parent_id, NavItem::Child(self.draw_list.id()));
         }
         
