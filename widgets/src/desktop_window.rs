@@ -24,7 +24,7 @@ live_design!{
                 layout: {
                     flow: Right
                 },
-                bg: {color: (COLOR_BG_APP)}
+                draw_bg: {color: (COLOR_BG_APP)}
                 walk:{height: 29},
                 caption_label = <Frame> {
                     walk:{width:Fill, height:Fill}

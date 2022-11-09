@@ -10,7 +10,7 @@ live_design!{
     App = {{App}} {
         ui: {
             walk: {width: Fill, height: Fill},
-            bg: {
+            draw_bg: {
                 shape:Rect
                 fn pixel(self) -> vec4 {
                     //return #f00

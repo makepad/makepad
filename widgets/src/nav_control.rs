@@ -11,7 +11,7 @@ live_design!{
     }
     
     NavControl= {{NavControl}} {
-        label: {
+        draw_label: {
             text_style: {
                 font_size: 6
             },
@@ -30,8 +30,8 @@ pub struct DrawFocusRect {
 #[derive(Live, LiveHook)]
 pub struct NavControl {
     view: View,
-    focus: DrawFocusRect,
-    label: DrawText,
+    draw_focus: DrawFocusRect,
+    draw_label: DrawText,
     #[rust] _recent_focus: Area,
 }
 

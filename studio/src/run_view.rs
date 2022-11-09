@@ -34,7 +34,7 @@ pub struct DrawApp {
 
 #[derive(Live)]
 pub struct RunView {
-    bg: DrawApp,
+    draw_bg: DrawApp,
     state: State,
     frame_delta: f64,
     #[rust] last_size: (usize, usize),
@@ -65,9 +65,9 @@ impl RunView {
             })
         }
         // ok what do we want. lets do fingerdown, finger 
-        match event.hits(cx, self.bg.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(fe) => {
-                cx.set_key_focus(self.bg.area());
+                cx.set_key_focus(self.draw_bg.area());
                 let rel = fe.abs - fe.rect.pos;
                 state.send_host_to_stdin(None, HostToStdin::FingerDown(StdinFingerDown{
                     time: fe.time,
@@ -115,13 +115,13 @@ impl RunView {
                 self.redraw(cx);
             }
             StdinToHost::DrawComplete => {
-                self.bg.redraw(cx);
+                self.draw_bg.redraw(cx);
             }
         }
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.bg.area().redraw(cx);
+        self.draw_bg.area().redraw(cx);
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, state: &BuildState) {
@@ -131,7 +131,7 @@ impl RunView {
         let dpi_factor = cx.current_dpi_factor();
         let rect = cx.walk_turtle(Walk::fill()).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
-        self.bg.draw_abs(cx, rect);
+        self.draw_bg.draw_abs(cx, rect);
         for client in &state.clients {
             for process in client.processes.values() {
                 
@@ -152,7 +152,7 @@ impl RunView {
                         dpi_factor: dpi_factor,
                     }));
                 }
-                self.bg.set_texture(0, &process.texture);
+                self.draw_bg.set_texture(0, &process.texture);
                 
                 break
             }

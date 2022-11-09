@@ -117,7 +117,7 @@ pub struct Splitter {
     min_horizontal: f64,
     max_horizontal: f64,
     
-    bar: DrawSplitter,
+    draw_splitter: DrawSplitter,
     split_bar_size: f64,
     
     // framecomponent mode
@@ -162,7 +162,7 @@ impl Widget for Splitter {
     }
     
     fn redraw(&mut self, cx:&mut Cx){
-        self.bar.redraw(cx)
+        self.draw_splitter.redraw(cx)
     }
     
     fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache) -> WidgetResult {
@@ -217,12 +217,12 @@ impl Splitter {
         cx.end_turtle();
         match self.axis {
             Axis::Horizontal => {
-                self.bar.is_vertical = 1.0;
-                self.bar.draw_walk(cx, Walk::size(Size::Fixed(self.split_bar_size), Size::Fill));
+                self.draw_splitter.is_vertical = 1.0;
+                self.draw_splitter.draw_walk(cx, Walk::size(Size::Fixed(self.split_bar_size), Size::Fill));
             }
             Axis::Vertical => {
-                self.bar.is_vertical = 0.0;
-                self.bar.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
+                self.draw_splitter.is_vertical = 0.0;
+                self.draw_splitter.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
             }
         }
         cx.begin_turtle(Walk::default(), Layout::flow_down());
@@ -256,7 +256,7 @@ impl Splitter {
         dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
         self.state_handle_event(cx, event);
-        match event.hits_with_options(cx, self.bar.area(), HitOptions::new().with_margin(self.margin())) {
+        match event.hits_with_options(cx, self.draw_splitter.area(), HitOptions::new().with_margin(self.margin())) {
         Hit::FingerHoverIn(_) => {
             match self.axis {
                 Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
@@ -314,7 +314,7 @@ impl Splitter {
                         }
                     }
                 };
-                self.bar.redraw(cx);
+                self.draw_splitter.redraw(cx);
                 dispatch_action(cx, SplitterAction::Changed {axis: self.axis, align: self.align});
             }
         }

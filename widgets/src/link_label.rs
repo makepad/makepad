@@ -13,7 +13,7 @@ live_design!{
     
     LinkLabel = {{LinkLabel}} {
         button: {
-            bg: {
+            draw_bg: {
                 const THICKNESS = 0.8
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -27,7 +27,7 @@ live_design!{
                     ), mix(0.0, THICKNESS, self.hover));
                 }
             }
-            label: {
+            draw_label: {
                 text_style: <FONT_META> {}
                 fn get_color(self) -> vec4 {
                     return mix(

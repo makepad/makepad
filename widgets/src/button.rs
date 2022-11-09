@@ -30,7 +30,7 @@ live_design!{
     }
     
     Button= {{Button}} {
-        bg: {
+        draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
             
@@ -93,8 +93,8 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        bg: {pressed: 0.0, hover: 0.0}
-                        label: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_label: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -104,16 +104,16 @@ live_design!{
                         pressed: Forward {duration: 0.01}
                     }
                     apply: {
-                        bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
                 
                 pressed = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
             }
@@ -134,8 +134,8 @@ pub enum ButtonAction {
 pub struct Button {
     state: State,
     
-    bg: DrawQuad,
-    label: DrawLabelText,
+    draw_bg: DrawQuad,
+    draw_label: DrawLabelText,
     
     walk: Walk,
     
@@ -154,7 +154,7 @@ impl Button {
     
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
         self.state_handle_event(cx, event);
-        match event.hits(cx, self.bg.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 dispatch_action(cx, ButtonAction::Press);
                 self.animate_state(cx, id!(hover.pressed));
@@ -183,18 +183,18 @@ impl Button {
         };
     }
     
-    pub fn area(&self)->Area{self.bg.area()}
+    pub fn area(&self)->Area{self.draw_bg.area()}
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
-        self.bg.begin(cx, self.walk, self.layout);
-        self.label.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.bg.end(cx);
+        self.draw_bg.begin(cx, self.walk, self.layout);
+        self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_bg.end(cx);
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.bg.begin(cx, walk, self.layout);
-        self.label.draw_walk(cx, Walk::fit(), Align::default(), &self.text);
-        self.bg.end(cx);
+        self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), &self.text);
+        self.draw_bg.end(cx);
     }
 }
 

@@ -72,14 +72,14 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         label: {hover: 0.0}
-                        bg: {hover: 0.0}
+                        draw_bg: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         label: {hover: 1.0}
-                        bg: {hover: 1.0}
+                        draw_bg: {hover: 1.0}
                     }
                 }
             }
@@ -89,14 +89,14 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         label: {focus: 0.0}
-                        bg: {focus: 0.0}
+                        draw_bg: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         label: {focus: 1.0}
-                        bg: {focus: 1.0}
+                        draw_bg: {focus: 1.0}
                     }
                 }
             }
@@ -131,7 +131,7 @@ pub struct DrawLabel {
 
 #[derive(Live, LiveHook)]
 pub struct NumberBox {
-    bg: DrawBg,
+    draw_bg: DrawBg,
     label: DrawLabel,
 
     layout: Layout,
@@ -157,7 +157,7 @@ impl NumberBox {
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
         self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.bg.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, id!(hover.on));
@@ -178,14 +178,14 @@ impl NumberBox {
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos:DVec2, number:f32, fmt:&str) {
         
-        self.bg.last_number = self.bg.number;
-        self.bg.number = number;
+        self.draw_bg.last_number = self.draw_bg.number;
+        self.draw_bg.number = number;
         self.label.last_number = self.label.number;
         self.label.number = number;
         
-        self.bg.begin(cx, Walk::fit().with_abs_pos(pos), self.layout);
+        self.draw_bg.begin(cx, Walk::fit().with_abs_pos(pos), self.layout);
         self.label.draw_walk(cx, Walk::fit(),self.label_align, fmt);
-        self.bg.end(cx);
+        self.draw_bg.end(cx);
     }
 }
 
@@ -244,7 +244,7 @@ impl NumberGrid{
                 buf.clear();
                 write!(buf,"{:.3}", number).unwrap();
                 let pos = start_pos + dvec2(x as f64 * 55.0,y as f64*15.0);
-                number_box.bg.fast_path = if self.fast_path{1.0}else{0.0};
+                number_box.draw_bg.fast_path = if self.fast_path{1.0}else{0.0};
                 number_box.draw_abs(cx, pos, number, &buf);
             }
         }

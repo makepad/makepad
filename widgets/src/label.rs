@@ -16,7 +16,7 @@ live_design!{
             width:Fit
             height:Fit
         }
-        label:{
+        draw_label:{
             color:#8
         }
     }
@@ -25,7 +25,7 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[live_design_fn(widget_factory!(Label))]
 pub struct Label {
-    label: DrawText,
+    draw_label: DrawText,
     walk: Walk,
     
 //    overflow: Overflow,
@@ -39,7 +39,7 @@ impl Widget for Label {
     fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
 
     fn redraw(&mut self, cx:&mut Cx){
-        self.label.redraw(cx)
+        self.draw_label.redraw(cx)
     }
     
     fn get_walk(&self)->Walk{
@@ -51,7 +51,7 @@ impl Widget for Label {
         for line in lines{
             // lets debugdraw the cliprect
             
-            self.label.draw_walk(cx, walk, self.align, line);
+            self.draw_label.draw_walk(cx, walk, self.align, line);
         }
         WidgetDraw::done()
     }

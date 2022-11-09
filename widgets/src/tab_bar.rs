@@ -17,7 +17,7 @@ live_design!{
             draw_depth: 10
             color: #c
         }
-        bar_fill: {
+        draw_fill: {
             color: (COLOR_BG_HEADER)
         }
         walk: {
@@ -40,9 +40,9 @@ live_design!{
 pub struct TabBar {
     
     scroll_bars: ScrollBars,
-    drag: DrawColor,
+    draw_drag: DrawColor,
     
-    bar_fill: DrawColor,
+    draw_fill: DrawColor,
     walk: Walk,
     tab: Option<LivePtr>,
     
@@ -83,7 +83,7 @@ impl TabBar {
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         if self.is_dragged {
-            self.drag.draw_walk(
+            self.draw_drag.draw_walk(
                 cx,
                 Walk {
                     width: Size::Fill,
@@ -93,7 +93,7 @@ impl TabBar {
             );
         }
         self.tabs.retain_visible();
-        self.bar_fill.draw_walk(cx, Walk::size(Size::Fill, Size::Fill));
+        self.draw_fill.draw_walk(cx, Walk::size(Size::Fill, Size::Fill));
         self.scroll_bars.end(cx);
     }
     
