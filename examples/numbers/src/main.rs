@@ -9,7 +9,7 @@ live_design!{
     App= {{App}} {
         ui:{
             <ScrollY>{
-                bg:{color:#5, shape:Solid}
+                draw_bg:{color:#5, shape:Solid}
                 <NumberGrid>{
                 }
             }

@@ -45,7 +45,7 @@ live_design! {
                 width: Fill,
                 height: Fill
             },
-            bg: {
+            draw_bg: {
                 shape: Solid
 
                 // The `fn pixel(self) -> vec4` syntax is used to define a property named `pixel`,

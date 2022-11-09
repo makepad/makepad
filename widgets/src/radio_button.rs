@@ -15,6 +15,10 @@ live_design!{
     DrawRadioButton = {{DrawRadioButton}} {
 
         uniform size: 7.0;
+
+        instance color_active: #00000000
+        instance color_inactive: #x99EEFF
+        
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             match self.radio_type {
@@ -47,7 +51,7 @@ live_design!{
     }
     
     RadioButton = {{RadioButton}} {
-        label_text: {
+        draw_label: {
             instance hover: 0.0
             instance focus: 0.0
             instance selected: 0.0
@@ -85,10 +89,6 @@ live_design!{
             height: Fit,
         }
         
-        radio_button: {
-            instance color_active: #00000000
-            instance color_inactive: #x99EEFF
-        }
         
         label_align: {
             y: 0.0
@@ -100,15 +100,15 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.15}}
                     apply: {
-                        radio_button: {hover: 0.0}
-                        label_text: {hover: 0.0}
+                        draw_radio: {hover: 0.0}
+                        draw_label: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        radio_button: {hover: 1.0}
-                        label_text: {hover: 1.0}
+                        draw_radio: {hover: 1.0}
+                        draw_label: {hover: 1.0}
                     }
                 }
             }
@@ -117,15 +117,15 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        radio_button: {focus: 0.0}
-                        label_text: {focus: 0.0}
+                        draw_radio: {focus: 0.0}
+                        draw_label: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        radio_button: {focus: 1.0}
-                        label_text: {focus: 1.0}
+                        draw_radio: {focus: 1.0}
+                        draw_label: {focus: 1.0}
                     }
                 }
             }
@@ -134,16 +134,16 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        radio_button: {selected: 0.0}
-                        label_text: {selected: 0.0}
+                        draw_radio: {selected: 0.0}
+                        draw_label: {selected: 0.0}
                     }
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        radio_button: {selected: 1.0}
-                        label_text: {selected: 1.0}
+                        draw_radio: {selected: 1.0}
+                        draw_label: {selected: 1.0}
                     }
                 }
             }
@@ -172,7 +172,7 @@ pub enum RadioType {
 #[derive(Live, LiveHook)]
 #[live_design_fn(widget_factory!(RadioButton))]
 pub struct RadioButton {
-    radio_button: DrawRadioButton,
+    draw_radio: DrawRadioButton,
     
     walk: Walk,
     
@@ -183,7 +183,7 @@ pub struct RadioButton {
     
     label_walk: Walk,
     label_align: Align,
-    label_text: DrawText,
+    draw_label: DrawText,
     label: String,
     
     bind: String,
@@ -201,7 +201,7 @@ impl RadioButton {
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, RadioButtonAction)) {
         self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.radio_button.area()) {
+        match event.hits(cx, self.draw_radio.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animate_state(cx, id!(hover.on));
@@ -227,9 +227,9 @@ impl RadioButton {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.radio_button.begin(cx, walk, self.layout);
-        self.label_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
-        self.radio_button.end(cx);
+        self.draw_radio.begin(cx, walk, self.layout);
+        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_radio.end(cx);
     }
 }
 
@@ -240,7 +240,7 @@ impl Widget for RadioButton {
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
-        self.radio_button.redraw(cx);
+        self.draw_radio.redraw(cx);
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {

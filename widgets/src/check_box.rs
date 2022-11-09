@@ -59,7 +59,7 @@ live_design!{
     }
     
     CheckBox = {{CheckBox}} {
-        label_text: {
+        draw_label: {
             color: #9
         }
         walk: {
@@ -72,7 +72,7 @@ live_design!{
             height: Fit,
         }
         
-        check_box: {
+        draw_check: {
         }
         
         label_align: {
@@ -85,13 +85,13 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.15}}
                     apply: {
-                        check_box: {hover: 0.0}
+                        draw_check: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        check_box: {hover: 1.0}
+                        draw_check: {hover: 1.0}
                     }
                 }
             }
@@ -100,13 +100,13 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        check_box: {focus: 0.0}
+                        draw_check: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        check_box: {focus: 1.0}
+                        draw_check: {focus: 1.0}
                     }
                 }
             }
@@ -114,12 +114,12 @@ live_design!{
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.0}}
-                    apply: {check_box: {selected: 0.0}}
+                    apply: {draw_check: {selected: 0.0}}
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
-                    apply: {check_box: {selected: 1.0}}
+                    apply: {draw_check: {selected: 1.0}}
                 }
             }
         }
@@ -147,7 +147,7 @@ pub enum CheckType {
 #[derive(Live, LiveHook)]
 #[live_design_fn(widget_factory!(CheckBox))]
 pub struct CheckBox {
-    check_box: DrawCheckBox,
+    draw_check: DrawCheckBox,
     
     walk: Walk,
     
@@ -156,7 +156,7 @@ pub struct CheckBox {
     
     label_walk: Walk,
     label_align: Align,
-    label_text: DrawText,
+    draw_label: DrawText,
     label: String,
     
     bind: String,
@@ -174,7 +174,7 @@ impl CheckBox {
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CheckBoxAction)) {
         self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.check_box.area()) {
+        match event.hits(cx, self.draw_check.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, id!(hover.on));
@@ -203,9 +203,9 @@ impl CheckBox {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.check_box.begin(cx, walk, self.layout);
-        self.label_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
-        self.check_box.end(cx);
+        self.draw_check.begin(cx, walk, self.layout);
+        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_check.end(cx);
     }
 }
 
@@ -233,7 +233,7 @@ impl Widget for CheckBox {
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
-        self.check_box.redraw(cx);
+        self.draw_check.redraw(cx);
     }
     
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {

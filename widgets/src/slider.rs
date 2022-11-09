@@ -73,7 +73,7 @@ live_design!{
             cursor_size: 2.0,
             empty_message: "0",
             numeric_only: true,
-            bg: {
+            draw_bg: {
                 shape: None
                 color: #5
                 radius: 2
@@ -93,7 +93,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        slider: {hover: 0.0}
+                        draw_slider: {hover: 0.0}
                         //text_input: {state: {hover = off}}
                     }
                 }
@@ -101,7 +101,7 @@ live_design!{
                     //cursor: Arrow,
                     from: {all: Snap}
                     apply: {
-                        slider: {hover: 1.0}
+                        draw_slider: {hover: 1.0}
                         //text_input: {state: {hover = on}}
                     }
                 }
@@ -111,13 +111,13 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        slider: {focus: 0.0}
+                        draw_slider: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        slider: {focus: 1.0}
+                        draw_slider: {focus: 1.0}
                     }
                 }
             }
@@ -125,12 +125,12 @@ live_design!{
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
-                    apply: {slider: {drag: 0.0}}
+                    apply: {draw_slider: {drag: 0.0}}
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Snap}
-                    apply: {slider: {drag: 1.0}}
+                    apply: {draw_slider: {drag: 1.0}}
                 }
             }
         }
@@ -147,7 +147,7 @@ pub struct DrawSlider {
 #[derive(Live, LiveHook)]
 #[live_design_fn(widget_factory!(Slider))]
 pub struct Slider {
-    slider: DrawSlider,
+    draw_slider: DrawSlider,
     
     walk: Walk,
     
@@ -215,7 +215,7 @@ impl Slider {
                 _ => ()
             }
         };
-        match event.hits(cx, self.slider.area()) {
+        match event.hits(cx, self.draw_slider.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, id!(hover.on));
@@ -252,7 +252,7 @@ impl Slider {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
                     self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
-                    self.slider.redraw(cx);
+                    self.draw_slider.redraw(cx);
                     self.update_text_input(cx);
                     dispatch_action(cx, SliderAction::Slide(self.to_external()));
                 }
@@ -268,8 +268,8 @@ impl Slider {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.slider.slide_pos = self.value as f32;
-        self.slider.begin(cx, walk, self.layout);
+        self.draw_slider.slide_pos = self.value as f32;
+        self.draw_slider.begin(cx, walk, self.layout);
         
         if let Some(dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
@@ -277,14 +277,14 @@ impl Slider {
             self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
         }
         
-        self.slider.end(cx);
+        self.draw_slider.end(cx);
     }
 }
 
 
 impl Widget for Slider {
     fn redraw(&mut self, cx: &mut Cx) {
-        self.slider.redraw(cx);
+        self.draw_slider.redraw(cx);
     }
     
     fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
