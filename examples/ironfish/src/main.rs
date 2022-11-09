@@ -353,6 +353,7 @@ live_design!{
     
     InstrumentDropdown = <ElementBox> {
         layout: {align: {y: 0.5}, padding: 0, flow: Right}
+        walk: {margin: {top: 10.0, right: (SPACING_CONTROLS), bottom: 10.0, left: 0}}
         label = <Label> {
             walk: {width: Fit, margin: {right: 5}},
             label: {
@@ -360,7 +361,6 @@ live_design!{
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
             }
         }
-        walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0}}
         dropdown = <FishDropDown> {}
     }
     
@@ -858,7 +858,6 @@ live_design!{
             layout: {flow: Down}
             walk: {width: Fill, height: Fit}
             filter_type = <InstrumentDropdown> {
-                walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
                 dropdown = {
                     labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
                     values: [LowPass, HighPass, BandPass, BandReject]
@@ -933,7 +932,6 @@ live_design!{
             }
             type = <InstrumentDropdown> {
                 layout: {flow: Down}
-                walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
                 dropdown = {
                     values: [DPWSawPulse, BlampTri, Pure, SuperSaw, HyperSaw, HarmonicSeries]
                     labels: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
