@@ -331,11 +331,11 @@ impl Cx {
                 CxOsOp::SetTopmost(_window_id, _is_topmost) => {
                     todo!()
                 }
-                CxOsOp::XrStartPresenting(_) => {
-                    todo!()
+                CxOsOp::XrStartPresenting => {
+                    //todo!()
                 },
-                CxOsOp::XrStopPresenting(_) => {
-                    todo!()
+                CxOsOp::XrStopPresenting => {
+                    //todo!()
                 },
                 CxOsOp::ShowTextIME(area, pos) => {
                     let pos = area.get_clipped_rect(self).pos + pos;

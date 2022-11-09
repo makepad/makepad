@@ -137,9 +137,6 @@ pub struct Button {
     bg: DrawQuad,
     label: DrawLabelText,
     
-    #[alias(width, walk.width)]
-    #[alias(height, walk.height)]
-    #[alias(margin, walk.margin)]
     walk: Walk,
     
     layout: Layout,

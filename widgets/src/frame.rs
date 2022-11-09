@@ -180,6 +180,12 @@ impl FrameRef {
         WidgetDraw::done()
     }
     
+    pub fn set_visible(&mut self, visible: bool){
+        if let Some(mut inner) = self.inner_mut() {
+            inner.visible = visible
+        }
+    }
+    
     pub fn set_scroll_pos(&self, cx: &mut Cx, v: DVec2) {
         if let Some(mut inner) = self.inner_mut() {
             inner.set_scroll_pos(cx, v)

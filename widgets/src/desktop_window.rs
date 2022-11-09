@@ -16,21 +16,38 @@ live_design!{
     DesktopWindow= {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
         var caption =  "Makepad"
-        frame: {
+        ui: {
             layout: {
                 flow: Down
             },
-            windows_buttons = <Solid> {
+            caption_bar = <Solid> {
+                layout: {
+                    flow: Right
+                },
                 bg: {color: (COLOR_BG_APP)}
                 walk:{height: 29},
                 caption_label = <Frame> {
+                    walk:{width:Fill, height:Fill}
                     layout: {align: {x: 0.5, y: 0.5}},
                     <Label> {text: (caption), walk: {margin: {left: 100}}}
                 }
-                //min_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMin}
-                //max_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMax}
-                //close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
-                
+                windows_buttons = <Frame> {
+                    visible: false,
+                    walk:{width:Fit, height:Fit}
+                    min = <DesktopButton> {button_type: WindowsMin}
+                    max = <DesktopButton> {button_type: WindowsMax}
+                    close = <DesktopButton> {button_type: WindowsClose}
+                }
+                web_fullscreen = <Frame>{
+                    visible: false,
+                    walk:{width:Fit, height:Fit}
+                    fullscreen = <DesktopButton> {button_type: Fullscreen}
+                }
+                web_xr = <Frame>{
+                    visible: false,
+                    walk:{width:Fit, height:Fit}
+                    xr_on = <DesktopButton> {button_type: XRMode}
+                }
             }
             inner_view = <Frame> {user_draw: true}
         }
@@ -53,7 +70,7 @@ pub struct DesktopWindow {
     pass: Pass,
     depth_texture: Texture,
     
-    frame: FrameRef,
+    ui: FrameRef,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![
@@ -74,8 +91,14 @@ impl LiveHook for DesktopWindow {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
-        if cx.platform_type().is_desktop(){
-            //self.frame.template(cx, id!(windows_buttons), id!(my_instrument), live!{});
+        // check if we are ar/vr capable
+        if cx.xr_capabilities().vr_supported{
+            // lets show a VR button
+            self.ui.get_frame(id!(web_xr)).set_visible(true);
+            log!("VR IS SUPPORTED");
+        }
+        if let OsType::MsWindows = cx.platform_type(){
+            self.ui.get_frame(id!(windows_buttons)).set_visible(true);
         }
     }
 }
@@ -90,21 +113,30 @@ pub enum DesktopWindowEvent {
 
 impl DesktopWindow {
     
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<DesktopWindowEvent> {
+        let mut a = Vec::new();
+        self.handle_event_fn(cx, event, &mut | _, v | a.push(v));
+        a
+    }
+    
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowEvent)){
         
         self.debug_view.handle_event(cx,event);
         self.nav_control.handle_event(cx, event, self.main_view.draw_list_id());
         self.overlay.handle_event(cx, event);
-        let actions = self.frame.handle_event(cx, event);
+        let actions = self.ui.handle_event(cx, event);
         if actions.not_empty(){
-            if self.frame.get_button(id!(min_btn)).clicked(&actions){
+            if self.ui.get_button(id!(min)).clicked(&actions){
             
             }
-            if self.frame.get_button(id!(max_btn)).clicked(&actions){
+            if self.ui.get_button(id!(max)).clicked(&actions){
             
             }
-            if self.frame.get_button(id!(close_btn)).clicked(&actions){
+            if self.ui.get_button(id!(close)).clicked(&actions){
             
+            }
+            if self.ui.get_button(id!(xr_on)).clicked(&actions){
+                cx.xr_start_presenting();
             }
         }
         /*
@@ -172,13 +204,13 @@ impl DesktopWindow {
         }
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, _menu: Option<&Menu>) -> ViewRedrawing {
+    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
         if !cx.view_will_redraw(&self.main_view) {
             return ViewRedrawing::no()
         }
         
         cx.begin_pass(&self.pass);
-        
+
         self.main_view.begin_always(cx);
 
         let pass_size = cx.current_pass_size();
@@ -188,7 +220,7 @@ impl DesktopWindow {
         self.overlay.begin(cx);
 
         //while self.frame.draw(cx).is_ok(){}
-        if self.frame.draw(cx).is_done() {
+        if self.ui.draw(cx).is_done() {
             self.end(cx);
             return ViewRedrawing::no()
         }
@@ -196,7 +228,7 @@ impl DesktopWindow {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw(cx).is_not_done() {}
+        while self.ui.draw(cx).is_not_done() {}
         self.debug_view.draw(cx);
         cx.end_turtle();
         self.main_view.end(cx);
