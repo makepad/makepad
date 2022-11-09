@@ -68,6 +68,7 @@ pub use makepad_shader_compiler::makepad_math::*;
 pub struct Cx {
     pub (crate) platform_type: OsType,
     pub (crate) gpu_info: GpuInfo,
+    pub (crate) xr_capabilities: XrCapabilities,
     pub (crate) cpu_cores: usize,
     
     pub windows: CxWindowPool,
@@ -135,6 +136,12 @@ pub enum OsType {
     WebBrowser {protocol: String, host: String, hostname: String, pathname: String, search: String, hash: String}
 }
 
+#[derive(Default)]
+pub struct XrCapabilities{
+    pub ar_supported: bool,
+    pub vr_supported: bool,
+}
+
 impl OsType {
     pub fn is_desktop(&self) -> bool {
         match self {
@@ -171,6 +178,7 @@ impl Cx {
             
             platform_type: OsType::Unknown,
             gpu_info: GpuInfo::default(),
+            xr_capabilities: XrCapabilities::default(),
             
             windows: Default::default(),
             passes: Default::default(),
