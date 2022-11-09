@@ -126,12 +126,11 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Live, Widget)]
 #[live_design_fn(widget_factory!(DesktopButton))]
 pub struct DesktopButton {
-    walk: Walk,
     state: State,
-    
+    walk: Walk,
     #[alias(button_type, bg.button_type)]
     pub bg: DrawDesktopButton,
 }
@@ -139,12 +138,12 @@ pub struct DesktopButton {
 #[derive(Live, LiveHook)]
 #[repr(u32)]
 pub enum DesktopButtonType {
-    WindowsMin,
-    WindowsMax,
-    WindowsMaxToggled,
-    WindowsClose,
-    XRMode,
-    #[pick] Fullscreen
+    WindowsMin = shader_enum(1),
+    WindowsMax = shader_enum(2),
+    WindowsMaxToggled = shader_enum(3),
+    WindowsClose = shader_enum(4),
+    XRMode = shader_enum(5),
+    #[pick] Fullscreen = shader_enum(6),
 }
 
 #[derive(Live, LiveHook)]
@@ -156,9 +155,9 @@ pub struct DrawDesktopButton {
     button_type: DesktopButtonType
 }
 
-impl DrawDesktopButton{
-    pub fn get_walk(&self)->Walk{
-        let (w, h) = match self.button_type {
+impl LiveHook for DesktopButton {
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
+        let (w, h) = match self.bg.button_type {
             DesktopButtonType::WindowsMin
                 | DesktopButtonType::WindowsMax
                 | DesktopButtonType::WindowsMaxToggled
@@ -166,7 +165,7 @@ impl DrawDesktopButton{
             DesktopButtonType::XRMode => (50., 36.),
             DesktopButtonType::Fullscreen => (50., 36.),
         };
-        Walk::fixed_size(dvec2(w, h))
+        self.walk = Walk::fixed_size(dvec2(w, h))
     }
 }
 

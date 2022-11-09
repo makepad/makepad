@@ -584,8 +584,6 @@ impl Event {
                 }
             },
             Event::TouchUpdateEvent(e) => {
-                // ok so .. lets iterate touches
-                // and lets look at touch starts, touch moves and touch stops
                 for t in &e.touches {
                     let digit_id = live_id_num!(touch, t.uid).into();
                     let device = DigitDevice::Touch {

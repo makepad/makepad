@@ -5,7 +5,7 @@ use {
     crate::{
         makepad_math::DVec2,
         gpu_info::GpuInfo,
-        cx::{Cx, OsType},
+        cx::{Cx, OsType, XrCapabilities},
         event::{
             DraggedItem,
             Timer,
@@ -59,8 +59,9 @@ pub enum CxOsOp {
     NormalizeWindow(WindowId),
     RestoreWindow(WindowId),
     SetTopmost(WindowId, bool),
-    XrStartPresenting(WindowId),
-    XrStopPresenting(WindowId),
+    
+    XrStartPresenting,
+    XrStopPresenting,
     
     ShowTextIME(Area, DVec2),
     HideTextIME,
@@ -72,6 +73,12 @@ pub enum CxOsOp {
 }
 
 impl Cx {
+
+
+    pub fn xr_capabilities(&self) -> &XrCapabilities {
+        &self.xr_capabilities
+    }
+    
     
     pub fn get_dependency(&self, path:&str)->Result<&Vec<u8>, String>{
         if let Some(data) = self.dependencies.get(path){
@@ -157,6 +164,14 @@ impl Cx {
         }
     }
     
+    pub fn xr_start_presenting(&mut self) {
+        self.platform_ops.push(CxOsOp::XrStartPresenting);
+    }
+    
+    pub fn xr_stop_presenting(&mut self) {
+        self.platform_ops.push(CxOsOp::XrStopPresenting);
+    }
+     
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f64 {
         if let Some(draw_list_id) = area.draw_list_id(){
             let pass_id = self.draw_lists[draw_list_id].pass_id.unwrap();

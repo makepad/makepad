@@ -154,24 +154,12 @@ impl Window {
         cx.windows[self.window_id()].window_geom.can_fullscreen
     }
     
-    pub fn xr_can_present(&mut self, cx: &mut Cx) -> bool {
-        cx.windows[self.window_id()].window_geom.xr_can_present
-    }
-    
     pub fn is_fullscreen(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.is_fullscreen
     }
     
     pub fn xr_is_presenting(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.xr_is_presenting
-    }
-    
-    pub fn xr_start_presenting(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxOsOp::XrStartPresenting(self.window_id()));
-    }
-    
-    pub fn xr_stop_presenting(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxOsOp::XrStopPresenting(self.window_id()));
     }
     
     pub fn is_topmost(&mut self, cx: &mut Cx) -> bool {
