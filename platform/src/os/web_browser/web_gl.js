@@ -3,7 +3,7 @@ import {WasmWebBrowser} from "./web_browser.js";
 export class WasmWebGL extends WasmWebBrowser {
     constructor(wasm, dispatch, canvas) {
         super (wasm, dispatch, canvas);
-        if(wasm === undefined){
+        if (wasm === undefined) {
             return
         }
         this.draw_shaders = [];
@@ -12,7 +12,7 @@ export class WasmWebGL extends WasmWebBrowser {
         this.vaos = [];
         this.textures = [];
         this.framebuffers = [];
-        
+        this.xr = undefined;
         this.init_webgl_context();
         
         this.load_deps();
@@ -22,9 +22,164 @@ export class WasmWebGL extends WasmWebBrowser {
     
     // webGL API
     
+    on_xr_animation_frame(time, frame) {
+        function empty_transform() {
+            return {
+                orientation: {
+                    a: 0,
+                    b: 0,
+                    c: 0,
+                    d: 0,
+                },
+                position: {
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                }
+            }
+        }
+        
+        function to_transform(pose_transform, tgt) {
+            let po = pose_transform.inverse.orientation;
+            let pp = pose_transform.position;
+            let o = tgt.orientation;
+            o.a = po.x
+            o.b = po.y
+            o.c = po.z
+            o.d = po.w
+            let p = tgt.position;
+            p.x = pp.x
+            p.y = pp.y
+            p.z = pp.z
+        }
+        
+        function get_matrices(layer, view, tgt){
+            tgt.view = view;
+            tgt.viewport = layer.getViewport(view);
+            tgt.projection_matrix = view.projectionMatrix;
+            tgt.transform_matrix = view.transform.inverse.matrix;
+            tgt.invtransform_matrix = view.transform.matrix;
+            tgt.camera_pos = view.transform.inverse.position;
+        }
+        
+        if (this.xr == undefined) {
+            return
+        }
+        
+        let ref_space = this.xr.ref_space;
+        let xr = this.xr;
+        
+        xr.session.requestAnimationFrame(this.xr.on_animation_frame);
+        xr.pose = frame.getViewerPose(ref_space);
+            
+        let left_view = xr.pose.views[0];
+        let right_view = xr.pose.views[1];
+        
+        get_matrices(xr.layer, xr.pose.views[0], xr.left_eye)
+        get_matrices(xr.layer, xr.pose.views[1], xr.right_eye)
+
+        if (xr.xr_update === undefined) {
+            xr.xr_update = {
+                time: 0,
+                head_transform: empty_transform(),
+                inputs: []
+            }
+        }
+        
+        let xr_update = xr.xr_update;
+        xr_update.time = time / 1000.0;
+        
+        to_transform(this.xr.pose.transform, xr_update.head_transform);
+        
+        let inputs = xr_update.inputs;
+        for (let i = 0; i < inputs.length; i ++) {
+            inputs[i].active = false;
+        }
+        
+        let input_sources = this.xr.session.inputSources;
+        for (let i = 0; i < input_sources.length; i ++) {
+            if (inputs[i] === undefined) {
+                inputs[i] = {active: false, grip: empty_transform(), ray: empty_transform(), hand: 0, buttons: [], axes: []};
+            }
+            let input = inputs[i];
+            let input_source = input_sources[i];
+            
+            let grip_pose = frame.getPose(input_source.gripSpace, ref_space);
+            let ray_pose = frame.getPose(input_source.targetRaySpace, ref_space);
+            
+            if (grip_pose == null || ray_pose == null) {
+                input.active = false;
+                continue;
+            }
+            
+            to_transform(grip_pose.transform, input.grip)
+            to_transform(ray_pose.transform, input.ray)
+            
+            let buttons = input.buttons;
+            let input_buttons = input_source.gamepad.buttons;
+            for (let i = 0; i < input_buttons.length; i ++) {
+                if (buttons[i] === undefined) {
+                    buttons[i] = {pressed: 0, value: 0}
+                };
+                buttons[i].pressed = input_buttons[i].pressed? 1: 0;
+                buttons[i].value = input_buttons[i].value
+            }
+            let axes = input.axes;
+            let input_axes = input_source.gamepad.axes;
+            for (let i = 0; i < input_axes.length; i ++) {
+                axes[i] = input_axes[i];
+            }
+        }
+        
+        this.to_wasm.ToWasmXRUpdate(xr_update)
+        this.to_wasm.ToWasmAnimationFrame({time: time / 1000.0});
+        this.in_animation_frame = true;
+        this.do_wasm_pump();
+        this.in_animation_frame = false;
+    }
+    
+    FromWasmXrStartPresenting(args) {
+        if (this.xr !== undefined) {
+            console.log("XR already presenting")
+            return
+        }
+        // alright lets fire up the xr stuff
+        navigator.xr.requestSession('immersive-vr', {requiredFeatures: ['local-floor']}).then(session => {
+            let layer = new XRWebGLLayer(session, this.gl, {
+                antialias: false,
+                depth: true,
+                stencil: false,
+                ignoreDepthValues: false,
+                framebufferScaleFactor: 1.5
+            });
+            session.updateRenderState({baseLayer: layer});
+            session.requestReferenceSpace("local-floor").then(ref_space => {
+                window.localStorage.setItem("xr_presenting", "true");
+                this.xr = {
+                    left_eye: {},
+                    right_eye: {},
+                    layer,
+                    ref_space,
+                    session,
+                    on_animation_frame: (t, f) => this.on_xr_animation_frame(t, f)
+                }
+                session.requestAnimationFrame(this.xr.on_animation_frame);
+                session.addEventListener("end", () => {
+                    window.localStorage.setItem("xr_presenting", "false");
+                    this.xr = undefined;
+                    this.FromWasmRequestAnimationFrame();
+                })
+            })
+        })
+    }
+    
+    FromWasmXrStopPresenting() {
+        
+    }
+    
     
     FromWasmCompileWebGLShader(args) {
-       
+        
         function get_attrib_locations(gl, program, base, slots) {
             let attrib_locs = [];
             let attribs = slots >> 2;
@@ -42,7 +197,7 @@ export class WasmWebGL extends WasmWebBrowser {
             }
             return attrib_locs
         }
-
+        
         var gl = this.gl
         var vsh = gl.createShader(gl.VERTEX_SHADER)
         
@@ -77,20 +232,20 @@ export class WasmWebGL extends WasmWebBrowser {
                 add_line_numbers_to_string(args.fragment)
             )
         }
-
+       //console.log(args.pixel)
         let texture_locs = [];
         for (let i = 0; i < args.textures.length; i ++) {
             texture_locs.push({
                 name: args.textures[i].name,
                 ty: args.textures[i].ty,
-                loc: gl.getUniformLocation(program, "ds_"+args.textures[i].name),
+                loc: gl.getUniformLocation(program, "ds_" + args.textures[i].name),
             });
         }
         
         // fetch all attribs and uniforms
         this.draw_shaders[args.shader_id] = {
-            vertex:args.vertex,
-            pixel:args.pixel,
+            vertex: args.vertex,
+            pixel: args.pixel,
             geom_attribs: get_attrib_locations(gl, program, "packed_geometry_", args.geometry_slots),
             inst_attribs: get_attrib_locations(gl, program, "packed_instance_", args.instance_slots),
             pass_uniform: gl.getUniformLocation(program, "pass_table"),
@@ -187,8 +342,6 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     
     
-    
-    
     FromWasmDrawCall(args) {
         var gl = this.gl;
         
@@ -204,14 +357,18 @@ export class WasmWebGL extends WasmWebBrowser {
         let instance_buffer = this.array_buffers[vao.inst_vb_id];
         // if vr_presenting
         // TODO CACHE buffers
-        if(args.const_table.ptr != 0) gl.uniform1fv(shader.const_uniform, new Float32Array(this.memory.buffer, args.const_table.ptr, args.const_table.len));
-        if(args.pass_uniforms.ptr != 0) gl.uniform1fv(shader.pass_uniform, new Float32Array(this.memory.buffer, args.pass_uniforms.ptr, args.pass_uniforms.len));
-        if(args.view_uniforms.ptr != 0) gl.uniform1fv(shader.view_uniform, new Float32Array(this.memory.buffer, args.view_uniforms.ptr, args.view_uniforms.len));
-        if(args.draw_uniforms.ptr != 0) gl.uniform1fv(shader.draw_uniform, new Float32Array(this.memory.buffer, args.draw_uniforms.ptr, args.draw_uniforms.len));
-        if(args.user_uniforms.ptr != 0) gl.uniform1fv(shader.user_uniform, new Float32Array(this.memory.buffer, args.user_uniforms.ptr, args.user_uniforms.len));
-        if(args.live_uniforms.ptr != 0) gl.uniform1fv(shader.live_uniform, new Float32Array(this.memory.buffer, args.live_uniforms.ptr, args.live_uniforms.len));
+        gl.uniform1fv(shader.view_uniform, new Float32Array(this.memory.buffer, args.view_uniforms.ptr, args.view_uniforms.len));
+        gl.uniform1fv(shader.draw_uniform, new Float32Array(this.memory.buffer, args.draw_uniforms.ptr, args.draw_uniforms.len));
+        
+        if (args.user_uniforms.ptr != 0) gl.uniform1fv(shader.user_uniform, new Float32Array(this.memory.buffer, args.user_uniforms.ptr, args.user_uniforms.len));
+        if (args.live_uniforms.ptr != 0) gl.uniform1fv(shader.live_uniform, new Float32Array(this.memory.buffer, args.live_uniforms.ptr, args.live_uniforms.len));
+        if (args.const_table.ptr != 0) gl.uniform1fv(shader.const_uniform, new Float32Array(this.memory.buffer, args.const_table.ptr, args.const_table.len));
+
+        let indices = index_buffer.length;
+        let instances = instance_buffer.length / shader.instance_slots;
         
         let texture_slots = shader.texture_locs.length;
+        
         for (let i = 0; i < texture_slots; i ++) {
             let tex_loc = shader.texture_locs[i];
             let texture_id = args.textures[i]
@@ -223,15 +380,44 @@ export class WasmWebGL extends WasmWebBrowser {
             }
         }
         
-        let indices = index_buffer.length;
-        let instances = instance_buffer.length / shader.instance_slots;
+        let xr = this.xr;
+        if (xr !== undefined && xr.in_xr_pass) {
+            let pass_uniforms = new Float32Array(this.memory.buffer, args.pass_uniforms.ptr, args.pass_uniforms.len);
 
-        this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            let left = xr.left_eye;
+            let lvp = left.viewport;
+            gl.viewport(lvp.x, lvp.y, lvp.width, lvp.height);
+            let mlp = left.projection_matrix;
+            for(let i = 0; i < 16; i++) pass_uniforms[i] = mlp[i];
+            let mlt = left.transform_matrix;
+            for(let i = 0; i < 16; i++) pass_uniforms[i + 16] = mlt[i];
+            let mli = left.invtransform_matrix;
+            for(let i = 0; i < 16; i++) pass_uniforms[i + 32] = mli[i];
+            gl.uniform1fv(shader.pass_uniform, pass_uniforms);
+            this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            
+            let right = xr.right_eye;
+            let rvp = right.viewport;
+            gl.viewport(rvp.x, rvp.y, rvp.width, rvp.height);
+            let mrp = right.projection_matrix;
+            for(let i = 0; i < 16; i++) pass_uniforms[i] = mrp[i];
+            let mrt = right.transform_matrix;
+            for(let i = 0; i < 16; i++) pass_uniforms[i + 16] = mrt[i];
+            let mri = right.invtransform_matrix;
+            for(let i = 0; i < 16; i++) pass_uniforms[i + 32] = mri[i];
+            gl.uniform1fv(shader.pass_uniform, pass_uniforms);
+            this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+        }
+        else {
+            gl.uniform1fv(shader.pass_uniform, new Float32Array(this.memory.buffer, args.pass_uniforms.ptr, args.pass_uniforms.len));
+            this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+        }
+        
         this.OES_vertex_array_object.bindVertexArrayOES(null);
     }
     
     
-    FromWasmAllocTextureImage2D(args){
+    FromWasmAllocTextureImage2D(args) {
         var gl = this.gl;
         var gl_tex = this.textures[args.texture_id] || gl.createTexture()
         
@@ -247,7 +433,11 @@ export class WasmWebGL extends WasmWebBrowser {
         this.textures[args.texture_id] = gl_tex;
     }
     
-    FromWasmBeginRenderTexture(args){
+    FromWasmBeginRenderTexture(args) {
+        if(this.xr !== undefined){
+            this.xr.in_xr_pass = false;
+        }
+
         let gl = this.gl
         var gl_framebuffer = this.framebuffers[args.pass_id] || (this.framebuffers[args.pass_id] = gl.createFramebuffer());
         gl.bindFramebuffer(gl.FRAMEBUFFER, gl_framebuffer);
@@ -256,7 +446,7 @@ export class WasmWebGL extends WasmWebBrowser {
         let clear_depth = 0.0;
         let clear_color;
         
-        for(let i = 0; i < args.color_targets.length; i++){
+        for (let i = 0; i < args.color_targets.length; i ++) {
             let tgt = args.color_targets[i];
             
             var gl_tex = this.textures[tgt.texture_id] || (this.textures[tgt.texture_id] = gl.createTexture());
@@ -293,14 +483,23 @@ export class WasmWebGL extends WasmWebBrowser {
     
     FromWasmBeginRenderCanvas(args) {
         let gl = this.gl
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        let xr = this.xr;
+        
+        if(xr !== undefined){
+            xr.in_xr_pass = true;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, xr.layer.framebuffer);
+            gl.viewport(0, 0, xr.layer.framebufferWidth, xr.layer.framebufferHeight);            
+        }
+        else{
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        }
         let c = args.clear_color;
         gl.clearColor(c.r, c.g, c.b, c.a);
         gl.clearDepth(args.depth);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     }
-
+    
     FromWasmSetDefaultDepthAndBlendMode() {
         let gl = this.gl
         gl.disable(gl.DEPTH_TEST);
@@ -309,8 +508,6 @@ export class WasmWebGL extends WasmWebBrowser {
         gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.enable(gl.BLEND);
     }
-    
-    
     
     init_webgl_context() {
         let mqString = '(resolution: ' + window.devicePixelRatio + 'dppx)'

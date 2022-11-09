@@ -5,9 +5,10 @@ use {
         makepad_live_id::*,
         makepad_wasm_bridge::*,
         makepad_math::{dvec2, DVec2, Vec3, Quat, Transform},
-        cx::{OsType},
+        cx::{OsType, XrCapabilities},
         window::CxWindowPool,
         area::Area,
+        midi::{MidiInputInfo, MidiData, MidiInputData},
         event::{
             XRButton,
             XRInput,
@@ -63,6 +64,7 @@ impl Into<OsType> for WBrowserInfo {
 pub struct ToWasmGetDeps {
     pub gpu_info: WGpuInfo,
     pub cpu_cores: u32,
+    pub xr_capabilities: WXrCapabilities,
     pub browser_info: WBrowserInfo,
 }
 
@@ -73,17 +75,18 @@ pub struct WDepLoaded {
 }
 
 #[derive(ToWasm)]
-pub struct WindowInfo {
+pub struct WWindowInfo {
     pub is_fullscreen: bool,
     pub can_fullscreen: bool,
     pub xr_is_presenting: bool,
-    pub xr_can_present: bool,
+    pub vr_supported: bool,
+    pub ar_supported: bool,
     pub dpi_factor: f64,
     pub inner_width: f64,
     pub inner_height: f64
 }
 
-impl Into<WindowGeom> for WindowInfo {
+impl Into<WindowGeom> for WWindowInfo {
     fn into(self) -> WindowGeom {
         WindowGeom {
             is_fullscreen: self.is_fullscreen,
@@ -93,8 +96,22 @@ impl Into<WindowGeom> for WindowInfo {
             outer_size: DVec2 {x: 0., y: 0.},
             position: DVec2 {x: 0., y: 0.},
             xr_is_presenting: self.xr_is_presenting,
-            xr_can_present: self.xr_can_present,
             can_fullscreen: self.can_fullscreen
+        }
+    }
+}
+
+#[derive(ToWasm)]
+pub struct WXrCapabilities {
+    pub vr_supported: bool,
+    pub ar_supported: bool,
+}
+
+impl Into<XrCapabilities> for WXrCapabilities {
+    fn into(self) -> XrCapabilities {
+        XrCapabilities {
+            vr_supported: self.vr_supported,
+            ar_supported: self.ar_supported,
         }
     }
 }
@@ -102,12 +119,12 @@ impl Into<WindowGeom> for WindowInfo {
 #[derive(ToWasm)]
 pub struct ToWasmInit {
     pub deps: Vec<WDepLoaded>,
-    pub window_info: WindowInfo
+    pub window_info: WWindowInfo
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmResizeWindow {
-    pub window_info: WindowInfo
+    pub window_info: WWindowInfo
 }
 
 #[derive(ToWasm)]
@@ -535,8 +552,8 @@ impl Into<XRButton> for WXRButton {
 
 #[derive(ToWasm)]
 pub struct WXRInput {
-    pub active: bool,
     pub hand: u32,
+    pub active: bool,
     pub grip: WXRTransform,
     pub ray: WXRTransform,
     pub buttons: Vec<WXRButton>,
@@ -607,4 +624,49 @@ pub struct ToWasmWebSocketMessage {
     pub web_socket_id: usize,
     pub data: WasmDataU8
 }
+
+
+
+#[derive(ToWasm)]
+pub struct ToWasmMidiInputData {
+    pub input_id: u32,
+    pub data: u32,
+}
+
+impl Into<MidiInputData> for ToWasmMidiInputData {
+    fn into(self) -> MidiInputData {
+        MidiInputData {
+            input_id: self.input_id as usize,
+            data: MidiData {
+                data0: ((self.data >> 16) & 0xff) as u8,
+                data1: ((self.data >> 8) & 0xff) as u8,
+                data2: ((self.data >> 0) & 0xff) as u8,
+            }
+        }
+    }
+}
+
+#[derive(ToWasm)]
+pub struct WMidiInputInfo {
+    pub manufacturer: String,
+    pub name: String,
+    pub uid: String,
+}
+
+
+#[derive(ToWasm)]
+pub struct ToWasmMidiInputList {
+    pub inputs: Vec<WMidiInputInfo>
+}
+
+impl Into<MidiInputInfo> for WMidiInputInfo {
+    fn into(self) -> MidiInputInfo {
+        MidiInputInfo {
+            manufacturer: self.manufacturer,
+            name: self.name,
+            uid: self.uid
+        }
+    }
+}
+
 
