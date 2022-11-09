@@ -5,23 +5,20 @@ use makepad_draw::*;
 
 live_design!{
     import makepad_widgets::frame::*;
+    import makepad_draw::shader::std::*;
     registry Widget::*;
     App = {{App}} {
         ui: {
             walk: {width: Fill, height: Fill},
             bg: {
-                shape: Solid
+                shape:Rect
                 fn pixel(self) -> vec4 {
-                    let pixel = self.rect_size * self.pos;
-                    if mod (pixel.y * 2.0, 2) >= 1.0 {
-                        return #f
-                    }
-                    else {
-                        return #1
-                    }
+                    //return #f00
+                    return Pal::premul(#3)
+                    //return vec4(1.0,0.0,0.0,1.0);
                 }
             }
-            piano = <Piano>{walk:{abs_pos:vec2(100,100)}}
+            piano = <Piano>{walk:{abs_pos:vec2(10,40)}}
         }
     }
 }
@@ -29,7 +26,7 @@ main_app!(App);
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    window: BareWindow,
+    window: DesktopWindow,
     ui: FrameRef,
 }
 
