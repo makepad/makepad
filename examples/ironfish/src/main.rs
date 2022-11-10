@@ -456,7 +456,7 @@ live_design!{
         layout: {padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
         label = <Label> {
             draw_label: {
-                text_style: {font_size: (FONT_SIZE_H1), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
                 color: (COLOR_TEXT_H2)
             }
             text: "replace me!"
@@ -650,7 +650,7 @@ live_design!{
                 speed = <InstrumentSlider> {
                     walk: {width: 200}
                     slider = {
-                        draw_slider: {line_color: (COLOR_MIX)}
+                        draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 240.0
                         label: "BPM"
@@ -1064,7 +1064,7 @@ live_design!{
                 walk: {width: Fill, height: Fit}
                 balance = <InstrumentBipolarSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_MIX)}
+                        draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         label: "Oscillator 1/2 Balance"
@@ -1076,7 +1076,7 @@ live_design!{
                 walk: {width: Fill, height: Fit}
                 noise = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_MIX)}
+                        draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         label: "Noise"
@@ -1084,7 +1084,7 @@ live_design!{
                 }
                 sub = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_MIX)}
+                        draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         label: "Sub"
@@ -1096,7 +1096,7 @@ live_design!{
                 walk: {width: Fill, height: Fit}
                 porta = <InstrumentSlider> {
                     slider = {
-                        draw_slider: {line_color: (COLOR_MIX)}
+                        draw_slider: {line_color: (COLOR_OSC)}
                         min: 0.0
                         max: 1.0
                         label: "Portamento"
@@ -1125,13 +1125,14 @@ live_design!{
             }}
 
 
-            <FishSubHeader> {label = {text: "Oscillator 1", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
+
+            <FishSubHeader> {label = {text: "Oscillator 1", draw_label: {color: (COLOR_OSC)}, walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
             osc1 = <OscPanel> {}
 
-            <FishSubHeader> {label = {text: "Oscillator 2", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
+            <FishSubHeader> {label = {text: "Oscillator 2", draw_label: {color: (COLOR_OSC)}, walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
             osc2 = <OscPanel> {}
 
-            <FishSubHeader> {label = {text: "Mixer", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
+            <FishSubHeader> {label = {text: "Mixer", draw_label: {color: (COLOR_OSC)}, walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
             <MixerPanel> {walk: {width: Fill, height: Fit}}
         }
     }
