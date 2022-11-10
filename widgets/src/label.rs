@@ -28,7 +28,7 @@ pub struct Label {
     draw_label: DrawText,
     walk: Walk,
     
-//    overflow: Overflow,
+//  overflow: Overflow,
     align: Align,
 
     //margin: Margin,
