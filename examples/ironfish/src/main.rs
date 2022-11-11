@@ -28,7 +28,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     
     const SPACING_PANELS = 10.0
-    const SPACING_CONTROLS = 4.0
+    const SPACING_CONTROLS = 3.0
     const COLOR_OSC = #xFFFF99FF // yellow
     const COLOR_MIX = #xC // gray
     const COLOR_ENV = #xFF8888 // light red
@@ -41,8 +41,8 @@ live_design!{
     const COLOR_TEXT_H1 = #x000000CC
     const COLOR_TEXT_H2 = #xFFFFFF66
     const COLOR_TEXT_H2_HOVER = #xD
-    const COLOR_BEVEL_SHADOW = #x00000066
-    const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF33
+    const COLOR_BEVEL_SHADOW = #x00000030
+    const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF44
     const COLOR_CONTROL_OUTSET = #xFFFFFF66
     const COLOR_HIDDEN_WHITE = #xFFFFFF00
     const COLOR_CONTROL_INSET = #x00000066
@@ -99,11 +99,10 @@ live_design!{
     }
     
     FishDropDown = <DropDown> {
-        walk: {margin: {left: 5.0, right: 0.0, top: 0.0, bottom: 0.0}}
-        layout: {padding: 6.0}
+        walk: {margin: {left: 5.0, right: 0.0, top: 0.0, bottom: 0.0}, width: Fit}
+        layout: {padding: {top: 6.0, right: 18.0, bottom: 6.0, left: 6.0}}
+        
         draw_label: {
-            // DrawLabelText= {{DrawLabelText}} {
-            // },
             text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
             fn get_color(self) -> vec4 {
                 return mix(
@@ -140,17 +139,24 @@ live_design!{
                     self.rect_size.y - 2,
                     3
                 )
-                sdf.stroke_keep(mix(mix((COLOR_BEVEL_HIGHLIGHT), (COLOR_BEVEL_SHADOW), pow(self.pos.y, 1.0)), mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 5.0)), self.pressed), 1.);
-                sdf.fill(
+                sdf.stroke_keep(
                     mix(
-                        mix(
-                            mix((COLOR_CONTROL_OUTSET), (COLOR_HIDDEN_WHITE), pow(self.pos.y, 0.075)),
-                            mix(#xFFFFFF20, #xFFFFFF10, pow(self.pos.y, 0.2)),
-                            self.hover
-                        ),
-                        mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 0.3)),
-                        self.pressed
-                    )
+                        mix((COLOR_HIDDEN_WHITE), (COLOR_HIDDEN_WHITE), pow(self.pos.y, .25)),
+                        mix((COLOR_BEVEL_HIGHLIGHT), (COLOR_BEVEL_SHADOW), pow(self.pos.y, .25)),
+                        self.hover
+                    ),
+                1.);
+                sdf.fill(
+                    #00000000
+                    // mix(
+                    //     mix(
+                    //         mix(#x00000000, #x00000000, pow(self.pos.y, 0.075)),
+                    //         mix(#xFFFFFF20, #xFFFFFF10, pow(self.pos.y, 0.2)),
+                    //         self.hover
+                    //     ),
+                    //     mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 0.3)),
+                    //     self.pressed
+                    // )
                 );
             }
         }
@@ -441,19 +447,18 @@ live_design!{
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                let edge = 5.0;
-                sdf.move_to(1.0 + edge, 1.0);
-                sdf.line_to(self.rect_size.x - 2.0, 1.0);
-                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - 2.0)
-                sdf.line_to(1.0, self.rect_size.y - 2.0);
-                sdf.line_to(1.0, 1.0 + edge);
-                sdf.close_path();
-                sdf.fill(#xFFFFFF18);
+                // let edge = 5.0; sdf.move_to(1.0 + edge, 1.0);
+                // sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                // sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - 2.0)
+                // sdf.line_to(1.0, self.rect_size.y - 2.0);
+                // sdf.line_to(1.0, 1.0 + edge);
+                // sdf.close_path();
+                // sdf.fill(#xFFFFFF18);
                 return sdf.result
             }
         }
-        walk: {width: Fill, height: Fit, margin: {top: (SPACING_PANELS), right: (SPACING_CONTROLS), bottom: 0.0, left: (SPACING_CONTROLS)}}
-        layout: {padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
+        walk: {width: Fit, height: Fit, margin: {top: (SPACING_PANELS), right: (SPACING_CONTROLS), bottom: -5.0, left: (SPACING_CONTROLS)}}
+        layout: {padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: 0.0}}
         label = <Label> {
             draw_label: {
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
@@ -946,83 +951,92 @@ live_design!{
                 return sdf.result
             }}
 
-            type = <InstrumentDropdown> {
-                layout: {flow: Down}
-                dropdown = {
-                    values: [DPWSawPulse, BlampTri, Pure, SuperSaw, HyperSaw, HarmonicSeries]
-                    labels: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
-                }
-                supersaw = <Frame> {
-                    layout: {flow: Right}
-                    walk: {width: Fill, height: Fit}
-                    spread = <InstrumentSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: 0.0
-                            max: 1.0
-                            label: "Spread"
+            <Frame> {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                <FishSubHeader> {label = {text: "Oscillator", draw_label: {color: (COLOR_OSC)}, walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}, width: Fit}}}
+
+                type = <InstrumentDropdown> {
+                    layout: {flow: Down}
+                    dropdown = {
+                        walk: {width: Fit}
+                        layout: {padding: {top: (SPACING_CONTROLS), right: 18.0, bottom: 0.0, left: 0.0}}
+                        values: [DPWSawPulse, BlampTri, Pure, SuperSaw, HyperSaw, HarmonicSeries]
+                        labels: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
+                    }
+                    supersaw = <Frame> {
+                        layout: {flow: Right}
+                        walk: {width: Fill, height: Fit}
+                        spread = <InstrumentSlider> {
+                            slider = {
+                                draw_slider: {line_color: (COLOR_OSC)}
+                                min: 0.0
+                                max: 1.0
+                                label: "Spread"
+                            }
+                        }
+                        diffuse = <InstrumentSlider> {
+                            slider = {
+                                draw_slider: {line_color: (COLOR_OSC)}
+                                min: 0.0
+                                max: 1.0
+                                label: "Diffuse"
+                            }
                         }
                     }
-                    diffuse = <InstrumentSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: 0.0
-                            max: 1.0
-                            label: "Diffuse"
+                    
+                    hypersaw = <Frame> {
+                        layout: {flow: Right}
+                        walk: {width: Fill, height: Fit}
+                        spread = <InstrumentSlider> {
+                            slider = {
+                                draw_slider: {line_color: (COLOR_OSC)}
+                                min: 0.0
+                                max: 1.0
+                                label: "Spread"
+                            }
+                        }
+                        diffuse = <InstrumentSlider> {
+                            slider = {
+                                draw_slider: {line_color: (COLOR_OSC)}
+                                min: 0.0
+                                max: 1.0
+                                label: "Diffuse"
+                            }
                         }
                     }
-                }
-                
-                hypersaw = <Frame> {
-                    layout: {flow: Right}
-                    walk: {width: Fill, height: Fit}
-                    spread = <InstrumentSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: 0.0
-                            max: 1.0
-                            label: "Spread"
+                    
+                    harmonic = <Frame> {
+                        layout: {flow: Right}
+                        walk: {width: Fill, height: Fit}
+                        harmonicshift = <InstrumentSlider> {
+                            slider = {
+                                draw_slider: {line_color: (COLOR_OSC)}
+                                min: 0
+                                max: 1.0
+                                label: "Shift"
+                            }
                         }
-                    }
-                    diffuse = <InstrumentSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: 0.0
-                            max: 1.0
-                            label: "Diffuse"
+                        harmonicenv = <InstrumentBipolarSlider> {
+                            slider = {
+                                draw_slider: {line_color: (COLOR_OSC)}
+                                min: -1.0
+                                max: 1.0
+                                label: "Env mod"
+                            }
                         }
-                    }
-                }
-                
-                harmonic = <Frame> {
-                    layout: {flow: Right}
-                    walk: {width: Fill, height: Fit}
-                    harmonicshift = <InstrumentSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: 0
-                            max: 1.0
-                            label: "Shift"
-                        }
-                    }
-                    harmonicenv = <InstrumentBipolarSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: -1.0
-                            max: 1.0
-                            label: "Env mod"
-                        }
-                    }
-                    harmoniclfo = <InstrumentBipolarSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: -1.0
-                            max: 1.0
-                            label: "LFO mod"
+                        harmoniclfo = <InstrumentBipolarSlider> {
+                            slider = {
+                                draw_slider: {line_color: (COLOR_OSC)}
+                                min: -1.0
+                                max: 1.0
+                                label: "LFO mod"
+                            }
                         }
                     }
                 }
             }
+
             
             twocol = <Frame> {
                 layout: {flow: Right}
@@ -1125,11 +1139,7 @@ live_design!{
             }}
 
 
-
-            <FishSubHeader> {label = {text: "Oscillator 1", draw_label: {color: (COLOR_OSC)}, walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
             osc1 = <OscPanel> {}
-
-            <FishSubHeader> {label = {text: "Oscillator 2", draw_label: {color: (COLOR_OSC)}, walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
             osc2 = <OscPanel> {}
 
             <FishSubHeader> {label = {text: "Mixer", draw_label: {color: (COLOR_OSC)}, walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}}
@@ -1173,38 +1183,6 @@ live_design!{
             walk: {width: Fill, height: Fit}
         }
     }
-    
-    // OscillatorTabs = <Box> {
-    //     layout: {flow: Down, spacing: 0}
-    //     walk: {height: Fit, width: Fill}
-    //     draw_bg: {color: #00000000}
-        
-    //     <Frame> {
-    //         layout: {flow: Right, spacing: 0}
-    //         walk: {height: Fit, width: Fill}
-            
-    //         <FishHeader> {
-    //             walk: {height: Fit, width: Fit}
-    //             draw_bg: {color: (COLOR_OSC)}
-    //             layout: {align: {x: 0.0, y: 0.0}}
-    //             label = {text: "Sound Sources", walk: {width: Fit, margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}},
-    //         }
-            
-    //         <Box> {
-    //             walk: {height: Fit, width: Fill, margin: {left: -2, top: -0}}
-    //             layout: {flow: Right, spacing: 0}
-    //             draw_bg: {color: #x00000000}
-                
-    //             tab1 = <FishTab> {label: "Osc 1", state: {selected = {default: on}}, draw_radio: {color_inactive: #00000000}, draw_label: {color_selected: (COLOR_OSC)}}
-    //             tab2 = <FishTab> {label: "Osc 2", draw_radio: {color_inactive: #x00000000}, draw_label: {color_selected: (COLOR_OSC)}}
-    //         }
-            
-    //     }
-        
-    //     osc1 = <OscPanel> {visible: true}
-    //     osc2 = <OscPanel> {visible: false}
-    // }
-
     
     EffectsTabs = <Box> {
         layout: {flow: Down, spacing: 0}
