@@ -41,7 +41,7 @@ live_design!{
     const COLOR_TEXT_H1 = #x000000CC
     const COLOR_TEXT_H2 = #xFFFFFF66
     const COLOR_TEXT_H2_HOVER = #xD
-    const COLOR_BEVEL_SHADOW = #x00000030
+    const COLOR_BEVEL_SHADOW = #x00000060
     const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF44
     const COLOR_CONTROL_OUTSET = #xFFFFFF66
     const COLOR_HIDDEN_WHITE = #xFFFFFF00
@@ -193,12 +193,13 @@ live_design!{
                     2.0
                 )
                 
-                sdf.stroke_keep(mix(mix((COLOR_BEVEL_HIGHLIGHT), (COLOR_BEVEL_SHADOW), pow(self.pos.y, 1.0)), mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 5.0)), self.pressed), 1.);
+                sdf.stroke_keep(mix(mix((#x00000040), #x00000080, pow(self.pos.y, 4.0)), mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 5.0)), self.pressed), 1.);
                 sdf.fill(
                     mix(
                         mix(
-                            mix((COLOR_CONTROL_OUTSET), (COLOR_HIDDEN_WHITE), pow(self.pos.y, 0.075)),
-                            mix(#xFFFFFF20, #xFFFFFF10, pow(self.pos.y, 0.2)),
+                            #FFFFFF00, 
+                            #FFFFFF20, 
+                            // mix(#xFFFFFF20, #xFFFFFF10, pow(self.pos.y, 0.2)),
                             self.hover
                         ),
                         mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 0.3)),
@@ -663,22 +664,22 @@ live_design!{
                 }
                 
                 rootnote = <InstrumentDropdown> {
-                    walk: {height: Fill}
+                    walk: {height: Fill, width: Fit}
                     layout: {align: {x: 0.0, y: 0.5}}
                     dropdown = {
                         layout: {align: {x: 0.0, y: 0.0}}
-                        walk: {width: Fill, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
+                        walk: {width: Fit, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
                         labels: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
                         values: [A, Asharp, B, C, Csharp, D, Dsharp, E, F, Fsharp, G, Gsharp]
                     }
                 }
                 
                 scaletype = <InstrumentDropdown> {
-                    walk: {height: Fill}
+                    walk: {height: Fill, width: Fit}
                     layout: {align: {x: 0.0, y: 0.5}}
                     dropdown = {
                         layout: {align: {x: 0.0, y: 0.0}}
-                        walk: {width: Fill, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
+                        walk: {width: Fit, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
                         labels: ["Minor", "Major", "Dorian", "Pentatonic"]
                         values: [Minor, Major, Dorian, Pentatonic]
                     }
@@ -952,18 +953,26 @@ live_design!{
             }}
 
             <Frame> {
-                layout: {flow: Right}
+                layout: {flow: Down}
                 walk: {width: Fill, height: Fit}
-                <FishSubHeader> {label = {text: "Oscillator", draw_label: {color: (COLOR_OSC)}, walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}, width: Fit}}}
+                <Frame> {
+                    layout: {flow: Right}
+                    walk: {width: Fill, height: Fit}
+                    <FishSubHeader> {label = {text: "Oscillator", draw_label: {color: (COLOR_OSC)}, walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}, width: Fit}}}
 
-                type = <InstrumentDropdown> {
-                    layout: {flow: Down}
-                    dropdown = {
-                        walk: {width: Fit}
-                        layout: {padding: {top: (SPACING_CONTROLS), right: 18.0, bottom: 0.0, left: 0.0}}
-                        values: [DPWSawPulse, BlampTri, Pure, SuperSaw, HyperSaw, HarmonicSeries]
-                        labels: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
+                    type = <InstrumentDropdown> {
+                        layout: {flow: Down}
+                        dropdown = {
+                            walk: {width: Fit, height: Fit}
+                            values: [DPWSawPulse, BlampTri, Pure, SuperSaw, HyperSaw, HarmonicSeries]
+                            labels: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
+                        }
                     }
+                }
+
+                <Frame> {
+                    layout: {flow: Down}
+                    walk: {width: Fill, height: Fit}
                     supersaw = <Frame> {
                         layout: {flow: Right}
                         walk: {width: Fill, height: Fit}
