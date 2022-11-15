@@ -527,11 +527,7 @@ live_design!{
                     label: "H"
                 }
             }
-        }
-        
-        <Frame> {
-            layout: {flow: Right}
-            walk: {width: Fill, height: Fit, margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}}
+
             decay = <InstrumentSlider> {
                 slider = {
                     draw_slider: {line_color: (COLOR_ENV)}
@@ -549,12 +545,7 @@ live_design!{
                     label: "S"
                 }
             }
-        }
-        
-        <Frame> {
-            layout: {flow: Right}
-            walk: {width: Fill, height: Fit, margin: {top: 0.0, right: 5.0, bottom: 0.0, left: 5.0}}
-            
+
             release = <InstrumentSlider> {
                 slider = {
                     draw_slider: {line_color: (COLOR_ENV)}
@@ -563,9 +554,9 @@ live_design!{
                     label: "R"
                 }
             }
-            
-            <Frame> {}
+        
         }
+        
     }
     
     VolumeEnvelopePanel = <FishTabPanel> {
@@ -605,118 +596,180 @@ live_design!{
         }
     }
     
-    SequencerPanel = <FishPanel> {
-        label = {draw_bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
-        walk: {width: Fill, height: Fill}
-        body = {
-            walk: {width: Fill, height: Fill}
-            <Frame> {
-                walk: {height: Fit, margin: 5.0}
-                layout: {flow: Right}
-                
-                playpause = <InstrumentCheckbox> {
-                    walk: {width: Fit, height: Fit, margin: 5}
-                    layout: {align: {x: 0.0, y: 0.5}}
-                    checkbox = {
-                        walk: {width: 20, height: 20, margin: 5}
-                        label: ""
-                        draw_check: {
-                            fn pixel(self) -> vec4 {
-                                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                                let left = 3;
-                                let sz = 20.0;
-                                let c = vec2(left + sz, self.rect_size.y);
-                                sdf.move_to(0.0, 0.0);
-                                sdf.line_to(c.x * 0.75, c.y * 0.5);
-                                sdf.line_to(0.0, c.y);
-                                sdf.close_path();
-                                sdf.fill_keep(
-                                    mix(
-                                        mix((COLOR_TEXT_H2) * 0.75, (COLOR_TEXT_H2), self.hover),
-                                        mix(
-                                            mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
-                                            mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
-                                            self.hover
-                                        ),
-                                        self.selected
-                                    )
-                                )
-                                sdf.stroke_keep(
-                                    mix(
-                                        mix(#xFFFFFF66, #xFFFFFF10, pow(self.pos.y, 0.5)),
-                                        #xFFFFFF80,
-                                        self.selected
-                                    ),
-                                    1.
-                                )
-                                return sdf.result
-                            }
-                        }
+    SequencerControls = <Frame> {
+        walk: {height: Fit, width: Fill, margin: 5.0}
+        layout: {flow: Right}
+
+        // draw_bg: {
+        //     color: #00000010,
+        //     radius: vec4(2.5, 2.5, 2.5, 2.5)
+        // }
+
+        playpause = <InstrumentCheckbox> {
+            walk: {width: Fit, height: Fit, margin: 5}
+            layout: {align: {x: 0.0, y: 0.5}}
+            checkbox = {
+                walk: {width: 20, height: 20, margin: 5}
+                label: ""
+                draw_check: {
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                        let left = 3;
+                        let sz = 20.0;
+                        let c = vec2(left + sz, self.rect_size.y);
+                        sdf.move_to(0.0, 0.0);
+                        sdf.line_to(c.x * 0.75, c.y * 0.5);
+                        sdf.line_to(0.0, c.y);
+                        sdf.close_path();
+                        sdf.fill_keep(
+                            mix(
+                                mix((COLOR_TEXT_H2) * 0.75, (COLOR_TEXT_H2), self.hover),
+                                mix(
+                                    mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                                    mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                                    self.hover
+                                ),
+                                self.selected
+                            )
+                        )
+                        sdf.stroke_keep(
+                            mix(
+                                mix(#xFFFFFF66, #xFFFFFF10, pow(self.pos.y, 0.5)),
+                                #xFFFFFF80,
+                                self.selected
+                            ),
+                            1.
+                        )
+                        return sdf.result
                     }
                 }
-                
-                speed = <InstrumentSlider> {
-                    walk: {width: 200}
-                    slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
-                        min: 0.0
-                        max: 240.0
-                        label: "BPM"
-                    }
-                }
-                
-                rootnote = <InstrumentDropdown> {
-                    walk: {height: Fill, width: Fit}
-                    layout: {align: {x: 0.0, y: 0.5}}
-                    dropdown = {
-                        layout: {align: {x: 0.0, y: 0.0}}
-                        walk: {width: Fit, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
-                        labels: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
-                        values: [A, Asharp, B, C, Csharp, D, Dsharp, E, F, Fsharp, G, Gsharp]
-                    }
-                }
-                
-                scaletype = <InstrumentDropdown> {
-                    walk: {height: Fill, width: Fit}
-                    layout: {align: {x: 0.0, y: 0.5}}
-                    dropdown = {
-                        layout: {align: {x: 0.0, y: 0.0}}
-                        walk: {width: Fit, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
-                        labels: ["Minor", "Major", "Dorian", "Pentatonic"]
-                        values: [Minor, Major, Dorian, Pentatonic]
-                    }
-                }
-                
-                arp = <InstrumentCheckbox> {
-                    walk: {width: Fit, height: Fill, margin: 5}
-                    layout: {align: {x: 0.0, y: 0.5}}
-                    checkbox = {
-                        label: "Arp"
-                    }
-                }
-                
-                <Frame> {
-                    walk: {width: Fit, height: Fill}
-                    layout: {align: {x: 0.0, y: 0.5}}
-                    clear_grid = <FishButton> {
-                        text: "Clear Grid"
-                        walk: {width: Fit, height: Fit, margin: 5}
-                    }
-                    grid_up = <FishButton> {
-                        text: "Up"
-                        walk: {width: Fit, height: Fit, margin: 5}
-                    }
-                    grid_down = <FishButton> {
-                        text: "Down"
-                        walk: {width: Fit, height: Fit, margin: 5}
-                    }
-                }
-            }
-            
-            sequencer = <Sequencer> {
-                walk: {width: Fill, height: Fill}
             }
         }
+        
+        speed = <InstrumentSlider> {
+            walk: {width: 150}
+            slider = {
+                draw_slider: {line_color: (COLOR_OSC)}
+                min: 0.0
+                max: 240.0
+                label: "BPM"
+            }
+        }
+        
+        <Frame> {
+            walk: {width: Fill}
+            layout: {flow: Right}
+        }
+
+        rootnote = <InstrumentDropdown> {
+            walk: {height: Fill, width: Fit}
+            layout: {align: {x: 0.0, y: 0.5}}
+            dropdown = {
+                layout: {align: {x: 0.0, y: 0.0}}
+                walk: {width: Fit, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
+                labels: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
+                values: [A, Asharp, B, C, Csharp, D, Dsharp, E, F, Fsharp, G, Gsharp]
+            }
+        }
+        
+        scaletype = <InstrumentDropdown> {
+            walk: {height: Fill, width: Fit}
+            layout: {align: {x: 0.0, y: 0.5}}
+            dropdown = {
+                layout: {align: {x: 0.0, y: 0.0}}
+                walk: {width: Fit, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
+                labels: ["Minor", "Major", "Dorian", "Pentatonic"]
+                values: [Minor, Major, Dorian, Pentatonic]
+            }
+        }
+        
+        
+        <Frame> {
+            walk: {width: Fit, height: Fill}
+            layout: {align: {x: 0.0, y: 0.5}}
+            clear_grid = <FishButton> {
+                text: "Clear"
+                walk: {width: Fit, height: Fit, margin: 5}
+            }
+            grid_up = <FishButton> {
+                text: "↑"
+                walk: {width: Fit, height: Fit, margin: 5}
+            }
+            grid_down = <FishButton> {
+                text: "↓"
+                walk: {width: Fit, height: Fit, margin: 5}
+            }
+        }
+
+    }    
+
+    PianoControls = <Box> {
+        layout: {flow: Right, spacing: 0.0, padding: 3.0}
+        walk: {height: Fit, width: Fill}
+        draw_bg: {
+            color: #00000044,
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let edge = 2.0;
+                sdf.move_to(1.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                sdf.line_to(1.0, self.rect_size.y - 2.0);
+                sdf.close_path();
+                sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                // sdf.stroke(self.color, 1.0)
+                return sdf.result
+            }
+            radius: vec4(3.0, 3.0, 0.0, 0.0)
+        }
+        <Frame> {
+            layout: {flow: Right}
+            walk: {width: 200, height: Fit}
+            porta = <InstrumentSlider> {
+                slider = {
+                    draw_slider: {line_color: (COLOR_MIX)}
+                    min: 0.0
+                    max: 1.0
+                    label: "Portamento"
+                }
+            }
+        }
+        <Frame> {
+            layout: {flow: Right}
+            walk: {width: Fill}
+        }
+        arp = <InstrumentCheckbox> {
+            walk: {width: Fit, height: Fill, margin: 5}
+            layout: {align: {x: 0.0, y: 0.5}}
+            checkbox = {
+                label: "Arp"
+            }
+        }
+    } 
+
+    SequencerPanel = <Box> {
+        walk: {width: Fill, height: Fill, margin: 0.0}
+        layout: {flow: Down, padding: 0.0}
+
+        draw_bg: {
+            color: #FFFFFF00
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let edge = 8.0;
+                sdf.move_to(1.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                sdf.line_to(1.0, self.rect_size.y - 2.0);
+                sdf.close_path();
+                sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
+                sdf.stroke(self.color, 1.0)
+                return sdf.result
+            }
+        }
+        <SequencerControls> {}
+        sequencer = <Sequencer> { walk: {width: Fill, height: Fill} }
     }
     
     CrushFXPanel = <FishTabPanel> {
@@ -1118,7 +1171,6 @@ live_design!{
     }
 
     MixerPanel = <FishTabPanel> {
-        // label = {draw_bg: {color: (COLOR_MIX)}, label = {text: "Mixer"}}
         body = {
             draw_bg: {color: #FFFFFF00
                 fn pixel(self) -> vec4 {
@@ -1159,21 +1211,10 @@ live_design!{
                     }
                 }
             }
-            <Frame> {
-                layout: {flow: Right}
-                walk: {width: Fill, height: Fit}
-                porta = <InstrumentSlider> {
-                    slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Portamento"
-                    }
-                }
-            }
         }
     }
-    
+
+
     OscPanels = <Frame> {
         <FishHeader> {label = {text: "Sound Sources", walk: {margin: {top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS)}}}, draw_bg: {color: (COLOR_OSC)}}
 
@@ -1221,24 +1262,24 @@ live_design!{
                 walk: {height: Fit, width: Fill, margin: {left: -2, top: -0}}
                 draw_bg: {color: #x00000000}
                 tab1 = <FishTab> {
-                    label: "Modulation",
+                    label: "Volume",
                     state: {selected = {default: on}},
                     draw_label: {color_selected: (COLOR_ENV)}
                 }
                 tab2 = <FishTab> {
-                    label: "Volume",
+                    label: "Modulation",
                     draw_label: {color_selected: (COLOR_ENV)}
                 }
             }
         }
-        tab1_frame = <ModEnvelopePanel> {
-            visible: true,
-            layout: {flow: Down, clip_y: true}
+        tab1_frame = <VolumeEnvelopePanel> {
+            visible: true, 
+            layout: {flow: Down}
             walk: {width: Fill, height: Fit}
         }
-        tab2_frame = <VolumeEnvelopePanel> {
-            visible: false
-            layout: {flow: Down}
+        tab2_frame = <ModEnvelopePanel> {
+            visible: false,
+            layout: {flow: Down, clip_y: true}
             walk: {width: Fill, height: Fit}
         }
     }
@@ -1284,7 +1325,6 @@ live_design!{
         
         ui: {
             design_mode: false,
-            draw_bg: {color: #f00},
             walk: {width: Fill, height: Fill}
             layout: {padding: 0, align: {x: 0.0, y: 0.0}, spacing: 0., flow: Down}
             
@@ -1303,7 +1343,7 @@ live_design!{
                 <Image> {image: d"crate://self/resources/tinrs.png", walk: {width: (1000 * 0.25), height: (175 * 0.25)}}
             }
             <GradientY> {
-                walk: {width: Fill, height: 150, margin: {top: 0, right: 0, bottom: 0, left: 0}}
+                walk: {width: Fill, height: 125, margin: {top: 0, right: 0, bottom: 0, left: 0}}
                 draw_bg: {color: #100A, color2: #0034}
                 display_audio = <DisplayAudio> {
                     walk: {height: Fill, width: Fill}
@@ -1311,14 +1351,11 @@ live_design!{
             }
             
             
-            piano = <Piano> {
-                walk: {width: Fill, height: Fit, margin: {top: 0.0, right: 0.0, bottom: 10.0, left: 0.0}}
-            }
             
             // CONTROLS
             <Frame> {
-                walk: {width: Fill, height: Fill, margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)}}
-                layout: {flow: Right, spacing: 0.0}
+                walk: {width: Fill, height: Fill, margin: 10.0}
+                layout: {flow: Right, spacing: 5.0}
                 
                 // COLUMN 1
                 <ScrollY> {
@@ -1338,6 +1375,16 @@ live_design!{
                     walk: {height: Fill, width: Fill}
                     <SequencerPanel> {
                         walk: {height: Fill, width: Fill}
+                        layout: {padding: 0.0}
+                    }
+                    <Frame> {
+                        layout: {flow: Down, spacing: 0.0}
+                        walk: {height: Fit, width: Fill}
+
+                        <PianoControls> {}
+                        piano = <Piano> {
+                            walk: {width: Fill, height: Fit, margin: 0.0}
+                        }
                     }
                 }
             }
