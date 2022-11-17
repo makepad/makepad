@@ -67,6 +67,8 @@ live_design!{
     }
 
     FishTab = <RadioButton> {
+        walk: { height: Fill, width: Fit }
+        layout: {align: {x: 0.0, y: 0.5}}
         draw_radio: {
             radio_type: Tab,
             color_inactive: #x00000000,
@@ -393,7 +395,7 @@ live_design!{
 
     FishTitle = <Solid> {
         walk: {width: Fit, height: Fit, margin: {bottom: -2}}
-        layout: {padding: {left: (SPACING_BASE_PADDING), top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING)}}
+        layout: {padding: {left: (SPACING_BASE_PADDING), top: (SPACING_BASE_PADDING + 1), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING + 2)}}
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
