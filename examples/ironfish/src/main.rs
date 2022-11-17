@@ -570,7 +570,7 @@ live_design!{
         walk: {height: Fit, width: Fill }
         layout: {flow: Right, padding: {top: 0.0, right: (SPACING_BASE_PADDING), bottom: 0.0, left: (SPACING_BASE_PADDING)}}
 
-        <PlayPause> {}
+        playpause = <PlayPause> {}
         
         speed = <InstrumentSlider> {
             walk: {width: 200}
