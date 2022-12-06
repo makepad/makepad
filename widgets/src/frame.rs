@@ -335,15 +335,15 @@ impl Widget for Frame {
                             return WidgetResult::found(result)
                         }
                     }
-                    return WidgetResult::found(child.clone());
+                    else{
+                        return WidgetResult::found(child.clone());
+                    }
                 }
-                else {
-                    for child in self.children.values_mut() {
-                        if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
-                            let store_count = result.strong_count();
-                            self.find_cache.insert(hash, (result.clone(),store_count));
-                            return WidgetResult::found(result)
-                        }
+                for child in self.children.values_mut() {
+                    if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
+                        let store_count = result.strong_count();
+                        self.find_cache.insert(hash, (result.clone(),store_count));
+                        return WidgetResult::found(result)
                     }
                 }
             }
@@ -357,13 +357,13 @@ impl Widget for Frame {
                             return WidgetResult::found(result)
                         }
                     }
-                    return WidgetResult::found(child.clone());
+                    else{
+                        return WidgetResult::found(child.clone());
+                    }
                 }
-                else {
-                    for child in self.children.values_mut() {
-                        if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
-                            return WidgetResult::found(result)
-                        }
+                for child in self.children.values_mut() {
+                    if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
+                        return WidgetResult::found(result)
                     }
                 }
             }

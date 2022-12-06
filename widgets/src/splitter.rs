@@ -62,7 +62,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        bar: {pressed: 0.0, hover: 0.0}
+                        draw_splitter: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -72,7 +72,7 @@ live_design!{
                         state_down: Forward {duration: 0.01}
                     }
                     apply: {
-                        bar: {
+                        draw_splitter: {
                             pressed: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
@@ -82,7 +82,7 @@ live_design!{
                 pressed = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        bar: {
+                        draw_splitter: {
                             pressed: [{time: 0.0, value: 1.0}],
                             hover: 1.0,
                         }

@@ -13,7 +13,7 @@ use {
         makepad_draw::*,
         makepad_widgets::{
             ScrollBars,
-            ScrollShadow
+            DrawScrollShadow
         },
         editor_state::{
             EditorState,
@@ -224,7 +224,7 @@ pub struct CodeEditorImpl {
     
     current_line_quad: DrawColor,
     
-    scroll_shadow: ScrollShadow,
+    draw_scroll_shadow: DrawScrollShadow,
     
     #[rust] pub line_num_width: f64,
     caret_blink_timeout: f64,
@@ -323,7 +323,7 @@ impl CodeEditorImpl {
             lines_layout.total_height + visible.y - self.text_glyph_size.y,
         );
         
-        self.scroll_shadow.draw(cx, dvec2(self.line_num_width, 0.));
+        self.draw_scroll_shadow.draw(cx, dvec2(self.line_num_width, 0.));
         self.scroll_bars.end(cx);
     }
     
@@ -1101,7 +1101,7 @@ impl CodeEditorImpl {
         }
     }
     
-    fn handle_select_scroll_in_finger_move(&mut self, fe: &FingerMoveHitEvent) {
+    fn handle_select_scroll_in_finger_move(&mut self, fe: &FingerMoveEvent) {
         let pow_scale = 0.1;
         let pow_fac = 3.;
         let max_speed = 40.;

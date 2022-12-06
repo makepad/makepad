@@ -55,7 +55,7 @@ pub struct AppInner {
 impl AppInner {
     
     pub fn draw(&mut self, cx: &mut Cx2d, state: &AppState) {
-        if self.window.begin(cx, None).is_redrawing() {
+        if self.window.begin(cx).is_redrawing() {
             self.dock.begin(cx);
             self.draw_panel(cx, state, live_id!(root).into());
             self.dock.end(cx);

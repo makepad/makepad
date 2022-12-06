@@ -37,7 +37,7 @@ live_design!{
     }
     
     Mandelbrot = {{Mandelbrot}} {
-        max_iter: 320,
+        max_iter: 620,
     }
 }
 
@@ -165,7 +165,7 @@ impl TileCache {
             1 | 2 | 3 => 1,
             4 => 2,
             5 => 3,
-            _ => 4
+            _ => 14
         };
         Self {
             textures,
@@ -591,20 +591,20 @@ impl Mandelbrot {
         
         // check if we click/touch the mandelbrot view in multitouch mode
         // in this mode we get fingerdown events for each finger.
-        match event.hits_with_options(cx, self.view_area, HitOptions::with_multi_touch()) {
+        match event.hits(cx, self.view_area) {
             Hit::FingerDown(fe) => {
                 // ok so we get multiple finger downs
                 self.is_zooming = true;
                 // in case of a mouse we check which mousebutton is down
-                if let Some(button) = fe.digit.mouse_button() {
+                //if let Some(button) = fe.digit.mouse_button() {
                     self.finger_abs = fe.abs;
-                    if button == 0 {
+                 //   if button == 0 {
                         self.is_zoom_in = true;
-                    }
-                    else {
-                        self.is_zoom_in = false;
-                    }
-                }
+                 //   }
+                 //   else {
+                //        self.is_zoom_in = false;
+                //    }
+               /* }
                 else {
                     if fe.digit.count == 1 {
                         self.finger_abs = fe.abs;
@@ -613,16 +613,16 @@ impl Mandelbrot {
                     else if fe.digit.count >= 2 {
                         self.is_zoom_in = false;
                     }
-                }
+                }*/
                 
                 self.view_area.redraw(cx);
                 
                 self.next_frame = cx.new_next_frame();
             },
             Hit::FingerMove(fe) => {
-                if fe.digit.index == 0 { // only respond to digit 0
+                //if fe.digit.index == 0 { // only respond to digit 0
                     self.finger_abs = fe.abs;
-                }
+                //}
             }
             Hit::FingerUp(_) => {
                 self.is_zoom_in = true;

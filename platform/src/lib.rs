@@ -16,6 +16,7 @@ pub mod thread;
 pub mod audio;
 pub mod midi;
 
+mod draw_matrix;
 mod id_pool;
 mod event;
 mod area;
@@ -179,7 +180,7 @@ pub use {
         },
         cursor::MouseCursor,
         menu::Menu,
-        
+        draw_matrix::DrawMatrix,
         window::Window,
         pass::{
             PassId,
