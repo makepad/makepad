@@ -69,8 +69,8 @@ live_design!{
                     apply: {
                         hover: 0.0,
                         draw_bg: {hover: (hover)}
-                        name: {hover: (hover)}
-                        icon: {hover: (hover)}
+                        draw_name: {hover: (hover)}
+                        draw_icon: {hover: (hover)}
                     }
                 }
                 on = {
@@ -87,8 +87,8 @@ live_design!{
                     apply: {
                         selected: 0.0,
                         draw_bg: {selected: (selected)}
-                        name: {selected: (selected)}
-                        icon: {selected: (selected)}
+                        draw_name: {selected: (selected)}
+                        draw_icon: {selected: (selected)}
                     }
                 }
                 on = {

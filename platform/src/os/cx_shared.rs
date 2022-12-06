@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use {
     std::collections::{HashSet, HashMap},
     crate::{
@@ -21,7 +20,7 @@ use {
 
 impl Cx {
     
-    
+    /*
     pub (crate) fn repaint_windows(&mut self) {
         for pass_id in self.passes.id_iter() {
             match self.passes[pass_id].parent {
@@ -31,7 +30,7 @@ impl Cx {
                 _ => ()
             }
         }
-    }
+    }*/
     
     pub (crate) fn any_passes_dirty(&self) -> bool {
         for pass_id in self.passes.id_iter() {
@@ -168,13 +167,13 @@ impl Cx {
 
     // helpers
     
-    
+    /*
     pub (crate) fn call_all_keys_up(&mut self) {
         let keys_down = self.keyboard.all_keys_up();
         for key_event in keys_down {
             self.call_event_handler(&Event::KeyUp(key_event))
         }
-    }
+    }*/ 
     
     pub (crate) fn call_draw_event(&mut self) {
         let mut draw_event = DrawEvent::default();

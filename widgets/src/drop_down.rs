@@ -353,7 +353,7 @@ impl DropDown {
                 lb.draw_item(cx, node_id, &item);
             }
             // ok we shift the entire menu. however we shouldnt go outside the screen area
-            lb.end(cx, last_rect.pos - item_pos.unwrap());
+            lb.end(cx, last_rect.pos - item_pos.unwrap_or(dvec2(0.0,0.0)));
         }
     }
 }

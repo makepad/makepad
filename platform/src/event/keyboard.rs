@@ -43,12 +43,12 @@ impl CxKeyboard {
             self.next_key_focus = new_area
         }
     }
-    
+    /*
     pub (crate) fn all_keys_up(&mut self) -> Vec<KeyEvent> {
         let mut keys_down = Vec::new();
         std::mem::swap(&mut keys_down, &mut self.keys_down);
         keys_down
-    }
+    }*/
     
     pub (crate) fn cycle_key_focus_changed(&mut self) -> Option<(Area, Area)> {
         if self.next_key_focus != self.key_focus {

@@ -10,7 +10,7 @@ live_design!{
     const SLIDE_WIDTH = 800
     
     Body = <Label> {
-        label: {
+        draw_label: {
             color: #f
             text_style: {
                 font_size: 35
@@ -24,7 +24,7 @@ live_design!{
         walk: {width: (SLIDE_WIDTH), height: Fill}
         layout: {align: {x: 0.5, y: 0.5}, flow: Down, spacing: 40}
         title = <Label> {
-            label: {
+            draw_label: {
                 color: #f
                 text_style: {
                     font_size: 64

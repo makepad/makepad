@@ -1,8 +1,6 @@
-#![allow(unused)]
 use {
     crate::{
         makepad_draw::*,
-        widget::*,
         button::{Button, ButtonAction}
     }
 };

@@ -67,6 +67,7 @@ impl RunView {
         // ok what do we want. lets do fingerdown, finger 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(fe) => {
+                /*
                 cx.set_key_focus(self.draw_bg.area());
                 let rel = fe.abs - fe.rect.pos;
                 state.send_host_to_stdin(None, HostToStdin::FingerDown(StdinFingerDown{
@@ -77,10 +78,10 @@ impl RunView {
                         Some(mb)
                     }else{None},
                     digit_id: fe.digit.id.0.0,
-                }));
+                }));*/
             },
             Hit::FingerUp(fe) => {
-                let rel = fe.abs - fe.rect.pos;
+                /*let rel = fe.abs - fe.rect.pos;
                 state.send_host_to_stdin(None, HostToStdin::FingerUp(StdinFingerUp{
                     time: fe.time,
                     x: rel.x,
@@ -89,10 +90,10 @@ impl RunView {
                         Some(mb)
                     }else{None},
                     digit_id: fe.digit.id.0.0,
-                }));
+                }));*/
             }
             Hit::FingerMove(fe) => {
-                let rel = fe.abs - fe.rect.pos;
+                /*let rel = fe.abs - fe.rect.pos;
                 state.send_host_to_stdin(None, HostToStdin::FingerMove(StdinFingerMove{
                     time: fe.time,
                     x: rel.x,
@@ -101,7 +102,7 @@ impl RunView {
                         Some(mb)
                     }else{None},
                     digit_id: fe.digit.id.0.0,
-                }));
+                }));*/
             }
             _ => ()
         }

@@ -31,7 +31,6 @@ impl CxWindowPool {
         Window(self.0.alloc())
     }
     
-    #[allow(dead_code)]
     pub fn id_zero()->WindowId{
         WindowId(0, 0)
     }
