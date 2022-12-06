@@ -580,6 +580,10 @@ live_primitive!(
                 *self = Vec4{x:v.x, y:v.y, z:v.z, w:1.0};
                 index + 1
             }
+            LiveValue::Vec4(v) => {
+                *self = Vec4{x:v.x, y:v.y, z:v.z, w:v.w};
+                index + 1
+            }
             LiveValue::Int64(v) => {
                 *self = Vec4::all(*v as f32);
                 index + 1
