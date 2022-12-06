@@ -10,7 +10,7 @@ live_design!{
     import makepad_widgets::theme::*;
     
     Tab= {{Tab}} {
-        name: {
+        draw_name: {
             text_style: <FONT_LABEL> {}
             instance hover: 0.0
             instance selected: 0.0
@@ -92,7 +92,7 @@ live_design!{
                     from: {all: Forward {duration: 0.3}}
                     apply: {
                         selected: 0.0,
-                        close_button: {button: {selected: (selected)}}
+                        close_button: {draw_button: {selected: (selected)}}
                         draw_bg: {selected: (selected)}
                         draw_name: {selected: (selected)}
                     }

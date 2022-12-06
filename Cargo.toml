@@ -19,6 +19,7 @@ workspace.members = [
     "studio",
     "tools/auto_version",
     "tools/web_server", 
+    "tools/file_router",
     "tools/wasm_strip",
 ]
 
