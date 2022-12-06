@@ -1,4 +1,3 @@
-#![allow(unused)]
 use {
     crate::{
         makepad_derive_widget::*,
@@ -205,7 +204,7 @@ pub struct TextInput {
 }
 
 impl LiveHook for TextInput {
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> Option<usize> {
         //nodes.debug_print(index,100);
         None
     }

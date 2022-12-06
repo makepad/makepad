@@ -181,12 +181,12 @@ live_design!{
         file_node: <FileTreeNode> {
             is_folder: false,
             draw_bg: {is_folder: 0.0}
-            name: {is_folder: 0.0}
+            draw_name: {is_folder: 0.0}
         }
         folder_node: <FileTreeNode> {
             is_folder: true,
             draw_bg: {is_folder: 1.0}
-            name: {is_folder: 1.0}
+            draw_name: {is_folder: 1.0}
         }
         layout: {flow: Down, clip_x: true, clip_y: true},
         scroll_bars: {}

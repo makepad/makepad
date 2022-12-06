@@ -1,4 +1,3 @@
-#![allow(unused)]
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,

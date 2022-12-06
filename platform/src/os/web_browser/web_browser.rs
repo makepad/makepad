@@ -406,6 +406,9 @@ impl CxOsApi for Cx {
             ToWasmWebSocketClose::to_string(),
             ToWasmWebSocketError::to_string(),
             ToWasmWebSocketMessage::to_string(),
+        
+            ToWasmMidiInputData::to_string(),
+            ToWasmMidiInputList::to_string(),
         ]);
         
         self.os.append_from_wasm_js(&[
@@ -435,6 +438,9 @@ impl CxOsApi for Cx {
             FromWasmBeginRenderCanvas::to_string(),
             FromWasmSetDefaultDepthAndBlendMode::to_string(),
             FromWasmDrawCall::to_string(),
+            
+            FromWasmStartMidiInput::to_string(),
+            FromWasmSpawnAudioOutput::to_string(),            
         ]);
     }
     

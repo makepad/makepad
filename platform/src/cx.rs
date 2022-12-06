@@ -19,6 +19,7 @@ use {
         cx_draw_shaders::{
             CxDrawShaders
         },
+        draw_matrix::CxDrawMatrixPool,
         os::{
             CxOs,
         },
@@ -74,6 +75,7 @@ pub struct Cx {
     pub windows: CxWindowPool,
     pub passes: CxPassPool,
     pub draw_lists: CxDrawListPool,
+    pub draw_matrices: CxDrawMatrixPool,
     pub (crate) textures: CxTexturePool,
     pub (crate) geometries: CxGeometryPool,
     
@@ -119,7 +121,6 @@ pub struct Cx {
     pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
 
     pub debug:Debug,
-
 }
 
 pub struct CxDependency {
@@ -177,20 +178,20 @@ impl Cx {
             cpu_cores: 8,
             
             platform_type: OsType::Unknown,
-            gpu_info: GpuInfo::default(),
-            xr_capabilities: XrCapabilities::default(),
+            gpu_info: Default::default(),
+            xr_capabilities: Default::default(),
             
             windows: Default::default(),
             passes: Default::default(),
             draw_lists: Default::default(),
+            draw_matrices: Default::default(),
             geometries: Default::default(),
-            textures:CxTexturePool::default(),
+            textures:Default::default(),
+            geometries_refs: Default::default(),
             
-            geometries_refs: HashMap::new(),
+            draw_shaders: Default::default(),
             
-            draw_shaders: CxDrawShaders::default(),
-            
-            new_draw_event: DrawEvent::default(),
+            new_draw_event: Default::default(),
             
             redraw_id: 1,
             event_id: 1,
@@ -199,19 +200,19 @@ impl Cx {
             next_frame_id: 1,
             web_socket_id: 1,
             
-            keyboard: CxKeyboard::default(),
-            fingers: CxFingers::default(),
-            finger_drag: CxFingerDrag::default(),
+            keyboard: Default::default(),
+            fingers: Default::default(),
+            finger_drag: Default::default(),
             
-            platform_ops: Vec::new(),
+            platform_ops: Default::default(),
             
             
-            new_next_frames: HashSet::new(),
+            new_next_frames: Default::default(),
             
-            dependencies: HashMap::new(),
+            dependencies: Default::default(),
             
-            signals: HashSet::new(),
-            triggers: HashMap::new(),
+            signals: Default::default(),
+            triggers: Default::default(),
             
             live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
             shader_registry: ShaderRegistry::new(),
@@ -224,7 +225,7 @@ impl Cx {
             
             debug: Default::default(),
 
-            globals: Vec::new(),
+            globals: Default::default(),
         }
     }
 }

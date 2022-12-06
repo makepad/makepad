@@ -13,7 +13,7 @@ live_design!{
     
     TabBar= {{TabBar}} {
         tab: <Tab> {}
-        drag: {
+        draw_drag: {
             draw_depth: 10
             color: #c
         }
@@ -28,7 +28,7 @@ live_design!{
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
-                bar:{bar_width:3.0}
+                draw_bar:{bar_width:3.0}
                 bar_size: 4
                 use_vertical_finger_scroll: true
             }

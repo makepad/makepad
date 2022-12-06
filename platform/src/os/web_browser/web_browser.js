@@ -312,7 +312,7 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
         const start_worklet = async () => {
-            await this.audio_context.audioWorklet.addModule("/makepad/media/src/os/web_browser/audio_worklet.js", {credentials: 'omit'});
+            await this.audio_context.audioWorklet.addModule("/makepad/platform/src/os/web_browser/audio_worklet.js", {credentials: 'omit'});
             
             const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
