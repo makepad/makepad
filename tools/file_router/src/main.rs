@@ -103,8 +103,8 @@ fn main() {
     });
     
     let mut fetch_file = if args.len() == 4 { // lets send a fetch init message
-        tx_sender.send(RouterMessage::FetchFile {name: args[2].clone()}).unwrap();
-        Some(args[2].clone())
+        tx_sender.send(RouterMessage::FetchFile {name: args[3].clone()}).unwrap();
+        Some(args[3].clone())
     }
     else {
         None
