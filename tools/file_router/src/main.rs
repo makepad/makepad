@@ -6,24 +6,26 @@ use std::sync::mpsc;
 use std::net::{TcpStream};
 use makepad_micro_serde::*;
 use std::io::SeekFrom;
+//use std::sync::{Mutex, Arc};
+//use std::cell::RefCell;
 
 #[derive(SerBin, DeBin)]
 enum RouterMessage {
     FetchFile {name: String},
     FileSize {size: u64},
     FetchChunk {chunk: u64, hash: u64},
-    ChunkSkipped{chunk:u64},
-    ChunkDownloaded{chunk:u64,data:Vec<u8>}
+    ChunkSkipped {chunk: u64},
+    ChunkDownloaded {chunk: u64, data: Vec<u8>}
 }
 
-const CHUNK_SIZE: u64 = 16 * 1024 * 1024;
+const CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 
 fn main() {
     // ok so first off lets connect a websocket to our server
     // then make a message enum we send accross the socket
     let args: Vec<String> = env::args().collect();
     
-    if args.len()<3{
+    if args.len()<3 {
         println!("cargo run makepad-file-router <ip:port> <secret> <optional file to fetch>")
     }
     
@@ -31,7 +33,7 @@ fn main() {
     let mut tcp_stream = TcpStream::connect(&args[1]).unwrap();
     
     // send it the http websocket fetch
-    let http_req = format!("GET /route/{} HTTP/1.1\r\nHost: makepad.nl\r\nConnection: upgrade\r\nUpgrade: websocket\r\nsec-websocket-key: x\r\n\r\n",args[2]);
+    let http_req = format!("GET /route/{} HTTP/1.1\r\nHost: makepad.nl\r\nConnection: upgrade\r\nUpgrade: websocket\r\nsec-websocket-key: x\r\n\r\n", args[2]);
     tcp_stream.write_all(http_req.as_bytes()).unwrap();
     
     // skip over response, we don't care.
@@ -103,8 +105,10 @@ fn main() {
     });
     
     let mut fetch_file = if args.len() == 4 { // lets send a fetch init message
-        tx_sender.send(RouterMessage::FetchFile {name: args[3].clone()}).unwrap();
-        Some(args[3].clone())
+        let name = args[3].clone();
+        //let fetch_hash = hash_file_parallel(&name, get_file_len(&name));
+        tx_sender.send(RouterMessage::FetchFile {name: name.clone()}).unwrap();
+        Some(name)
     }
     else {
         None
@@ -116,13 +120,18 @@ fn main() {
         format!("./{}", name)
     }
     
+    fn get_file_len(name:&str)->u64{
+        let path = get_file_path(name);
+        fs::metadata(path).unwrap().len() as u64        
+    }
+    
     fn set_file_len(name: &str, len: u64) {
         let path = get_file_path(name);
         let file = fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
         file.set_len(len).unwrap();
     }
-    
-    fn read_chunk(name: &str, chunk: u64)->Vec<u8>{
+
+    fn read_chunk(name: &str, chunk: u64) -> Vec<u8> {
         let path = get_file_path(name);
         let mut file = fs::OpenOptions::new().read(true).open(path).unwrap();
         file.seek(SeekFrom::Start(chunk * CHUNK_SIZE)).unwrap();
@@ -138,15 +147,19 @@ fn main() {
         }
     }
     
-    fn write_chunk(name: &str, chunk: u64, data:Vec<u8>) {
+    fn write_chunk(name: &str, chunk: u64, data: Vec<u8>) {
         let path = get_file_path(name);
-        let mut file = fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+        
+        let mut file = fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
         file.seek(SeekFrom::Start(chunk * CHUNK_SIZE)).unwrap();
         // lets read the chunk
         if let Ok(len) = file.write(&data) {
-            if len != data.len(){
+            if len != data.len() {
                 panic!("File write failed")
             }
+
+            let mut file = fs::File::create(format!("{}.last",path)).unwrap();
+            file.write_all(format!("{}", chunk).as_bytes()).unwrap();
         }
         else {
             panic!("File read failed")
@@ -161,10 +174,9 @@ fn main() {
                     continue
                 }
                 fetch_file = Some(name.clone());
-                let file = format!("./{}", name);
                 // someone wants to fetch a file.
                 // lets read the file size
-                let size = fs::metadata(file).unwrap().len() as u64;
+                let size = get_file_len(&name);
                 fetch_chunks = Some(size / CHUNK_SIZE);
                 tx_sender.send(RouterMessage::FileSize {size}).unwrap();
             }
@@ -174,36 +186,46 @@ fn main() {
                 println!("Setting file length of {} to {}, might take a while", fetch_file, size);
                 set_file_len(fetch_file, size);
                 println!("File length set done");
-                // lets start the first chunk
-                let hash = hash_bytes(&read_chunk(fetch_file, 0));
-                tx_sender.send(RouterMessage::FetchChunk {chunk: 0, hash}).unwrap();
-            }
-            RouterMessage::FetchChunk{chunk, hash}=>{
-                let data = read_chunk(fetch_file.as_ref().unwrap(), chunk);
-                let old_hash = hash_bytes(&data);
-                if old_hash == hash{
-                    println!("FetchChunk {} {}/{} skipped", fetch_file.as_ref().unwrap(), chunk, fetch_chunks.unwrap());
-                    tx_sender.send(RouterMessage::ChunkSkipped {chunk}).unwrap();
+
+                let start_chunk = if let Ok(mut file) = fs::File::open(format!("{}.last",get_file_path(fetch_file))){
+                    let mut contents = String::new();
+                    file.read_to_string(&mut contents).unwrap();
+                    contents.parse().unwrap()
                 }
                 else{
-                    println!("FetchChunk {} {}/{} uploading", fetch_file.as_ref().unwrap(), chunk, fetch_chunks.unwrap());
+                    0
+                };
+
+                // lets start the first chunk
+                let hash = hash_bytes(&read_chunk(fetch_file, 0));
+                tx_sender.send(RouterMessage::FetchChunk {chunk: start_chunk, hash}).unwrap();
+            }
+            RouterMessage::FetchChunk {chunk, hash} => {
+                let data = read_chunk(fetch_file.as_ref().unwrap(), chunk);
+                let old_hash = hash_bytes(&data);
+                if old_hash == hash {
+                    println!("FetchChunk {} {}/{} skipped {:.2}%", fetch_file.as_ref().unwrap(), chunk, fetch_chunks.unwrap(), (chunk as f64 / fetch_chunks.unwrap() as f64) * 100.0);
+                    tx_sender.send(RouterMessage::ChunkSkipped {chunk}).unwrap();
+                }
+                else {
+                    println!("FetchChunk {} {}/{} uploading {:.2}%", fetch_file.as_ref().unwrap(), chunk, fetch_chunks.unwrap(), (chunk as f64 / fetch_chunks.unwrap() as f64) * 100.0);
                     tx_sender.send(RouterMessage::ChunkDownloaded {chunk, data}).unwrap();
                 }
             }
-            RouterMessage::ChunkSkipped{chunk}=>{
-                println!("ChunkSkipped {} {}/{}", fetch_file.as_ref().unwrap(), chunk, fetch_chunks.unwrap());
-                let hash = hash_bytes(&read_chunk(fetch_file.as_ref().unwrap(), chunk+1));
-                tx_sender.send(RouterMessage::FetchChunk {chunk: chunk+1, hash}).unwrap();
+            RouterMessage::ChunkSkipped {chunk} => {
+                println!("ChunkSkipped {} {}/{} {:.2}%", fetch_file.as_ref().unwrap(), chunk, fetch_chunks.unwrap(), (chunk as f64 / fetch_chunks.unwrap() as f64) * 100.0);
+                let hash = hash_bytes(&read_chunk(fetch_file.as_ref().unwrap(), chunk + 1));
+                tx_sender.send(RouterMessage::FetchChunk {chunk: chunk + 1, hash}).unwrap();
             }
-            RouterMessage::ChunkDownloaded{chunk, data}=>{
-                println!("ChunkDownloaded {} {}/{}", fetch_file.as_ref().unwrap(), chunk, fetch_chunks.unwrap());
+            RouterMessage::ChunkDownloaded {chunk, data} => {
+                println!("ChunkDownloaded {} {}/{} {:.2}%", fetch_file.as_ref().unwrap(), chunk, fetch_chunks.unwrap(), (chunk as f64 / fetch_chunks.unwrap() as f64) * 100.0);
                 let data_len = data.len();
                 write_chunk(fetch_file.as_ref().unwrap(), chunk, data);
-                let hash = hash_bytes(&read_chunk(fetch_file.as_ref().unwrap(), chunk+1));
-                if data_len == CHUNK_SIZE as usize{
-                    tx_sender.send(RouterMessage::FetchChunk {chunk: chunk+1, hash}).unwrap();
+                let hash = hash_bytes(&read_chunk(fetch_file.as_ref().unwrap(), chunk + 1));
+                if data_len == CHUNK_SIZE as usize {
+                    tx_sender.send(RouterMessage::FetchChunk {chunk: chunk + 1, hash}).unwrap();
                 }
-                else{
+                else {
                     println!("File done");
                     return;
                 }
@@ -214,7 +236,7 @@ fn main() {
 }
 
 fn hash_bytes(id_bytes: &[u8]) -> u64 {
-    let mut x:u64 = 0xd6e8_feb8_6659_fd93;
+    let mut x: u64 = 0xd6e8_feb8_6659_fd93;
     let mut i = 0;
     while i < id_bytes.len() {
         x = x.overflowing_add(id_bytes[i] as u64).0;
