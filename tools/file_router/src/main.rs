@@ -258,6 +258,5 @@ fn hash_bytes(id_bytes: &[u8]) -> u64 {
         x ^= x >> 32;
         i += 1;
     }
-    // mark high bit as meaning that this is a hash id
     return x
 }
