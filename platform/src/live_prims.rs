@@ -25,7 +25,7 @@ macro_rules!live_primitive {
         impl LiveRead for $ ty {
             fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
                 out.push(LiveNode::from_id_value(id, self.to_live_value()));
-            }
+            } 
         }
         impl LiveApply for $ ty {
             //fn type_id(&self) -> TypeId {
@@ -289,6 +289,54 @@ live_primitive!(
     },
     fn to_live_value(&self) -> LiveValue {
         LiveValue::Int64(*self)
+    }
+);
+
+live_primitive!(
+    i32,
+    0i32,
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Float32(val) => {
+                *self = *val as i32;
+                index + 1
+            }
+            LiveValue::Float64(val) => {
+                *self = *val as i32;
+                index + 1
+            }
+            LiveValue::Int64(val) => {
+                *self = *val as i32;
+                index + 1
+            }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Float64(v) => {*self = v as i32;}
+                        LiveEval::Int64(v) => {*self = v as i32;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            },
+            LiveValue::Array => {
+                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::DSL {..} => nodes.skip_node(index),
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "i64");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::Int64(*self as i64)
     }
 );
 
