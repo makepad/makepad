@@ -20,7 +20,7 @@ use {
 
 impl Cx {
     
-    /*
+    
     pub (crate) fn repaint_windows(&mut self) {
         for pass_id in self.passes.id_iter() {
             match self.passes[pass_id].parent {
@@ -30,7 +30,7 @@ impl Cx {
                 _ => ()
             }
         }
-    }*/
+    }
     
     pub (crate) fn any_passes_dirty(&self) -> bool {
         for pass_id in self.passes.id_iter() {
