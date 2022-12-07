@@ -15,15 +15,9 @@ pub struct HttpServer {
     pub post_max_size: u64
 }
 
-pub struct HttpChunk{
-    pub len: usize,
-    pub buf: [u8;1400]
-}
-
 pub struct HttpResponse {
     pub header: String,
-    pub rx_body: mpsc::Receiver<HttpChunk>,
-    pub tx_ready: mpsc::Sender<()>,
+    pub body: Vec<u8>
 }
 
 pub enum HttpRequest {
@@ -133,9 +127,7 @@ fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: Http
     
     if let Ok(response) = rx_socket.recv() {
         write_bytes_to_tcp_stream_no_error(&mut tcp_stream, response.header.as_bytes());
-        while let Ok(chunk) = response.rx_body.recv(){
-            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &chunk.buf[0..chunk.len]);
-        } 
+        write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &response.body);
     }
     let _ = tcp_stream.shutdown(Shutdown::Both);
 }
@@ -250,14 +242,7 @@ fn handle_get(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpH
     
     if let Ok(response) = rx_socket.recv() {
         write_bytes_to_tcp_stream_no_error(&mut tcp_stream, response.header.as_bytes());
-        while let Ok(chunk) = response.rx_body.recv(){
-            if write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &chunk.buf[0..chunk.len]){
-                break;
-            }
-            if response.tx_ready.send(()).is_err(){
-                break
-            };
-        }
+        write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &response.body);
     }
     let _ = tcp_stream.shutdown(Shutdown::Both);
 }
