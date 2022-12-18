@@ -1,6 +1,9 @@
 Our new mastodon social media links:
+
 Rik Arends: https://fosstodon.org/@rikarends#
+
 Eddy Bruel: - 
+
 Sebastian Michailidis: -
 
 # Makepad
