@@ -6,6 +6,9 @@ Eddy Bruel: -
 
 Sebastian Michailidis: -
 
+Our discord channel for Makepad:
+https://discord.gg/adqBRq7Ece
+
 # Makepad
 
 ## Overview
@@ -70,5 +73,4 @@ https://127.0.0.1:8080/makepad/examples/ironfish/src/index.html
 
 ## Contact
 
-If you have any questions/suggestions, feel free to reach out to us on our discord channel:
-https://discord.gg/adqBRq7Ece
+
