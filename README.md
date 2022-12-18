@@ -1,5 +1,5 @@
 Our new mastodon social media links:
-Rik Arends: @rikarends@fosstodon.org - https://fosstodon.org/@rikarends#
+Rik Arends: https://fosstodon.org/@rikarends#
 Eddy Bruel: - 
 Sebastian Michailidis: -
 
