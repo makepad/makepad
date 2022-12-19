@@ -1,6 +1,6 @@
 use {
     std::{
-        cell::{RefCell,Cell},
+        cell::{RefCell, Cell},
         rc::Rc,
         ptr,
         ffi::OsStr,
@@ -11,6 +11,9 @@ use {
     crate::{
         event::*,
         area::Area,
+        makepad_live_id::*,
+        os::mswindows::win32_app::encode_wide,
+        os::mswindows::win32_app::post_signal_to_hwnd,
         os::mswindows::win32_sys,
         os::mswindows::win32_sys::{
             HWND,
@@ -30,7 +33,6 @@ use {
             CreateWindowExW,
             SetWindowLongPtrW,
             GetWindowLongPtrW,
-            GetWindowLongW,
             DefWindowProcW,
             ShowWindow,
             PostMessageW,
@@ -45,13 +47,12 @@ use {
             ReleaseCapture,
             SetCapture,
             TrackMouseEvent,
-            GetKeyState, 
+            GetKeyState,
             TRACKMOUSEEVENT,
             DwmExtendFrameIntoClientArea,
             GetModuleHandleW
         },
         os::mswindows::win32_event::*,
-        os::mswindows::win32_app::Win32App,
         os::mswindows::win32_app::get_win32_app_global,
         window::{WindowId},
         cx::*,
@@ -76,23 +77,23 @@ pub struct Win32Window {
 
 impl Win32Window {
     
-    pub fn new(win32_app: &mut Win32App, window_id: usize) -> Win32Window {
+    pub fn new(window_id: WindowId) -> Win32Window {
         Win32Window {
-            window_id: window_id,
-            win32_app: win32_app,
+            window_id,
+            mouse_buttons_down: 0,
             last_window_geom: WindowGeom::default(),
-            time_start: win32_app.time_start,
             last_key_mod: KeyModifiers::default(),
-            ime_spot: Vec2::default(),
+            ime_spot: DVec2::default(),
             current_cursor: MouseCursor::Default,
-            last_mouse_pos: Vec2::default(),
+            last_mouse_pos: DVec2::default(),
             ignore_wmsize: 0,
             hwnd: None,
             track_mouse_event: false
         }
     }
     
-    pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
+    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>) {
+        let title = encode_wide(title);
         
         let style = win32_sys::WS_SIZEBOX
             | win32_sys::WS_MAXIMIZEBOX
@@ -118,22 +119,21 @@ impl Win32Window {
             let hwnd = CreateWindowExW(
                 style_ex,
                 get_win32_app_global().class_name_wstr.as_ptr(),
-                title,
+                title.as_ptr(),
                 style,
                 x,
                 y,
                 win32_sys::CW_USEDEFAULT,
                 win32_sys::CW_USEDEFAULT,
-                ptr::null_mut(),
-                ptr::null_mut(),
+                0,
+                0,
                 GetModuleHandleW(ptr::null()),
                 ptr::null_mut(),
             );
             
             self.hwnd = Some(hwnd);
             
-            
-            SetWindowLongPtrW(hwnd, win32_sys::GWLP_USERDATA, self as *const _ as isize);
+            SetWindowLongPtrW(hwnd, win32_sys::GWLP_USERDATA, self as *const _ as usize);
             
             self.set_outer_size(size);
             
@@ -143,8 +143,8 @@ impl Win32Window {
             
             if let Ok(mut sigs) = get_win32_app_global().race_signals.lock() {
                 get_win32_app_global().all_windows.push(hwnd);
-                for sig in sigs.iter() {
-                    PostMessageW(hwnd, win32_sys::WM_USER, sig.0, sig.1 as isize);
+                for signal in sigs.iter() {
+                    post_signal_to_hwnd(hwnd, *signal);
                 }
                 sigs.clear();
             }
@@ -163,10 +163,10 @@ impl Win32Window {
         match msg {
             win32_sys::WM_ACTIVATE => {
                 if wparam & 0xffff == win32_sys::WA_ACTIVE as usize {
-                    window.do_callback(&mut vec![Win32Event::AppFocus]);
+                    window.do_callback(vec![Win32Event::AppGotFocus]);
                 }
                 else {
-                    window.do_callback(&mut vec![Win32Event::AppFocusLost]);
+                    window.do_callback(vec![Win32Event::AppLostFocus]);
                 }
             },
             win32_sys::WM_NCCALCSIZE => {
@@ -192,71 +192,66 @@ impl Win32Window {
                 const EDGE: i32 = 8;
                 GetWindowRect(hwnd, &mut rect);
                 if xcoord < rect.left + EDGE {
-                    (*window.win32_app).current_cursor = MouseCursor::Hidden;
                     if ycoord < rect.top + EDGE {
-                        window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NwseResize)]);
-                        return win32_sys::HTTOPLEFT;
+                        get_win32_app_global().set_mouse_cursor(MouseCursor::NwseResize);
+                        return win32_sys::HTTOPLEFT as LRESULT;
                     }
                     if ycoord > rect.bottom - EDGE {
-                        window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NeswResize)]);
-                        return win32_sys::HTBOTTOMLEFT;
+                        get_win32_app_global().set_mouse_cursor(MouseCursor::NeswResize);
+                        return win32_sys::HTBOTTOMLEFT as LRESULT;
                     }
-                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::EwResize)]);
-                    return win32_sys::HTLEFT;
+                    get_win32_app_global().set_mouse_cursor(MouseCursor::EwResize);
+                    return win32_sys::HTLEFT as LRESULT;
                 }
                 if xcoord > rect.right - EDGE {
-                    (*window.win32_app).current_cursor = MouseCursor::Hidden;
                     if ycoord < rect.top + EDGE {
-                        window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NeswResize)]);
-                        return win32_sys::HTTOPRIGHT;
+                        get_win32_app_global().set_mouse_cursor(MouseCursor::NeswResize);
+                        return win32_sys::HTTOPRIGHT as LRESULT;
                     }
                     if ycoord > rect.bottom - EDGE {
-                        window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NwseResize)]);
-                        return win32_sys::HTBOTTOMRIGHT;
+                        get_win32_app_global().set_mouse_cursor(MouseCursor::NwseResize);
+                        return win32_sys::HTBOTTOMRIGHT as LRESULT;
                     }
-                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::EwResize)]);
-                    return win32_sys::HTRIGHT;
+                    get_win32_app_global().set_mouse_cursor(MouseCursor::EwResize);
+                    return win32_sys::HTRIGHT as LRESULT;
                 }
                 if ycoord < rect.top + EDGE {
-                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NsResize)]);
-                    return win32_sys::HTTOP;
+                    get_win32_app_global().set_mouse_cursor(MouseCursor::NsResize);
+                    return win32_sys::HTTOP as LRESULT;
                 }
                 if ycoord > rect.bottom - EDGE {
-                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NsResize)]);
-                    return win32_sys::HTBOTTOM;
+                    get_win32_app_global().set_mouse_cursor(MouseCursor::NsResize);
+                    return win32_sys::HTBOTTOM as LRESULT;
                 }
-                let mut events = vec![
-                    Event::WindowDragQuery(WindowDragQueryEvent {
+                let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
+                window.do_callback(vec![
+                    Win32Event::WindowDragQuery(WindowDragQueryEvent {
                         window_id: window.window_id,
                         abs: window.get_mouse_pos_from_lparam(lparam),
-                        response: WindowDragQueryResponse::NoAnswer
+                        response: response.clone()
                     })
-                ];
-                window.do_callback(&mut events);
-                match &events[0] {
-                    Event::WindowDragQuery(wd) => match &wd.response {
-                        WindowDragQueryResponse::Client => {
-                            return win32_sys::HTCLIENT
-                        }
-                        WindowDragQueryResponse::Caption => {
-                            window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::Default)]);
-                            return win32_sys::HTCAPTION
-                        },
-                        WindowDragQueryResponse::SysMenu => {
-                            window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::Default)]);
-                            return win32_sys::HTSYSMENU
-                        }
-                        _ => ()
+                ]);
+                match response.get() {
+                    WindowDragQueryResponse::Client => {
+                        return win32_sys::HTCLIENT as LRESULT;
+                    }
+                    WindowDragQueryResponse::Caption => {
+                        get_win32_app_global().set_mouse_cursor(MouseCursor::Default);
+                        return win32_sys::HTCAPTION as LRESULT;
                     },
+                    WindowDragQueryResponse::SysMenu => {
+                        get_win32_app_global().set_mouse_cursor(MouseCursor::Default);
+                        return win32_sys::HTSYSMENU as LRESULT;
+                    }
                     _ => ()
                 }
                 if ycoord < rect.top + 50 && xcoord < rect.left + 50 {
-                    return win32_sys::HTSYSMENU;
+                    return win32_sys::HTSYSMENU as LRESULT;
                 }
                 if ycoord < rect.top + 50 && xcoord < rect.right - 300 {
-                    return win32_sys::HTCAPTION;
+                    return win32_sys::HTCAPTION as LRESULT;
                 }
-                return win32_sys::HTCLIENT;
+                return win32_sys::HTCLIENT as LRESULT;
             },
             win32_sys::WM_ERASEBKGND => {
                 return 1
@@ -286,8 +281,8 @@ impl Win32Window {
                 get_win32_app_global().current_cursor = MouseCursor::Hidden;
             },
             win32_sys::WM_MOUSEWHEEL => {
-                let delta = (wparam >> 16) as u16 as i16 as f32;
-                window.send_scroll(Vec2 {x: 0.0, y: -delta}, Self::get_key_modifiers(), true);
+                let delta = (wparam >> 16) as u16 as i16 as f64;
+                window.send_scroll(DVec2 {x: 0.0, y: -delta}, Self::get_key_modifiers(), true);
             },
             win32_sys::WM_LBUTTONDOWN => window.send_mouse_down(0, Self::get_key_modifiers()),
             win32_sys::WM_LBUTTONUP => window.send_mouse_up(0, Self::get_key_modifiers()),
@@ -305,7 +300,7 @@ impl Win32Window {
                 if modifiers.control || modifiers.logo {
                     match key_code {
                         KeyCode::KeyV => { // paste
-                            if OpenClipboard(ptr::null_mut()) != 0 {
+                            if OpenClipboard(0) != 0 {
                                 let mut data: Vec<u16> = Vec::new();
                                 let h_clipboard_data = GetClipboardData(win32_sys::CF_UNICODETEXT);
                                 let h_clipboard_ptr = GlobalLock(h_clipboard_data) as *mut u16;
@@ -316,7 +311,7 @@ impl Win32Window {
                                     GlobalUnlock(h_clipboard_data);
                                     CloseClipboard();
                                     if let Ok(utf8) = String::from_utf16(&data) {
-                                        window.do_callback(&mut vec![
+                                        window.do_callback(vec![
                                             Win32Event::TextInput(TextInputEvent {
                                                 input: utf8,
                                                 was_paste: true,
@@ -339,10 +334,10 @@ impl Win32Window {
                                 })
                             ]);
                             let response = response.borrow();
-                            if let Some(response) = response.as_ref(){
+                            if let Some(response) = response.as_ref() {
                                 // plug it into the windows clipboard
                                 // make utf16 dta
-                                if OpenClipboard(ptr::null_mut()) != 0 {
+                                if OpenClipboard(0) != 0 {
                                     EmptyClipboard();
                                     
                                     let data: Vec<u16> = OsStr::new(response).encode_wide().chain(Some(0).into_iter()).collect();
@@ -362,8 +357,8 @@ impl Win32Window {
                         _ => ()
                     }
                 }
-                window.do_callback(&vec![
-                    Event::KeyDown(KeyEvent {
+                window.do_callback(vec![
+                    Win32Event::KeyDown(KeyEvent {
                         key_code: key_code,
                         is_repeat: lparam & 0x7fff>0,
                         modifiers: modifiers,
@@ -372,7 +367,7 @@ impl Win32Window {
                 ]);
             },
             win32_sys::WM_KEYUP | win32_sys::WM_SYSKEYUP => {
-                window.do_callback(&vec![
+                window.do_callback(vec![
                     Win32Event::KeyUp(KeyEvent {
                         key_code: Self::virtual_key_to_key_code(wparam),
                         is_repeat: lparam & 0x7fff>0,
@@ -386,7 +381,7 @@ impl Win32Window {
                 if let Ok(utf8) = String::from_utf16(&[wparam as u16]) {
                     let char_code = utf8.chars().next().unwrap();
                     if char_code >= ' ' {
-                        window.do_callback(&vec![
+                        window.do_callback(vec![
                             Win32Event::TextInput(TextInputEvent {
                                 input: utf8,
                                 was_paste: false,
@@ -398,19 +393,19 @@ impl Win32Window {
             },
             win32_sys::WM_ENTERSIZEMOVE => {
                 get_win32_app_global().start_resize();
-                window.do_callback(&vec![Win32Event::WindowResizeLoopStart(window.window_id)]);
+                window.do_callback(vec![Win32Event::WindowResizeLoopStart(window.window_id)]);
             }
             win32_sys::WM_EXITSIZEMOVE => {
                 get_win32_app_global().stop_resize();
-                window.do_callback(&vec![Win32Event::WindowResizeLoopStop(window.window_id)]);
+                window.do_callback(vec![Win32Event::WindowResizeLoopStop(window.window_id)]);
             },
             win32_sys::WM_SIZE | win32_sys::WM_DPICHANGED => {
                 window.send_change_event();
             },
             win32_sys::WM_USER => {
                 let mut signals = HashSet::new();
-                signals.insert(Signal {signal_id: wparam as usize});
-                window.do_callback(&mut vec![
+                signals.insert(Signal(LiveId(((wparam as u64) << 32) | (lparam as u64))));
+                window.do_callback(vec![
                     Win32Event::Signal(SignalEvent {signals})
                 ]);
             },
@@ -425,9 +420,8 @@ impl Win32Window {
                 }
             },
             win32_sys::WM_DESTROY => { // window actively destroyed
-                get_win32_app_global().event_recur_block = false; //exception case
-                window.do_callback(&mut vec![
-                    Event::WindowClosed(WindowClosedEvent {
+                window.do_callback(vec![
+                    Win32Event::WindowClosed(WindowClosedEvent {
                         window_id: window.window_id,
                     })
                 ]);
@@ -447,17 +441,17 @@ impl Win32Window {
         let dpi = self.get_dpi_factor();
         let ycoord = (lparam >> 16) as u16 as i16 as f64;
         let xcoord = (lparam & 0xffff) as u16 as i16 as f64;
-        Vec2 {x: xcoord / dpi, y: ycoord / dpi}
+        DVec2 {x: xcoord / dpi, y: ycoord / dpi}
     }
     
     pub fn get_key_modifiers() -> KeyModifiers {
         unsafe {
             KeyModifiers {
-                control: GetKeyState(win32_sys::VK_CONTROL) & 0x80>0,
-                shift: GetKeyState(win32_sys::VK_SHIFT) & 0x80>0,
-                alt: GetKeyState(win32_sys::VK_MENU) & 0x80>0,
-                logo: GetKeyState(win32_sys::VK_LWIN) & 0x80>0
-                    || GetKeyState(win32_sys::VK_RWIN) & 0x80>0,
+                control: GetKeyState(win32_sys::VK_CONTROL as i32) & 0x80>0,
+                shift: GetKeyState(win32_sys::VK_SHIFT as i32) & 0x80>0,
+                alt: GetKeyState(win32_sys::VK_MENU as i32) & 0x80>0,
+                logo: GetKeyState(win32_sys::VK_LWIN as i32) & 0x80>0
+                    || GetKeyState(win32_sys::VK_RWIN as i32) & 0x80>0,
             }
         }
     }
@@ -523,7 +517,7 @@ impl Win32Window {
     
     pub fn get_is_topmost(&self) -> bool {
         unsafe {
-            let ex_style = GetWindowLongW(self.hwnd.unwrap(), win32_sys::GWL_EXSTYLE) as u32;
+            let ex_style = GetWindowLongPtrW(self.hwnd.unwrap(), win32_sys::GWL_EXSTYLE) as u32;
             if (ex_style & win32_sys::WS_EX_TOPMOST) != 0 {
                 return true
             }
@@ -533,7 +527,6 @@ impl Win32Window {
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
-            xr_can_present: false,
             xr_is_presenting: false,
             can_fullscreen: false,
             is_topmost: self.get_is_topmost(),
@@ -551,7 +544,7 @@ impl Win32Window {
             let mut wp = wp.assume_init();
             wp.length = mem::size_of::<WINDOWPLACEMENT>() as u32;
             GetWindowPlacement(self.hwnd.unwrap(), &mut wp);
-            if wp.showCmd as i32 == win32_sys::SW_MAXIMIZE {
+            if wp.showCmd as u32 == win32_sys::SW_MAXIMIZE {
                 return true
             }
             return false
@@ -562,7 +555,7 @@ impl Win32Window {
         get_win32_app_global().time_now()
     }
     
-    pub fn set_ime_spot(&mut self, spot: Vec2) {
+    pub fn set_ime_spot(&mut self, spot: DVec2) {
         self.ime_spot = spot;
     }
     
@@ -602,7 +595,7 @@ impl Win32Window {
                 (pos.y * dpi) as i32,
                 window_rect.right - window_rect.left,
                 window_rect.bottom - window_rect.top,
-                false
+                win32_sys::FALSE
             );
         }
     }
@@ -618,7 +611,7 @@ impl Win32Window {
                 window_rect.top,
                 (size.x * dpi) as i32,
                 (size.y * dpi) as i32,
-                false
+                win32_sys::FALSE
             );
         }
     }
@@ -638,7 +631,7 @@ impl Win32Window {
                     + ((window_rect.right - window_rect.left) - (client_rect.right - client_rect.left)),
                 (size.y * dpi) as i32
                     + ((window_rect.bottom - window_rect.top) - (client_rect.bottom - client_rect.top)),
-                false
+                win32_sys::FALSE
             );
         }
     }
@@ -649,7 +642,7 @@ impl Win32Window {
         }
     }
     
-    pub fn do_callback(&mut self, events: &mut Vec<Win32Event>) {
+    pub fn do_callback(&mut self, events: Vec<Win32Event>) {
         unsafe {
             get_win32_app_global().do_callback(events);
         }
@@ -661,7 +654,7 @@ impl Win32Window {
         let old_geom = self.last_window_geom.clone();
         self.last_window_geom = new_geom.clone();
         
-        self.do_callback(&mut vec![
+        self.do_callback(vec![
             Win32Event::WindowGeomChange(WindowGeomChangeEvent {
                 window_id: self.window_id,
                 old_geom: old_geom,
@@ -672,11 +665,11 @@ impl Win32Window {
     }
     
     pub fn send_focus_event(&mut self) {
-        self.do_callback(&mut vec![Win32Event::AppFocus]);
+        self.do_callback(vec![Win32Event::AppGotFocus]);
     }
     
     pub fn send_focus_lost_event(&mut self) {
-        self.do_callback(&mut vec![Win32Event::AppFocusLost]);
+        self.do_callback(vec![Win32Event::AppLostFocus]);
     }
     
     pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
@@ -737,16 +730,19 @@ impl Win32Window {
     }
     
     pub fn send_close_requested_event(&mut self) -> bool {
-        let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {window_id: self.window_id, accept_close: true})];
-        self.do_callback(&mut events);
-        if let Event::WindowCloseRequested(cre) = &events[0] {
-            return cre.accept_close
+        let accept_close = Rc::new(Cell::new(true));
+        self.do_callback(vec![Win32Event::WindowCloseRequested(WindowCloseRequestedEvent {
+            window_id: self.window_id,
+            accept_close: accept_close.clone()
+        })]);
+        if !accept_close.get() {
+            return false
         }
         true
     }
     
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
-        self.do_callback(&mut vec![Event::TextInput(TextInputEvent {
+        self.do_callback(vec![Win32Event::TextInput(TextInputEvent {
             input: input,
             was_paste: false,
             replace_last: replace_last
@@ -754,7 +750,7 @@ impl Win32Window {
     }
     
     pub fn virtual_key_to_key_code(wparam: WPARAM) -> KeyCode {
-        match wparam as i32 {
+        match wparam as u16 {
             win32_sys::VK_ESCAPE => KeyCode::Escape,
             win32_sys::VK_OEM_3 => KeyCode::Backtick,
             win32_sys::VK_0 => KeyCode::Key0,
@@ -783,7 +779,7 @@ impl Win32Window {
             win32_sys::VK_P => KeyCode::KeyP,
             win32_sys::VK_OEM_4 => KeyCode::LBracket,
             win32_sys::VK_OEM_6 => KeyCode::RBracket,
-            win32_sys::VK_RETURN => KeyCode::Return,
+            win32_sys::VK_RETURN => KeyCode::ReturnKey,
             win32_sys::VK_A => KeyCode::KeyA,
             win32_sys::VK_S => KeyCode::KeyS,
             win32_sys::VK_D => KeyCode::KeyD,
@@ -832,7 +828,7 @@ impl Win32Window {
             win32_sys::VK_F11 => KeyCode::F11,
             win32_sys::VK_F12 => KeyCode::F12,
             win32_sys::VK_SNAPSHOT => KeyCode::PrintScreen,
-            win32_sys::VK_SCROLL => KeyCode::Scrolllock,
+            win32_sys::VK_SCROLL => KeyCode::ScrollLock,
             win32_sys::VK_PAUSE => KeyCode::Pause,
             win32_sys::VK_INSERT => KeyCode::Insert,
             win32_sys::VK_DELETE => KeyCode::Delete,
