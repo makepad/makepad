@@ -6,6 +6,7 @@ use {
         makepad_math::*,
         makepad_error_log::*,
         os::{
+            mswindows::win32_sys,
             mswindows::win32_app::Win32App,
             mswindows::win32_window::Win32Window,
         },
@@ -312,7 +313,7 @@ impl Cx {
         );
     }
     
-     pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &D3d11Cx) {
+     pub (crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
         for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
@@ -328,13 +329,13 @@ impl Cx {
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.platform.iter().enumerate() {
-                    if ds.mtlsl == gen.mtlsl {
+                    if ds.hlsl == hlsl {
                         cx_shader.platform = Some(index);
                         break;
                     }
                 }
                 if cx_shader.platform.is_none() {
-                    if let Some(shp) = CxOsDrawShader::new(metal_cx, gen) {
+                    if let Some(shp) = CxOsDrawShader::new(d3d11_cx, hlsl) {
                         cx_shader.platform = Some(self.draw_shaders.platform.len());
                         self.draw_shaders.platform.push(shp);
                     }
@@ -374,52 +375,6 @@ impl Cx {
             }
         };
         self.live_styles.changed_shaders.clear();
-    }
-    
-    
-    pub fn hlsl_update_all_shaders(&mut self, d3d11_cx: &D3d11Cx, errors: &mut Vec<LiveBodyError>) {
-        
-        // recompile shaders, and update values
-        
-        let options = ShaderCompileOptions {
-            gather_all: true,
-            create_const_table: true,
-            no_const_collapse: false
-        };
-        
-        for (live_id, change) in &self.live_styles.changed_shaders {
-            match change {
-                LiveChangeType::Recompile => {
-                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
-                        Err(err) => {
-                            errors.push(err);
-                        },
-                        Ok((shader_ast, default_geometry)) => {
-                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
-                            Self::hlsl_compile_shader(
-                                shader_id,
-                                &mut self.shaders[shader_id],
-                                shader_ast,
-                                default_geometry,
-                                options,
-                                d3d11_cx,
-                                &self.live_styles
-                            );
-                        }
-                    }
-                }
-                LiveChangeType::UpdateValue => {
-                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
-                    let sh = &mut self.shaders[shader_id];
-                    sh.mapping.update_live_uniforms(&self.live_styles);
-                    if let Some(platform) = &mut sh.platform{
-                        platform.live_uniforms.update_with_f32_constant_data(d3d11_cx, sh.mapping.live_uniforms_buf.as_slice());
-                    }
-                }
-            }
-        }
-        self.live_styles.changed_shaders.clear();
-        
     }
     
     pub fn hlsl_compile_shader(
@@ -1046,7 +1001,7 @@ impl D3d11Cx {
     }
     
     pub fn create_depth_stencil_state(&self)
-        -> Result<ComPtr<d3d11::ID3D11DepthStencilState>, winerror::HRESULT> {
+        -> Result<ComPtr<d3d11::ID3D11DepthStencilState>, win32_sys::HRESULT> {
         let mut depth_stencil_state = ptr::null_mut();
         let ds_desc = d3d11::D3D11_DEPTH_STENCIL_DESC {
             DepthEnable: TRUE,
@@ -1516,7 +1471,7 @@ pub struct CxOsGeometry {
 }
 
 #[derive(Clone)]
-pub struct CxOsShader {
+pub struct CxOsDrawShader {
     pub hlsl_shader: String,
     pub const_table_uniforms: D3d11Buffer,
     pub live_uniforms: D3d11Buffer,
