@@ -397,5 +397,4 @@ extern "system" {
     pub fn TrackMouseEvent(lpeventtrack: *mut TRACKMOUSEEVENT) -> BOOL;
     pub fn GetKeyState(nvirtkey: i32) -> i16;
     pub fn DwmExtendFrameIntoClientArea(hwnd: HWND, pmarinset: *const MARGINS) -> HRESULT;
-    
 }
