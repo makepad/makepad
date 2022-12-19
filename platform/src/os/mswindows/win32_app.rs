@@ -4,9 +4,7 @@ use {
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
         mem,
-        os::raw::c_void,
         sync::{Mutex},
-        collections::{HashMap}
     },
     crate::{
         event::{TimerEvent, Signal},
@@ -20,8 +18,8 @@ use {
             WNDCLASSEXW,
             HMONITOR,
             HWND,
-            WPARAM,
             BOOL,
+            FARPROC,
             PROCESS_DPI_AWARENESS,
             DPI_AWARENESS_CONTEXT,
             MONITOR_DPI_TYPE,
@@ -73,7 +71,7 @@ pub struct Win32App {
     pub class_name_wstr: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
-    pub race_signals: Mutex<Vec<WPARAM >>,
+    pub race_signals: Mutex<Vec<Signal>>,
     
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
@@ -101,17 +99,17 @@ impl Win32App {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: unsafe {GetModuleHandleW(ptr::null())},
-            hIcon: unsafe {LoadIconW(ptr::null_mut(), win32_sys::IDI_WINLOGO)}, //h_icon,
-            hCursor: ptr::null_mut(), //unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
-            hbrBackground: ptr::null_mut(),
+            hIcon: unsafe {LoadIconW(0, win32_sys::IDI_WINLOGO)}, //h_icon,
+            hCursor: 0, //unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
+            hbrBackground: 0,
             lpszMenuName: ptr::null(),
             lpszClassName: class_name_wstr.as_ptr(),
-            hIconSm: ptr::null_mut(),
+            hIconSm: 0,
         };
         
         unsafe {
             RegisterClassExW(&class);
-            IsGUIThread(true);
+            IsGUIThread(win32_sys::TRUE);
         }
         
         let time_start = 0i64;
@@ -129,11 +127,8 @@ impl Win32App {
             event_flow: EventFlow::Poll,
             all_windows: Vec::new(),
             timers: Vec::new(),
-            free_timers: Vec::new(),
             dpi_functions: DpiFunctions::new(),
             current_cursor: MouseCursor::Default,
-            status_to_usize: HashMap::new(),
-            usize_to_status: HashMap::new(),
         };
         
         win32_app.dpi_functions.become_dpi_aware();
@@ -145,27 +140,27 @@ impl Win32App {
         unsafe {
             loop {
                 match self.event_flow {
-                    EventFlow::Block => {
+                    EventFlow::Wait => {
                         let mut msg = std::mem::MaybeUninit::uninit();
-                        let ret = GetMessageW(msg.as_mut_ptr(), ptr::null_mut(), 0, 0);
+                        let ret = GetMessageW(msg.as_mut_ptr(), 0, 0, 0);
                         let msg = msg.assume_init();
                         if ret == 0 {
                             // Only happens if the message is `WM_QUIT`.
                             debug_assert_eq!(msg.message, win32_sys::WM_QUIT);
-                            self.event_loop_running = false;
+                            self.event_flow = EventFlow::Exit;
                         }
                         else {
                             TranslateMessage(&msg);
                             DispatchMessageW(&msg);
-                            self.do_callback(&mut vec![Win32Event::Paint]);
+                            self.do_callback(vec![Win32Event::Paint]);
                         }
                     }
                     EventFlow::Poll => {
                         let mut msg = std::mem::MaybeUninit::uninit();
-                        let ret = PeekMessageW(msg.as_mut_ptr(), ptr::null_mut(), 0, 0, 1);
+                        let ret = PeekMessageW(msg.as_mut_ptr(), 0, 0, 0, 1);
                         let msg = msg.assume_init();
                         if ret == 0 {
-                            self.do_callback(&mut vec![Win32Event::Paint])
+                            self.do_callback(vec![Win32Event::Paint])
                         }
                         else {
                             TranslateMessage(&msg);
@@ -177,11 +172,10 @@ impl Win32App {
                     }
                 }
             }
-            self.event_callback = None;
         }
     }
     
-    pub fn do_callback(&mut self, events: &mut Vec<Win32Event>) {
+    pub fn do_callback(&mut self, events: Vec<Win32Event>) {
         if let Some(mut callback) = self.event_callback.take() {
             self.event_flow = callback(self, events);
             self.event_callback = Some(callback);
@@ -215,10 +209,10 @@ impl Win32App {
         if let Some(hit_timer) = hit_timer {
             match hit_timer {
                 Win32Timer::Timer {timer_id, ..} => {
-                    win32_app.do_callback(&mut vec![Win32Event::Timer(TimerEvent {timer_id: timer_id})]);
+                    win32_app.do_callback(vec![Win32Event::Timer(TimerEvent {timer_id: timer_id})]);
                 },
                 Win32Timer::Resize {..} => {
-                    win32_app.do_callback(&mut vec![Win32Event::Paint]);
+                    win32_app.do_callback(vec![Win32Event::Paint]);
                 },
                 _ => ()
             }
@@ -274,25 +268,21 @@ impl Win32App {
         }
     }
     
+    
     pub fn post_signal(signal: Signal) {
         unsafe {
             let win32_app = get_win32_app_global();
             if let Ok(mut sigs) = win32_app.race_signals.lock() {
                 if win32_app.all_windows.len()>0 {
-                    PostMessageW(
-                        win32_app.all_windows[0],
-                        win32_sys::WM_USER,
-                        signal.signal_id as usize,
-                        0
-                    );
+                    post_signal_to_hwnd(win32_app.all_windows[0], signal)
                 }
                 else { // we have no windows
-                    sigs.push(signal.signal_id as usize);
+                    sigs.push(signal);
                 }
             }
         }
     }
-    
+    /*
     pub fn terminate_event_loop(&mut self) {
         unsafe {
             if self.all_windows.len()>0 {
@@ -300,7 +290,7 @@ impl Win32App {
             }
         }
         self.event_loop_running = false;
-    }
+    }*/
     
     pub fn time_now(&self) -> f64 {
         unsafe {
@@ -350,7 +340,7 @@ impl Win32App {
                     ShowCursor(0);
                 }
                 else {
-                    SetCursor(LoadCursorW(ptr::null_mut(), win32_cursor));
+                    SetCursor(LoadCursorW(0, win32_cursor));
                     ShowCursor(1);
                 }
             }
@@ -370,30 +360,41 @@ type EnableNonClientDpiScaling = unsafe extern "system" fn (hwnd: HWND) -> BOOL;
 
 // Helper function to dynamically load function pointer.
 // `library` and `function` must be zero-terminated.
-fn get_function_impl(library: &str, function: &str) -> Option<*const c_void> {
+fn get_function_impl(library: &str, function: &str) -> FARPROC {
     // Library names we will use are ASCII so we can use the A version to avoid string conversion.
-    let module = unsafe {LoadLibraryA(library)};
-    if module.is_null() {
+    
+    let module = unsafe {LoadLibraryA(library.as_ptr())};
+    if module == 0 {
         return None;
     }
     
-    let function_ptr = unsafe {GetProcAddress(module, function)};
-    if function_ptr.is_null() {
+    let function_ptr = unsafe {GetProcAddress(module, function.as_ptr())};
+    if function_ptr.is_none() {
         return None;
     }
     
-    Some(function_ptr as _)
+    function_ptr
 }
 
 macro_rules!get_function {
     ( $ lib: expr, $ func: ident) => {
         get_function_impl(concat!( $ lib, '\0'), concat!(stringify!( $ func), '\0'))
-            .map( | f | unsafe {mem::transmute::<*const _, $ func>(f)})
+            .map( | f | unsafe {mem::transmute::<_, $ func>(f)})
     }
 }
 
 pub fn encode_wide(string: impl AsRef<OsStr>) -> Vec<u16> {
     string.as_ref().encode_wide().chain(std::iter::once(0)).collect()
+}
+
+
+pub fn post_signal_to_hwnd(hwnd:HWND, signal:Signal){
+    PostMessageW(
+        hwnd,
+        win32_sys::WM_USER,
+        ((signal.0.0)&0xffff_ffff) as usize,
+        ((signal.0.0>>32)&0xffff_ffff) as isize,
+    );
 }
 
 pub struct DpiFunctions {
@@ -423,7 +424,7 @@ impl DpiFunctions {
         unsafe {
             if let Some(set_process_dpi_awareness_context) = self.set_process_dpi_awareness_context {
                 // We are on Windows 10 Anniversary Update (1607) or later.
-                if set_process_dpi_awareness_context(win32_sys::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == FALSE {
+                if set_process_dpi_awareness_context(win32_sys::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == win32_sys::FALSE {
                     // V2 only works with Windows 10 Creators Update (1703). Try using the older
                     // V1 if we can't set V2.
                     set_process_dpi_awareness_context(win32_sys::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
@@ -468,7 +469,7 @@ impl DpiFunctions {
     pub fn hwnd_dpi_factor(&self, hwnd: HWND) -> f32 {
         unsafe {
             let hdc = GetDC(hwnd);
-            if hdc.is_null() {
+            if hdc == 0 {
                 panic!("`GetDC` returned null!");
             }
             let dpi = if let Some(get_dpi_for_window) = self.get_dpi_for_window {
@@ -481,7 +482,7 @@ impl DpiFunctions {
             else if let Some(get_dpi_for_monitor) = self.get_dpi_for_monitor {
                 // We are on Windows 8.1 or later.
                 let monitor = MonitorFromWindow(hwnd, win32_sys::MONITOR_DEFAULTTONEAREST);
-                if monitor.is_null() {
+                if monitor == 0 {
                     BASE_DPI
                 }
                 else {
@@ -496,7 +497,7 @@ impl DpiFunctions {
             }
             else {
                 // We are on Vista or later.
-                if IsProcessDPIAware().as_bool() {
+                if IsProcessDPIAware() == win32_sys::TRUE{
                     // If the process is DPI aware, then scaling must be handled by the application using
                     // this DPI value.
                     GetDeviceCaps(hdc, win32_sys::LOGPIXELSX) as u32

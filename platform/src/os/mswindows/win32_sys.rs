@@ -31,7 +31,8 @@ pub type PCSTR = *const u8;
 pub type PCWSTR = *const u16;
 pub type BSTR = *const u16;
 pub type BOOL = i32;
-
+pub const FALSE : BOOL = 0;
+pub const TRUE : BOOL = 0;
 pub const S_OK: HRESULT = 0i32;
 
 pub type WNDPROC = Option<unsafe extern "system" fn(param0: HWND, param1: u32, param2: WPARAM, param3: LPARAM) -> LRESULT>;
@@ -344,8 +345,8 @@ pub type GLOBAL_ALLOC_FLAGS = u32;
 
 pub const TME_LEAVE: TRACKMOUSEEVENT_FLAGS = 2u32;
 
-pub use SetWindowLongW as SetWindowLongPtrW;
-pub use GetWindowLongW as GetWindowLongPtrW;
+//pub use SetWindowLongW as SetWindowLongPtrW;
+//pub use GetWindowLongW as GetWindowLongPtrW;
 
 #[cfg_attr(windows, link(name = "windows"))]
 extern "system" {
@@ -355,7 +356,7 @@ extern "system" {
     pub fn GetMessageW(lpmsg: *mut MSG, hwnd: HWND, wmsgfiltermin: u32, wmsgfiltermax: u32) -> BOOL;
     pub fn TranslateMessage(lpmsg: *const MSG) -> BOOL;
     pub fn DispatchMessageW(lpmsg: *const MSG) -> LRESULT;
-    pub fn PeekMessageW(lpmsg: *mut MSG, hwnd: HWND, wmsgfiltermin: u32, wmsgfiltermax: u32, wremovemsg: PEEK_MESSAGE_REMOVE_TYPE) -> super::super::Foundation::BOOL;
+    pub fn PeekMessageW(lpmsg: *mut MSG, hwnd: HWND, wmsgfiltermin: u32, wmsgfiltermax: u32, wremovemsg: PEEK_MESSAGE_REMOVE_TYPE) -> BOOL;
     pub fn SetTimer(hwnd: HWND, nidevent: usize, uelapse: u32, lptimerfunc: TIMERPROC) -> usize;
     pub fn KillTimer(hwnd: HWND, uidevent: usize) -> BOOL;
     pub fn PostMessageW(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> BOOL;
@@ -381,8 +382,8 @@ extern "system" {
     pub fn SetClipboardData(uformat: u32, hmem: HANDLE) -> HANDLE;
     pub fn CloseClipboard() -> BOOL;
     pub fn CreateWindowExW(dwexstyle: WINDOW_EX_STYLE, lpclassname:PCWSTR, lpwindowname: PCWSTR, dwstyle: WINDOW_STYLE, x: i32, y: i32, nwidth: i32, nheight: i32, hwndparent: HWND, hmenu: HMENU, hinstance: HINSTANCE, lpparam: *const c_void) -> HWND;
-    pub fn SetWindowLongW(hwnd: HWND, nindex: WINDOW_LONG_PTR_INDEX, dwnewlong: i32) -> i32;
-    pub fn GetWindowLongW(hwnd: HWND, nindex: WINDOW_LONG_PTR_INDEX) -> i32;
+    pub fn SetWindowLongPtrW(hwnd: HWND, nindex: WINDOW_LONG_PTR_INDEX, dwnewlong: usize) -> usize;
+    pub fn GetWindowLongPtrW(hwnd: HWND, nindex: WINDOW_LONG_PTR_INDEX) -> usize;
     pub fn DefWindowProcW(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT;
     pub fn ShowWindow(hwnd: HWND, ncmdshow: SHOW_WINDOW_CMD) -> BOOL;
     pub fn GetWindowRect(hwnd: HWND, lprect: *mut RECT) -> BOOL;
