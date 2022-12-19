@@ -1,7 +1,7 @@
 use {
     crate::{
         midi::*,
-        os::apple::frameworks::*,
+        os::apple::apple_sys::*,
         os::apple::core_audio::*,
         os::apple::apple_util::*,
         objc_block,

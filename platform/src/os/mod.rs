@@ -16,9 +16,15 @@ pub use crate::os::apple::*;
 #[cfg(target_os = "macos")]
 pub use crate::os::apple::media::*;
 
+#[cfg(target_os = "windows")]
+pub mod mswindows;
+
+
 #[cfg(target_arch = "wasm32")]
 pub mod web_browser;
 
 #[cfg(target_arch = "wasm32")]
 pub use crate::os::web_browser::*;
+
+
 

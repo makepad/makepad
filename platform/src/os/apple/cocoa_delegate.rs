@@ -11,7 +11,7 @@ use {
             DVec2,
         },
         os::{
-            apple::frameworks::*,
+            apple::apple_sys::*,
             cocoa_app::{
                 get_cocoa_class_global,
                 get_cocoa_app_global

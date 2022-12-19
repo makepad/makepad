@@ -2,7 +2,7 @@
 use {
     std::{
         rc::Rc,
-        cell::{Cell,RefCell},
+        cell::{RefCell},
         sync::Mutex,
         ptr,
         time::Instant,
@@ -14,7 +14,7 @@ use {
             DVec2,
         },
         os::{
-            apple::frameworks::*,
+            apple::apple_sys::*,
             cocoa_delegate::*,
             cocoa_event::{
                 CocoaEvent,
@@ -27,6 +27,7 @@ use {
                 get_event_keycode,
                 get_event_key_modifier
             },
+            cx_desktop::EventFlow,
         },
         menu::{
             CxCommandSetting
@@ -44,7 +45,6 @@ use {
             SignalEvent,
             DraggedItem,
             KeyModifiers,
-            ScrollEvent,
         },
         cursor::MouseCursor,
         menu::{
@@ -63,7 +63,7 @@ pub static mut COCOA_CLASSES: *const CocoaClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
 pub static mut COCOA_APP : *mut CocoaApp = 0 as *mut _;
 
-pub fn init_cocoa_globals(event_callback:Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>){
+pub fn init_cocoa_app_global(event_callback:Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> EventFlow>){
     unsafe{
         COCOA_CLASSES = Box::into_raw(Box::new(CocoaClasses::new()));
         COCOA_APP = Box::into_raw(Box::new(CocoaApp::new(event_callback)));
@@ -140,16 +140,15 @@ pub struct CocoaApp {
     last_key_mod: KeyModifiers,
     pasteboard: ObjcId,
     startup_focus_hack_ran: bool,
-    event_callback: Option<Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>>,
-    event_loop_running: bool,
-    loop_block: bool,
+    event_callback: Option<Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> EventFlow>>,
+    event_flow: EventFlow,
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
     ns_event: ObjcId,
 }
 
 impl CocoaApp {
-    pub fn new(event_callback:Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>) -> CocoaApp {
+    pub fn new(event_callback:Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> EventFlow>) -> CocoaApp {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let app_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().app_delegate, new];
@@ -168,10 +167,9 @@ impl CocoaApp {
                 signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
-                loop_block: false,
+                event_flow: EventFlow::Poll,
                 last_key_mod: KeyModifiers {..Default::default()},
                 event_callback: Some(event_callback),
-                event_loop_running: true,
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
                 ns_event: ptr::null_mut(),
@@ -472,29 +470,6 @@ impl CocoaApp {
             },
             NSEventType::NSMouseEntered => {},
             NSEventType::NSMouseExited => {},
-            /*
-            appkit::NSMouseMoved |
-            appkit::NSLeftMouseDragged |
-            appkit::NSOtherMouseDragged |
-            appkit::NSRightMouseDragged => {
-                let window: id = ns_event.window();
-                if window == nil {
-                    return
-                }
-                let window_delegate = NSWindow::delegate(window);
-                if window_delegate == nil {
-                    return
-                }
-                let ptr: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
-                let cocoa_window = &mut *(ptr as *mut CocoaWindow);
-                
-                let window_point = ns_event.locationInWindow();
-                let view_point = cocoa_window.view.convertPoint_fromView_(window_point, nil);
-                let view_rect = NSView::frame(cocoa_window.view);
-                let mouse_pos = Vec2 {x: view_point.x as f32, y: view_rect.size.height as f32 - view_point.y as f32};
-                
-                cocoa_window.send_finger_hover_and_move(mouse_pos, get_event_key_modifier(ns_event));
-            },*/
             NSEventType::NSScrollWheel => {
                 let window: ObjcId = msg_send![ns_event, window];
                 if window == nil {
@@ -510,31 +485,9 @@ impl CocoaApp {
                 let dy: f64 = msg_send![ns_event, scrollingDeltaY];
                 let has_prec: BOOL = msg_send![ns_event, hasPreciseScrollingDeltas];
                 return if has_prec == YES {
-                    self.do_callback(vec![
-                        CocoaEvent::Scroll(ScrollEvent {
-                            window_id: cocoa_window.window_id,
-                            scroll: DVec2 {x: -dx, y: -dy},
-                            abs: cocoa_window.last_mouse_pos,
-                            modifiers: get_event_key_modifier(ns_event),
-                            time: self.time_now(),
-                            is_mouse: false,
-                            handled_x: Cell::new(false),
-                            handled_y: Cell::new(false),
-                        })
-                    ]);
+                    cocoa_window.send_scroll(DVec2 {x: -dx, y: -dy}, get_event_key_modifier(ns_event), false);
                 } else {
-                    self.do_callback(vec![
-                        CocoaEvent::Scroll(ScrollEvent {
-                            window_id: cocoa_window.window_id,
-                            scroll: DVec2 {x: -dx * 32., y: -dy * 32.},
-                            abs: cocoa_window.last_mouse_pos,
-                            modifiers: get_event_key_modifier(ns_event),
-                            time: self.time_now(),
-                            is_mouse: true,
-                            handled_x: Cell::new(false),
-                            handled_y: Cell::new(false),
-                        })
-                    ]);
+                    cocoa_window.send_scroll(DVec2 {x: -dx * 32., y: -dy * 32.}, get_event_key_modifier(ns_event), true);
                 }
             },
             NSEventType::NSEventTypePressure => {
@@ -545,48 +498,52 @@ impl CocoaApp {
         }
     }
     
-    pub fn terminate_event_loop(&mut self) {
-        self.event_loop_running = false;
-    }
-    
     pub fn event_loop(&mut self){
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let () = msg_send![ns_app, finishLaunching];
             
-            while self.event_loop_running {
-                let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-                
-                let ns_until: ObjcId = if self.loop_block {
-                    msg_send![class!(NSDate), distantFuture]
-                }else {
-                    msg_send![class!(NSDate), distantPast]
-                };
-                let ns_event: ObjcId = msg_send![
-                    ns_app,
-                    nextEventMatchingMask: NSEventMask::NSAnyEventMask as u64 | NSEventMask::NSEventMaskPressure as u64
-                    untilDate: ns_until
-                    inMode: NSDefaultRunLoopMode
-                    dequeue: YES
-                ];
-                
-                if ns_event != nil {
-                    self.process_ns_event(ns_event);
+            loop{
+                match self.event_flow{
+                    EventFlow::Exit=>{
+                        break;
+                    }
+                    EventFlow::Poll | EventFlow::Wait=>{
+                        let event_wait =  if let EventFlow::Wait = self.event_flow {true}else{false};
+                        let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+                        
+                        let ns_until: ObjcId = if event_wait {
+                            msg_send![class!(NSDate), distantFuture]
+                        }else {
+                            msg_send![class!(NSDate), distantPast]
+                        };
+                        
+                        let ns_event: ObjcId = msg_send![
+                            ns_app,
+                            nextEventMatchingMask: NSEventMask::NSAnyEventMask as u64 | NSEventMask::NSEventMaskPressure as u64
+                            untilDate: ns_until
+                            inMode: NSDefaultRunLoopMode
+                            dequeue: YES
+                        ];
+                        
+                        if ns_event != nil {
+                            self.process_ns_event(ns_event);
+                        }
+                        
+                        if ns_event == nil || event_wait {
+                            self.do_callback(vec![CocoaEvent::Paint]);
+                        }
+                        
+                        let () = msg_send![pool, release];
+                    }
                 }
-                
-                if ns_event == nil || self.loop_block {
-                    self.do_callback(vec![CocoaEvent::Paint]);
-                }
-                
-                let () = msg_send![pool, release];
             }
-            self.event_callback = None;
         }
     }
     
     pub fn do_callback(&mut self, events: Vec<CocoaEvent>) {
         if let Some(mut callback) = self.event_callback.take(){
-            self.loop_block = callback(self, events);
+            self.event_flow = callback(self, events);
             self.event_callback = Some(callback);
         }
         //s(*callback)(self, events);
