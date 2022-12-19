@@ -4,7 +4,7 @@ use {
         makepad_error_log::*,
         audio::*,
         midi::*,
-        os::apple::frameworks::*,
+        os::apple::apple_sys::*,
         os::apple::core_audio::*,
         os::apple::cocoa_delegate::*,
         os::apple::cocoa_app::*,

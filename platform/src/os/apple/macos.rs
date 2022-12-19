@@ -1,7 +1,7 @@
 use {
     std::{
         rc::Rc,
-        sync::{Arc,Mutex},
+        sync::{Arc, Mutex},
         cell::{RefCell},
     },
     makepad_objc_sys::{
@@ -14,7 +14,8 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         os::{
-            apple::frameworks::*,
+            cx_desktop::EventFlow,
+            apple::apple_sys::*,
             cocoa_event::{CocoaEvent},
             metal_xpc::{
                 start_xpc_service,
@@ -22,7 +23,7 @@ use {
             cocoa_app::{
                 CocoaApp,
                 get_cocoa_app_global,
-                init_cocoa_globals
+                init_cocoa_app_global
             },
             core_midi::*,
             metal::{MetalCx, MetalWindow, DrawPassMode},
@@ -64,7 +65,8 @@ impl Cx {
         }
         
         let metal_windows = Rc::new(RefCell::new(Vec::new()));
-        init_cocoa_globals(Box::new({
+        
+        init_cocoa_app_global(Box::new({
             let cx = cx.clone();
             move | cocoa_app,
             events | {
@@ -121,7 +123,7 @@ impl Cx {
         events: Vec<CocoaEvent>,
         metal_cx: &mut MetalCx,
         metal_windows: &mut Vec<MetalWindow>
-    ) -> bool {
+    ) -> EventFlow {
         
         self.handle_platform_ops(metal_windows, metal_cx, cocoa_app);
         
@@ -154,8 +156,8 @@ impl Cx {
             //self.process_desktop_pre_event(&mut event);
             match event {
                 CocoaEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
-                    for mw in metal_windows.iter_mut() {
-                        if let Some(main_pass_id) = self.windows[mw.window_id].main_pass_id {
+                    for window in metal_windows.iter_mut() {
+                        if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
                             self.repaint_pass(main_pass_id);
                         }
                     }
@@ -166,18 +168,18 @@ impl Cx {
                     self.call_event_handler(&Event::AppLostFocus);
                 }
                 CocoaEvent::WindowResizeLoopStart(window_id) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        metal_window.start_resize();
+                    if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.start_resize();
                     }
                 }
                 CocoaEvent::WindowResizeLoopStop(window_id) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        metal_window.stop_resize();
+                    if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.stop_resize();
                     }
                 }
                 CocoaEvent::WindowGeomChange(re) => { // do this here because mac
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
-                        metal_window.window_geom = re.new_geom.clone();
+                    if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
+                        window.window_geom = re.new_geom.clone();
                         self.windows[re.window_id].window_geom = re.new_geom.clone();
                         // redraw just this windows root draw list
                         if re.old_geom.inner_size != re.new_geom.inner_size {
@@ -191,14 +193,16 @@ impl Cx {
                 }
                 CocoaEvent::WindowClosed(wc) => {
                     // lets remove the window from the set
-                    self.windows[wc.window_id].is_created = false;
-                    if let Some(index) = metal_windows.iter().position( | w | w.window_id == wc.window_id) {
+                    let window_id = wc.window_id;
+                    self.call_event_handler(&Event::WindowClosed(wc));
+                    
+                    self.windows[window_id].is_created = false;
+                    if let Some(index) = metal_windows.iter().position( | w | w.window_id == window_id) {
                         metal_windows.remove(index);
                         if metal_windows.len() == 0 {
-                            cocoa_app.terminate_event_loop();
+                            return EventFlow::Exit
                         }
                     }
-                    self.call_event_handler(&Event::WindowClosed(wc));
                 }
                 CocoaEvent::Paint => {
                     if self.new_next_frames.len() != 0 {
@@ -277,9 +281,9 @@ impl Cx {
         }
         
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
-            false
+            EventFlow::Poll
         } else {
-            true
+            EventFlow::Wait
         }
     }
     
@@ -399,7 +403,7 @@ impl CxOsApi for Cx {
 pub struct CxOs {
     pub (crate) keep_alive_counter: usize,
     pub (crate) midi_access: Option<CoreMidiAccess>,
-    pub (crate) midi_input_data: Arc<Mutex<RefCell<Vec<MidiInputData>>>>,    
+    pub (crate) midi_input_data: Arc<Mutex<RefCell<Vec<MidiInputData >> >>,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
 }

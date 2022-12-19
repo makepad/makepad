@@ -11,7 +11,7 @@ use {
         },
         window::WindowId,
         os::{
-            apple::frameworks::*,
+            apple::apple_sys::*,
             apple::apple_util::{
                 str_to_nsstring,
             },
@@ -22,6 +22,7 @@ use {
         },
         area::Area,
         event::{
+            ScrollEvent,
             MouseUpEvent,
             MouseDownEvent,
             MouseMoveEvent,
@@ -69,7 +70,6 @@ impl CocoaWindow {
                 time_start: cocoa_app.time_start,
                 live_resize_timer: nil,
                 window_delegate: window_delegate,
-                //layer_delegate:layer_delegate,
                 window: window,
                 window_id: window_id,
                 view: view,
@@ -362,21 +362,33 @@ impl CocoaWindow {
     
     pub fn send_mouse_move(&mut self, _event: ObjcId, pos: DVec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
-        let mut events = Vec::new();
         
         get_cocoa_app_global().startup_focus_hack();
         
-        events.push(CocoaEvent::MouseMove(MouseMoveEvent {
+        self.do_callback(vec![CocoaEvent::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
             abs: pos,
             modifiers: modifiers,
             time: self.time_now(),
             handled: Cell::new(Area::Empty),
-        }));
+        })]);
         
-        //get_cocoa_app_global().ns_event = event;
-        self.do_callback(events);
         //get_cocoa_app_global().ns_event = ptr::null_mut();
+    }
+    
+    pub fn send_scroll(&mut self, scroll:DVec2, modifiers: KeyModifiers, is_mouse:bool){
+        self.do_callback(vec![
+            CocoaEvent::Scroll(ScrollEvent {
+                window_id: self.window_id,
+                scroll,
+                abs: self.last_mouse_pos,
+                modifiers,
+                time: self.time_now(),
+                is_mouse,
+                handled_x: Cell::new(false),
+                handled_y: Cell::new(false),
+            })
+        ]);
     }
     
     pub fn send_window_close_requested_event(&mut self) -> bool {
