@@ -12,7 +12,7 @@ pub use {
     },
     
     crate::{
-        os::apple::frameworks::*,
+        os::apple::apple_sys::*,
         makepad_objc_sys::{
             runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO},
             declare::ClassDecl,

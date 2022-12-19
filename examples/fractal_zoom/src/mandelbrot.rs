@@ -43,7 +43,7 @@ live_design!{
 
 pub const TILE_SIZE_X: usize = 256;
 pub const TILE_SIZE_Y: usize = 256;
-pub const TILE_CACHE_SIZE: usize = 500;
+pub const TILE_CACHE_SIZE: usize = 3500;
 // the shader struct used to draw
 
 #[derive(Live, LiveHook)]
