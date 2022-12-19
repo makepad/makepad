@@ -15,7 +15,7 @@ use {
         makepad_live_id::*,
         makepad_error_log::*,
         os::{
-            apple::frameworks::*,
+            apple::apple_sys::*,
             apple::apple_util::{
                 nsstring_to_string,
                 str_to_nsstring,

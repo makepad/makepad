@@ -120,7 +120,7 @@ live_design!{
                 indent_width: 10.0
                 walk: {width: Fit, height: Fit}
                 layout: {
-                    padding: {left: 15, top: 5, bottom: 5, right: 15},
+                    padding: {left: 15, top: 5, bottom: 5, right: 15}, 
                 }
             }
         }

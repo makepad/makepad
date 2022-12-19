@@ -1,25 +1,287 @@
 // makepad is win10 only because of dx12 + terminal API
-use crate::cx_win32::*;
-use crate::cx::*;
+use {
+    std::{
+        rc::Rc,
+        cell::{RefCell},
+    },
+    crate::{
+        makepad_live_id::*,
+        cx::*,
+        event::*,
+        os::{
+            mswindows::win32_event::*,
+            mswindows::d3d11::{D3d11Window, D3d11Cx},
+            mswindows::win32_app::*,
+            cx_desktop::EventFlow,
+        },
+        cx_api::{CxOsApi, CxOsOp},
+    }
+};
 
 impl Cx {
 
-    pub fn event_loop<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Cx, &mut Event),
-    {
-        self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
-        self.event_loop_core();
-        self.event_handler = None;  
-    }
-    
-    pub fn event_loop_core(&mut self){
-        self.platform_type = OsType::Windows;
+    pub fn event_loop(mut self){
         
+        self.platform_type = OsType::Windows;
+        let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
+        let cx = Rc::new(RefCell::new(self));
+                
         let mut win32_app = Win32App::new();
         
         win32_app.init();
         
-        let mut d3d11_windows: Vec<D3d11Window> = Vec::new();
+        let mut d3d11_windows =  Rc::new(RefCell::new(Vec::new()));
+        
+        init_win32_app_global(Box::new({
+            let cx = cx.clone();
+            move | cocoa_app,
+            events | {
+                let mut cx = cx.borrow_mut();
+                let mut d3d11_cx = d3d11_cx.borrow_mut();
+                let mut d3d11_windows = d3d11_windows.borrow_mut();
+                cx.win32_event_callback(cocoa_app, events, &mut d3d11_cx, &mut d3d11_windows)
+            }
+        }));
+        
+        get_win32_app_global().event_loop();
+    }
+    
+    fn win32_event_callback(
+        &mut self,
+        win32_app: &mut Win32App,
+        events: Vec<Win32Event>,
+        d3d11_cx: &mut D3d11Cx,
+        d3d11_windows: &mut Vec<D3d11Window>
+    ) -> EventFlow {
+         self.handle_platform_ops(d3d11_windows, d3d11_cx, win32_app);
+        
+        let mut paint_dirty = false;
+        for event in events {
+            
+            //self.process_desktop_pre_event(&mut event);
+            match event {
+                Win32Event::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+                    for window in d3d11_windows.iter_mut() {
+                        if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
+                            self.repaint_pass(main_pass_id);
+                        }
+                    }
+                    paint_dirty = true;
+                    self.call_event_handler(&Event::AppGotFocus);
+                }
+                Win32Event::AppLostFocus => {
+                    self.call_event_handler(&Event::AppLostFocus);
+                }
+                Win32Event::WindowResizeLoopStart(window_id) => {
+                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.start_resize();
+                    }
+                }
+                Win32Event::WindowResizeLoopStop(window_id) => {
+                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        window.stop_resize();
+                    }
+                }
+                Win32Event::WindowGeomChange(re) => { // do this here because mac
+                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == re.window_id) {
+                        window.window_geom = re.new_geom.clone();
+                        self.windows[re.window_id].window_geom = re.new_geom.clone();
+                        // redraw just this windows root draw list
+                        if re.old_geom.inner_size != re.new_geom.inner_size {
+                            if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                                self.redraw_pass_and_child_passes(main_pass_id);
+                            }
+                        }
+                    }
+                    // ok lets not redraw all, just this window
+                    self.call_event_handler(&Event::WindowGeomChange(re));
+                }
+                Win32Event::WindowClosed(wc) => {
+
+                    self.call_event_handler(&Event::WindowClosed(wc));
+                    // lets remove the window from the set
+                    self.windows[wc.window_id].is_created = false;
+                    if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == wc.window_id) {
+                        d3d11_windows.remove(index);
+                        if d3d11_windows.len() == 0 {
+                            return EventFlow::Exit
+                        }
+                    }
+                }
+                Win32Event::Paint => {
+                    if self.new_next_frames.len() != 0 {
+                        self.call_next_frame_event(win32_app.time_now());
+                    }
+                    if self.need_redrawing() {
+                        self.call_draw_event();
+                        self.hlsl_compile_shaders(&d3d11_cx);
+                    }
+                    // ok here we send out to all our childprocesses
+                    
+                    self.handle_repaint(d3d11_cx, d3d11_cx);
+                }
+                Win32Event::MouseDown(e) => {
+                    self.fingers.process_tap_count(
+                        e.abs,
+                        e.time
+                    );
+                    self.fingers.mouse_down(e.button);
+                    self.call_event_handler(&Event::MouseDown(e.into()))
+                }
+                Win32Event::MouseMove(e) => {
+                    self.call_event_handler(&Event::MouseMove(e.into()));
+                    self.fingers.cycle_hover_area(live_id!(mouse).into());
+                    self.fingers.move_captures();
+                }
+                Win32Event::MouseUp(e) => {
+                    let button = e.button;
+                    self.call_event_handler(&Event::MouseUp(e.into()));
+                    self.fingers.mouse_up(button);
+                }
+                Win32Event::Scroll(e) => {
+                    self.call_event_handler(&Event::Scroll(e.into()))
+                }
+                Win32Event::WindowDragQuery(e) => {
+                    self.call_event_handler(&Event::WindowDragQuery(e))
+                }
+                Win32Event::WindowCloseRequested(e) => {
+                    self.call_event_handler(&Event::WindowCloseRequested(e))
+                }
+                Win32Event::TextInput(e) => {
+                    self.call_event_handler(&Event::TextInput(e))
+                }
+                Win32Event::Drag(e) => {
+                    self.call_event_handler(&Event::Drag(e))
+                }
+                Win32Event::Drop(e) => {
+                    self.call_event_handler(&Event::Drop(e))
+                }
+                Win32Event::DragEnd => {
+                    self.call_event_handler(&Event::DragEnd)
+                }
+                Win32Event::KeyDown(e) => {
+                    self.keyboard.process_key_down(e.clone());
+                    self.call_event_handler(&Event::KeyDown(e))
+                }
+                Win32Event::KeyUp(e) => {
+                    self.keyboard.process_key_up(e.clone());
+                    self.call_event_handler(&Event::KeyUp(e))
+                }
+                Win32Event::TextCopy(e) => {
+                    self.call_event_handler(&Event::TextCopy(e))
+                }
+                Win32Event::Timer(e) => {
+                    self.call_event_handler(&Event::Timer(e))
+                }
+                Win32Event::Signal(se) => {
+                    //println!("SIGNAL!");
+                    //self.handle_core_midi_signals(&se);
+                    self.call_event_handler(&Event::Signal(se));
+                }
+                Win32Event::MenuCommand(e) => {
+                    self.call_event_handler(&Event::MenuCommand(e))
+                }
+            }
+        }
+        
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+            EventFlow::Poll
+        } else {
+            EventFlow::Wait
+        }
+        
+    }
+
+
+    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<D3d11Window>, metal_cx: &D3d11Cx, win32_app: &mut CocoaApp) {
+        while let Some(op) = self.platform_ops.pop() {
+            match op {
+                CxOsOp::CreateWindow(window_id) => {
+                    let window = &mut self.windows[window_id];
+                    let metal_window = MetalWindow::new(
+                        window_id,
+                        &metal_cx,
+                        cocoa_app,
+                        window.create_inner_size.unwrap_or(dvec2(800., 600.)),
+                        window.create_position,
+                        &window.create_title
+                    );
+                    window.window_geom = metal_window.window_geom.clone();
+                    metal_windows.push(metal_window);
+                    window.is_created = true;
+                },
+                CxOsOp::CloseWindow(window_id) => {
+                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        self.windows[window_id].is_created = false;
+                        metal_window.cocoa_window.close_window();
+                        break;
+                    }
+                },
+                CxOsOp::MinimizeWindow(window_id) => {
+                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        metal_window.cocoa_window.minimize();
+                    }
+                },
+                CxOsOp::MaximizeWindow(window_id) => {
+                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        metal_window.cocoa_window.maximize();
+                    }
+                },
+                CxOsOp::RestoreWindow(window_id) => {
+                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        metal_window.cocoa_window.restore();
+                    }
+                },
+                CxOsOp::FullscreenWindow(_window_id) => {
+                    todo!()
+                },
+                CxOsOp::NormalizeWindow(_window_id) => {
+                    todo!()
+                }
+                CxOsOp::SetTopmost(_window_id, _is_topmost) => {
+                    todo!()
+                }
+                CxOsOp::XrStartPresenting => {
+                    //todo!()
+                },
+                CxOsOp::XrStopPresenting => {
+                    //todo!()
+                },
+                CxOsOp::ShowTextIME(area, pos) => {
+                    let pos = area.get_clipped_rect(self).pos + pos;
+                    metal_windows.iter_mut().for_each( | w | {
+                        w.cocoa_window.set_ime_spot(pos);
+                    });
+                },
+                CxOsOp::HideTextIME => {
+                    //todo!()
+                },
+                CxOsOp::SetCursor(cursor) => {
+                    cocoa_app.set_mouse_cursor(cursor);
+                },
+                CxOsOp::StartTimer {timer_id, interval, repeats} => {
+                    cocoa_app.start_timer(timer_id, interval, repeats);
+                },
+                CxOsOp::StopTimer(timer_id) => {
+                    cocoa_app.stop_timer(timer_id);
+                },
+                CxOsOp::StartDragging(dragged_item) => {
+                    cocoa_app.start_dragging(dragged_item);
+                }
+                CxOsOp::UpdateMenu(menu) => {
+                    cocoa_app.update_app_menu(&menu, &self.command_settings)
+                }
+            }
+        }
+    }
+    
+    fn win32_event_callback(
+        &mut self,
+        win32_app: &mut Win32App,
+        events: Vec<Win32Event>,
+        d3d11_cx: &mut D3d11Cx,
+        d3d11_windows: &mut Vec<D3d11Window>
+    ) -> bool {
         
         let d3d11_cx = D3d11Cx::new();
         
@@ -307,12 +569,5 @@ impl Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    pub post_id: u64,
-    pub set_ime_position: Option<Vec2>,
-    pub start_timer: Vec<(u64, f64, bool)>,
-    pub stop_timer: Vec<u64>,
-    pub text_clipboard_response: Option<String>,
-    pub desktop: CxDesktop,
-    pub d3d11_cx: Option<*const D3d11Cx>
 }
   
