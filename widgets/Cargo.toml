@@ -16,3 +16,5 @@ makepad-derive-widget = {path = "./derive_widget", version="0.3.0"}
 [features]
 nightly = ["makepad-draw-2d/nightly"]
 
+[package.metadata.docs.rs]
+default-target = "x86_64-apple-darwin"
