@@ -16,7 +16,7 @@ use {
         makepad_shader_compiler::{
             ShaderRegistry
         },
-        cx_draw_shaders::{
+        draw_shader::{
             CxDrawShaders
         },
         draw_matrix::CxDrawMatrixPool,

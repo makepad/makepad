@@ -249,7 +249,7 @@ pub struct CxPass {
     pub pass_size: DVec2,
     pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
-    pub platform: CxOsPass,
+    pub os: CxOsPass,
 }
 
 impl Default for CxPass {
@@ -269,7 +269,7 @@ impl Default for CxPass {
             parent: CxPassParent::None,
             paint_dirty: false,
             pass_size: DVec2::default(),
-            platform: CxOsPass::default()
+            os: CxOsPass::default()
         }
     }
 } 

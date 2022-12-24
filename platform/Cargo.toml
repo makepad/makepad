@@ -45,6 +45,30 @@ makepad-objc-sys = { path = "./bind/objc-sys", version = "0.3.0" }
 # features = ["dwmapi", "libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
 
 [target.x86_64-pc-windows-msvc.dependencies]
+
+[target.x86_64-pc-windows-msvc.dependencies.windows]
+version = "0.43"
+#path = "./bind/windows-lite"
+features = [
+    "Win32_Foundation", 
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_HiDpi",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_DataExchange",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D_Fxc",
+]
 # windows = "0.43"
 # wio = "0.2"
 # time = "0.1.4"
