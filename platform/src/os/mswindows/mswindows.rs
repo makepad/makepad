@@ -1,6 +1,6 @@
 // makepad is win10 only because of dx12 + terminal API
 use {
-    std::{
+    std::{ 
         rc::Rc,
         cell::{RefCell},
     },
@@ -14,7 +14,8 @@ use {
             mswindows::win32_app::*,
             cx_desktop::EventFlow,
         },
-        cx_api::{CxOsOp},
+        pass::{CxPassParent},
+        cx_api::{CxOsApi, CxOsOp},
     }
 };
 
@@ -26,7 +27,7 @@ impl Cx {
         let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
         let cx = Rc::new(RefCell::new(self));
         
-        let mut d3d11_windows = Rc::new(RefCell::new(Vec::new()));
+        let d3d11_windows = Rc::new(RefCell::new(Vec::new()));
         
         init_win32_app_global(Box::new({
             let cx = cx.clone();
@@ -92,11 +93,11 @@ impl Cx {
                     self.call_event_handler(&Event::WindowGeomChange(re));
                 }
                 Win32Event::WindowClosed(wc) => {
-                    
+                    let window_id = wc.window_id;
                     self.call_event_handler(&Event::WindowClosed(wc));
                     // lets remove the window from the set
-                    self.windows[wc.window_id].is_created = false;
-                    if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == wc.window_id) {
+                    self.windows[window_id].is_created = false;
+                    if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
                         d3d11_windows.remove(index);
                         if d3d11_windows.len() == 0 {
                             return EventFlow::Exit
@@ -113,7 +114,7 @@ impl Cx {
                     }
                     // ok here we send out to all our childprocesses
                     
-                    self.handle_repaint(d3d11_cx, d3d11_cx);
+                    self.handle_repaint(d3d11_windows, d3d11_cx);
                 }
                 Win32Event::MouseDown(e) => {
                     self.fingers.process_tap_count(
@@ -186,7 +187,30 @@ impl Cx {
         }
         
     }
-    
+
+    pub (crate) fn handle_repaint(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &mut D3d11Cx) {
+        let mut passes_todo = Vec::new();
+        self.compute_pass_repaint_order(&mut passes_todo);
+        self.repaint_id += 1;
+        for pass_id in &passes_todo {
+            match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Window(window_id) => {
+                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        let dpi_factor = window.window_geom.dpi_factor;
+                        window.resize_buffers(&d3d11_cx);
+                        self.draw_pass_to_window(*pass_id, true, dpi_factor, window, d3d11_cx);
+                    }
+                }
+                CxPassParent::Pass(parent_pass_id) => {
+                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    self.draw_pass_to_texture(*pass_id, dpi_factor, d3d11_cx);
+                },
+                CxPassParent::None => {
+                    self.draw_pass_to_texture(*pass_id, 1.0, d3d11_cx);
+                }
+            }
+        }
+    }
     
     fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx, win32_app: &mut Win32App) {
         while let Some(op) = self.platform_ops.pop() {
@@ -196,7 +220,6 @@ impl Cx {
                     let d3d11_window = D3d11Window::new(
                         window_id,
                         &d3d11_cx,
-                        win32_app,
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
                         &window.create_title
@@ -257,14 +280,38 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     win32_app.stop_timer(timer_id);
                 },
-                CxOsOp::StartDragging(dragged_item) => {
+                CxOsOp::StartDragging(_dragged_item) => {
                     //win32_app.start_dragging(dragged_item);
                 }
-                CxOsOp::UpdateMenu(menu) => {
+                CxOsOp::UpdateMenu(_menu) => {
                     //win32_app.update_app_menu(&menu, &self.command_settings)
                 }
             }
         }
+    }
+}
+
+impl CxOsApi for Cx {
+    fn init(&mut self) {
+        self.live_expand();
+        self.live_scan_dependencies();
+        self.desktop_load_dependencies();
+    }
+    
+    fn post_signal(signal: Signal) {
+        Win32App::post_signal(signal);
+    }
+    
+    fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
+        std::thread::spawn(f);
+    }
+    
+    fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
+        todo!()
+    }
+    
+    fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
+        todo!()
     }
 }
 

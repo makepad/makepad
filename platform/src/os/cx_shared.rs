@@ -1,3 +1,4 @@
+
 use {
     std::collections::{HashSet, HashMap},
     crate::{
@@ -19,8 +20,7 @@ use {
 };
 
 impl Cx {
-    
-    
+    #[allow(dead_code)]
     pub (crate) fn repaint_windows(&mut self) {
         for pass_id in self.passes.id_iter() {
             match self.passes[pass_id].parent {

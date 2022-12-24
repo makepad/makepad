@@ -1,53 +1,59 @@
 use {
     std::{
-        ptr,
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
         mem,
         sync::{Mutex},
     },
     crate::{
+        windows_crate::{
+            core::HRESULT,
+            core::PCWSTR,
+            core::PCSTR,
+            Win32::Foundation::WPARAM,
+            Win32::Foundation::LPARAM,
+            Win32::UI::WindowsAndMessaging::WNDCLASSEXW,
+            Win32::UI::WindowsAndMessaging::PM_REMOVE,
+            Win32::UI::WindowsAndMessaging::LoadIconW,
+            Win32::UI::WindowsAndMessaging::RegisterClassExW,
+            Win32::UI::WindowsAndMessaging::IsGUIThread,
+            Win32::UI::WindowsAndMessaging::GetMessageW,
+            Win32::UI::WindowsAndMessaging::TranslateMessage,
+            Win32::UI::WindowsAndMessaging::DispatchMessageW,
+            Win32::UI::WindowsAndMessaging::PeekMessageW,
+            Win32::UI::WindowsAndMessaging::SetTimer,
+            Win32::UI::WindowsAndMessaging::KillTimer,
+            Win32::UI::WindowsAndMessaging::PostMessageW,
+            Win32::UI::WindowsAndMessaging::ShowCursor,
+            Win32::UI::WindowsAndMessaging::SetCursor,
+            Win32::UI::WindowsAndMessaging::LoadCursorW,
+            Win32::UI::WindowsAndMessaging::IsProcessDPIAware,
+            Win32::Graphics::Gdi::HMONITOR,
+            Win32::Graphics::Gdi::GetDC,
+            Win32::Graphics::Gdi::MonitorFromWindow,
+            Win32::Graphics::Gdi::GetDeviceCaps,
+            Win32::Graphics::Gdi,
+            Win32::Foundation::S_OK,
+            Win32::Foundation::HWND,
+            Win32::Foundation::BOOL,
+            Win32::Foundation::FARPROC,
+            Win32::UI::WindowsAndMessaging,
+            Win32::UI::HiDpi,
+            Win32::System::LibraryLoader::GetModuleHandleW,
+            Win32::System::LibraryLoader::LoadLibraryA,
+            Win32::System::LibraryLoader::GetProcAddress,
+            Win32::System::Performance::QueryPerformanceCounter,
+            Win32::System::Performance::QueryPerformanceFrequency,
+        },
         event::{TimerEvent, Signal},
         cursor::MouseCursor,
         os::cx_desktop::EventFlow,
         os::mswindows::win32_event::Win32Event,
         os::mswindows::win32_window::Win32Window,
-        os::mswindows::win32_sys,
-        os::mswindows::win32_sys::{
-            HRESULT,
-            WNDCLASSEXW,
-            HMONITOR,
-            HWND,
-            BOOL,
-            FARPROC,
-            PROCESS_DPI_AWARENESS,
-            DPI_AWARENESS_CONTEXT,
-            MONITOR_DPI_TYPE,
-            LoadIconW,
-            RegisterClassExW,
-            IsGUIThread,
-            GetMessageW,
-            TranslateMessage,
-            DispatchMessageW,
-            PeekMessageW,
-            SetTimer,
-            KillTimer,
-            PostMessageW,
-            ShowCursor,
-            SetCursor,
-            LoadCursorW,
-            IsProcessDPIAware,
-            GetDC,
-            MonitorFromWindow,
-            GetDeviceCaps,
-            GetModuleHandleW,
-            LoadLibraryA,
-            GetProcAddress,
-            QueryPerformanceCounter,
-            QueryPerformanceFrequency
-        },
     },
 };
+pub const FALSE: BOOL = BOOL(0);
+pub const TRUE: BOOL = BOOL(1);
 
 static mut WIN32_APP: *mut Win32App = 0 as *mut _;
 
@@ -68,7 +74,6 @@ pub struct Win32App {
     pub time_freq: i64,
     event_callback: Option<Box<dyn FnMut(&mut Win32App, Vec<Win32Event>) -> EventFlow >>,
     
-    pub class_name_wstr: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
     pub race_signals: Mutex<Vec<Signal>>,
@@ -88,38 +93,37 @@ pub enum Win32Timer {
 impl Win32App {
     pub fn new(event_callback: Box<dyn FnMut(&mut Win32App, Vec<Win32Event>) -> EventFlow>) -> Win32App {
         
-        let class_name_wstr = encode_wide("MakepadWindow");
-        
         let class = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
-            style: win32_sys::CS_HREDRAW
-                | win32_sys::CS_VREDRAW
-                | win32_sys::CS_OWNDC,
+            style: WindowsAndMessaging::CS_HREDRAW
+                | WindowsAndMessaging::CS_VREDRAW
+                | WindowsAndMessaging::CS_OWNDC,
             lpfnWndProc: Some(Win32Window::window_class_proc),
+            hInstance: unsafe {GetModuleHandleW(None).unwrap()},
+            hIcon: unsafe {LoadIconW(None, WindowsAndMessaging::IDI_WINLOGO).unwrap()}, //h_icon,
+            lpszClassName: PCWSTR(b"MakepadWindow\0".as_ptr() as _),
+            ..Default::default()
+/*            
             cbClsExtra: 0,
             cbWndExtra: 0,
-            hInstance: unsafe {GetModuleHandleW(ptr::null())},
-            hIcon: unsafe {LoadIconW(0, win32_sys::IDI_WINLOGO)}, //h_icon,
-            hCursor: 0, //unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
-            hbrBackground: 0,
-            lpszMenuName: ptr::null(),
-            lpszClassName: class_name_wstr.as_ptr(),
-            hIconSm: 0,
+            hCursor: Default::default(), //unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
+            hbrBackground: Default::default(),
+            lpszMenuName: PCWSTR::null(),
+            hIconSm: Default::default(),*/
         };
         
         unsafe {
             RegisterClassExW(&class);
-            IsGUIThread(win32_sys::TRUE);
+            IsGUIThread(TRUE);
         }
         
-        let time_start = 0i64;
-        QueryPerformanceCounter(&mut time_start);
+        let mut time_start = 0i64;
+        unsafe{QueryPerformanceCounter(&mut time_start)};
 
-        let time_freq = 0i64;
-        QueryPerformanceFrequency(&mut time_freq);
+        let mut time_freq = 0i64;
+        unsafe{QueryPerformanceFrequency(&mut time_freq)};
 
         let win32_app = Win32App {
-            class_name_wstr,
             time_start,
             time_freq,
             race_signals: Mutex::new(Vec::new()),
@@ -142,11 +146,11 @@ impl Win32App {
                 match self.event_flow {
                     EventFlow::Wait => {
                         let mut msg = std::mem::MaybeUninit::uninit();
-                        let ret = GetMessageW(msg.as_mut_ptr(), 0, 0, 0);
+                        let ret = GetMessageW(msg.as_mut_ptr(), None, 0, 0);
                         let msg = msg.assume_init();
-                        if ret == 0 {
+                        if ret == FALSE {
                             // Only happens if the message is `WM_QUIT`.
-                            debug_assert_eq!(msg.message, win32_sys::WM_QUIT);
+                            debug_assert_eq!(msg.message, WindowsAndMessaging::WM_QUIT);
                             self.event_flow = EventFlow::Exit;
                         }
                         else {
@@ -157,9 +161,9 @@ impl Win32App {
                     }
                     EventFlow::Poll => {
                         let mut msg = std::mem::MaybeUninit::uninit();
-                        let ret = PeekMessageW(msg.as_mut_ptr(), 0, 0, 0, 1);
+                        let ret = PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE);
                         let msg = msg.assume_init();
-                        if ret == 0 {
+                        if ret == FALSE {
                             self.do_callback(vec![Win32Event::Paint])
                         }
                         else {
@@ -191,7 +195,7 @@ impl Win32App {
                     Win32Timer::Timer {win32_id, repeats, ..} => if win32_id == in_win32_id {
                         hit_timer = Some(win32_app.timers[slot].clone());
                         if !repeats {
-                            KillTimer(0, in_win32_id);
+                            KillTimer(None, in_win32_id);
                             win32_app.timers[slot] = Win32Timer::Free;
                         }
                         break;
@@ -233,7 +237,7 @@ impl Win32App {
     
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         let slot = self.get_free_timer_slot();
-        let win32_id = unsafe {SetTimer(0, 0, (interval * 1000.0) as u32, Some(Self::timer_proc))};
+        let win32_id = unsafe {SetTimer(None, 0, (interval * 1000.0) as u32, Some(Self::timer_proc))};
         self.timers[slot] = Win32Timer::Timer {
             timer_id: timer_id,
             win32_id: win32_id,
@@ -247,7 +251,7 @@ impl Win32App {
             if let Win32Timer::Timer {win32_id, timer_id, ..} = self.timers[slot] {
                 if timer_id == which_timer_id {
                     self.timers[slot] = Win32Timer::Free;
-                    unsafe {KillTimer(0, win32_id);}
+                    unsafe {KillTimer(None, win32_id);}
                 }
             }
         }
@@ -255,7 +259,7 @@ impl Win32App {
     
     pub fn start_resize(&mut self) {
         let slot = self.get_free_timer_slot();
-        let win32_id = unsafe {SetTimer(0, 0, 8 as u32, Some(Self::timer_proc))};
+        let win32_id = unsafe {SetTimer(None, 0, 8 as u32, Some(Self::timer_proc))};
         self.timers[slot] = Win32Timer::Resize {win32_id: win32_id};
     }
     
@@ -263,22 +267,20 @@ impl Win32App {
         for slot in 0..self.timers.len() {
             if let Win32Timer::Resize {win32_id} = self.timers[slot] {
                 self.timers[slot] = Win32Timer::Free;
-                unsafe {KillTimer(0, win32_id);}
+                unsafe {KillTimer(None, win32_id);}
             }
         }
     }
     
     
     pub fn post_signal(signal: Signal) {
-        unsafe {
-            let win32_app = get_win32_app_global();
-            if let Ok(mut sigs) = win32_app.race_signals.lock() {
-                if win32_app.all_windows.len()>0 {
-                    post_signal_to_hwnd(win32_app.all_windows[0], signal)
-                }
-                else { // we have no windows
-                    sigs.push(signal);
-                }
+        let win32_app = get_win32_app_global();
+        if let Ok(mut sigs) = win32_app.race_signals.lock() {
+            if win32_app.all_windows.len()>0 {
+                post_signal_to_hwnd(win32_app.all_windows[0], signal)
+            }
+            else { // we have no windows
+                sigs.push(signal);
             }
         }
     }
@@ -294,7 +296,7 @@ impl Win32App {
     
     pub fn time_now(&self) -> f64 {
         unsafe {
-            let time_now = 0i64;
+            let mut time_now = 0i64;
             QueryPerformanceCounter(&mut time_now);
             (time_now - self.time_start) as f64 / self.time_freq as f64
         }
@@ -304,44 +306,44 @@ impl Win32App {
         if self.current_cursor != cursor {
             let win32_cursor = match cursor {
                 MouseCursor::Hidden => {
-                    ptr::null()
+                    PCWSTR::null()
                 },
-                MouseCursor::Default => win32_sys::IDC_ARROW,
-                MouseCursor::Crosshair => win32_sys::IDC_CROSS,
-                MouseCursor::Hand => win32_sys::IDC_HAND,
-                MouseCursor::Arrow => win32_sys::IDC_ARROW,
-                MouseCursor::Move => win32_sys::IDC_SIZEALL,
-                MouseCursor::Text => win32_sys::IDC_IBEAM,
-                MouseCursor::Wait => win32_sys::IDC_ARROW,
-                MouseCursor::Help => win32_sys::IDC_HELP,
-                MouseCursor::NotAllowed => win32_sys::IDC_NO,
+                MouseCursor::Default => WindowsAndMessaging::IDC_ARROW,
+                MouseCursor::Crosshair => WindowsAndMessaging::IDC_CROSS,
+                MouseCursor::Hand => WindowsAndMessaging::IDC_HAND,
+                MouseCursor::Arrow => WindowsAndMessaging::IDC_ARROW,
+                MouseCursor::Move => WindowsAndMessaging::IDC_SIZEALL,
+                MouseCursor::Text => WindowsAndMessaging::IDC_IBEAM,
+                MouseCursor::Wait => WindowsAndMessaging::IDC_ARROW,
+                MouseCursor::Help => WindowsAndMessaging::IDC_HELP,
+                MouseCursor::NotAllowed => WindowsAndMessaging::IDC_NO,
                 
-                MouseCursor::EResize => win32_sys::IDC_SIZEWE,
-                MouseCursor::NResize => win32_sys::IDC_SIZENS,
-                MouseCursor::NeResize => win32_sys::IDC_SIZENESW,
-                MouseCursor::NwResize => win32_sys::IDC_SIZENWSE,
-                MouseCursor::SResize => win32_sys::IDC_SIZENS,
-                MouseCursor::SeResize => win32_sys::IDC_SIZENWSE,
-                MouseCursor::SwResize => win32_sys::IDC_SIZENESW,
-                MouseCursor::WResize => win32_sys::IDC_SIZEWE,
+                MouseCursor::EResize => WindowsAndMessaging::IDC_SIZEWE,
+                MouseCursor::NResize => WindowsAndMessaging::IDC_SIZENS,
+                MouseCursor::NeResize => WindowsAndMessaging::IDC_SIZENESW,
+                MouseCursor::NwResize => WindowsAndMessaging::IDC_SIZENWSE,
+                MouseCursor::SResize => WindowsAndMessaging::IDC_SIZENS,
+                MouseCursor::SeResize => WindowsAndMessaging::IDC_SIZENWSE,
+                MouseCursor::SwResize => WindowsAndMessaging::IDC_SIZENESW,
+                MouseCursor::WResize => WindowsAndMessaging::IDC_SIZEWE,
                 
                 
-                MouseCursor::NsResize => win32_sys::IDC_SIZENS,
-                MouseCursor::NeswResize => win32_sys::IDC_SIZENESW,
-                MouseCursor::EwResize => win32_sys::IDC_SIZEWE,
-                MouseCursor::NwseResize => win32_sys::IDC_SIZENWSE,
+                MouseCursor::NsResize => WindowsAndMessaging::IDC_SIZENS,
+                MouseCursor::NeswResize => WindowsAndMessaging::IDC_SIZENESW,
+                MouseCursor::EwResize => WindowsAndMessaging::IDC_SIZEWE,
+                MouseCursor::NwseResize => WindowsAndMessaging::IDC_SIZENWSE,
                 
-                MouseCursor::ColResize => win32_sys::IDC_SIZEWE,
-                MouseCursor::RowResize => win32_sys::IDC_SIZENS,
+                MouseCursor::ColResize => WindowsAndMessaging::IDC_SIZEWE,
+                MouseCursor::RowResize => WindowsAndMessaging::IDC_SIZENS,
             };
             self.current_cursor = cursor;
             unsafe {
-                if win32_cursor == ptr::null() {
-                    ShowCursor(0);
+                if win32_cursor == PCWSTR::null() {
+                    ShowCursor(FALSE);
                 }
                 else {
-                    SetCursor(LoadCursorW(0, win32_cursor));
-                    ShowCursor(1);
+                    SetCursor(LoadCursorW(None, win32_cursor).unwrap());
+                    ShowCursor(TRUE);
                 }
             }
             //TODO
@@ -352,10 +354,10 @@ impl Win32App {
 // reworked from winit windows platform https://github.com/rust-windowing/winit/blob/eventloop-2.0/src/platform_impl/windows/dpi.rs
 
 type SetProcessDPIAware = unsafe extern "system" fn () -> BOOL;
-type SetProcessDpiAwareness = unsafe extern "system" fn (value: PROCESS_DPI_AWARENESS,) -> HRESULT;
-type SetProcessDpiAwarenessContext = unsafe extern "system" fn (value: DPI_AWARENESS_CONTEXT,) -> BOOL;
+type SetProcessDpiAwareness = unsafe extern "system" fn (value: HiDpi::PROCESS_DPI_AWARENESS,) -> HRESULT;
+type SetProcessDpiAwarenessContext = unsafe extern "system" fn (value: HiDpi::DPI_AWARENESS_CONTEXT,) -> BOOL;
 type GetDpiForWindow = unsafe extern "system" fn (hwnd: HWND) -> u32;
-type GetDpiForMonitor = unsafe extern "system" fn (hmonitor: HMONITOR, dpi_type: MONITOR_DPI_TYPE, dpi_x: *mut u32, dpi_y: *mut u32) -> HRESULT;
+type GetDpiForMonitor = unsafe extern "system" fn (hmonitor: HMONITOR, dpi_type: HiDpi::MONITOR_DPI_TYPE, dpi_x: *mut u32, dpi_y: *mut u32) -> HRESULT;
 type EnableNonClientDpiScaling = unsafe extern "system" fn (hwnd: HWND) -> BOOL;
 
 // Helper function to dynamically load function pointer.
@@ -363,12 +365,12 @@ type EnableNonClientDpiScaling = unsafe extern "system" fn (hwnd: HWND) -> BOOL;
 fn get_function_impl(library: &str, function: &str) -> FARPROC {
     // Library names we will use are ASCII so we can use the A version to avoid string conversion.
     
-    let module = unsafe {LoadLibraryA(library.as_ptr())};
-    if module == 0 {
+    let module = unsafe {LoadLibraryA(PCSTR::from_raw(library.as_ptr()))};
+    if module.is_err() {
         return None;
     }
     
-    let function_ptr = unsafe {GetProcAddress(module, function.as_ptr())};
+    let function_ptr = unsafe {GetProcAddress(module.unwrap(), PCSTR::from_raw(function.as_ptr()))};
     if function_ptr.is_none() {
         return None;
     }
@@ -389,12 +391,12 @@ pub fn encode_wide(string: impl AsRef<OsStr>) -> Vec<u16> {
 
 
 pub fn post_signal_to_hwnd(hwnd:HWND, signal:Signal){
-    PostMessageW(
+    unsafe{PostMessageW(
         hwnd,
-        win32_sys::WM_USER,
-        ((signal.0.0)&0xffff_ffff) as usize,
-        ((signal.0.0>>32)&0xffff_ffff) as isize,
-    );
+        WindowsAndMessaging::WM_USER,
+        WPARAM(((signal.0.0)&0xffff_ffff) as usize),
+        LPARAM(((signal.0.0>>32)&0xffff_ffff) as isize),
+    )};
 }
 
 pub struct DpiFunctions {
@@ -424,19 +426,19 @@ impl DpiFunctions {
         unsafe {
             if let Some(set_process_dpi_awareness_context) = self.set_process_dpi_awareness_context {
                 // We are on Windows 10 Anniversary Update (1607) or later.
-                if set_process_dpi_awareness_context(win32_sys::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == win32_sys::FALSE {
+                if set_process_dpi_awareness_context(HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == FALSE {
                     // V2 only works with Windows 10 Creators Update (1703). Try using the older
                     // V1 if we can't set V2.
-                    set_process_dpi_awareness_context(win32_sys::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+                    set_process_dpi_awareness_context(HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
                 }
             }
             else if let Some(set_process_dpi_awareness) = self.set_process_dpi_awareness {
                 // We are on Windows 8.1 or later.
-                set_process_dpi_awareness(win32_sys::PROCESS_PER_MONITOR_DPI_AWARE);
+                set_process_dpi_awareness(HiDpi::PROCESS_PER_MONITOR_DPI_AWARE).unwrap();
             }
             else if let Some(set_process_dpi_aware) = self.set_process_dpi_aware {
                 // We are on Vista or later.
-                set_process_dpi_aware();
+                set_process_dpi_aware().unwrap();
             }
         }
     }
@@ -469,7 +471,7 @@ impl DpiFunctions {
     pub fn hwnd_dpi_factor(&self, hwnd: HWND) -> f32 {
         unsafe {
             let hdc = GetDC(hwnd);
-            if hdc == 0 {
+            if hdc.is_invalid(){
                 panic!("`GetDC` returned null!");
             }
             let dpi = if let Some(get_dpi_for_window) = self.get_dpi_for_window {
@@ -481,14 +483,14 @@ impl DpiFunctions {
             }
             else if let Some(get_dpi_for_monitor) = self.get_dpi_for_monitor {
                 // We are on Windows 8.1 or later.
-                let monitor = MonitorFromWindow(hwnd, win32_sys::MONITOR_DEFAULTTONEAREST);
-                if monitor == 0 {
+                let monitor = MonitorFromWindow(hwnd, Gdi::MONITOR_DEFAULTTONEAREST);
+                if monitor.is_invalid() {
                     BASE_DPI
                 }
                 else {
                     let mut dpi_x = 0;
                     let mut dpi_y = 0;
-                    if get_dpi_for_monitor(monitor, win32_sys::MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == win32_sys::S_OK {
+                    if get_dpi_for_monitor(monitor, HiDpi::MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == S_OK {
                         dpi_x as u32
                     } else {
                         BASE_DPI
@@ -497,10 +499,10 @@ impl DpiFunctions {
             }
             else {
                 // We are on Vista or later.
-                if IsProcessDPIAware() == win32_sys::TRUE{
+                if IsProcessDPIAware() == TRUE{
                     // If the process is DPI aware, then scaling must be handled by the application using
                     // this DPI value.
-                    GetDeviceCaps(hdc, win32_sys::LOGPIXELSX) as u32
+                    GetDeviceCaps(hdc, Gdi::LOGPIXELSX) as u32
                 } else {
                     // If the process is DPI unaware, then scaling is performed by the OS; we thus return
                     // 96 (scale factor 1.0) to prevent the window from being re-scaled by both the

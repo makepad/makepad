@@ -24,7 +24,7 @@ use {
         area::Area,
         geometry::{GeometryFields},
         live_traits::*,
-        cx_draw_shaders::*
+        draw_shader::*
     },
 };
 
@@ -311,7 +311,7 @@ impl DrawVars {
                     cx.draw_shaders.shaders.push(CxDrawShader {
                         class_prop: class_node.id,
                         type_name: shader_type_name,
-                        platform: None,
+                        os_shader_id: None,
                         mapping: mapping
                     });
                     // ok so. maybe we should fill the live_uniforms buffer?

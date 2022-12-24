@@ -73,7 +73,7 @@ impl Cx {
                 };
                 
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if sh.platform.is_none() { // shader didnt compile somehow
+                if sh.os_shader_id.is_none() { // shader didnt compile somehow
                     continue;
                 }
                 
@@ -357,13 +357,13 @@ impl Cx {
                    log!("{}\n{}", vertex,pixel);
                 }
                 // lets see if we have the shader already
-                for (index, ds) in self.draw_shaders.platform.iter().enumerate() {
+                for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
                     if ds.vertex == vertex && ds.pixel == pixel {
-                        cx_shader.platform = Some(index);
+                        cx_shader.os_shader_id = Some(index);
                         break;
                     }
                 }
-                if cx_shader.platform.is_none() {
+                if cx_shader.os_shader_id.is_none() {
                     let shp = CxOsDrawShader::new(vertex.clone(), pixel.clone());
                     self.os.from_wasm(FromWasmCompileWebGLShader{
                         shader_id: item.draw_shader_id,
@@ -381,8 +381,8 @@ impl Cx {
                         */
                         textures:cx_shader.mapping.textures.iter().map(|v| v.to_from_wasm_texture_input()).collect()
                     });
-                    cx_shader.platform = Some(self.draw_shaders.platform.len());
-                    self.draw_shaders.platform.push(shp);
+                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                    self.draw_shaders.os_shaders.push(shp);
                 }
             }
         }
