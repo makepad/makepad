@@ -3,7 +3,7 @@ use crate::{
     makepad_math::Vec4,
     makepad_live_id::{LiveId},
     cursor::MouseCursor,
-    cx_draw_shaders::DrawShaderTextureInput,
+    draw_shader::DrawShaderTextureInput,
     draw_vars::{
         DRAW_CALL_TEXTURE_SLOTS
     },

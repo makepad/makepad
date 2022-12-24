@@ -6,7 +6,6 @@ mod live_prims;
 #[macro_use]
 mod cx;
 mod cx_api;
-mod cx_draw_shaders;
 
 pub mod live_traits;
 pub mod live_cx;
@@ -17,6 +16,10 @@ pub mod audio;
 pub mod midi;
 
 mod draw_matrix;
+mod draw_shader;
+mod draw_list;
+mod draw_vars;
+
 mod id_pool;
 mod event;
 mod area;
@@ -27,9 +30,7 @@ mod cursor;
 mod menu;
 mod state;
 mod gpu_info;
-mod draw_vars;
 mod geometry;
-mod draw_list;
 mod debug;
 mod component_map;
 
@@ -43,6 +44,9 @@ pub use makepad_wasm_bridge;
 
 #[cfg(target_os = "macos")]
 pub use makepad_objc_sys;
+
+#[cfg(target_os = "windows")]
+pub use windows as windows_crate;
 
 pub use {
     makepad_shader_compiler,
