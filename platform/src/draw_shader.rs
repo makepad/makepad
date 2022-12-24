@@ -66,7 +66,7 @@ pub struct CxDrawShaderItem {
 #[derive(Default)]
 pub struct CxDrawShaders {
     pub shaders: Vec<CxDrawShader>,
-    pub platform: Vec<CxOsDrawShader>,
+    pub os_shaders: Vec<CxOsDrawShader>,
     pub generation: u64,
     pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
     pub compile_set: BTreeSet<DrawShaderPtr>,
@@ -110,7 +110,7 @@ pub struct DrawShader {
 pub struct CxDrawShader {
     pub class_prop: LiveId,
     pub type_name: LiveId,
-    pub platform: Option<usize>,
+    pub os_shader_id: Option<usize>,
     pub mapping: CxDrawShaderMapping
 }
 

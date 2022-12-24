@@ -84,10 +84,10 @@ impl Cx {
                     continue;
                 };
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if sh.platform.is_none() { // shader didnt compile somehow
+                if sh.os_shader_id.is_none() { // shader didnt compile somehow
                     continue;
                 }
-                let shp = &self.draw_shaders.platform[sh.platform.unwrap()];
+                let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
@@ -374,20 +374,20 @@ impl Cx {
                 }
             }
             // create depth state
-            if self.passes[pass_id].platform.mtl_depth_state.is_none() {
+            if self.passes[pass_id].os.mtl_depth_state.is_none() {
                 
                 let desc: ObjcId = unsafe {msg_send![class!(MTLDepthStencilDescriptor), new]};
                 let () = unsafe {msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]};
                 let () = unsafe {msg_send![desc, setDepthWriteEnabled: true]};
                 let depth_stencil_state: ObjcId = unsafe {msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc]};
-                self.passes[pass_id].platform.mtl_depth_state = Some(depth_stencil_state);
+                self.passes[pass_id].os.mtl_depth_state = Some(depth_stencil_state);
             }
         }
         
         let command_buffer: ObjcId = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
         let encoder: ObjcId = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
         
-        if let Some(depth_state) = self.passes[pass_id].platform.mtl_depth_state {
+        if let Some(depth_state) = self.passes[pass_id].os.mtl_depth_state {
             let () = unsafe {msg_send![encoder, setDepthStencilState: depth_state]};
         }
         
@@ -581,16 +581,16 @@ impl Cx {
                     log!("{}", gen.mtlsl);
                 }
                 // lets see if we have the shader already
-                for (index, ds) in self.draw_shaders.platform.iter().enumerate() {
+                for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
                     if ds.mtlsl == gen.mtlsl {
-                        cx_shader.platform = Some(index);
+                        cx_shader.os_shader_id = Some(index);
                         break;
                     }
                 }
-                if cx_shader.platform.is_none() {
+                if cx_shader.os_shader_id.is_none() {
                     if let Some(shp) = CxOsDrawShader::new(metal_cx, gen) {
-                        cx_shader.platform = Some(self.draw_shaders.platform.len());
-                        self.draw_shaders.platform.push(shp);
+                        cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                        self.draw_shaders.os_shaders.push(shp);
                     }
                 }
             }
@@ -1063,8 +1063,6 @@ struct CxOsTextureInner {
     height: u64,
     format: TextureFormat,
     multisample: Option<usize>,
-    
-    
     texture: RcObjcId
 }
 

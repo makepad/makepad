@@ -11,7 +11,7 @@ use {
         },
         pass::PassId,
         id_pool::*,
-        cx_draw_shaders::{
+        draw_shader::{
             CxDrawShaderOptions,
             CxDrawShaderMapping,
             CxDrawShader,
@@ -122,7 +122,7 @@ impl DrawUniforms {
         self.draw_scroll.w = local_scroll.y;
     }*/
 }
-
+ 
 pub enum CxDrawKind{
     SubList(DrawListId),
     DrawCall(CxDrawCall),
@@ -277,7 +277,7 @@ pub struct CxDrawList {
     pub draw_items: CxDrawItems,
     
     pub draw_list_uniforms: CxDrawListUniforms,
-    pub platform: CxOsView,
+    pub os: CxOsView,
     
     //pub rect: Rect,
     //pub draw_clip: (Vec2,Vec2),
