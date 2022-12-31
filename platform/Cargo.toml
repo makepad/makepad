@@ -46,15 +46,15 @@ makepad-objc-sys = { path = "./bind/objc-sys", version = "0.3.0" }
 
 [target.x86_64-pc-windows-msvc.dependencies]
 
-[target.x86_64-pc-windows-msvc.dependencies.windows]
+[target.x86_64-pc-windows-msvc.dependencies.makepad-windows]
 version = "0.43"
-#path = "./bind/windows-lite"
-features = [
+path = "./bind/windows"
+features = [ 
     "Win32_Foundation", 
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
-    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Gdi", 
     "Win32_Graphics_Dwm",
     "Win32_UI_HiDpi",
     "Win32_System_Memory",
