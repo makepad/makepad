@@ -8,6 +8,9 @@ use {
         makepad_live_id::*,
         cx::*,
         event::*,
+        media_api::CxMediaApi,
+        audio::*,
+        midi::*,
         os::{
             mswindows::win32_event::*,
             mswindows::d3d11::{D3d11Window, D3d11Cx},
@@ -314,6 +317,28 @@ impl CxOsApi for Cx {
         todo!()
     }
 }
+
+impl CxMediaApi for Cx{
+    
+    fn send_midi_data(&mut self, _data:MidiData){
+    }
+    
+    fn handle_midi_received(&mut self, _event:&Event)->Vec<MidiInputData>{
+        Vec::new()
+    }
+    
+    fn handle_midi_inputs(&mut self, _event:&Event)->Vec<MidiInputInfo>{
+        Vec::new()
+    }
+    
+    fn start_midi_input(&mut self) {
+    }
+    
+    fn start_audio_output<F>(&mut self, _f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static {
+        
+    }
+}
+
 
 #[derive(Default)]
 pub struct CxOs {

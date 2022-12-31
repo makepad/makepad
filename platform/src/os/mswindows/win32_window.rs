@@ -11,47 +11,225 @@ use {
     crate::{
         windows_crate::{
             core::PCWSTR,
-            Win32::Foundation::HWND,
-            Win32::Foundation::HANDLE,
-            Win32::Foundation::WPARAM,
-            Win32::Foundation::LPARAM,
-            Win32::Foundation::LRESULT,
-            Win32::Foundation::RECT,
-            Win32::System::Memory::GlobalLock,
-            Win32::System::Memory::GlobalAlloc,
-            Win32::System::Memory::GlobalSize,
-            Win32::System::Memory::GlobalUnlock,
-            Win32::System::Memory::GLOBAL_ALLOC_FLAGS,
-            Win32::System::SystemServices,
-            Win32::System::WindowsProgramming,
-            Win32::System::DataExchange::OpenClipboard,
-            Win32::System::DataExchange::EmptyClipboard,
-            Win32::System::DataExchange::GetClipboardData,
-            Win32::System::DataExchange::SetClipboardData,
-            Win32::System::DataExchange::CloseClipboard,
-            Win32::UI::WindowsAndMessaging,
-            Win32::UI::WindowsAndMessaging::CreateWindowExW,
-            Win32::UI::WindowsAndMessaging::SetWindowLongPtrW,
-            Win32::UI::WindowsAndMessaging::GetWindowLongPtrW,
-            Win32::UI::WindowsAndMessaging::DefWindowProcW,
-            Win32::UI::WindowsAndMessaging::ShowWindow,
-            Win32::UI::WindowsAndMessaging::PostMessageW,
-            Win32::UI::WindowsAndMessaging::GetWindowRect,
-            Win32::UI::WindowsAndMessaging::DestroyWindow,
-            Win32::UI::WindowsAndMessaging::SetWindowPos,
-            Win32::UI::WindowsAndMessaging::GetWindowPlacement,
-            Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT,
-            Win32::UI::WindowsAndMessaging::GetClientRect,
-            Win32::UI::WindowsAndMessaging::MoveWindow,
-            Win32::UI::Controls::MARGINS,
-            Win32::UI::Controls,
-            Win32::UI::Input::KeyboardAndMouse,
-            Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
-            Win32::UI::Input::KeyboardAndMouse::ReleaseCapture,
-            Win32::UI::Input::KeyboardAndMouse::SetCapture,
-            Win32::UI::Input::KeyboardAndMouse::TrackMouseEvent,
-            Win32::UI::Input::KeyboardAndMouse::GetKeyState,
-            Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT,
+            Win32::Foundation::{
+                HWND,
+                HANDLE,
+                WPARAM,
+                LPARAM,
+                LRESULT,
+                RECT,
+            },
+            Win32::System::Memory::{
+                GlobalLock,
+                GlobalAlloc,
+                GlobalSize,
+                GlobalUnlock,
+                GLOBAL_ALLOC_FLAGS,
+            },
+            Win32::System::SystemServices::{
+                CF_UNICODETEXT
+            },
+            Win32::System::WindowsProgramming::{
+                GMEM_DDESHARE
+            },
+            Win32::System::DataExchange::{
+                OpenClipboard,
+                EmptyClipboard,
+                GetClipboardData,
+                SetClipboardData,
+                CloseClipboard,
+            },
+            Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW,
+                SetWindowLongPtrW,
+                GetWindowLongPtrW,
+                DefWindowProcW,
+                ShowWindow,
+                PostMessageW,
+                GetWindowRect,
+                DestroyWindow,
+                SetWindowPos,
+                GetWindowPlacement,
+                WINDOWPLACEMENT,
+                GetClientRect,
+                MoveWindow,
+                GWL_EXSTYLE,
+                HWND_TOPMOST,
+                HWND_NOTOPMOST,
+                WS_SIZEBOX,
+                WS_MAXIMIZEBOX,
+                WS_MINIMIZEBOX,
+                WS_POPUP,
+                WS_CLIPSIBLINGS,
+                WS_CLIPCHILDREN,
+                WS_SYSMENU,
+                WS_EX_WINDOWEDGE,
+                WS_EX_APPWINDOW,
+                WS_EX_ACCEPTFILES,
+                WS_EX_TOPMOST,
+                CW_USEDEFAULT,
+                GWLP_USERDATA,
+                SW_SHOW,
+                SW_RESTORE,
+                SW_MAXIMIZE,
+                SW_MINIMIZE,
+                SWP_NOMOVE,
+                SWP_NOSIZE,
+                WM_ACTIVATE,
+                WM_NCCALCSIZE,
+                WM_NCHITTEST,
+                WA_ACTIVE,
+                WM_ERASEBKGND,
+                WM_MOUSEMOVE,
+                WM_MOUSEWHEEL,
+                WM_LBUTTONDOWN,
+                WM_LBUTTONUP,
+                WM_RBUTTONDOWN,
+                WM_RBUTTONUP,
+                WM_MBUTTONDOWN,
+                WM_MBUTTONUP,
+                WM_KEYDOWN,
+                WM_SYSKEYDOWN,
+                WM_CLOSE,
+                WM_KEYUP,
+                WM_SYSKEYUP,
+                WM_CHAR,
+                WM_ENTERSIZEMOVE,
+                WM_EXITSIZEMOVE,
+                WM_SIZE,
+                WM_DPICHANGED,
+                WM_USER,
+                WM_DESTROY,
+                HTTOPLEFT,
+                HTBOTTOMLEFT,
+                HTLEFT,
+                HTTOPRIGHT,
+                HTBOTTOMRIGHT,
+                HTRIGHT,
+                HTTOP,
+                HTBOTTOM,
+                HTCLIENT,
+                HTCAPTION,
+                HTSYSMENU
+            },
+            Win32::UI::Controls::{
+                MARGINS,
+                WM_MOUSELEAVE
+            },
+            Win32::UI::Input::KeyboardAndMouse::{
+                VIRTUAL_KEY,
+                ReleaseCapture,
+                SetCapture,
+                TrackMouseEvent,
+                GetKeyState,
+                TRACKMOUSEEVENT,
+                TME_LEAVE,
+                VK_CONTROL,
+                VK_SHIFT,
+                VK_MENU,
+                VK_LWIN,
+                VK_RWIN,
+                VK_ESCAPE,
+                VK_OEM_3,
+                VK_0,
+                VK_1,
+                VK_2,
+                VK_3,
+                VK_4,
+                VK_5,
+                VK_6,
+                VK_7,
+                VK_8,
+                VK_9,
+                VK_OEM_MINUS,
+                VK_OEM_PLUS,
+                VK_BACK,
+                VK_TAB,
+                VK_Q,
+                VK_W,
+                VK_E,
+                VK_R,
+                VK_T,
+                VK_Y,
+                VK_U,
+                VK_I,
+                VK_O,
+                VK_P,
+                VK_OEM_4,
+                VK_OEM_6,
+                VK_RETURN,
+                VK_A,
+                VK_S,
+                VK_D,
+                VK_F,
+                VK_G,
+                VK_H,
+                VK_J,
+                VK_K,
+                VK_L,
+                VK_OEM_1,
+                VK_OEM_7,
+                VK_OEM_5,
+                VK_Z,
+                VK_X,
+                VK_C,
+                VK_V,
+                VK_B,
+                VK_N,
+                VK_M,
+                VK_OEM_COMMA,
+                VK_OEM_PERIOD,
+                VK_OEM_2,
+                VK_LCONTROL,
+                VK_RCONTROL,
+                VK_LMENU,
+                VK_RMENU,
+                VK_LSHIFT,
+                VK_RSHIFT,
+                VK_SPACE,
+                VK_CAPITAL,
+                VK_F1,
+                VK_F2,
+                VK_F3,
+                VK_F4,
+                VK_F5,
+                VK_F6,
+                VK_F7,
+                VK_F8,
+                VK_F9,
+                VK_F10,
+                VK_F11,
+                VK_F12,
+                VK_SNAPSHOT,
+                VK_SCROLL,
+                VK_PAUSE,
+                VK_INSERT,
+                VK_DELETE,
+                VK_HOME,
+                VK_END,
+                VK_PRIOR,
+                VK_NEXT,
+                VK_NUMPAD0,
+                VK_NUMPAD1,
+                VK_NUMPAD2,
+                VK_NUMPAD3,
+                VK_NUMPAD4,
+                VK_NUMPAD5,
+                VK_NUMPAD6,
+                VK_NUMPAD7,
+                VK_NUMPAD8,
+                VK_NUMPAD9,
+                VK_SUBTRACT,
+                VK_ADD,
+                VK_DECIMAL,
+                VK_MULTIPLY,
+                VK_DIVIDE,
+                VK_NUMLOCK,
+                VK_UP,
+                VK_DOWN,
+                VK_LEFT,
+                VK_RIGHT,
+            },
             Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea,
             Win32::System::LibraryLoader::GetModuleHandleW,
         },
@@ -104,17 +282,17 @@ impl Win32Window {
     pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>) {
         let title = encode_wide(title);
         
-        let style = WindowsAndMessaging::WS_SIZEBOX
-            | WindowsAndMessaging::WS_MAXIMIZEBOX
-            | WindowsAndMessaging::WS_MINIMIZEBOX
-            | WindowsAndMessaging::WS_POPUP
-            | WindowsAndMessaging::WS_CLIPSIBLINGS
-            | WindowsAndMessaging::WS_CLIPCHILDREN
-            | WindowsAndMessaging::WS_SYSMENU;
+        let style = WS_SIZEBOX
+            | WS_MAXIMIZEBOX
+            | WS_MINIMIZEBOX
+            | WS_POPUP
+            | WS_CLIPSIBLINGS
+            | WS_CLIPCHILDREN
+            | WS_SYSMENU;
         
-        let style_ex = WindowsAndMessaging::WS_EX_WINDOWEDGE
-            | WindowsAndMessaging::WS_EX_APPWINDOW
-            | WindowsAndMessaging::WS_EX_ACCEPTFILES;
+        let style_ex = WS_EX_WINDOWEDGE
+            | WS_EX_APPWINDOW
+            | WS_EX_ACCEPTFILES;
         
         unsafe {
             
@@ -122,7 +300,7 @@ impl Win32Window {
                 (position.x as i32, position.y as i32)
             }
             else {
-                (WindowsAndMessaging::CW_USEDEFAULT, WindowsAndMessaging::CW_USEDEFAULT)
+                (CW_USEDEFAULT, CW_USEDEFAULT)
             };
             
             let hwnd = CreateWindowExW(
@@ -132,8 +310,8 @@ impl Win32Window {
                 style,
                 x,
                 y,
-                WindowsAndMessaging::CW_USEDEFAULT,
-                WindowsAndMessaging::CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
                 None,
                 None,
                 GetModuleHandleW(None).unwrap(),
@@ -142,11 +320,11 @@ impl Win32Window {
             
             self.hwnd = Some(hwnd);
             
-            SetWindowLongPtrW(hwnd, WindowsAndMessaging::GWLP_USERDATA, self as *const _ as isize);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, self as *const _ as isize);
             
             self.set_outer_size(size);
             
-            ShowWindow(hwnd, WindowsAndMessaging::SW_SHOW);
+            ShowWindow(hwnd, SW_SHOW);
             
             get_win32_app_global().dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap());
             
@@ -163,22 +341,22 @@ impl Win32Window {
     
     pub unsafe extern "system" fn window_class_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,) -> LRESULT {
         
-        let user_data = GetWindowLongPtrW(hwnd, WindowsAndMessaging::GWLP_USERDATA);
+        let user_data = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
         if user_data == 0 {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         };
         
         let window = &mut (*(user_data as *mut Win32Window));
         match msg {
-            WindowsAndMessaging::WM_ACTIVATE => {
-                if wparam.0 & 0xffff == WindowsAndMessaging::WA_ACTIVE as usize {
+            WM_ACTIVATE => {
+                if wparam.0 & 0xffff == WA_ACTIVE as usize {
                     window.do_callback(vec![Win32Event::AppGotFocus]);
                 }
                 else {
                     window.do_callback(vec![Win32Event::AppLostFocus]);
                 }
             },
-            WindowsAndMessaging::WM_NCCALCSIZE => {
+            WM_NCCALCSIZE => {
                 // check if we are maximised
                 if window.get_is_maximized() {
                     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -194,7 +372,7 @@ impl Win32Window {
                     return LRESULT(0)
                 }
             },
-            WindowsAndMessaging::WM_NCHITTEST => {
+            WM_NCHITTEST => {
                 let ycoord = (lparam.0 >> 16) as u16 as i16 as i32;
                 let xcoord = (lparam.0 & 0xffff) as u16 as i16 as i32;
                 let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
@@ -203,34 +381,34 @@ impl Win32Window {
                 if xcoord < rect.left + EDGE {
                     if ycoord < rect.top + EDGE {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::NwseResize);
-                        return LRESULT(WindowsAndMessaging::HTTOPLEFT as isize);
+                        return LRESULT(HTTOPLEFT as isize);
                     }
                     if ycoord > rect.bottom - EDGE {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::NeswResize);
-                        return LRESULT(WindowsAndMessaging::HTBOTTOMLEFT as isize);
+                        return LRESULT(HTBOTTOMLEFT as isize);
                     }
                     get_win32_app_global().set_mouse_cursor(MouseCursor::EwResize);
-                    return LRESULT(WindowsAndMessaging::HTLEFT as isize);
+                    return LRESULT(HTLEFT as isize);
                 }
                 if xcoord > rect.right - EDGE {
                     if ycoord < rect.top + EDGE {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::NeswResize);
-                        return LRESULT(WindowsAndMessaging::HTTOPRIGHT as isize);
+                        return LRESULT(HTTOPRIGHT as isize);
                     }
                     if ycoord > rect.bottom - EDGE {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::NwseResize);
-                        return LRESULT(WindowsAndMessaging::HTBOTTOMRIGHT as isize);
+                        return LRESULT(HTBOTTOMRIGHT as isize);
                     }
                     get_win32_app_global().set_mouse_cursor(MouseCursor::EwResize);
-                    return LRESULT(WindowsAndMessaging::HTRIGHT as isize);
+                    return LRESULT(HTRIGHT as isize);
                 }
                 if ycoord < rect.top + EDGE {
                     get_win32_app_global().set_mouse_cursor(MouseCursor::NsResize);
-                    return LRESULT(WindowsAndMessaging::HTTOP as isize);
+                    return LRESULT(HTTOP as isize);
                 }
                 if ycoord > rect.bottom - EDGE {
                     get_win32_app_global().set_mouse_cursor(MouseCursor::NsResize);
-                    return LRESULT(WindowsAndMessaging::HTBOTTOM as isize);
+                    return LRESULT(HTBOTTOM as isize);
                 }
                 let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
                 window.do_callback(vec![
@@ -242,35 +420,35 @@ impl Win32Window {
                 ]);
                 match response.get() {
                     WindowDragQueryResponse::Client => {
-                        return LRESULT(WindowsAndMessaging::HTCLIENT as isize);
+                        return LRESULT(HTCLIENT as isize);
                     }
                     WindowDragQueryResponse::Caption => {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::Default);
-                        return LRESULT(WindowsAndMessaging::HTCAPTION as isize);
+                        return LRESULT(HTCAPTION as isize);
                     },
                     WindowDragQueryResponse::SysMenu => {
                         get_win32_app_global().set_mouse_cursor(MouseCursor::Default);
-                        return LRESULT(WindowsAndMessaging::HTSYSMENU as isize);
+                        return LRESULT(HTSYSMENU as isize);
                     }
                     _ => ()
                 }
                 if ycoord < rect.top + 50 && xcoord < rect.left + 50 {
-                    return LRESULT(WindowsAndMessaging::HTSYSMENU as isize);
+                    return LRESULT(HTSYSMENU as isize);
                 }
                 if ycoord < rect.top + 50 && xcoord < rect.right - 300 {
-                    return LRESULT(WindowsAndMessaging::HTCAPTION as isize);
+                    return LRESULT(HTCAPTION as isize);
                 }
-                return LRESULT(WindowsAndMessaging::HTCLIENT as isize);
+                return LRESULT(HTCLIENT as isize);
             },
-            WindowsAndMessaging::WM_ERASEBKGND => {
+            WM_ERASEBKGND => {
                 return LRESULT(1)
             },
-            WindowsAndMessaging::WM_MOUSEMOVE => {
+            WM_MOUSEMOVE => {
                 if !window.track_mouse_event {
                     window.track_mouse_event = true;
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: KeyboardAndMouse::TME_LEAVE,
+                        dwFlags: TME_LEAVE,
                         hwndTrack: hwnd,
                         dwHoverTime: 0
                     };
@@ -281,7 +459,7 @@ impl Win32Window {
                     Self::get_key_modifiers()
                 )
             },
-            Controls::WM_MOUSELEAVE => {
+            WM_MOUSELEAVE => {
                 window.track_mouse_event = false;
                 window.send_mouse_move(
                     window.last_mouse_pos,
@@ -289,29 +467,29 @@ impl Win32Window {
                 );
                 get_win32_app_global().current_cursor = MouseCursor::Hidden;
             },
-            WindowsAndMessaging::WM_MOUSEWHEEL => {
+            WM_MOUSEWHEEL => {
                 let delta = (wparam.0 >> 16) as u16 as i16 as f64;
                 window.send_scroll(DVec2 {x: 0.0, y: -delta}, Self::get_key_modifiers(), true);
             },
-            WindowsAndMessaging::WM_LBUTTONDOWN => window.send_mouse_down(0, Self::get_key_modifiers()),
-            WindowsAndMessaging::WM_LBUTTONUP => window.send_mouse_up(0, Self::get_key_modifiers()),
-            WindowsAndMessaging::WM_RBUTTONDOWN => window.send_mouse_down(1, Self::get_key_modifiers()),
-            WindowsAndMessaging::WM_RBUTTONUP => window.send_mouse_up(1, Self::get_key_modifiers()),
-            WindowsAndMessaging::WM_MBUTTONDOWN => window.send_mouse_down(2, Self::get_key_modifiers()),
-            WindowsAndMessaging::WM_MBUTTONUP => window.send_mouse_up(2, Self::get_key_modifiers()),
-            WindowsAndMessaging::WM_KEYDOWN | WindowsAndMessaging::WM_SYSKEYDOWN => {
+            WM_LBUTTONDOWN => window.send_mouse_down(0, Self::get_key_modifiers()),
+            WM_LBUTTONUP => window.send_mouse_up(0, Self::get_key_modifiers()),
+            WM_RBUTTONDOWN => window.send_mouse_down(1, Self::get_key_modifiers()),
+            WM_RBUTTONUP => window.send_mouse_up(1, Self::get_key_modifiers()),
+            WM_MBUTTONDOWN => window.send_mouse_down(2, Self::get_key_modifiers()),
+            WM_MBUTTONUP => window.send_mouse_up(2, Self::get_key_modifiers()),
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
                 // detect control/cmd - c / v / x
                 let modifiers = Self::get_key_modifiers();
                 let key_code = Self::virtual_key_to_key_code(wparam);
                 if modifiers.alt && key_code == KeyCode::F4 {
-                    PostMessageW(hwnd, WindowsAndMessaging::WM_CLOSE, WPARAM(0), LPARAM(0));
+                    PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
                 if modifiers.control || modifiers.logo {
                     match key_code {
                         KeyCode::KeyV => { // paste
-                            if OpenClipboard(None) == TRUE{
+                            if OpenClipboard(None) == TRUE {
                                 let mut data: Vec<u16> = Vec::new();
-                                let h_clipboard_data = GetClipboardData(SystemServices::CF_UNICODETEXT.0).unwrap();
+                                let h_clipboard_data = GetClipboardData(CF_UNICODETEXT.0).unwrap();
                                 let h_clipboard_ptr = GlobalLock(h_clipboard_data.0) as *mut u16;
                                 let clipboard_size = GlobalSize(h_clipboard_data.0);
                                 if clipboard_size > 2 {
@@ -346,19 +524,19 @@ impl Win32Window {
                             if let Some(response) = response.as_ref() {
                                 // plug it into the windows clipboard
                                 // make utf16 dta
-                                if OpenClipboard(None) == TRUE{
+                                if OpenClipboard(None) == TRUE {
                                     EmptyClipboard();
                                     
                                     let data: Vec<u16> = OsStr::new(response).encode_wide().chain(Some(0).into_iter()).collect();
                                     
-                                    let h_clipboard_data = GlobalAlloc(GLOBAL_ALLOC_FLAGS(WindowsProgramming::GMEM_DDESHARE), 2 * data.len());
+                                    let h_clipboard_data = GlobalAlloc(GLOBAL_ALLOC_FLAGS(GMEM_DDESHARE), 2 * data.len());
                                     
                                     let h_clipboard_ptr = GlobalLock(h_clipboard_data) as *mut u16;
                                     
                                     std::ptr::copy_nonoverlapping(data.as_ptr(), h_clipboard_ptr, data.len());
                                     
                                     GlobalUnlock(h_clipboard_data);
-                                    SetClipboardData(SystemServices::CF_UNICODETEXT.0, HANDLE(h_clipboard_data)).unwrap();
+                                    SetClipboardData(CF_UNICODETEXT.0, HANDLE(h_clipboard_data)).unwrap();
                                     CloseClipboard();
                                 }
                             };
@@ -375,7 +553,7 @@ impl Win32Window {
                     })
                 ]);
             },
-            WindowsAndMessaging::WM_KEYUP | WindowsAndMessaging::WM_SYSKEYUP => {
+            WM_KEYUP | WM_SYSKEYUP => {
                 window.do_callback(vec![
                     Win32Event::KeyUp(KeyEvent {
                         key_code: Self::virtual_key_to_key_code(wparam),
@@ -386,7 +564,7 @@ impl Win32Window {
                 ]);
                 
             },
-            WindowsAndMessaging::WM_CHAR => {
+            WM_CHAR => {
                 if let Ok(utf8) = String::from_utf16(&[wparam.0 as u16]) {
                     let char_code = utf8.chars().next().unwrap();
                     if char_code >= ' ' {
@@ -400,25 +578,25 @@ impl Win32Window {
                     }
                 }
             },
-            WindowsAndMessaging::WM_ENTERSIZEMOVE => {
+            WM_ENTERSIZEMOVE => {
                 get_win32_app_global().start_resize();
                 window.do_callback(vec![Win32Event::WindowResizeLoopStart(window.window_id)]);
             }
-            WindowsAndMessaging::WM_EXITSIZEMOVE => {
+            WM_EXITSIZEMOVE => {
                 get_win32_app_global().stop_resize();
                 window.do_callback(vec![Win32Event::WindowResizeLoopStop(window.window_id)]);
             },
-            WindowsAndMessaging::WM_SIZE | WindowsAndMessaging::WM_DPICHANGED => {
+            WM_SIZE | WM_DPICHANGED => {
                 window.send_change_event();
             },
-            WindowsAndMessaging::WM_USER => {
+            WM_USER => {
                 let mut signals = HashSet::new();
                 signals.insert(Signal(LiveId(((wparam.0 as u64) << 32) | (lparam.0 as u64))));
                 window.do_callback(vec![
                     Win32Event::Signal(SignalEvent {signals})
                 ]);
             },
-            WindowsAndMessaging::WM_CLOSE => { // close requested
+            WM_CLOSE => { // close requested
                 let accept_close = Rc::new(Cell::new(true));
                 window.do_callback(vec![Win32Event::WindowCloseRequested(WindowCloseRequestedEvent {
                     window_id: window.window_id,
@@ -428,7 +606,7 @@ impl Win32Window {
                     DestroyWindow(hwnd);
                 }
             },
-            WindowsAndMessaging::WM_DESTROY => { // window actively destroyed
+            WM_DESTROY => { // window actively destroyed
                 window.do_callback(vec![
                     Win32Event::WindowClosed(WindowClosedEvent {
                         window_id: window.window_id,
@@ -456,11 +634,11 @@ impl Win32Window {
     pub fn get_key_modifiers() -> KeyModifiers {
         unsafe {
             KeyModifiers {
-                control: GetKeyState(KeyboardAndMouse::VK_CONTROL.0 as i32) & 0x80>0,
-                shift: GetKeyState(KeyboardAndMouse::VK_SHIFT.0 as i32) & 0x80>0,
-                alt: GetKeyState(KeyboardAndMouse::VK_MENU.0 as i32) & 0x80>0,
-                logo: GetKeyState(KeyboardAndMouse::VK_LWIN.0 as i32) & 0x80>0
-                    || GetKeyState(KeyboardAndMouse::VK_RWIN.0 as i32) & 0x80>0,
+                control: GetKeyState(VK_CONTROL.0 as i32) & 0x80>0,
+                shift: GetKeyState(VK_SHIFT.0 as i32) & 0x80>0,
+                alt: GetKeyState(VK_MENU.0 as i32) & 0x80>0,
+                logo: GetKeyState(VK_LWIN.0 as i32) & 0x80>0
+                    || GetKeyState(VK_RWIN.0 as i32) & 0x80>0,
             }
         }
     }
@@ -473,15 +651,15 @@ impl Win32Window {
     
     pub fn restore(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), WindowsAndMessaging::SW_RESTORE);
-            PostMessageW(self.hwnd.unwrap(), WindowsAndMessaging::WM_SIZE, WPARAM(0), LPARAM(0));
+            ShowWindow(self.hwnd.unwrap(), SW_RESTORE);
+            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0));
         }
     }
     
     pub fn maximize(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), WindowsAndMessaging::SW_MAXIMIZE);
-            PostMessageW(self.hwnd.unwrap(), WindowsAndMessaging::WM_SIZE, WPARAM(0), LPARAM(0));
+            ShowWindow(self.hwnd.unwrap(), SW_MAXIMIZE);
+            PostMessageW(self.hwnd.unwrap(), WM_SIZE, WPARAM(0), LPARAM(0));
         }
     }
     
@@ -493,7 +671,7 @@ impl Win32Window {
     
     pub fn minimize(&self) {
         unsafe {
-            ShowWindow(self.hwnd.unwrap(), WindowsAndMessaging::SW_MINIMIZE);
+            ShowWindow(self.hwnd.unwrap(), SW_MINIMIZE);
         }
     }
     
@@ -502,23 +680,23 @@ impl Win32Window {
             if topmost {
                 SetWindowPos(
                     self.hwnd.unwrap(),
-                    WindowsAndMessaging::HWND_TOPMOST,
+                    HWND_TOPMOST,
                     0,
                     0,
                     0,
                     0,
-                    WindowsAndMessaging::SWP_NOMOVE | WindowsAndMessaging::SWP_NOSIZE
+                    SWP_NOMOVE | SWP_NOSIZE
                 );
             }
             else {
                 SetWindowPos(
                     self.hwnd.unwrap(),
-                    WindowsAndMessaging::HWND_NOTOPMOST,
+                    HWND_NOTOPMOST,
                     0,
                     0,
                     0,
                     0,
-                    WindowsAndMessaging::SWP_NOMOVE | WindowsAndMessaging::SWP_NOSIZE
+                    SWP_NOMOVE | SWP_NOSIZE
                 );
             }
         }
@@ -526,8 +704,8 @@ impl Win32Window {
     
     pub fn get_is_topmost(&self) -> bool {
         unsafe {
-            let ex_style = GetWindowLongPtrW(self.hwnd.unwrap(), WindowsAndMessaging::GWL_EXSTYLE);
-            if ex_style as u32 & WindowsAndMessaging::WS_EX_TOPMOST.0 != 0 {
+            let ex_style = GetWindowLongPtrW(self.hwnd.unwrap(), GWL_EXSTYLE);
+            if ex_style as u32 & WS_EX_TOPMOST.0 != 0 {
                 return true
             }
             return false
@@ -553,7 +731,7 @@ impl Win32Window {
             let mut wp = wp.assume_init();
             wp.length = mem::size_of::<WINDOWPLACEMENT>() as u32;
             GetWindowPlacement(self.hwnd.unwrap(), &mut wp);
-            if wp.showCmd == WindowsAndMessaging::SW_MAXIMIZE {
+            if wp.showCmd == SW_MAXIMIZE {
                 return true
             }
             return false
@@ -756,113 +934,111 @@ impl Win32Window {
     
     pub fn virtual_key_to_key_code(wparam: WPARAM) -> KeyCode {
         match VIRTUAL_KEY(wparam.0 as u16) {
-            KeyboardAndMouse::VK_ESCAPE => KeyCode::Escape,
-            KeyboardAndMouse::VK_OEM_3 => KeyCode::Backtick,
-            KeyboardAndMouse::VK_0 => KeyCode::Key0,
-            KeyboardAndMouse::VK_1 => KeyCode::Key1,
-            KeyboardAndMouse::VK_2 => KeyCode::Key2,
-            KeyboardAndMouse::VK_3 => KeyCode::Key3,
-            KeyboardAndMouse::VK_4 => KeyCode::Key4,
-            KeyboardAndMouse::VK_5 => KeyCode::Key5,
-            KeyboardAndMouse::VK_6 => KeyCode::Key6,
-            KeyboardAndMouse::VK_7 => KeyCode::Key7,
-            KeyboardAndMouse::VK_8 => KeyCode::Key8,
-            KeyboardAndMouse::VK_9 => KeyCode::Key9,
-            KeyboardAndMouse::VK_OEM_MINUS => KeyCode::Minus,
-            KeyboardAndMouse::VK_OEM_PLUS => KeyCode::Equals,
-            KeyboardAndMouse::VK_BACK => KeyCode::Backspace,
-            KeyboardAndMouse::VK_TAB => KeyCode::Tab,
-            KeyboardAndMouse::VK_Q => KeyCode::KeyQ,
-            KeyboardAndMouse::VK_W => KeyCode::KeyW,
-            KeyboardAndMouse::VK_E => KeyCode::KeyE,
-            KeyboardAndMouse::VK_R => KeyCode::KeyR,
-            KeyboardAndMouse::VK_T => KeyCode::KeyT,
-            KeyboardAndMouse::VK_Y => KeyCode::KeyY,
-            KeyboardAndMouse::VK_U => KeyCode::KeyU,
-            KeyboardAndMouse::VK_I => KeyCode::KeyI,
-            KeyboardAndMouse::VK_O => KeyCode::KeyO,
-            KeyboardAndMouse::VK_P => KeyCode::KeyP,
-            KeyboardAndMouse::VK_OEM_4 => KeyCode::LBracket,
-            KeyboardAndMouse::VK_OEM_6 => KeyCode::RBracket,
-            KeyboardAndMouse::VK_RETURN => KeyCode::ReturnKey,
-            KeyboardAndMouse::VK_A => KeyCode::KeyA,
-            KeyboardAndMouse::VK_S => KeyCode::KeyS,
-            KeyboardAndMouse::VK_D => KeyCode::KeyD,
-            KeyboardAndMouse::VK_F => KeyCode::KeyF,
-            KeyboardAndMouse::VK_G => KeyCode::KeyG,
-            KeyboardAndMouse::VK_H => KeyCode::KeyH,
-            KeyboardAndMouse::VK_J => KeyCode::KeyJ,
-            KeyboardAndMouse::VK_K => KeyCode::KeyK,
-            KeyboardAndMouse::VK_L => KeyCode::KeyL,
-            KeyboardAndMouse::VK_OEM_1 => KeyCode::Semicolon,
-            KeyboardAndMouse::VK_OEM_7 => KeyCode::Quote,
-            KeyboardAndMouse::VK_OEM_5 => KeyCode::Backslash,
-            KeyboardAndMouse::VK_Z => KeyCode::KeyZ,
-            KeyboardAndMouse::VK_X => KeyCode::KeyX,
-            KeyboardAndMouse::VK_C => KeyCode::KeyC,
-            KeyboardAndMouse::VK_V => KeyCode::KeyV,
-            KeyboardAndMouse::VK_B => KeyCode::KeyB,
-            KeyboardAndMouse::VK_N => KeyCode::KeyN,
-            KeyboardAndMouse::VK_M => KeyCode::KeyM,
-            KeyboardAndMouse::VK_OEM_COMMA => KeyCode::Comma,
-            KeyboardAndMouse::VK_OEM_PERIOD => KeyCode::Period,
-            KeyboardAndMouse::VK_OEM_2 => KeyCode::Slash,
-            KeyboardAndMouse::VK_LCONTROL => KeyCode::Control,
-            KeyboardAndMouse::VK_RCONTROL => KeyCode::Control,
-            KeyboardAndMouse::VK_CONTROL => KeyCode::Control,
-            KeyboardAndMouse::VK_LMENU => KeyCode::Alt,
-            KeyboardAndMouse::VK_RMENU => KeyCode::Alt,
-            KeyboardAndMouse::VK_MENU => KeyCode::Alt,
-            KeyboardAndMouse::VK_LSHIFT => KeyCode::Shift,
-            KeyboardAndMouse::VK_RSHIFT => KeyCode::Shift,
-            KeyboardAndMouse::VK_SHIFT => KeyCode::Shift,
-            KeyboardAndMouse::VK_LWIN => KeyCode::Logo,
-            KeyboardAndMouse::VK_RWIN => KeyCode::Logo,
-            KeyboardAndMouse::VK_SPACE => KeyCode::Space,
-            KeyboardAndMouse::VK_CAPITAL => KeyCode::Capslock,
-            KeyboardAndMouse::VK_F1 => KeyCode::F1,
-            KeyboardAndMouse::VK_F2 => KeyCode::F2,
-            KeyboardAndMouse::VK_F3 => KeyCode::F3,
-            KeyboardAndMouse::VK_F4 => KeyCode::F4,
-            KeyboardAndMouse::VK_F5 => KeyCode::F5,
-            KeyboardAndMouse::VK_F6 => KeyCode::F6,
-            KeyboardAndMouse::VK_F7 => KeyCode::F7,
-            KeyboardAndMouse::VK_F8 => KeyCode::F8,
-            KeyboardAndMouse::VK_F9 => KeyCode::F9,
-            KeyboardAndMouse::VK_F10 => KeyCode::F10,
-            KeyboardAndMouse::VK_F11 => KeyCode::F11,
-            KeyboardAndMouse::VK_F12 => KeyCode::F12,
-            KeyboardAndMouse::VK_SNAPSHOT => KeyCode::PrintScreen,
-            KeyboardAndMouse::VK_SCROLL => KeyCode::ScrollLock,
-            KeyboardAndMouse::VK_PAUSE => KeyCode::Pause,
-            KeyboardAndMouse::VK_INSERT => KeyCode::Insert,
-            KeyboardAndMouse::VK_DELETE => KeyCode::Delete,
-            KeyboardAndMouse::VK_HOME => KeyCode::Home,
-            KeyboardAndMouse::VK_END => KeyCode::End,
-            KeyboardAndMouse::VK_PRIOR => KeyCode::PageUp,
-            KeyboardAndMouse::VK_NEXT => KeyCode::PageDown,
-            KeyboardAndMouse::VK_NUMPAD0 => KeyCode::Numpad0,
-            KeyboardAndMouse::VK_NUMPAD1 => KeyCode::Numpad1,
-            KeyboardAndMouse::VK_NUMPAD2 => KeyCode::Numpad2,
-            KeyboardAndMouse::VK_NUMPAD3 => KeyCode::Numpad3,
-            KeyboardAndMouse::VK_NUMPAD4 => KeyCode::Numpad4,
-            KeyboardAndMouse::VK_NUMPAD5 => KeyCode::Numpad5,
-            KeyboardAndMouse::VK_NUMPAD6 => KeyCode::Numpad6,
-            KeyboardAndMouse::VK_NUMPAD7 => KeyCode::Numpad7,
-            KeyboardAndMouse::VK_NUMPAD8 => KeyCode::Numpad8,
-            KeyboardAndMouse::VK_NUMPAD9 => KeyCode::Numpad9,
-            //winuser::VK_BACK => KeyCode::NumpadEquals,
-            KeyboardAndMouse::VK_SUBTRACT => KeyCode::NumpadSubtract,
-            KeyboardAndMouse::VK_ADD => KeyCode::NumpadAdd,
-            KeyboardAndMouse::VK_DECIMAL => KeyCode::NumpadDecimal,
-            KeyboardAndMouse::VK_MULTIPLY => KeyCode::NumpadMultiply,
-            KeyboardAndMouse::VK_DIVIDE => KeyCode::NumpadDivide,
-            KeyboardAndMouse::VK_NUMLOCK => KeyCode::Numlock,
-            //winuser::VK_BACK => KeyCode::NumpadEnter,
-            KeyboardAndMouse::VK_UP => KeyCode::ArrowUp,
-            KeyboardAndMouse::VK_DOWN => KeyCode::ArrowDown,
-            KeyboardAndMouse::VK_LEFT => KeyCode::ArrowLeft,
-            KeyboardAndMouse::VK_RIGHT => KeyCode::ArrowRight,
+            VK_ESCAPE => KeyCode::Escape,
+            VK_OEM_3 => KeyCode::Backtick,
+            VK_0 => KeyCode::Key0,
+            VK_1 => KeyCode::Key1,
+            VK_2 => KeyCode::Key2,
+            VK_3 => KeyCode::Key3,
+            VK_4 => KeyCode::Key4,
+            VK_5 => KeyCode::Key5,
+            VK_6 => KeyCode::Key6,
+            VK_7 => KeyCode::Key7,
+            VK_8 => KeyCode::Key8,
+            VK_9 => KeyCode::Key9,
+            VK_OEM_MINUS => KeyCode::Minus,
+            VK_OEM_PLUS => KeyCode::Equals,
+            VK_BACK => KeyCode::Backspace,
+            VK_TAB => KeyCode::Tab,
+            VK_Q => KeyCode::KeyQ,
+            VK_W => KeyCode::KeyW,
+            VK_E => KeyCode::KeyE,
+            VK_R => KeyCode::KeyR,
+            VK_T => KeyCode::KeyT,
+            VK_Y => KeyCode::KeyY,
+            VK_U => KeyCode::KeyU,
+            VK_I => KeyCode::KeyI,
+            VK_O => KeyCode::KeyO,
+            VK_P => KeyCode::KeyP,
+            VK_OEM_4 => KeyCode::LBracket,
+            VK_OEM_6 => KeyCode::RBracket,
+            VK_RETURN => KeyCode::ReturnKey,
+            VK_A => KeyCode::KeyA,
+            VK_S => KeyCode::KeyS,
+            VK_D => KeyCode::KeyD,
+            VK_F => KeyCode::KeyF,
+            VK_G => KeyCode::KeyG,
+            VK_H => KeyCode::KeyH,
+            VK_J => KeyCode::KeyJ,
+            VK_K => KeyCode::KeyK,
+            VK_L => KeyCode::KeyL,
+            VK_OEM_1 => KeyCode::Semicolon,
+            VK_OEM_7 => KeyCode::Quote,
+            VK_OEM_5 => KeyCode::Backslash,
+            VK_Z => KeyCode::KeyZ,
+            VK_X => KeyCode::KeyX,
+            VK_C => KeyCode::KeyC,
+            VK_V => KeyCode::KeyV,
+            VK_B => KeyCode::KeyB,
+            VK_N => KeyCode::KeyN,
+            VK_M => KeyCode::KeyM,
+            VK_OEM_COMMA => KeyCode::Comma,
+            VK_OEM_PERIOD => KeyCode::Period,
+            VK_OEM_2 => KeyCode::Slash,
+            VK_LCONTROL => KeyCode::Control,
+            VK_RCONTROL => KeyCode::Control,
+            VK_CONTROL => KeyCode::Control,
+            VK_LMENU => KeyCode::Alt,
+            VK_RMENU => KeyCode::Alt,
+            VK_MENU => KeyCode::Alt,
+            VK_LSHIFT => KeyCode::Shift,
+            VK_RSHIFT => KeyCode::Shift,
+            VK_SHIFT => KeyCode::Shift,
+            VK_LWIN => KeyCode::Logo,
+            VK_RWIN => KeyCode::Logo,
+            VK_SPACE => KeyCode::Space,
+            VK_CAPITAL => KeyCode::Capslock,
+            VK_F1 => KeyCode::F1,
+            VK_F2 => KeyCode::F2,
+            VK_F3 => KeyCode::F3,
+            VK_F4 => KeyCode::F4,
+            VK_F5 => KeyCode::F5,
+            VK_F6 => KeyCode::F6,
+            VK_F7 => KeyCode::F7,
+            VK_F8 => KeyCode::F8,
+            VK_F9 => KeyCode::F9,
+            VK_F10 => KeyCode::F10,
+            VK_F11 => KeyCode::F11,
+            VK_F12 => KeyCode::F12,
+            VK_SNAPSHOT => KeyCode::PrintScreen,
+            VK_SCROLL => KeyCode::ScrollLock,
+            VK_PAUSE => KeyCode::Pause,
+            VK_INSERT => KeyCode::Insert,
+            VK_DELETE => KeyCode::Delete,
+            VK_HOME => KeyCode::Home,
+            VK_END => KeyCode::End,
+            VK_PRIOR => KeyCode::PageUp,
+            VK_NEXT => KeyCode::PageDown,
+            VK_NUMPAD0 => KeyCode::Numpad0,
+            VK_NUMPAD1 => KeyCode::Numpad1,
+            VK_NUMPAD2 => KeyCode::Numpad2,
+            VK_NUMPAD3 => KeyCode::Numpad3,
+            VK_NUMPAD4 => KeyCode::Numpad4,
+            VK_NUMPAD5 => KeyCode::Numpad5,
+            VK_NUMPAD6 => KeyCode::Numpad6,
+            VK_NUMPAD7 => KeyCode::Numpad7,
+            VK_NUMPAD8 => KeyCode::Numpad8,
+            VK_NUMPAD9 => KeyCode::Numpad9,
+            VK_SUBTRACT => KeyCode::NumpadSubtract,
+            VK_ADD => KeyCode::NumpadAdd,
+            VK_DECIMAL => KeyCode::NumpadDecimal,
+            VK_MULTIPLY => KeyCode::NumpadMultiply,
+            VK_DIVIDE => KeyCode::NumpadDivide,
+            VK_NUMLOCK => KeyCode::Numlock,
+            VK_UP => KeyCode::ArrowUp,
+            VK_DOWN => KeyCode::ArrowDown,
+            VK_LEFT => KeyCode::ArrowLeft,
+            VK_RIGHT => KeyCode::ArrowRight,
             _ => KeyCode::Unknown
         }
     }
