@@ -10,35 +10,66 @@ use {
             core::HRESULT,
             core::PCWSTR,
             core::PCSTR,
-            Win32::Foundation::WPARAM,
-            Win32::Foundation::LPARAM,
-            Win32::UI::WindowsAndMessaging::WNDCLASSEXW,
-            Win32::UI::WindowsAndMessaging::PM_REMOVE,
-            Win32::UI::WindowsAndMessaging::LoadIconW,
-            Win32::UI::WindowsAndMessaging::RegisterClassExW,
-            Win32::UI::WindowsAndMessaging::IsGUIThread,
-            Win32::UI::WindowsAndMessaging::GetMessageW,
-            Win32::UI::WindowsAndMessaging::TranslateMessage,
-            Win32::UI::WindowsAndMessaging::DispatchMessageW,
-            Win32::UI::WindowsAndMessaging::PeekMessageW,
-            Win32::UI::WindowsAndMessaging::SetTimer,
-            Win32::UI::WindowsAndMessaging::KillTimer,
-            Win32::UI::WindowsAndMessaging::PostMessageW,
-            Win32::UI::WindowsAndMessaging::ShowCursor,
-            Win32::UI::WindowsAndMessaging::SetCursor,
-            Win32::UI::WindowsAndMessaging::LoadCursorW,
-            Win32::UI::WindowsAndMessaging::IsProcessDPIAware,
-            Win32::Graphics::Gdi::HMONITOR,
-            Win32::Graphics::Gdi::GetDC,
-            Win32::Graphics::Gdi::MonitorFromWindow,
-            Win32::Graphics::Gdi::GetDeviceCaps,
-            Win32::Graphics::Gdi,
+            Win32::Foundation::{
+                WPARAM,
+                LPARAM
+            },
+            Win32::UI::WindowsAndMessaging::{
+                WNDCLASSEXW,
+                PM_REMOVE,
+                LoadIconW,
+                RegisterClassExW,
+                IsGUIThread,
+                GetMessageW,
+                TranslateMessage,
+                DispatchMessageW,
+                PeekMessageW,
+                SetTimer,
+                KillTimer,
+                PostMessageW,
+                ShowCursor,
+                SetCursor,
+                LoadCursorW,
+                IsProcessDPIAware,
+                IDC_ARROW,
+                IDC_CROSS,
+                IDC_HAND,
+                IDC_SIZEALL,
+                IDC_IBEAM,
+                IDC_HELP,
+                IDC_NO,
+                IDC_SIZEWE,
+                IDC_SIZENS,
+                IDC_SIZENESW,
+                IDC_SIZENWSE,
+                WM_QUIT,
+                CS_HREDRAW,
+                CS_VREDRAW,
+                CS_OWNDC,
+                IDI_WINLOGO,
+                WM_USER
+            },
+            Win32::Graphics::Gdi::{
+                HMONITOR,
+                GetDC,
+                MonitorFromWindow,
+                GetDeviceCaps,
+                MONITOR_DEFAULTTONEAREST,
+                LOGPIXELSX
+            },
             Win32::Foundation::S_OK,
             Win32::Foundation::HWND,
             Win32::Foundation::BOOL,
             Win32::Foundation::FARPROC,
-            Win32::UI::WindowsAndMessaging,
-            Win32::UI::HiDpi,
+            Win32::UI::HiDpi::{
+                PROCESS_DPI_AWARENESS,
+                DPI_AWARENESS_CONTEXT,
+                MONITOR_DPI_TYPE,
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
+                PROCESS_PER_MONITOR_DPI_AWARE,
+                MDT_EFFECTIVE_DPI
+            },
             Win32::System::LibraryLoader::GetModuleHandleW,
             Win32::System::LibraryLoader::LoadLibraryA,
             Win32::System::LibraryLoader::GetProcAddress,
@@ -95,12 +126,12 @@ impl Win32App {
         
         let class = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
-            style: WindowsAndMessaging::CS_HREDRAW
-                | WindowsAndMessaging::CS_VREDRAW
-                | WindowsAndMessaging::CS_OWNDC,
+            style: CS_HREDRAW
+                | CS_VREDRAW
+                | CS_OWNDC,
             lpfnWndProc: Some(Win32Window::window_class_proc),
             hInstance: unsafe {GetModuleHandleW(None).unwrap()},
-            hIcon: unsafe {LoadIconW(None, WindowsAndMessaging::IDI_WINLOGO).unwrap()}, //h_icon,
+            hIcon: unsafe {LoadIconW(None, IDI_WINLOGO).unwrap()}, //h_icon,
             lpszClassName: PCWSTR(b"MakepadWindow\0".as_ptr() as _),
             ..Default::default()
 /*            
@@ -150,7 +181,7 @@ impl Win32App {
                         let msg = msg.assume_init();
                         if ret == FALSE {
                             // Only happens if the message is `WM_QUIT`.
-                            debug_assert_eq!(msg.message, WindowsAndMessaging::WM_QUIT);
+                            debug_assert_eq!(msg.message, WM_QUIT);
                             self.event_flow = EventFlow::Exit;
                         }
                         else {
@@ -308,33 +339,33 @@ impl Win32App {
                 MouseCursor::Hidden => {
                     PCWSTR::null()
                 },
-                MouseCursor::Default => WindowsAndMessaging::IDC_ARROW,
-                MouseCursor::Crosshair => WindowsAndMessaging::IDC_CROSS,
-                MouseCursor::Hand => WindowsAndMessaging::IDC_HAND,
-                MouseCursor::Arrow => WindowsAndMessaging::IDC_ARROW,
-                MouseCursor::Move => WindowsAndMessaging::IDC_SIZEALL,
-                MouseCursor::Text => WindowsAndMessaging::IDC_IBEAM,
-                MouseCursor::Wait => WindowsAndMessaging::IDC_ARROW,
-                MouseCursor::Help => WindowsAndMessaging::IDC_HELP,
-                MouseCursor::NotAllowed => WindowsAndMessaging::IDC_NO,
+                MouseCursor::Default => IDC_ARROW,
+                MouseCursor::Crosshair => IDC_CROSS,
+                MouseCursor::Hand => IDC_HAND,
+                MouseCursor::Arrow => IDC_ARROW,
+                MouseCursor::Move => IDC_SIZEALL,
+                MouseCursor::Text => IDC_IBEAM,
+                MouseCursor::Wait => IDC_ARROW,
+                MouseCursor::Help => IDC_HELP,
+                MouseCursor::NotAllowed => IDC_NO,
                 
-                MouseCursor::EResize => WindowsAndMessaging::IDC_SIZEWE,
-                MouseCursor::NResize => WindowsAndMessaging::IDC_SIZENS,
-                MouseCursor::NeResize => WindowsAndMessaging::IDC_SIZENESW,
-                MouseCursor::NwResize => WindowsAndMessaging::IDC_SIZENWSE,
-                MouseCursor::SResize => WindowsAndMessaging::IDC_SIZENS,
-                MouseCursor::SeResize => WindowsAndMessaging::IDC_SIZENWSE,
-                MouseCursor::SwResize => WindowsAndMessaging::IDC_SIZENESW,
-                MouseCursor::WResize => WindowsAndMessaging::IDC_SIZEWE,
+                MouseCursor::EResize => IDC_SIZEWE,
+                MouseCursor::NResize => IDC_SIZENS,
+                MouseCursor::NeResize => IDC_SIZENESW,
+                MouseCursor::NwResize => IDC_SIZENWSE,
+                MouseCursor::SResize => IDC_SIZENS,
+                MouseCursor::SeResize => IDC_SIZENWSE,
+                MouseCursor::SwResize => IDC_SIZENESW,
+                MouseCursor::WResize => IDC_SIZEWE,
                 
                 
-                MouseCursor::NsResize => WindowsAndMessaging::IDC_SIZENS,
-                MouseCursor::NeswResize => WindowsAndMessaging::IDC_SIZENESW,
-                MouseCursor::EwResize => WindowsAndMessaging::IDC_SIZEWE,
-                MouseCursor::NwseResize => WindowsAndMessaging::IDC_SIZENWSE,
+                MouseCursor::NsResize => IDC_SIZENS,
+                MouseCursor::NeswResize => IDC_SIZENESW,
+                MouseCursor::EwResize => IDC_SIZEWE,
+                MouseCursor::NwseResize => IDC_SIZENWSE,
                 
-                MouseCursor::ColResize => WindowsAndMessaging::IDC_SIZEWE,
-                MouseCursor::RowResize => WindowsAndMessaging::IDC_SIZENS,
+                MouseCursor::ColResize => IDC_SIZEWE,
+                MouseCursor::RowResize => IDC_SIZENS,
             };
             self.current_cursor = cursor;
             unsafe {
@@ -354,10 +385,10 @@ impl Win32App {
 // reworked from winit windows platform https://github.com/rust-windowing/winit/blob/eventloop-2.0/src/platform_impl/windows/dpi.rs
 
 type SetProcessDPIAware = unsafe extern "system" fn () -> BOOL;
-type SetProcessDpiAwareness = unsafe extern "system" fn (value: HiDpi::PROCESS_DPI_AWARENESS,) -> HRESULT;
-type SetProcessDpiAwarenessContext = unsafe extern "system" fn (value: HiDpi::DPI_AWARENESS_CONTEXT,) -> BOOL;
+type SetProcessDpiAwareness = unsafe extern "system" fn (value: PROCESS_DPI_AWARENESS,) -> HRESULT;
+type SetProcessDpiAwarenessContext = unsafe extern "system" fn (value: DPI_AWARENESS_CONTEXT,) -> BOOL;
 type GetDpiForWindow = unsafe extern "system" fn (hwnd: HWND) -> u32;
-type GetDpiForMonitor = unsafe extern "system" fn (hmonitor: HMONITOR, dpi_type: HiDpi::MONITOR_DPI_TYPE, dpi_x: *mut u32, dpi_y: *mut u32) -> HRESULT;
+type GetDpiForMonitor = unsafe extern "system" fn (hmonitor: HMONITOR, dpi_type: MONITOR_DPI_TYPE, dpi_x: *mut u32, dpi_y: *mut u32) -> HRESULT;
 type EnableNonClientDpiScaling = unsafe extern "system" fn (hwnd: HWND) -> BOOL;
 
 // Helper function to dynamically load function pointer.
@@ -393,7 +424,7 @@ pub fn encode_wide(string: impl AsRef<OsStr>) -> Vec<u16> {
 pub fn post_signal_to_hwnd(hwnd:HWND, signal:Signal){
     unsafe{PostMessageW(
         hwnd,
-        WindowsAndMessaging::WM_USER,
+        WM_USER,
         WPARAM(((signal.0.0)&0xffff_ffff) as usize),
         LPARAM(((signal.0.0>>32)&0xffff_ffff) as isize),
     )};
@@ -426,15 +457,15 @@ impl DpiFunctions {
         unsafe {
             if let Some(set_process_dpi_awareness_context) = self.set_process_dpi_awareness_context {
                 // We are on Windows 10 Anniversary Update (1607) or later.
-                if set_process_dpi_awareness_context(HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == FALSE {
+                if set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == FALSE {
                     // V2 only works with Windows 10 Creators Update (1703). Try using the older
                     // V1 if we can't set V2.
-                    set_process_dpi_awareness_context(HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+                    set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
                 }
             }
             else if let Some(set_process_dpi_awareness) = self.set_process_dpi_awareness {
                 // We are on Windows 8.1 or later.
-                set_process_dpi_awareness(HiDpi::PROCESS_PER_MONITOR_DPI_AWARE).unwrap();
+                set_process_dpi_awareness(PROCESS_PER_MONITOR_DPI_AWARE).unwrap();
             }
             else if let Some(set_process_dpi_aware) = self.set_process_dpi_aware {
                 // We are on Vista or later.
@@ -483,14 +514,14 @@ impl DpiFunctions {
             }
             else if let Some(get_dpi_for_monitor) = self.get_dpi_for_monitor {
                 // We are on Windows 8.1 or later.
-                let monitor = MonitorFromWindow(hwnd, Gdi::MONITOR_DEFAULTTONEAREST);
+                let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                 if monitor.is_invalid() {
                     BASE_DPI
                 }
                 else {
                     let mut dpi_x = 0;
                     let mut dpi_y = 0;
-                    if get_dpi_for_monitor(monitor, HiDpi::MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == S_OK {
+                    if get_dpi_for_monitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == S_OK {
                         dpi_x as u32
                     } else {
                         BASE_DPI
@@ -502,7 +533,7 @@ impl DpiFunctions {
                 if IsProcessDPIAware() == TRUE{
                     // If the process is DPI aware, then scaling must be handled by the application using
                     // this DPI value.
-                    GetDeviceCaps(hdc, Gdi::LOGPIXELSX) as u32
+                    GetDeviceCaps(hdc, LOGPIXELSX) as u32
                 } else {
                     // If the process is DPI unaware, then scaling is performed by the OS; we thus return
                     // 96 (scale factor 1.0) to prevent the window from being re-scaled by both the
