@@ -29,6 +29,7 @@ live_design!{
                     return sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
                 }
             }
+            return #0
         }
 
         fn pixel(self) -> vec4 {

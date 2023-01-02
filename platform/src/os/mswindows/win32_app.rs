@@ -104,7 +104,7 @@ pub struct Win32App {
     pub time_start: i64,
     pub time_freq: i64,
     event_callback: Option<Box<dyn FnMut(&mut Win32App, Vec<Win32Event>) -> EventFlow >>,
-    
+    pub window_class_name: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
     pub race_signals: Mutex<Vec<Signal>>,
@@ -123,7 +123,7 @@ pub enum Win32Timer {
 
 impl Win32App {
     pub fn new(event_callback: Box<dyn FnMut(&mut Win32App, Vec<Win32Event>) -> EventFlow>) -> Win32App {
-        
+        let window_class_name = encode_wide("MakepadWindow\0");
         let class = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW
@@ -132,7 +132,7 @@ impl Win32App {
             lpfnWndProc: Some(Win32Window::window_class_proc),
             hInstance: unsafe {GetModuleHandleW(None).unwrap()},
             hIcon: unsafe {LoadIconW(None, IDI_WINLOGO).unwrap()}, //h_icon,
-            lpszClassName: PCWSTR(b"MakepadWindow\0".as_ptr() as _),
+            lpszClassName: PCWSTR(window_class_name.as_ptr()),
             ..Default::default()
 /*            
             cbClsExtra: 0,
@@ -144,7 +144,7 @@ impl Win32App {
         };
         
         unsafe {
-            RegisterClassExW(&class);
+            let ret = RegisterClassExW(&class);
             IsGUIThread(TRUE);
         }
         
@@ -155,6 +155,7 @@ impl Win32App {
         unsafe{QueryPerformanceFrequency(&mut time_freq)};
 
         let win32_app = Win32App {
+            window_class_name,
             time_start,
             time_freq,
             race_signals: Mutex::new(Vec::new()),
