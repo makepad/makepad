@@ -305,7 +305,7 @@ impl Win32Window {
             
             let hwnd = CreateWindowExW(
                 style_ex,
-                PCWSTR(b"MakepadWindow\0".as_ptr() as _),
+                PCWSTR(get_win32_app_global().window_class_name.as_ptr()),
                 PCWSTR(title.as_ptr()),
                 style,
                 x,
@@ -317,7 +317,7 @@ impl Win32Window {
                 GetModuleHandleW(None).unwrap(),
                 None,
             );
-            
+
             self.hwnd = Some(hwnd);
             
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, self as *const _ as isize);

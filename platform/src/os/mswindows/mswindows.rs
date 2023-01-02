@@ -25,7 +25,6 @@ use {
 impl Cx {
     
     pub fn event_loop(mut self) {
-        
         self.platform_type = OsType::MsWindows;
         let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
         let cx = Rc::new(RefCell::new(self));
@@ -41,7 +40,8 @@ impl Cx {
                 cx.win32_event_callback(win32_app, events, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
-        
+        cx.borrow_mut().call_event_handler(&Event::Construct);
+        cx.borrow_mut().redraw_all();
         get_win32_app_global().event_loop();
     }
     
@@ -227,6 +227,7 @@ impl Cx {
                         window.create_position,
                         &window.create_title
                     );
+
                     window.window_geom = d3d11_window.window_geom.clone();
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;
