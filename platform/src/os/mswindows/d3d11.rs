@@ -128,6 +128,11 @@ impl Cx {
         //self.views[view_id].set_clipping_uniforms();
         self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
         
+        {
+            let draw_list = &mut self.draw_lists[draw_list_id];
+            draw_list.os.view_uniforms.update_with_f32_constant_data(d3d11_cx, draw_list.draw_list_uniforms.as_slice());
+        }
+        
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].kind.sub_list() {
                 self.render_view(
@@ -143,7 +148,7 @@ impl Cx {
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
                     draw_call
-                }else {
+                } else {
                     continue;
                 };
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
@@ -210,12 +215,12 @@ impl Cx {
                     d3d11_cx.context.IASetVertexBuffers(0, 2, Some(buffers.as_ptr()), Some(strides.as_ptr()), Some(offsets.as_ptr()));
                     
                     let buffers = [
+                        shp.live_uniforms.buffer.clone(),
+                        shp.const_table_uniforms.buffer.clone(),
+                        draw_item.os.draw_uniforms.buffer.clone(),
                         self.passes[pass_id].os.pass_uniforms.buffer.clone(),
                         draw_list.os.view_uniforms.buffer.clone(),
-                        draw_item.os.draw_uniforms.buffer.clone(),
                         draw_item.os.user_uniforms.buffer.clone(),
-                        shp.live_uniforms.buffer.clone(),
-                        shp.const_table_uniforms.buffer.clone()
                     ];
                     d3d11_cx.context.VSSetConstantBuffers(0, Some(&buffers));
                     d3d11_cx.context.PSSetConstantBuffers(0, Some(&buffers));
@@ -225,7 +230,7 @@ impl Cx {
                     
                     let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
                         texture_id
-                    }else {
+                    } else {
                         continue;
                     };
                     
@@ -253,7 +258,7 @@ impl Cx {
                     }
                 }
                 //if self.passes[pass_id].debug{
-                //    println!("DRAWING PASS {} {}", geometry.indices.len(), instances);
+                  // println!("DRAWING {} {}", geometry.indices.len(), instances);
                 //}
                 unsafe {
                     d3d11_cx.context.DrawIndexedInstanced(
@@ -294,7 +299,6 @@ impl Cx {
         unsafe {
             d3d11_cx.context.RSSetViewports(Some(&[viewport]));
         }
-        
         // set up the color texture array
         let mut color_textures = Vec::new();
         
@@ -352,7 +356,7 @@ impl Cx {
             }
             unsafe {d3d11_cx.context.OMSetRenderTargets(
                 Some(&color_textures),
-                cxtexture.os.depth_stencil_view.as_ref().unwrap()
+                None,//cxtexture.os.depth_stencil_view.as_ref().unwrap()
             )}
         }
         else {
@@ -630,6 +634,9 @@ impl D3d11Buffer {
     }
     
     pub fn update_with_f32_constant_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
+        if data.len() == 0{
+            return
+        }
         if (data.len() & 3) != 0 { // we have to align the data at the end
             let mut new_data = data.to_vec();
             let steps = 4 - (data.len() & 3);
@@ -653,7 +660,6 @@ impl D3d11Buffer {
             MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
             StructureByteStride: 0
         };
-        
         self.buffer = Some(
             unsafe {d3d11_cx.device.CreateBuffer(&buffer_desc, Some(&sub_data)).unwrap()}
         );
@@ -903,7 +909,7 @@ impl CxOsPass {
             d3d11_cx.context.RSSetState(self.raster_state.as_ref().unwrap());
             let blend_factor = [0., 0., 0., 0.];
             d3d11_cx.context.OMSetBlendState(self.blend_state.as_ref().unwrap(), Some(blend_factor.as_ptr()), 0xffffffff);
-            d3d11_cx.context.OMSetDepthStencilState(self.depth_stencil_state.as_ref().unwrap(), 0);
+            //d3d11_cx.context.OMSetDepthStencilState(self.depth_stencil_state.as_ref().unwrap(), 0);
         }
     }
 }
@@ -951,7 +957,7 @@ impl CxOsDrawShader {
                     None, // include
                     PCSTR(entry.as_ptr()), // entry point
                     PCSTR(target.as_ptr()), // target
-                    1, // flags1
+                    0, // flags1
                     0, // flags2
                     &mut blob,
                     Some(&mut errors)
@@ -1017,7 +1023,7 @@ impl CxOsDrawShader {
             std::slice::from_raw_parts(ps_blob.GetBufferPointer() as *const u8, ps_blob.GetBufferSize() as usize),
             None
         ).unwrap()};
-        
+         
         let mut layout_desc = Vec::new();
         let mut strings = Vec::new();
         
@@ -1090,10 +1096,16 @@ impl CxOsDrawShader {
             ).unwrap()
         };
         
+        let mut live_uniforms = D3d11Buffer::default();
+        live_uniforms.update_with_f32_constant_data(d3d11_cx, mapping.live_uniforms_buf.as_ref());
+        
+        let mut const_table_uniforms = D3d11Buffer::default();
+        const_table_uniforms.update_with_f32_constant_data(d3d11_cx, mapping.const_table.table.as_ref());
+        
         Some(Self {
             hlsl,
-            const_table_uniforms: Default::default(),
-            live_uniforms: Default::default(),
+            const_table_uniforms,
+            live_uniforms,
             pixel_shader: ps,
             vertex_shader: vs,
             pixel_shader_blob: ps_blob,
