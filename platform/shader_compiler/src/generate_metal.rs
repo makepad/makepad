@@ -49,11 +49,19 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_shader(&mut self) {
         writeln!(self.string, "#include <metal_stdlib>").unwrap();
         writeln!(self.string, "using namespace metal;").unwrap();
+
+        let mut all_constructor_fns = BTreeSet::new();
+        
+        for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
+            let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
+            all_constructor_fns.extend(fn_def.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
+        }
         
         for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
             if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
                 writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::nearest,min_filter::nearest),pos);}}").unwrap();
+                break;
             }
             if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d_rt))) {
                 writeln!(self.string, "float4 sample2d_rt(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::nearest,min_filter::nearest),pos);}}").unwrap();
@@ -69,16 +77,10 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_instance_struct();
         self.generate_varying_struct();
         
-        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
-        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
-        
-        for &(ty_lit, ref param_tys) in pixel_def
-            .constructor_fn_deps
-            .borrow_mut()
-            .as_ref()
-            .unwrap()
-            .union(vertex_def.constructor_fn_deps.borrow().as_ref().unwrap())
-        {
+        //let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
+        //let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
+
+        for (ty_lit, ref param_tys) in all_constructor_fns{
             generate_cons_fn(self.backend_writer, self.string, ty_lit, &param_tys);
         }
         
@@ -447,9 +449,10 @@ struct MetalBackendWriter<'a> {
 
 impl<'a> BackendWriter for MetalBackendWriter<'a> {
     
-    fn needs_cstyle_struct_cons(&self) -> bool {
-        false
+    fn get_struct_cons_type(&self) -> StructConsType {
+        StructConsType::Brace
     }
+
     
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
         false
@@ -470,9 +473,9 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
     
     fn use_cons_fn(&self, what: &str) -> bool {
         match what {
-            "mpsc_mat3_mat4" => true,
-            "mpsc_mat2_mat4" => true,
-            "mpsc_mat2_mat3" => true,
+            "consfn_mat3_mat4" => true,
+            "consfn_mat2_mat4" => true,
+            "consfn_mat2_mat3" => true,
             _ => false
         }
     }

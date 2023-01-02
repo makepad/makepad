@@ -43,11 +43,24 @@ struct DrawShaderGenerator<'a> {
 impl<'a> DrawShaderGenerator<'a> {
     fn generate_shader(&mut self) {
         
+        let mut all_constructor_fns = BTreeSet::new();
+        
+        for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
+            let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
+            all_constructor_fns.extend(fn_def.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
+        }
+
         for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
             if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d))) {
                 writeln!(self.string, "SamplerState default_texture_sampler{{Filter=MIN_MAX_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;}};").unwrap();
                 writeln!(self.string, "float4 sample2d(Texture2D tex, float2 pos){{return tex.Sample(default_texture_sampler,pos);}}").unwrap();
+                break;
+            }
+
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(live_id!(sample2d_rt))) {
+                writeln!(self.string, "SamplerState default_texture_sampler{{Filter=MIN_MAX_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;}};").unwrap();
+                writeln!(self.string, "float4 sample2d_rt(Texture2D tex, float2 pos){{return tex.Sample(default_texture_sampler,pos);}}").unwrap();
                 break;
             }
         };
@@ -60,16 +73,10 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_instance_struct();
         self.generate_varying_struct();
         
-        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
-        let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
+        //let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(vertex))).unwrap();
+        //let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(live_id!(pixel))).unwrap();
         
-        for &(ty_lit, ref param_tys) in vertex_def
-            .constructor_fn_deps
-            .borrow_mut()
-            .as_ref()
-            .unwrap()
-            .union(pixel_def.constructor_fn_deps.borrow().as_ref().unwrap())
-        {
+        for (ty_lit, ref param_tys) in all_constructor_fns{
             generate_cons_fn(self.backend_writer, self.string, ty_lit, &param_tys);
         }
         
@@ -123,6 +130,28 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
             }
             writeln!(self.string, "}};").unwrap();
+            
+            write!(self.string, "{0} consfn_{0}(", struct_ptr).unwrap();
+            if !struct_def.fields.is_empty() {
+                writeln!(self.string).unwrap();
+                let mut sep = "";
+                for field in &struct_def.fields {
+                    write!(self.string, "{}", sep).unwrap();
+                    self.write_var_decl(
+                        &DisplayStructField(field.ident),
+                        field.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
+                    sep = ", ";
+                }
+            }
+            writeln!(self.string, "){{;").unwrap();
+            writeln!(self.string, "{} r;", struct_ptr).unwrap();
+            if !struct_def.fields.is_empty() {
+                for field in &struct_def.fields {
+                    writeln!(self.string, "r.{0} = {0};", DisplayStructField(field.ident)).unwrap();
+                }
+            }
+            writeln!(self.string, "return r;\n}}").unwrap();
         }
     }
     
@@ -225,7 +254,14 @@ impl<'a> DrawShaderGenerator<'a> {
                             writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
                             index += 1;
                         },
-                        _ => panic!("unsupported type in generate_instance_struct")
+                        Ty::Enum(_) => {
+                            write!(self.string, "    ").unwrap();
+                            self.write_ty_lit(TyLit::Int);
+                            write!(self.string, " {}", &DisplayDsIdent(field.ident)).unwrap();
+                            writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
+                            index += 1;
+                        },
+                        x => panic!("unsupported type in generate_instance_struct {:?}", x)
                     }
                 }
                 _ => {}
@@ -279,7 +315,14 @@ impl<'a> DrawShaderGenerator<'a> {
                             writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
                             index += 1;
                         },
-                        _ => panic!("unsupported type in generate_varying_struct")
+                        Ty::Enum(_) =>{
+                            write!(self.string, "    ").unwrap();
+                            self.write_ty_lit(TyLit::Int);
+                            write!(self.string, " {}", &DisplayDsIdent(field.ident)).unwrap();
+                            writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
+                            index += 1;
+                        }
+                        x => panic!("unsupported type in generate_varying_struct {:?}", x)
                     }
                 }
                 DrawShaderFieldKind::Varying {..} => {
@@ -433,6 +476,7 @@ impl<'a> DrawShaderGenerator<'a> {
             Ty::Mat2 => write!(self.string, "float2x2(0.0,0.0, 0.0,0.0)").unwrap(),
             Ty::Mat3 => write!(self.string, "float3x3(0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,0.0,0.0)").unwrap(),
             Ty::Mat4 => write!(self.string, "float4x4(0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0)").unwrap(),
+            Ty::Enum(_) => write!(self.string, "0").unwrap(),
             _ => panic!("Implement init for type")
         }
     }
@@ -454,8 +498,8 @@ struct HlslBackendWriter<'a> {
 
 impl<'a> BackendWriter for HlslBackendWriter<'a> {
     
-    fn needs_cstyle_struct_cons(&self) -> bool {
-        false
+    fn get_struct_cons_type(&self) -> StructConsType {
+        StructConsType::ConsFn
     }
     
     fn enum_is_float(&self)->bool{
@@ -476,9 +520,9 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
     
     fn use_cons_fn(&self, what: &str) -> bool {
         match what {
-            "mpsc_vec4_float_float_float_float" => false,
-            "mpsc_vec3_float_float_float" => false,
-            "mpsc_vec2_float_float" => false,
+            "consfn_vec4_float_float_float_float" => false,
+            "consfn_vec3_float_float_float" => false,
+            "consfn_vec2_float_float" => false,
             _ => true
         }
     }
@@ -604,25 +648,24 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
     
     fn write_call_expr_hidden_args(&self, string: &mut String, hidden_args: &BTreeSet<HiddenArgKind >, sep: &str) {
         let mut sep = sep;
-        if self.const_table.table.len()>0 {
+        /*if self.const_table.table.len()>0 {
             write!(string, "{}", sep).unwrap();
             sep = ", ";
             write!(string, "const_table").unwrap();
         }
-        
+        */
         for hidden_arg in hidden_args {
-            write!(string, "{}", sep).unwrap();
             match hidden_arg {
                 HiddenArgKind::Geometries => {
-                    write!(string, "geometries").unwrap();
+                    write!(string, "{}geometries",sep).unwrap();
                     sep = ", ";
                 }
                 HiddenArgKind::Instances => {
-                    write!(string, "instances").unwrap();
+                    write!(string, "{}instances",sep).unwrap();
                     sep = ", ";
                 }
                 HiddenArgKind::Varyings => {
-                    write!(string, "varyings").unwrap();
+                    write!(string, "{}varyings",sep).unwrap();
                     sep = ", ";
                 }
                 _ => ()
@@ -634,18 +677,17 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
         let mut sep = sep;
         
         for hidden_arg in hidden_args {
-            write!(string, "{}", sep).unwrap();
             match hidden_arg {
                 HiddenArgKind::Geometries => {
-                    write!(string, "in Geometries geometries").unwrap();
+                    write!(string, "{}in Geometries geometries", sep).unwrap();
                     sep = ", ";
                 }
                 HiddenArgKind::Instances => {
-                    write!(string, "in Instances instances").unwrap();
+                    write!(string, "{}in Instances instances", sep).unwrap();
                     sep = ", ";
                 }
                 HiddenArgKind::Varyings => {
-                    write!(string, "inout Varyings varyings").unwrap();
+                    write!(string, "{}inout Varyings varyings", sep).unwrap();
                     sep = ", ";
                 }
                 _ => ()

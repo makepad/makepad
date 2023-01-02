@@ -664,6 +664,7 @@ impl<'a> ShaderParser<'a> {
         let enum_name = self.expect_ident(live_error_origin!()) ?;
         self.expect_token(LiveToken::Punct(live_id!(::))) ?;
         let enum_variant = self.expect_ident(live_error_origin!()) ?;
+        
         self.expect_token(LiveToken::Punct(live_id!( =>))) ?;
         let block = self.expect_block() ?;
         Ok(span.end(self, | span | Match {

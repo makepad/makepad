@@ -297,30 +297,31 @@ impl Cx {
         
         // set up the color texture array
         let mut color_textures = Vec::new();
-        for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
-            let render_target;
-            let is_initial;
-            if index == 0 && first_target.is_some() {
-                render_target = first_target.clone();
-                is_initial = true;
-            }
-            else {
+        
+        if let Some(render_target) = first_target {
+            color_textures.push(Some(render_target.clone()));
+            let color = self.passes[pass_id].clear_color;
+            let color = [color.x, color.y, color.z, color.w];
+            unsafe {d3d11_cx.context.ClearRenderTargetView(first_target.as_ref().unwrap(), color.as_ptr())}
+        }
+        else {
+            for color_texture in self.passes[pass_id].color_textures.iter() {
                 let cxtexture = &mut self.textures[color_texture.texture_id];
-                is_initial = cxtexture.os.update_render_target(d3d11_cx, &cxtexture.desc, pass_size * dpi_factor);
-                render_target = cxtexture.os.render_target_view.clone();
-            }
-            color_textures.push(render_target.clone());
-            // possibly clear it
-            match color_texture.clear_color {
-                PassClearColor::InitWith(color) => {
-                    if is_initial {
+                let is_initial = cxtexture.os.update_render_target(d3d11_cx, &cxtexture.desc, pass_size * dpi_factor);
+                let render_target = cxtexture.os.render_target_view.clone();
+                color_textures.push(render_target.clone());
+                // possibly clear it
+                match color_texture.clear_color {
+                    PassClearColor::InitWith(color) => {
+                        if is_initial {
+                            let color = [color.x, color.y, color.z, color.w];
+                            unsafe {d3d11_cx.context.ClearRenderTargetView(render_target.as_ref().unwrap(), color.as_ptr())}
+                        }
+                    },
+                    PassClearColor::ClearWith(color) => {
                         let color = [color.x, color.y, color.z, color.w];
                         unsafe {d3d11_cx.context.ClearRenderTargetView(render_target.as_ref().unwrap(), color.as_ptr())}
                     }
-                },
-                PassClearColor::ClearWith(color) => {
-                    let color = [color.x, color.y, color.z, color.w];
-                    unsafe {d3d11_cx.context.ClearRenderTargetView(render_target.as_ref().unwrap(), color.as_ptr())}
                 }
             }
         }
@@ -372,7 +373,7 @@ impl Cx {
     pub fn draw_pass_to_window(&mut self, pass_id: PassId, vsync: bool, dpi_factor: f64, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-        
+
         self.setup_pass_render_targets(pass_id, dpi_factor, &d3d11_window.render_target_view, d3d11_cx);
         
         let mut zbias = 0.0;
@@ -760,13 +761,13 @@ impl CxOsTexture {
             Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {Count: 1, Quality: 0},
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_DEPTH_STENCIL, // | d3d11::D3D11_BIND_SHADER_RESOURCE,
+            BindFlags: D3D11_BIND_DEPTH_STENCIL, // | D3D11_BIND_SHADER_RESOURCE,
             CPUAccessFlags: D3D11_CPU_ACCESS_FLAG(0),
             MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
         };
         
         let texture = unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None).unwrap()};
-        let shader_resource_view = unsafe {d3d11_cx.device.CreateShaderResourceView(&texture, None).unwrap()};
+        //let shader_resource_view = unsafe {d3d11_cx.device.CreateShaderResourceView(&texture, None).unwrap()};
         
         let dsv_desc = D3D11_DEPTH_STENCIL_VIEW_DESC {
             Format: DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
@@ -781,7 +782,7 @@ impl CxOsTexture {
         self.height = height;
         self.depth_stencil_view = Some(depth_stencil_view);
         self.texture = Some(texture);
-        self.shader_resource_view = Some(shader_resource_view);
+        self.shader_resource_view = None; //Some(shader_resource_view);
         
         return true
     }
@@ -937,7 +938,7 @@ impl CxOsDrawShader {
     
     fn new(d3d11_cx: &D3d11Cx, hlsl: String, mapping: &CxDrawShaderMapping) -> Option<Self> {
         
-        fn compile_shader(entry: &str, target: &str, shader: &str) -> Result<ID3DBlob, String> {
+        fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<ID3DBlob, String> {
             unsafe {
                 let shader_bytes = shader.as_bytes();
                 let mut blob = None;
@@ -986,10 +987,10 @@ impl CxOsDrawShader {
                 _ => panic!("slots_to_dxgi_format unsupported slotcount {}", slots)
             }
         }
-
-        let vs_blob = match compile_shader("vs\0", "mpsc_vertex_main\0", &hlsl) {
+        
+        let vs_blob = match compile_shader("vs_5_0\0", "vertex_main\0", &hlsl) {
             Err(msg) => {
-                println!("Cannot compile vertexshader {} {}", split_source(&hlsl), msg);
+                println!("Cannot compile vertexshader\n{}\n{}", msg, split_source(&hlsl));
                 return None
             },
             Ok(blob) => {
@@ -997,9 +998,9 @@ impl CxOsDrawShader {
             }
         };
         
-        let ps_blob = match compile_shader("ps\0", "mpsc_vertex_main\0", &hlsl) {
+        let ps_blob = match compile_shader("ps_5_0\0", "pixel_main\0", &hlsl) {
             Err(msg) => {
-                println!("Cannot compile pixelshader {} {}", split_source(&hlsl), msg);
+                println!("Cannot compile pixelshader\n{}\n{}", msg, split_source(&hlsl));
                 return None
             },
             Ok(blob) => {
@@ -1089,7 +1090,7 @@ impl CxOsDrawShader {
             ).unwrap()
         };
         
-        Some(Self{
+        Some(Self {
             hlsl,
             const_table_uniforms: Default::default(),
             live_uniforms: Default::default(),
