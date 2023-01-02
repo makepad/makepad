@@ -769,9 +769,8 @@ struct GlslBackendWriter<'a> {
 }
 
 impl<'a> BackendWriter for GlslBackendWriter<'a> {
-    
-    fn needs_cstyle_struct_cons(&self) -> bool {
-        true
+    fn get_struct_cons_type(&self) -> StructConsType {
+        StructConsType::Paren
     }
     
     fn enum_is_float(&self) -> bool {

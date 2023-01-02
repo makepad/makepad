@@ -231,11 +231,6 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node){
     let source = parse_file(file).unwrap();
     let symbols = source.parse_use();
     let symbols = filter_symbols(symbols, id!(crate.windows_crate.Win32));
-    // alright we have our symbols
-    // now what. now we should take each symbol and construct a file path
-    // and then load that file.
-    // ok so we now have our windows deps.
-    // ok now we need to filter to crate::windows_crate::
 
     fn push_unique(output:&mut Node, what:&[LiveId], value:String){
         if what.len() == 1{
@@ -324,7 +319,7 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node){
     
     for sym in symbols {
         // allright lets open the module
-        let mut path = format!("./platform/bind/windows/src/Windows/Win32");
+        let mut path = format!("./platform/bind/windows/generate/src/Windows/Win32");
         // ok so everything is going to go into the module Win32
         // but how do we sort the substructure
         for i in 0..sym.len() - 1 { 
