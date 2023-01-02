@@ -159,7 +159,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "cbuffer LiveUniforms : register(b0) {{").unwrap();
         for (value_node_ptr, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
             write!(self.string, "    ").unwrap();
-            self.write_ty_lit(ty.maybe_ty_lit().unwrap());
+            self.write_ty_lit(ty.maybe_ty_lit().unwrap()); 
             write!(self.string, " ").unwrap();
             write!(self.string, "{}", value_node_ptr).unwrap();
             writeln!(self.string, ";").unwrap();
@@ -168,18 +168,22 @@ impl<'a> DrawShaderGenerator<'a> {
         
         writeln!(self.string, "cbuffer ConstTable : register(b1){{float4 const_table[{}];}};", self.const_table.table.len() >> 2).unwrap();
         
-        let mut index = 2;
-        
         for (ident, vec) in fields_as_uniform_blocks {
+            let index = match ident.0{
+                live_id!(draw)=>2,
+                live_id!(pass)=>3,
+                live_id!(user)=>5,
+                live_id!(view)=>4,
+                _=>panic!()
+            };
             writeln!(self.string, "cbuffer Uniforms_{} : register(b{}) {{", ident, index).unwrap();
             for (index, _item) in vec {
                 let field = &self.draw_shader_def.fields[*index];
                 write!(self.string, "    ").unwrap();
                 self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
                 writeln!(self.string, ";").unwrap();
-            }
+            } 
             writeln!(self.string, "}};").unwrap();
-            index += 1;
         }
     }
     
