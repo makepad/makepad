@@ -319,27 +319,6 @@ impl CxOsApi for Cx {
     }
 }
 
-impl CxMediaApi for Cx{
-    
-    fn send_midi_data(&mut self, _data:MidiData){
-    }
-    
-    fn handle_midi_received(&mut self, _event:&Event)->Vec<MidiInputData>{
-        Vec::new()
-    }
-    
-    fn handle_midi_inputs(&mut self, _event:&Event)->Vec<MidiInputInfo>{
-        Vec::new()
-    }
-    
-    fn start_midi_input(&mut self) {
-    }
-    
-    fn start_audio_output<F>(&mut self, _f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static {
-        
-    }
-}
-
 
 #[derive(Default)]
 pub struct CxOs {
