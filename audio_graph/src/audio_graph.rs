@@ -43,11 +43,9 @@ pub struct AudioGraph {
 
 impl LiveHook for AudioGraph {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        return
         Self::start_audio_output(cx, self.from_ui.receiver(), self.to_ui.sender());
         // we should have a component
         
-        #[allow(unreachable_code)]
         if let Some(root) = self.root.as_mut() {
             let graph_node = root.get_graph_node(cx);
             self.from_ui.send(FromUI::NewRoot(graph_node)).unwrap();

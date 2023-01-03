@@ -151,6 +151,7 @@ use {
                 IDXGISwapChain,
             },
             Win32::Foundation::{
+                WIN32_ERROR,
                 CHAR,
                 FILETIME,
                 LUID,
@@ -195,6 +196,9 @@ use {
             Win32::UI::Shell::PropertiesSystem {
                 IPropertyStore,
                 PROPERTYKEY
+            },
+            Win32::Security::{
+                SECURITY_ATTRIBUTES
             },
             Win32::System::Com::{
                 ITypeComp,
@@ -295,6 +299,8 @@ use {
                 STGMOVE,
             },
             Win32::Media::Audio::{
+                WAVEFORMATEX,
+                AUDCLNT_SHAREMODE,
                 Identity,
                 EDataFlow,
                 IMMDeviceCollection,
