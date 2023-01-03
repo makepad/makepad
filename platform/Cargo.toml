@@ -68,7 +68,9 @@ features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_System_Ole"
 ]
-# windows = "0.43"
-# wio = "0.2"
-# time = "0.1.4"

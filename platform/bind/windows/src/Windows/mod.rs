@@ -1,4 +1,4 @@
-#![allow(non_camel_case_types)]
+#![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]
 pub mod Win32{
 pub mod Foundation{
 #[derive(PartialEq, Eq)]#[repr(transparent)]
@@ -239,6 +239,96 @@ impl ::core::fmt::Debug for RECT {
     }
 }
 
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct HINSTANCE(pub isize);
+impl HINSTANCE {
+    pub fn is_invalid(&self) -> bool {
+        self.0 == 0
+    }
+}
+impl ::core::marker::Copy for HINSTANCE {}
+impl ::core::clone::Clone for HINSTANCE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for HINSTANCE {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for HINSTANCE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for HINSTANCE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("HINSTANCE").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<HINSTANCE>> for HINSTANCE {
+    fn from(optional: ::core::option::Option<HINSTANCE>) -> HINSTANCE {
+        optional.unwrap_or_default()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct CHAR(pub u8);
+impl ::core::marker::Copy for CHAR {}
+impl ::core::clone::Clone for CHAR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CHAR {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CHAR {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CHAR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("CHAR").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<CHAR>> for CHAR {
+    fn from(optional: ::core::option::Option<CHAR>) -> CHAR {
+        optional.unwrap_or_default()
+    }
+}
+
+#[repr(C)]
+pub struct FILETIME {
+    pub dwLowDateTime: u32,
+    pub dwHighDateTime: u32,
+}
+impl ::core::marker::Copy for FILETIME {}
+impl ::core::cmp::Eq for FILETIME {}
+impl ::core::cmp::PartialEq for FILETIME {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<FILETIME>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for FILETIME {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for FILETIME {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for FILETIME {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for FILETIME {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("FILETIME").field("dwLowDateTime", &self.dwLowDateTime).field("dwHighDateTime", &self.dwHighDateTime).finish()
+    }
+}
+
 #[repr(C)]
 pub struct LUID {
     pub LowPart: u32,
@@ -301,35 +391,143 @@ impl ::core::fmt::Debug for POINT {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HINSTANCE(pub isize);
-impl HINSTANCE {
-    pub fn is_invalid(&self) -> bool {
-        self.0 == 0
+#[repr(C)]
+pub struct DECIMAL {
+    pub wReserved: u16,
+    pub Anonymous1: DECIMAL_0,
+    pub Hi32: u32,
+    pub Anonymous2: DECIMAL_1,
+}
+impl ::core::marker::Copy for DECIMAL {}
+impl ::core::cmp::Eq for DECIMAL {}
+impl ::core::cmp::PartialEq for DECIMAL {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL>()) == 0 }
     }
 }
-impl ::core::marker::Copy for HINSTANCE {}
-impl ::core::clone::Clone for HINSTANCE {
+impl ::core::clone::Clone for DECIMAL {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl ::core::default::Default for HINSTANCE {
+impl ::core::default::Default for DECIMAL {
     fn default() -> Self {
         unsafe { ::core::mem::zeroed() }
     }
 }
-unsafe impl ::windows::core::Abi for HINSTANCE {
+unsafe impl ::windows::core::Abi for DECIMAL {
     type Abi = Self;
 }
-impl ::core::fmt::Debug for HINSTANCE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("HINSTANCE").field(&self.0).finish()
+
+#[repr(C)]pub union DECIMAL_0 {
+    pub Anonymous: DECIMAL_0_0,
+    pub signscale: u16,
+}
+impl ::core::marker::Copy for DECIMAL_0 {}
+impl ::core::cmp::Eq for DECIMAL_0 {}
+impl ::core::cmp::PartialEq for DECIMAL_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_0>()) == 0 }
     }
 }
-impl ::core::convert::From<::core::option::Option<HINSTANCE>> for HINSTANCE {
-    fn from(optional: ::core::option::Option<HINSTANCE>) -> HINSTANCE {
-        optional.unwrap_or_default()
+impl ::core::clone::Clone for DECIMAL_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DECIMAL_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DECIMAL_0 {
+    type Abi = Self;
+}
+
+#[repr(C)]pub union DECIMAL_1 {
+    pub Anonymous: DECIMAL_1_0,
+    pub Lo64: u64,
+}
+impl ::core::marker::Copy for DECIMAL_1 {}
+impl ::core::cmp::Eq for DECIMAL_1 {}
+impl ::core::cmp::PartialEq for DECIMAL_1 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_1>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DECIMAL_1 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DECIMAL_1 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DECIMAL_1 {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct DECIMAL_0_0 {
+    pub scale: u8,
+    pub sign: u8,
+}
+impl ::core::marker::Copy for DECIMAL_0_0 {}
+impl ::core::cmp::Eq for DECIMAL_0_0 {}
+impl ::core::cmp::PartialEq for DECIMAL_0_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_0_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DECIMAL_0_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DECIMAL_0_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DECIMAL_0_0 {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DECIMAL_0_0 {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DECIMAL_0_0").field("scale", &self.scale).field("sign", &self.sign).finish()
+    }
+}
+
+#[repr(C)]
+pub struct DECIMAL_1_0 {
+    pub Lo32: u32,
+    pub Mid32: u32,
+}
+impl ::core::marker::Copy for DECIMAL_1_0 {}
+impl ::core::cmp::Eq for DECIMAL_1_0 {}
+impl ::core::cmp::PartialEq for DECIMAL_1_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_1_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DECIMAL_1_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DECIMAL_1_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DECIMAL_1_0 {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DECIMAL_1_0 {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DECIMAL_1_0").field("Lo32", &self.Lo32).field("Mid32", &self.Mid32).finish()
     }
 }
 
@@ -391,56 +589,6 @@ impl ::core::fmt::Debug for WNDCLASSEXW {
 }
 
 pub const PM_REMOVE: PEEK_MESSAGE_REMOVE_TYPE = PEEK_MESSAGE_REMOVE_TYPE(1u32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct PEEK_MESSAGE_REMOVE_TYPE(pub u32);
-impl ::core::marker::Copy for PEEK_MESSAGE_REMOVE_TYPE {}
-impl ::core::clone::Clone for PEEK_MESSAGE_REMOVE_TYPE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for PEEK_MESSAGE_REMOVE_TYPE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for PEEK_MESSAGE_REMOVE_TYPE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for PEEK_MESSAGE_REMOVE_TYPE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("PEEK_MESSAGE_REMOVE_TYPE").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for PEEK_MESSAGE_REMOVE_TYPE {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for PEEK_MESSAGE_REMOVE_TYPE {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for PEEK_MESSAGE_REMOVE_TYPE {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for PEEK_MESSAGE_REMOVE_TYPE {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for PEEK_MESSAGE_REMOVE_TYPE {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
 
 pub unsafe fn LoadIconW<'a, P0, P1>(hinstance: P0, lpiconname: P1) -> ::windows::core::Result<HICON>
 where
@@ -616,56 +764,6 @@ pub const WM_QUIT: u32 = 18u32;
 
 pub const CS_HREDRAW: WNDCLASS_STYLES = WNDCLASS_STYLES(2u32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WNDCLASS_STYLES(pub u32);
-impl ::core::marker::Copy for WNDCLASS_STYLES {}
-impl ::core::clone::Clone for WNDCLASS_STYLES {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for WNDCLASS_STYLES {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for WNDCLASS_STYLES {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for WNDCLASS_STYLES {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("WNDCLASS_STYLES").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for WNDCLASS_STYLES {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for WNDCLASS_STYLES {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for WNDCLASS_STYLES {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for WNDCLASS_STYLES {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for WNDCLASS_STYLES {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
-
 pub const CS_VREDRAW: WNDCLASS_STYLES = WNDCLASS_STYLES(1u32);
 
 pub const CS_OWNDC: WNDCLASS_STYLES = WNDCLASS_STYLES(32u32);
@@ -840,83 +938,11 @@ where
 
 pub const GWL_EXSTYLE: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(-20i32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WINDOW_LONG_PTR_INDEX(pub i32);
-impl ::core::marker::Copy for WINDOW_LONG_PTR_INDEX {}
-impl ::core::clone::Clone for WINDOW_LONG_PTR_INDEX {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for WINDOW_LONG_PTR_INDEX {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for WINDOW_LONG_PTR_INDEX {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for WINDOW_LONG_PTR_INDEX {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("WINDOW_LONG_PTR_INDEX").field(&self.0).finish()
-    }
-}
-
 pub const HWND_TOPMOST: super::super::Foundation::HWND = super::super::Foundation::HWND(-1i32 as _);
 
 pub const HWND_NOTOPMOST: super::super::Foundation::HWND = super::super::Foundation::HWND(-2i32 as _);
 
 pub const WS_SIZEBOX: WINDOW_STYLE = WINDOW_STYLE(262144u32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WINDOW_STYLE(pub u32);
-impl ::core::marker::Copy for WINDOW_STYLE {}
-impl ::core::clone::Clone for WINDOW_STYLE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for WINDOW_STYLE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for WINDOW_STYLE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for WINDOW_STYLE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("WINDOW_STYLE").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for WINDOW_STYLE {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for WINDOW_STYLE {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for WINDOW_STYLE {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for WINDOW_STYLE {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for WINDOW_STYLE {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
 
 pub const WS_MAXIMIZEBOX: WINDOW_STYLE = WINDOW_STYLE(65536u32);
 
@@ -932,56 +958,6 @@ pub const WS_SYSMENU: WINDOW_STYLE = WINDOW_STYLE(524288u32);
 
 pub const WS_EX_WINDOWEDGE: WINDOW_EX_STYLE = WINDOW_EX_STYLE(256u32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WINDOW_EX_STYLE(pub u32);
-impl ::core::marker::Copy for WINDOW_EX_STYLE {}
-impl ::core::clone::Clone for WINDOW_EX_STYLE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for WINDOW_EX_STYLE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for WINDOW_EX_STYLE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for WINDOW_EX_STYLE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("WINDOW_EX_STYLE").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for WINDOW_EX_STYLE {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for WINDOW_EX_STYLE {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for WINDOW_EX_STYLE {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for WINDOW_EX_STYLE {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for WINDOW_EX_STYLE {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
-
 pub const WS_EX_APPWINDOW: WINDOW_EX_STYLE = WINDOW_EX_STYLE(262144u32);
 
 pub const WS_EX_ACCEPTFILES: WINDOW_EX_STYLE = WINDOW_EX_STYLE(16u32);
@@ -994,56 +970,6 @@ pub const GWLP_USERDATA: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(-21i32);
 
 pub const SW_SHOW: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(5u32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct SHOW_WINDOW_CMD(pub u32);
-impl ::core::marker::Copy for SHOW_WINDOW_CMD {}
-impl ::core::clone::Clone for SHOW_WINDOW_CMD {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for SHOW_WINDOW_CMD {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for SHOW_WINDOW_CMD {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for SHOW_WINDOW_CMD {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("SHOW_WINDOW_CMD").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for SHOW_WINDOW_CMD {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for SHOW_WINDOW_CMD {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for SHOW_WINDOW_CMD {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for SHOW_WINDOW_CMD {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for SHOW_WINDOW_CMD {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
-
 pub const SW_RESTORE: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(9u32);
 
 pub const SW_MAXIMIZE: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(3u32);
@@ -1051,56 +977,6 @@ pub const SW_MAXIMIZE: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(3u32);
 pub const SW_MINIMIZE: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(6u32);
 
 pub const SWP_NOMOVE: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(2u32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct SET_WINDOW_POS_FLAGS(pub u32);
-impl ::core::marker::Copy for SET_WINDOW_POS_FLAGS {}
-impl ::core::clone::Clone for SET_WINDOW_POS_FLAGS {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for SET_WINDOW_POS_FLAGS {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for SET_WINDOW_POS_FLAGS {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for SET_WINDOW_POS_FLAGS {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("SET_WINDOW_POS_FLAGS").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for SET_WINDOW_POS_FLAGS {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for SET_WINDOW_POS_FLAGS {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for SET_WINDOW_POS_FLAGS {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for SET_WINDOW_POS_FLAGS {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for SET_WINDOW_POS_FLAGS {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
 
 pub const SWP_NOSIZE: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(1u32);
 
@@ -1218,6 +1094,328 @@ impl ::core::ops::BitAndAssign for WINDOWPLACEMENT_FLAGS {
     }
 }
 impl ::core::ops::Not for WINDOWPLACEMENT_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct WNDCLASS_STYLES(pub u32);
+impl ::core::marker::Copy for WNDCLASS_STYLES {}
+impl ::core::clone::Clone for WNDCLASS_STYLES {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WNDCLASS_STYLES {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for WNDCLASS_STYLES {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for WNDCLASS_STYLES {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("WNDCLASS_STYLES").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for WNDCLASS_STYLES {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for WNDCLASS_STYLES {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for WNDCLASS_STYLES {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for WNDCLASS_STYLES {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for WNDCLASS_STYLES {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct PEEK_MESSAGE_REMOVE_TYPE(pub u32);
+impl ::core::marker::Copy for PEEK_MESSAGE_REMOVE_TYPE {}
+impl ::core::clone::Clone for PEEK_MESSAGE_REMOVE_TYPE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for PEEK_MESSAGE_REMOVE_TYPE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for PEEK_MESSAGE_REMOVE_TYPE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for PEEK_MESSAGE_REMOVE_TYPE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("PEEK_MESSAGE_REMOVE_TYPE").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for PEEK_MESSAGE_REMOVE_TYPE {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for PEEK_MESSAGE_REMOVE_TYPE {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for PEEK_MESSAGE_REMOVE_TYPE {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for PEEK_MESSAGE_REMOVE_TYPE {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for PEEK_MESSAGE_REMOVE_TYPE {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct WINDOW_EX_STYLE(pub u32);
+impl ::core::marker::Copy for WINDOW_EX_STYLE {}
+impl ::core::clone::Clone for WINDOW_EX_STYLE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WINDOW_EX_STYLE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for WINDOW_EX_STYLE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for WINDOW_EX_STYLE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("WINDOW_EX_STYLE").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for WINDOW_EX_STYLE {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for WINDOW_EX_STYLE {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for WINDOW_EX_STYLE {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for WINDOW_EX_STYLE {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for WINDOW_EX_STYLE {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct WINDOW_STYLE(pub u32);
+impl ::core::marker::Copy for WINDOW_STYLE {}
+impl ::core::clone::Clone for WINDOW_STYLE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WINDOW_STYLE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for WINDOW_STYLE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for WINDOW_STYLE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("WINDOW_STYLE").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for WINDOW_STYLE {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for WINDOW_STYLE {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for WINDOW_STYLE {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for WINDOW_STYLE {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for WINDOW_STYLE {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct WINDOW_LONG_PTR_INDEX(pub i32);
+impl ::core::marker::Copy for WINDOW_LONG_PTR_INDEX {}
+impl ::core::clone::Clone for WINDOW_LONG_PTR_INDEX {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WINDOW_LONG_PTR_INDEX {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for WINDOW_LONG_PTR_INDEX {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for WINDOW_LONG_PTR_INDEX {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("WINDOW_LONG_PTR_INDEX").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct SHOW_WINDOW_CMD(pub u32);
+impl ::core::marker::Copy for SHOW_WINDOW_CMD {}
+impl ::core::clone::Clone for SHOW_WINDOW_CMD {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for SHOW_WINDOW_CMD {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for SHOW_WINDOW_CMD {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for SHOW_WINDOW_CMD {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("SHOW_WINDOW_CMD").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for SHOW_WINDOW_CMD {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for SHOW_WINDOW_CMD {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for SHOW_WINDOW_CMD {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for SHOW_WINDOW_CMD {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for SHOW_WINDOW_CMD {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct SET_WINDOW_POS_FLAGS(pub u32);
+impl ::core::marker::Copy for SET_WINDOW_POS_FLAGS {}
+impl ::core::clone::Clone for SET_WINDOW_POS_FLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for SET_WINDOW_POS_FLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for SET_WINDOW_POS_FLAGS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for SET_WINDOW_POS_FLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("SET_WINDOW_POS_FLAGS").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for SET_WINDOW_POS_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for SET_WINDOW_POS_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for SET_WINDOW_POS_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for SET_WINDOW_POS_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for SET_WINDOW_POS_FLAGS {
     type Output = Self;
     fn not(self) -> Self {
         Self(self.0.not())
@@ -1577,56 +1775,6 @@ impl ::core::fmt::Debug for TRACKMOUSEEVENT {
 
 pub const TME_LEAVE: TRACKMOUSEEVENT_FLAGS = TRACKMOUSEEVENT_FLAGS(2u32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct TRACKMOUSEEVENT_FLAGS(pub u32);
-impl ::core::marker::Copy for TRACKMOUSEEVENT_FLAGS {}
-impl ::core::clone::Clone for TRACKMOUSEEVENT_FLAGS {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for TRACKMOUSEEVENT_FLAGS {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for TRACKMOUSEEVENT_FLAGS {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for TRACKMOUSEEVENT_FLAGS {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("TRACKMOUSEEVENT_FLAGS").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for TRACKMOUSEEVENT_FLAGS {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for TRACKMOUSEEVENT_FLAGS {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for TRACKMOUSEEVENT_FLAGS {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for TRACKMOUSEEVENT_FLAGS {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for TRACKMOUSEEVENT_FLAGS {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
-
 pub const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(17u16);
 
 pub const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(16u16);
@@ -1837,6 +1985,225 @@ pub const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(37u16);
 
 pub const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(39u16);
 
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct TRACKMOUSEEVENT_FLAGS(pub u32);
+impl ::core::marker::Copy for TRACKMOUSEEVENT_FLAGS {}
+impl ::core::clone::Clone for TRACKMOUSEEVENT_FLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for TRACKMOUSEEVENT_FLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for TRACKMOUSEEVENT_FLAGS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for TRACKMOUSEEVENT_FLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("TRACKMOUSEEVENT_FLAGS").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for TRACKMOUSEEVENT_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for TRACKMOUSEEVENT_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for TRACKMOUSEEVENT_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for TRACKMOUSEEVENT_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for TRACKMOUSEEVENT_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+}
+}
+pub mod Shell{
+pub mod PropertiesSystem{
+#[repr(transparent)]
+pub struct IPropertyStore(::windows::core::IUnknown);
+impl IPropertyStore {
+    pub unsafe fn GetCount(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetCount)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    pub unsafe fn GetAt(&self, iprop: u32) -> ::windows::core::Result<PROPERTYKEY> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetAt)(::windows::core::Vtable::as_raw(self), iprop, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<PROPERTYKEY>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
+    pub unsafe fn GetValue(&self, key: *const PROPERTYKEY) -> ::windows::core::Result<super::super::super::System::Com::StructuredStorage::PROPVARIANT> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetValue)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(key), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::super::System::Com::StructuredStorage::PROPVARIANT>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
+    pub unsafe fn SetValue(&self, key: *const PROPERTYKEY, propvar: *const super::super::super::System::Com::StructuredStorage::PROPVARIANT) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).SetValue)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(key), ::core::mem::transmute(propvar)).ok()
+    }
+    pub unsafe fn Commit(&self) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Commit)(::windows::core::Vtable::as_raw(self)).ok()
+    }
+}
+impl ::core::cmp::Eq for IPropertyStore {}
+impl ::core::cmp::PartialEq for IPropertyStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IPropertyStore {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IPropertyStore {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IPropertyStore").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IPropertyStore {
+    type Vtable = IPropertyStore_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IPropertyStore {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x886d8eeb_8cf2_4446_8d02_cdba1dbdcf99);
+}
+
+::windows::core::interface_hierarchy!(IPropertyStore, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IPropertyStore_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub GetCount: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, cprops: *mut u32) -> ::windows::core::HRESULT,
+    pub GetAt: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, iprop: u32, pkey: *mut PROPERTYKEY) -> ::windows::core::HRESULT,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
+    pub GetValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, key: *const PROPERTYKEY, pv: *mut ::core::mem::ManuallyDrop<super::super::super::System::Com::StructuredStorage::PROPVARIANT>) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage")))]
+    GetValue: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
+    pub SetValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, key: *const PROPERTYKEY, propvar: *const ::core::mem::ManuallyDrop<super::super::super::System::Com::StructuredStorage::PROPVARIANT>) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage")))]
+    SetValue: usize,
+    pub Commit: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait IPropertyStore_Impl: Sized {
+    fn GetCount(&self) -> ::windows::core::Result<u32>;
+    fn GetAt(&self, iprop: u32) -> ::windows::core::Result<PROPERTYKEY>;
+    fn GetValue(&self, key: *const PROPERTYKEY) -> ::windows::core::Result<super::super::super::System::Com::StructuredStorage::PROPVARIANT>;
+    fn SetValue(&self, key: *const PROPERTYKEY, propvar: *const super::super::super::System::Com::StructuredStorage::PROPVARIANT) -> ::windows::core::Result<()>;
+    fn Commit(&self) -> ::windows::core::Result<()>;
+}
+
+impl IPropertyStore_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IPropertyStore_Impl, const OFFSET: isize>() -> IPropertyStore_Vtbl {
+        unsafe extern "system" fn GetCount<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IPropertyStore_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, cprops: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetCount() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(cprops, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetAt<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IPropertyStore_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, iprop: u32, pkey: *mut PROPERTYKEY) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetAt(::core::mem::transmute_copy(&iprop)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pkey, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetValue<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IPropertyStore_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, key: *const PROPERTYKEY, pv: *mut ::core::mem::ManuallyDrop<super::super::super::System::Com::StructuredStorage::PROPVARIANT>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetValue(::core::mem::transmute_copy(&key)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pv, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn SetValue<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IPropertyStore_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, key: *const PROPERTYKEY, propvar: *const ::core::mem::ManuallyDrop<super::super::super::System::Com::StructuredStorage::PROPVARIANT>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetValue(::core::mem::transmute_copy(&key), ::core::mem::transmute_copy(&propvar)).into()
+        }
+        unsafe extern "system" fn Commit<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IPropertyStore_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Commit().into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetCount: GetCount::<Identity, Impl, OFFSET>,
+            GetAt: GetAt::<Identity, Impl, OFFSET>,
+            GetValue: GetValue::<Identity, Impl, OFFSET>,
+            SetValue: SetValue::<Identity, Impl, OFFSET>,
+            Commit: Commit::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IPropertyStore as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(C)]
+pub struct PROPERTYKEY {
+    pub fmtid: ::windows::core::GUID,
+    pub pid: u32,
+}
+impl ::core::marker::Copy for PROPERTYKEY {}
+impl ::core::cmp::Eq for PROPERTYKEY {}
+impl ::core::cmp::PartialEq for PROPERTYKEY {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<PROPERTYKEY>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for PROPERTYKEY {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for PROPERTYKEY {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for PROPERTYKEY {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for PROPERTYKEY {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("PROPERTYKEY").field("fmtid", &self.fmtid).field("pid", &self.pid).finish()
+    }
+}
+
 }
 }
 }
@@ -1909,51 +2276,7 @@ where
 
 pub const MONITOR_DEFAULTTONEAREST: MONITOR_FROM_FLAGS = MONITOR_FROM_FLAGS(2u32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct MONITOR_FROM_FLAGS(pub u32);
-impl ::core::marker::Copy for MONITOR_FROM_FLAGS {}
-impl ::core::clone::Clone for MONITOR_FROM_FLAGS {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for MONITOR_FROM_FLAGS {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for MONITOR_FROM_FLAGS {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for MONITOR_FROM_FLAGS {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("MONITOR_FROM_FLAGS").field(&self.0).finish()
-    }
-}
-
 pub const LOGPIXELSX: GET_DEVICE_CAPS_INDEX = GET_DEVICE_CAPS_INDEX(88u32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct GET_DEVICE_CAPS_INDEX(pub u32);
-impl ::core::marker::Copy for GET_DEVICE_CAPS_INDEX {}
-impl ::core::clone::Clone for GET_DEVICE_CAPS_INDEX {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for GET_DEVICE_CAPS_INDEX {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for GET_DEVICE_CAPS_INDEX {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for GET_DEVICE_CAPS_INDEX {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("GET_DEVICE_CAPS_INDEX").field(&self.0).finish()
-    }
-}
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]
 pub struct HDC(pub isize);
@@ -2019,6 +2342,50 @@ impl ::core::convert::From<::core::option::Option<HBRUSH>> for HBRUSH {
     }
 }
 
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct MONITOR_FROM_FLAGS(pub u32);
+impl ::core::marker::Copy for MONITOR_FROM_FLAGS {}
+impl ::core::clone::Clone for MONITOR_FROM_FLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for MONITOR_FROM_FLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for MONITOR_FROM_FLAGS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for MONITOR_FROM_FLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("MONITOR_FROM_FLAGS").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct GET_DEVICE_CAPS_INDEX(pub u32);
+impl ::core::marker::Copy for GET_DEVICE_CAPS_INDEX {}
+impl ::core::clone::Clone for GET_DEVICE_CAPS_INDEX {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for GET_DEVICE_CAPS_INDEX {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for GET_DEVICE_CAPS_INDEX {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for GET_DEVICE_CAPS_INDEX {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("GET_DEVICE_CAPS_INDEX").field(&self.0).finish()
+    }
+}
+
 }
 pub mod Dwm{
 pub unsafe fn DwmExtendFrameIntoClientArea<'a, P0>(hwnd: P0, pmarinset: *const super::super::UI::Controls::MARGINS) -> ::windows::core::Result<()>
@@ -2033,3487 +2400,8 @@ where
 }
 
 }
-pub mod Direct3D{
-#[repr(transparent)]
-pub struct ID3DInclude(::std::ptr::NonNull<::std::ffi::c_void>);
-impl ID3DInclude {
-    pub unsafe fn Open<'a, P0>(&self, includetype: D3D_INCLUDE_TYPE, pfilename: P0, pparentdata: *const ::core::ffi::c_void, ppdata: *mut *mut ::core::ffi::c_void, pbytes: *mut u32) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::PCSTR>,
-    {
-        (::windows::core::Vtable::vtable(self).Open)(::windows::core::Vtable::as_raw(self), includetype, pfilename.into(), ::core::mem::transmute(pparentdata), ::core::mem::transmute(ppdata), ::core::mem::transmute(pbytes)).ok()
-    }
-    pub unsafe fn Close(&self, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).Close)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdata)).ok()
-    }
-}
-impl ::core::cmp::Eq for ID3DInclude {}
-impl ::core::cmp::PartialEq for ID3DInclude {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3DInclude {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3DInclude {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3DInclude").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3DInclude {}
-unsafe impl ::core::marker::Sync for ID3DInclude {}
-unsafe impl ::windows::core::Vtable for ID3DInclude {
-    type Vtable = ID3DInclude_Vtbl;
-}
-
-#[repr(C)]
-pub struct ID3DInclude_Vtbl {
-    pub Open: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, includetype: D3D_INCLUDE_TYPE, pfilename: ::windows::core::PCSTR, pparentdata: *const ::core::ffi::c_void, ppdata: *mut *mut ::core::ffi::c_void, pbytes: *mut u32) -> ::windows::core::HRESULT,
-    pub Close: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdata: *const ::core::ffi::c_void) -> ::windows::core::HRESULT,
-}
-
-pub trait ID3DInclude_Impl: Sized {
-    fn Open(&self, includetype: D3D_INCLUDE_TYPE, pfilename: &::windows::core::PCSTR, pparentdata: *const ::core::ffi::c_void, ppdata: *mut *mut ::core::ffi::c_void, pbytes: *mut u32) -> ::windows::core::Result<()>;
-    fn Close(&self, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()>;
-}
-
-impl ID3DInclude_Vtbl {
-    pub const fn new<Impl: ID3DInclude_Impl>() -> ID3DInclude_Vtbl {
-        unsafe extern "system" fn Open<Impl: ID3DInclude_Impl>(this: *mut ::core::ffi::c_void, includetype: D3D_INCLUDE_TYPE, pfilename: ::windows::core::PCSTR, pparentdata: *const ::core::ffi::c_void, ppdata: *mut *mut ::core::ffi::c_void, pbytes: *mut u32) -> ::windows::core::HRESULT {
-            let this = (this as *mut *mut ::core::ffi::c_void) as *const ::windows::core::ScopedHeap;
-            let this = &*((*this).this as *const Impl);
-            this.Open(::core::mem::transmute_copy(&includetype), ::core::mem::transmute(&pfilename), ::core::mem::transmute_copy(&pparentdata), ::core::mem::transmute_copy(&ppdata), ::core::mem::transmute_copy(&pbytes)).into()
-        }
-        unsafe extern "system" fn Close<Impl: ID3DInclude_Impl>(this: *mut ::core::ffi::c_void, pdata: *const ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *mut *mut ::core::ffi::c_void) as *const ::windows::core::ScopedHeap;
-            let this = &*((*this).this as *const Impl);
-            this.Close(::core::mem::transmute_copy(&pdata)).into()
-        }
-        Self { Open: Open::<Impl>, Close: Close::<Impl> }
-    }
-}
-
-#[repr(C)]
-pub struct D3D_SHADER_MACRO {
-    pub Name: ::windows::core::PCSTR,
-    pub Definition: ::windows::core::PCSTR,
-}
-impl ::core::marker::Copy for D3D_SHADER_MACRO {}
-impl ::core::cmp::Eq for D3D_SHADER_MACRO {}
-impl ::core::cmp::PartialEq for D3D_SHADER_MACRO {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D_SHADER_MACRO>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D_SHADER_MACRO {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D_SHADER_MACRO {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D_SHADER_MACRO {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D_SHADER_MACRO {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D_SHADER_MACRO").field("Name", &self.Name).field("Definition", &self.Definition).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_SRV_DIMENSION(pub i32);
-impl ::core::marker::Copy for D3D_SRV_DIMENSION {}
-impl ::core::clone::Clone for D3D_SRV_DIMENSION {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D_SRV_DIMENSION {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D_SRV_DIMENSION {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D_SRV_DIMENSION {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D_SRV_DIMENSION").field(&self.0).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_INCLUDE_TYPE(pub i32);
-impl ::core::marker::Copy for D3D_INCLUDE_TYPE {}
-impl ::core::clone::Clone for D3D_INCLUDE_TYPE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D_INCLUDE_TYPE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D_INCLUDE_TYPE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D_INCLUDE_TYPE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D_INCLUDE_TYPE").field(&self.0).finish()
-    }
-}
-
-pub mod Fxc{
-pub unsafe fn D3DCompile<'a, P0, P1, P2, P3>(psrcdata: *const ::core::ffi::c_void, srcdatasize: usize, psourcename: P0, pdefines: ::core::option::Option<*const super::D3D_SHADER_MACRO>, pinclude: P1, pentrypoint: P2, ptarget: P3, flags1: u32, flags2: u32, ppcode: *mut ::core::option::Option<super::ID3DBlob>, pperrormsgs: ::core::option::Option<*mut ::core::option::Option<super::ID3DBlob>>) -> ::windows::core::Result<()>
-where
-    P0: ::std::convert::Into<::windows::core::PCSTR>,
-    P1: ::std::convert::Into<::windows::core::InParam<'a, super::ID3DInclude>>,
-    P2: ::std::convert::Into<::windows::core::PCSTR>,
-    P3: ::std::convert::Into<::windows::core::PCSTR>,
-{
-    #[cfg_attr(windows, link(name = "windows"))]
-    extern "system" {
-        fn D3DCompile(psrcdata: *const ::core::ffi::c_void, srcdatasize: usize, psourcename: ::windows::core::PCSTR, pdefines: *const super::D3D_SHADER_MACRO, pinclude: *mut ::core::ffi::c_void, pentrypoint: ::windows::core::PCSTR, ptarget: ::windows::core::PCSTR, flags1: u32, flags2: u32, ppcode: *mut *mut ::core::ffi::c_void, pperrormsgs: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT;
-    }
-    D3DCompile(::core::mem::transmute(psrcdata), srcdatasize, psourcename.into(), ::core::mem::transmute(pdefines.unwrap_or(::std::ptr::null())), pinclude.into().abi(), pentrypoint.into(), ptarget.into(), flags1, flags2, ::core::mem::transmute(ppcode), ::core::mem::transmute(pperrormsgs.unwrap_or(::std::ptr::null_mut()))).ok()
-}
-
-}
-#[repr(transparent)]
-pub struct ID3DBlob(::windows::core::IUnknown);
-impl ID3DBlob {
-    pub unsafe fn GetBufferPointer(&self) -> *mut ::core::ffi::c_void {
-        (::windows::core::Vtable::vtable(self).GetBufferPointer)(::windows::core::Vtable::as_raw(self))
-    }
-    pub unsafe fn GetBufferSize(&self) -> usize {
-        (::windows::core::Vtable::vtable(self).GetBufferSize)(::windows::core::Vtable::as_raw(self))
-    }
-}
-impl ::core::cmp::Eq for ID3DBlob {}
-impl ::core::cmp::PartialEq for ID3DBlob {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3DBlob {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3DBlob {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3DBlob").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3DBlob {}
-unsafe impl ::core::marker::Sync for ID3DBlob {}
-unsafe impl ::windows::core::Vtable for ID3DBlob {
-    type Vtable = ID3DBlob_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3DBlob {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x8ba5fb08_5195_40e2_ac58_0d989c3a0102);
-}
-
-#[repr(C)]
-pub struct ID3DBlob_Vtbl {
-    pub base__: ::windows::core::IUnknown_Vtbl,
-    pub GetBufferPointer: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> *mut ::core::ffi::c_void,
-    pub GetBufferSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> usize,
-}
-
-pub trait ID3DBlob_Impl: Sized {
-    fn GetBufferPointer(&self) -> *mut ::core::ffi::c_void;
-    fn GetBufferSize(&self) -> usize;
-}
-
-impl ID3DBlob_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3DBlob_Impl, const OFFSET: isize>() -> ID3DBlob_Vtbl {
-        unsafe extern "system" fn GetBufferPointer<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3DBlob_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> *mut ::core::ffi::c_void {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetBufferPointer()
-        }
-        unsafe extern "system" fn GetBufferSize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3DBlob_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> usize {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetBufferSize()
-        }
-        Self {
-            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
-            GetBufferPointer: GetBufferPointer::<Identity, Impl, OFFSET>,
-            GetBufferSize: GetBufferSize::<Identity, Impl, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3DBlob as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3DBlob, ::windows::core::IUnknown);
-
-pub const D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST: D3D_PRIMITIVE_TOPOLOGY = D3D_PRIMITIVE_TOPOLOGY(4i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_PRIMITIVE_TOPOLOGY(pub i32);
-impl ::core::marker::Copy for D3D_PRIMITIVE_TOPOLOGY {}
-impl ::core::clone::Clone for D3D_PRIMITIVE_TOPOLOGY {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D_PRIMITIVE_TOPOLOGY {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D_PRIMITIVE_TOPOLOGY {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D_PRIMITIVE_TOPOLOGY {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D_PRIMITIVE_TOPOLOGY").field(&self.0).finish()
-    }
-}
-
-pub const D3D_DRIVER_TYPE_UNKNOWN: D3D_DRIVER_TYPE = D3D_DRIVER_TYPE(0i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_DRIVER_TYPE(pub i32);
-impl ::core::marker::Copy for D3D_DRIVER_TYPE {}
-impl ::core::clone::Clone for D3D_DRIVER_TYPE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D_DRIVER_TYPE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D_DRIVER_TYPE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D_DRIVER_TYPE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D_DRIVER_TYPE").field(&self.0).finish()
-    }
-}
-
-pub const D3D_FEATURE_LEVEL_11_0: D3D_FEATURE_LEVEL = D3D_FEATURE_LEVEL(45056i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_FEATURE_LEVEL(pub i32);
-impl ::core::marker::Copy for D3D_FEATURE_LEVEL {}
-impl ::core::clone::Clone for D3D_FEATURE_LEVEL {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D_FEATURE_LEVEL {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D_FEATURE_LEVEL {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D_FEATURE_LEVEL {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D_FEATURE_LEVEL").field(&self.0).finish()
-    }
-}
-
-}
 pub mod Direct3D11{
-#[repr(transparent)]
-pub struct ID3D11Asynchronous(::windows::core::IUnknown);
-impl ID3D11Asynchronous {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetDataSize(&self) -> u32 {
-        (::windows::core::Vtable::vtable(self).GetDataSize)(::windows::core::Vtable::as_raw(self))
-    }
-}
-impl ::core::cmp::Eq for ID3D11Asynchronous {}
-impl ::core::cmp::PartialEq for ID3D11Asynchronous {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11Asynchronous {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11Asynchronous {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11Asynchronous").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11Asynchronous {}
-unsafe impl ::core::marker::Sync for ID3D11Asynchronous {}
-unsafe impl ::windows::core::Vtable for ID3D11Asynchronous {
-    type Vtable = ID3D11Asynchronous_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11Asynchronous {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x4b35d0cd_1e15_4258_9c98_1b1333f6dd3b);
-}
-
-#[repr(C)]
-pub struct ID3D11Asynchronous_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-    pub GetDataSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> u32,
-}
-
-pub trait ID3D11Asynchronous_Impl: Sized + ID3D11DeviceChild_Impl {
-    fn GetDataSize(&self) -> u32;
-}
-
-impl ID3D11Asynchronous_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Asynchronous_Impl, const OFFSET: isize>() -> ID3D11Asynchronous_Vtbl {
-        unsafe extern "system" fn GetDataSize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Asynchronous_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> u32 {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDataSize()
-        }
-        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(), GetDataSize: GetDataSize::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11Asynchronous as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11Asynchronous, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11ClassInstance(::windows::core::IUnknown);
-impl ID3D11ClassInstance {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetClassLinkage(&self, pplinkage: *mut ::core::option::Option<ID3D11ClassLinkage>) {
-        (::windows::core::Vtable::vtable(self).GetClassLinkage)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pplinkage))
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_CLASS_INSTANCE_DESC) {
-        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
-    }
-    pub unsafe fn GetInstanceName(&self, pinstancename: ::windows::core::PSTR, pbufferlength: *mut usize) {
-        (::windows::core::Vtable::vtable(self).GetInstanceName)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pinstancename), ::core::mem::transmute(pbufferlength))
-    }
-    pub unsafe fn GetTypeName(&self, ptypename: ::windows::core::PSTR, pbufferlength: *mut usize) {
-        (::windows::core::Vtable::vtable(self).GetTypeName)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ptypename), ::core::mem::transmute(pbufferlength))
-    }
-}
-impl ::core::cmp::Eq for ID3D11ClassInstance {}
-impl ::core::cmp::PartialEq for ID3D11ClassInstance {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11ClassInstance {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11ClassInstance {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11ClassInstance").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11ClassInstance {}
-unsafe impl ::core::marker::Sync for ID3D11ClassInstance {}
-unsafe impl ::windows::core::Vtable for ID3D11ClassInstance {
-    type Vtable = ID3D11ClassInstance_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11ClassInstance {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xa6cd7faa_b0b7_4a2f_9436_8662a65797cb);
-}
-
-#[repr(C)]
-pub struct ID3D11ClassInstance_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-    pub GetClassLinkage: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pplinkage: *mut *mut ::core::ffi::c_void),
-    #[cfg(feature = "Win32_Foundation")]
-    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_CLASS_INSTANCE_DESC),
-    #[cfg(not(feature = "Win32_Foundation"))]
-    GetDesc: usize,
-    pub GetInstanceName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pinstancename: ::windows::core::PSTR, pbufferlength: *mut usize),
-    pub GetTypeName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ptypename: ::windows::core::PSTR, pbufferlength: *mut usize),
-}
-
-pub trait ID3D11ClassInstance_Impl: Sized + ID3D11DeviceChild_Impl {
-    fn GetClassLinkage(&self, pplinkage: *mut ::core::option::Option<ID3D11ClassLinkage>);
-    fn GetDesc(&self, pdesc: *mut D3D11_CLASS_INSTANCE_DESC);
-    fn GetInstanceName(&self, pinstancename: ::windows::core::PSTR, pbufferlength: *mut usize);
-    fn GetTypeName(&self, ptypename: ::windows::core::PSTR, pbufferlength: *mut usize);
-}
-
-impl ID3D11ClassInstance_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>() -> ID3D11ClassInstance_Vtbl {
-        unsafe extern "system" fn GetClassLinkage<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pplinkage: *mut *mut ::core::ffi::c_void) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetClassLinkage(::core::mem::transmute_copy(&pplinkage))
-        }
-        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_CLASS_INSTANCE_DESC) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDesc(::core::mem::transmute_copy(&pdesc))
-        }
-        unsafe extern "system" fn GetInstanceName<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pinstancename: ::windows::core::PSTR, pbufferlength: *mut usize) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetInstanceName(::core::mem::transmute_copy(&pinstancename), ::core::mem::transmute_copy(&pbufferlength))
-        }
-        unsafe extern "system" fn GetTypeName<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ptypename: ::windows::core::PSTR, pbufferlength: *mut usize) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetTypeName(::core::mem::transmute_copy(&ptypename), ::core::mem::transmute_copy(&pbufferlength))
-        }
-        Self {
-            base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(),
-            GetClassLinkage: GetClassLinkage::<Identity, Impl, OFFSET>,
-            GetDesc: GetDesc::<Identity, Impl, OFFSET>,
-            GetInstanceName: GetInstanceName::<Identity, Impl, OFFSET>,
-            GetTypeName: GetTypeName::<Identity, Impl, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11ClassInstance as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11ClassInstance, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11Texture3D(::windows::core::IUnknown);
-impl ID3D11Texture3D {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetType(&self, presourcedimension: *mut D3D11_RESOURCE_DIMENSION) {
-        (::windows::core::Vtable::vtable(self).base__.GetType)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(presourcedimension))
-    }
-    pub unsafe fn SetEvictionPriority(&self, evictionpriority: u32) {
-        (::windows::core::Vtable::vtable(self).base__.SetEvictionPriority)(::windows::core::Vtable::as_raw(self), evictionpriority)
-    }
-    pub unsafe fn GetEvictionPriority(&self) -> u32 {
-        (::windows::core::Vtable::vtable(self).base__.GetEvictionPriority)(::windows::core::Vtable::as_raw(self))
-    }
-    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE3D_DESC) {
-        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
-    }
-}
-impl ::core::cmp::Eq for ID3D11Texture3D {}
-impl ::core::cmp::PartialEq for ID3D11Texture3D {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11Texture3D {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11Texture3D {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11Texture3D").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11Texture3D {}
-unsafe impl ::core::marker::Sync for ID3D11Texture3D {}
-unsafe impl ::windows::core::Vtable for ID3D11Texture3D {
-    type Vtable = ID3D11Texture3D_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11Texture3D {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x037e866e_f56d_4357_a8af_9dabbe6e250e);
-}
-
-#[repr(C)]
-pub struct ID3D11Texture3D_Vtbl {
-    pub base__: ID3D11Resource_Vtbl,
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE3D_DESC),
-    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
-    GetDesc: usize,
-}
-
-pub trait ID3D11Texture3D_Impl: Sized + ID3D11Resource_Impl {
-    fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE3D_DESC);
-}
-
-impl ID3D11Texture3D_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture3D_Impl, const OFFSET: isize>() -> ID3D11Texture3D_Vtbl {
-        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture3D_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE3D_DESC) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDesc(::core::mem::transmute_copy(&pdesc))
-        }
-        Self { base__: ID3D11Resource_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11Texture3D as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Resource as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11Texture3D, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Resource);
-
-#[repr(transparent)]
-pub struct ID3D11Texture1D(::windows::core::IUnknown);
-impl ID3D11Texture1D {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetType(&self, presourcedimension: *mut D3D11_RESOURCE_DIMENSION) {
-        (::windows::core::Vtable::vtable(self).base__.GetType)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(presourcedimension))
-    }
-    pub unsafe fn SetEvictionPriority(&self, evictionpriority: u32) {
-        (::windows::core::Vtable::vtable(self).base__.SetEvictionPriority)(::windows::core::Vtable::as_raw(self), evictionpriority)
-    }
-    pub unsafe fn GetEvictionPriority(&self) -> u32 {
-        (::windows::core::Vtable::vtable(self).base__.GetEvictionPriority)(::windows::core::Vtable::as_raw(self))
-    }
-    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE1D_DESC) {
-        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
-    }
-}
-impl ::core::cmp::Eq for ID3D11Texture1D {}
-impl ::core::cmp::PartialEq for ID3D11Texture1D {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11Texture1D {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11Texture1D {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11Texture1D").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11Texture1D {}
-unsafe impl ::core::marker::Sync for ID3D11Texture1D {}
-unsafe impl ::windows::core::Vtable for ID3D11Texture1D {
-    type Vtable = ID3D11Texture1D_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11Texture1D {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xf8fb5c27_c6b3_4f75_a4c8_439af2ef564c);
-}
-
-#[repr(C)]
-pub struct ID3D11Texture1D_Vtbl {
-    pub base__: ID3D11Resource_Vtbl,
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE1D_DESC),
-    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
-    GetDesc: usize,
-}
-
-pub trait ID3D11Texture1D_Impl: Sized + ID3D11Resource_Impl {
-    fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE1D_DESC);
-}
-
-impl ID3D11Texture1D_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture1D_Impl, const OFFSET: isize>() -> ID3D11Texture1D_Vtbl {
-        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture1D_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE1D_DESC) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDesc(::core::mem::transmute_copy(&pdesc))
-        }
-        Self { base__: ID3D11Resource_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11Texture1D as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Resource as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11Texture1D, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Resource);
-
-#[repr(transparent)]
-pub struct ID3D11Resource(::windows::core::IUnknown);
-impl ID3D11Resource {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetType(&self, presourcedimension: *mut D3D11_RESOURCE_DIMENSION) {
-        (::windows::core::Vtable::vtable(self).GetType)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(presourcedimension))
-    }
-    pub unsafe fn SetEvictionPriority(&self, evictionpriority: u32) {
-        (::windows::core::Vtable::vtable(self).SetEvictionPriority)(::windows::core::Vtable::as_raw(self), evictionpriority)
-    }
-    pub unsafe fn GetEvictionPriority(&self) -> u32 {
-        (::windows::core::Vtable::vtable(self).GetEvictionPriority)(::windows::core::Vtable::as_raw(self))
-    }
-}
-impl ::core::cmp::Eq for ID3D11Resource {}
-impl ::core::cmp::PartialEq for ID3D11Resource {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11Resource {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11Resource {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11Resource").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11Resource {}
-unsafe impl ::core::marker::Sync for ID3D11Resource {}
-unsafe impl ::windows::core::Vtable for ID3D11Resource {
-    type Vtable = ID3D11Resource_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11Resource {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xdc8e63f3_d12b_4952_b47b_5e45026a862d);
-}
-
-#[repr(C)]
-pub struct ID3D11Resource_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-    pub GetType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, presourcedimension: *mut D3D11_RESOURCE_DIMENSION),
-    pub SetEvictionPriority: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, evictionpriority: u32),
-    pub GetEvictionPriority: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> u32,
-}
-
-pub trait ID3D11Resource_Impl: Sized + ID3D11DeviceChild_Impl {
-    fn GetType(&self, presourcedimension: *mut D3D11_RESOURCE_DIMENSION);
-    fn SetEvictionPriority(&self, evictionpriority: u32);
-    fn GetEvictionPriority(&self) -> u32;
-}
-
-impl ID3D11Resource_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Resource_Impl, const OFFSET: isize>() -> ID3D11Resource_Vtbl {
-        unsafe extern "system" fn GetType<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Resource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, presourcedimension: *mut D3D11_RESOURCE_DIMENSION) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetType(::core::mem::transmute_copy(&presourcedimension))
-        }
-        unsafe extern "system" fn SetEvictionPriority<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Resource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, evictionpriority: u32) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.SetEvictionPriority(::core::mem::transmute_copy(&evictionpriority))
-        }
-        unsafe extern "system" fn GetEvictionPriority<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Resource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> u32 {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetEvictionPriority()
-        }
-        Self {
-            base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(),
-            GetType: GetType::<Identity, Impl, OFFSET>,
-            SetEvictionPriority: SetEvictionPriority::<Identity, Impl, OFFSET>,
-            GetEvictionPriority: GetEvictionPriority::<Identity, Impl, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11Resource as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11Resource, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11UnorderedAccessView(::windows::core::IUnknown);
-impl ID3D11UnorderedAccessView {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetResource(&self, ppresource: *mut ::core::option::Option<ID3D11Resource>) {
-        (::windows::core::Vtable::vtable(self).base__.GetResource)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppresource))
-    }
-    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC) {
-        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
-    }
-}
-impl ::core::cmp::Eq for ID3D11UnorderedAccessView {}
-impl ::core::cmp::PartialEq for ID3D11UnorderedAccessView {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11UnorderedAccessView {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11UnorderedAccessView {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11UnorderedAccessView").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11UnorderedAccessView {}
-unsafe impl ::core::marker::Sync for ID3D11UnorderedAccessView {}
-unsafe impl ::windows::core::Vtable for ID3D11UnorderedAccessView {
-    type Vtable = ID3D11UnorderedAccessView_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11UnorderedAccessView {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x28acf509_7f5c_48f6_8611_f316010a6380);
-}
-
-#[repr(C)]
-pub struct ID3D11UnorderedAccessView_Vtbl {
-    pub base__: ID3D11View_Vtbl,
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC),
-    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
-    GetDesc: usize,
-}
-
-pub trait ID3D11UnorderedAccessView_Impl: Sized + ID3D11View_Impl {
-    fn GetDesc(&self, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC);
-}
-
-impl ID3D11UnorderedAccessView_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11UnorderedAccessView_Impl, const OFFSET: isize>() -> ID3D11UnorderedAccessView_Vtbl {
-        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11UnorderedAccessView_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDesc(::core::mem::transmute_copy(&pdesc))
-        }
-        Self { base__: ID3D11View_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11UnorderedAccessView as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11View as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11UnorderedAccessView, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11View);
-
-#[repr(transparent)]
-pub struct ID3D11ClassLinkage(::windows::core::IUnknown);
-impl ID3D11ClassLinkage {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetClassInstance<'a, P0>(&self, pclassinstancename: P0, instanceindex: u32) -> ::windows::core::Result<ID3D11ClassInstance>
-    where
-        P0: ::std::convert::Into<::windows::core::PCSTR>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetClassInstance)(::windows::core::Vtable::as_raw(self), pclassinstancename.into(), instanceindex, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ID3D11ClassInstance>(result__)
-    }
-    pub unsafe fn CreateClassInstance<'a, P0>(&self, pclasstypename: P0, constantbufferoffset: u32, constantvectoroffset: u32, textureoffset: u32, sampleroffset: u32) -> ::windows::core::Result<ID3D11ClassInstance>
-    where
-        P0: ::std::convert::Into<::windows::core::PCSTR>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).CreateClassInstance)(::windows::core::Vtable::as_raw(self), pclasstypename.into(), constantbufferoffset, constantvectoroffset, textureoffset, sampleroffset, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ID3D11ClassInstance>(result__)
-    }
-}
-impl ::core::cmp::Eq for ID3D11ClassLinkage {}
-impl ::core::cmp::PartialEq for ID3D11ClassLinkage {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11ClassLinkage {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11ClassLinkage {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11ClassLinkage").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11ClassLinkage {}
-unsafe impl ::core::marker::Sync for ID3D11ClassLinkage {}
-unsafe impl ::windows::core::Vtable for ID3D11ClassLinkage {
-    type Vtable = ID3D11ClassLinkage_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11ClassLinkage {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xddf57cba_9543_46e4_a12b_f207a0fe7fed);
-}
-
-#[repr(C)]
-pub struct ID3D11ClassLinkage_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-    pub GetClassInstance: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pclassinstancename: ::windows::core::PCSTR, instanceindex: u32, ppinstance: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    pub CreateClassInstance: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pclasstypename: ::windows::core::PCSTR, constantbufferoffset: u32, constantvectoroffset: u32, textureoffset: u32, sampleroffset: u32, ppinstance: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-}
-
-pub trait ID3D11ClassLinkage_Impl: Sized + ID3D11DeviceChild_Impl {
-    fn GetClassInstance(&self, pclassinstancename: &::windows::core::PCSTR, instanceindex: u32) -> ::windows::core::Result<ID3D11ClassInstance>;
-    fn CreateClassInstance(&self, pclasstypename: &::windows::core::PCSTR, constantbufferoffset: u32, constantvectoroffset: u32, textureoffset: u32, sampleroffset: u32) -> ::windows::core::Result<ID3D11ClassInstance>;
-}
-
-impl ID3D11ClassLinkage_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassLinkage_Impl, const OFFSET: isize>() -> ID3D11ClassLinkage_Vtbl {
-        unsafe extern "system" fn GetClassInstance<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassLinkage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pclassinstancename: ::windows::core::PCSTR, instanceindex: u32, ppinstance: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.GetClassInstance(::core::mem::transmute(&pclassinstancename), ::core::mem::transmute_copy(&instanceindex)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(ppinstance, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn CreateClassInstance<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassLinkage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pclasstypename: ::windows::core::PCSTR, constantbufferoffset: u32, constantvectoroffset: u32, textureoffset: u32, sampleroffset: u32, ppinstance: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.CreateClassInstance(::core::mem::transmute(&pclasstypename), ::core::mem::transmute_copy(&constantbufferoffset), ::core::mem::transmute_copy(&constantvectoroffset), ::core::mem::transmute_copy(&textureoffset), ::core::mem::transmute_copy(&sampleroffset)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(ppinstance, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        Self {
-            base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(),
-            GetClassInstance: GetClassInstance::<Identity, Impl, OFFSET>,
-            CreateClassInstance: CreateClassInstance::<Identity, Impl, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11ClassLinkage as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11ClassLinkage, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11GeometryShader(::windows::core::IUnknown);
-impl ID3D11GeometryShader {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-}
-impl ::core::cmp::Eq for ID3D11GeometryShader {}
-impl ::core::cmp::PartialEq for ID3D11GeometryShader {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11GeometryShader {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11GeometryShader {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11GeometryShader").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11GeometryShader {}
-unsafe impl ::core::marker::Sync for ID3D11GeometryShader {}
-unsafe impl ::windows::core::Vtable for ID3D11GeometryShader {
-    type Vtable = ID3D11GeometryShader_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11GeometryShader {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x38325b96_effb_4022_ba02_2e795b70275c);
-}
-
-#[repr(C)]
-pub struct ID3D11GeometryShader_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-}
-
-pub trait ID3D11GeometryShader_Impl: Sized + ID3D11DeviceChild_Impl {}
-
-impl ID3D11GeometryShader_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11GeometryShader_Impl, const OFFSET: isize>() -> ID3D11GeometryShader_Vtbl {
-        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11GeometryShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11GeometryShader, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11HullShader(::windows::core::IUnknown);
-impl ID3D11HullShader {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-}
-impl ::core::cmp::Eq for ID3D11HullShader {}
-impl ::core::cmp::PartialEq for ID3D11HullShader {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11HullShader {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11HullShader {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11HullShader").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11HullShader {}
-unsafe impl ::core::marker::Sync for ID3D11HullShader {}
-unsafe impl ::windows::core::Vtable for ID3D11HullShader {
-    type Vtable = ID3D11HullShader_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11HullShader {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x8e5c6061_628a_4c8e_8264_bbe45cb3d5dd);
-}
-
-#[repr(C)]
-pub struct ID3D11HullShader_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-}
-
-pub trait ID3D11HullShader_Impl: Sized + ID3D11DeviceChild_Impl {}
-
-impl ID3D11HullShader_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11HullShader_Impl, const OFFSET: isize>() -> ID3D11HullShader_Vtbl {
-        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11HullShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11HullShader, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11DomainShader(::windows::core::IUnknown);
-impl ID3D11DomainShader {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-}
-impl ::core::cmp::Eq for ID3D11DomainShader {}
-impl ::core::cmp::PartialEq for ID3D11DomainShader {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11DomainShader {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11DomainShader {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11DomainShader").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11DomainShader {}
-unsafe impl ::core::marker::Sync for ID3D11DomainShader {}
-unsafe impl ::windows::core::Vtable for ID3D11DomainShader {
-    type Vtable = ID3D11DomainShader_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11DomainShader {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xf582c508_0f36_490c_9977_31eece268cfa);
-}
-
-#[repr(C)]
-pub struct ID3D11DomainShader_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-}
-
-pub trait ID3D11DomainShader_Impl: Sized + ID3D11DeviceChild_Impl {}
-
-impl ID3D11DomainShader_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DomainShader_Impl, const OFFSET: isize>() -> ID3D11DomainShader_Vtbl {
-        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11DomainShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11DomainShader, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11ComputeShader(::windows::core::IUnknown);
-impl ID3D11ComputeShader {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-}
-impl ::core::cmp::Eq for ID3D11ComputeShader {}
-impl ::core::cmp::PartialEq for ID3D11ComputeShader {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11ComputeShader {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11ComputeShader {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11ComputeShader").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11ComputeShader {}
-unsafe impl ::core::marker::Sync for ID3D11ComputeShader {}
-unsafe impl ::windows::core::Vtable for ID3D11ComputeShader {
-    type Vtable = ID3D11ComputeShader_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11ComputeShader {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x4f5b196e_c2bd_495e_bd01_1fded38e4969);
-}
-
-#[repr(C)]
-pub struct ID3D11ComputeShader_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-}
-
-pub trait ID3D11ComputeShader_Impl: Sized + ID3D11DeviceChild_Impl {}
-
-impl ID3D11ComputeShader_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ComputeShader_Impl, const OFFSET: isize>() -> ID3D11ComputeShader_Vtbl {
-        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11ComputeShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11ComputeShader, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11SamplerState(::windows::core::IUnknown);
-impl ID3D11SamplerState {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_SAMPLER_DESC) {
-        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
-    }
-}
-impl ::core::cmp::Eq for ID3D11SamplerState {}
-impl ::core::cmp::PartialEq for ID3D11SamplerState {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11SamplerState {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11SamplerState {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11SamplerState").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11SamplerState {}
-unsafe impl ::core::marker::Sync for ID3D11SamplerState {}
-unsafe impl ::windows::core::Vtable for ID3D11SamplerState {
-    type Vtable = ID3D11SamplerState_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11SamplerState {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xda6fea51_564c_4487_9810_f0d0f9b4e3a5);
-}
-
-#[repr(C)]
-pub struct ID3D11SamplerState_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_SAMPLER_DESC),
-}
-
-pub trait ID3D11SamplerState_Impl: Sized + ID3D11DeviceChild_Impl {
-    fn GetDesc(&self, pdesc: *mut D3D11_SAMPLER_DESC);
-}
-
-impl ID3D11SamplerState_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11SamplerState_Impl, const OFFSET: isize>() -> ID3D11SamplerState_Vtbl {
-        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11SamplerState_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_SAMPLER_DESC) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDesc(::core::mem::transmute_copy(&pdesc))
-        }
-        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11SamplerState as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11SamplerState, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11DeviceChild(::windows::core::IUnknown);
-impl ID3D11DeviceChild {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-}
-impl ::core::cmp::Eq for ID3D11DeviceChild {}
-impl ::core::cmp::PartialEq for ID3D11DeviceChild {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11DeviceChild {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11DeviceChild {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11DeviceChild").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11DeviceChild {}
-unsafe impl ::core::marker::Sync for ID3D11DeviceChild {}
-unsafe impl ::windows::core::Vtable for ID3D11DeviceChild {
-    type Vtable = ID3D11DeviceChild_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11DeviceChild {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x1841e5c8_16b0_489b_bcc8_44cfb0d5deae);
-}
-
-#[repr(C)]
-pub struct ID3D11DeviceChild_Vtbl {
-    pub base__: ::windows::core::IUnknown_Vtbl,
-    pub GetDevice: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppdevice: *mut *mut ::core::ffi::c_void),
-    pub GetPrivateData: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    pub SetPrivateData: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    pub SetPrivateDataInterface: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pdata: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-}
-
-pub trait ID3D11DeviceChild_Impl: Sized {
-    fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>);
-    fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
-    fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()>;
-    fn SetPrivateDataInterface(&self, guid: *const ::windows::core::GUID, pdata: &::core::option::Option<::windows::core::IUnknown>) -> ::windows::core::Result<()>;
-}
-
-impl ID3D11DeviceChild_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>() -> ID3D11DeviceChild_Vtbl {
-        unsafe extern "system" fn GetDevice<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppdevice: *mut *mut ::core::ffi::c_void) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDevice(::core::mem::transmute_copy(&ppdevice))
-        }
-        unsafe extern "system" fn GetPrivateData<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetPrivateData(::core::mem::transmute_copy(&guid), ::core::mem::transmute_copy(&pdatasize), ::core::mem::transmute_copy(&pdata)).into()
-        }
-        unsafe extern "system" fn SetPrivateData<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.SetPrivateData(::core::mem::transmute_copy(&guid), ::core::mem::transmute_copy(&datasize), ::core::mem::transmute_copy(&pdata)).into()
-        }
-        unsafe extern "system" fn SetPrivateDataInterface<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pdata: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.SetPrivateDataInterface(::core::mem::transmute_copy(&guid), ::core::mem::transmute(&pdata)).into()
-        }
-        Self {
-            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
-            GetDevice: GetDevice::<Identity, Impl, OFFSET>,
-            GetPrivateData: GetPrivateData::<Identity, Impl, OFFSET>,
-            SetPrivateData: SetPrivateData::<Identity, Impl, OFFSET>,
-            SetPrivateDataInterface: SetPrivateDataInterface::<Identity, Impl, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11DeviceChild, ::windows::core::IUnknown);
-
-#[repr(transparent)]
-pub struct ID3D11View(::windows::core::IUnknown);
-impl ID3D11View {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetResource(&self, ppresource: *mut ::core::option::Option<ID3D11Resource>) {
-        (::windows::core::Vtable::vtable(self).GetResource)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppresource))
-    }
-}
-impl ::core::cmp::Eq for ID3D11View {}
-impl ::core::cmp::PartialEq for ID3D11View {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11View {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11View {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11View").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11View {}
-unsafe impl ::core::marker::Sync for ID3D11View {}
-unsafe impl ::windows::core::Vtable for ID3D11View {
-    type Vtable = ID3D11View_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11View {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x839d1216_bb2e_412b_b7f4_a9dbebe08ed1);
-}
-
-#[repr(C)]
-pub struct ID3D11View_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-    pub GetResource: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppresource: *mut *mut ::core::ffi::c_void),
-}
-
-pub trait ID3D11View_Impl: Sized + ID3D11DeviceChild_Impl {
-    fn GetResource(&self, ppresource: *mut ::core::option::Option<ID3D11Resource>);
-}
-
-impl ID3D11View_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11View_Impl, const OFFSET: isize>() -> ID3D11View_Vtbl {
-        unsafe extern "system" fn GetResource<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11View_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppresource: *mut *mut ::core::ffi::c_void) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetResource(::core::mem::transmute_copy(&ppresource))
-        }
-        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(), GetResource: GetResource::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11View as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11View, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[repr(transparent)]
-pub struct ID3D11Query(::windows::core::IUnknown);
-impl ID3D11Query {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetDataSize(&self) -> u32 {
-        (::windows::core::Vtable::vtable(self).base__.GetDataSize)(::windows::core::Vtable::as_raw(self))
-    }
-    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_QUERY_DESC) {
-        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
-    }
-}
-impl ::core::cmp::Eq for ID3D11Query {}
-impl ::core::cmp::PartialEq for ID3D11Query {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11Query {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11Query {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11Query").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11Query {}
-unsafe impl ::core::marker::Sync for ID3D11Query {}
-unsafe impl ::windows::core::Vtable for ID3D11Query {
-    type Vtable = ID3D11Query_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11Query {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xd6c00747_87b7_425e_b84d_44d108560afd);
-}
-
-#[repr(C)]
-pub struct ID3D11Query_Vtbl {
-    pub base__: ID3D11Asynchronous_Vtbl,
-    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_QUERY_DESC),
-}
-
-pub trait ID3D11Query_Impl: Sized + ID3D11Asynchronous_Impl {
-    fn GetDesc(&self, pdesc: *mut D3D11_QUERY_DESC);
-}
-
-impl ID3D11Query_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>() -> ID3D11Query_Vtbl {
-        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_QUERY_DESC) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDesc(::core::mem::transmute_copy(&pdesc))
-        }
-        Self { base__: ID3D11Asynchronous_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11Query as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Asynchronous as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11Query, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Asynchronous);
-
-#[repr(transparent)]
-pub struct ID3D11Predicate(::windows::core::IUnknown);
-impl ID3D11Predicate {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetDataSize(&self) -> u32 {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetDataSize)(::windows::core::Vtable::as_raw(self))
-    }
-    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_QUERY_DESC) {
-        (::windows::core::Vtable::vtable(self).base__.GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
-    }
-}
-impl ::core::cmp::Eq for ID3D11Predicate {}
-impl ::core::cmp::PartialEq for ID3D11Predicate {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11Predicate {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11Predicate {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11Predicate").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11Predicate {}
-unsafe impl ::core::marker::Sync for ID3D11Predicate {}
-unsafe impl ::windows::core::Vtable for ID3D11Predicate {
-    type Vtable = ID3D11Predicate_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11Predicate {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x9eb576dd_9f77_4d86_81aa_8bab5fe490e2);
-}
-
-#[repr(C)]
-pub struct ID3D11Predicate_Vtbl {
-    pub base__: ID3D11Query_Vtbl,
-}
-
-pub trait ID3D11Predicate_Impl: Sized + ID3D11Query_Impl {}
-
-impl ID3D11Predicate_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Predicate_Impl, const OFFSET: isize>() -> ID3D11Predicate_Vtbl {
-        Self { base__: ID3D11Query_Vtbl::new::<Identity, Impl, OFFSET>() }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11Predicate as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Asynchronous as ::windows::core::Interface>::IID || iid == &<ID3D11Query as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11Predicate, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Asynchronous, ID3D11Query);
-
-#[repr(transparent)]
-pub struct ID3D11Counter(::windows::core::IUnknown);
-impl ID3D11Counter {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetDataSize(&self) -> u32 {
-        (::windows::core::Vtable::vtable(self).base__.GetDataSize)(::windows::core::Vtable::as_raw(self))
-    }
-    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_COUNTER_DESC) {
-        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
-    }
-}
-impl ::core::cmp::Eq for ID3D11Counter {}
-impl ::core::cmp::PartialEq for ID3D11Counter {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11Counter {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11Counter {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11Counter").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11Counter {}
-unsafe impl ::core::marker::Sync for ID3D11Counter {}
-unsafe impl ::windows::core::Vtable for ID3D11Counter {
-    type Vtable = ID3D11Counter_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11Counter {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x6e8c49fb_a371_4770_b440_29086022b741);
-}
-
-#[repr(C)]
-pub struct ID3D11Counter_Vtbl {
-    pub base__: ID3D11Asynchronous_Vtbl,
-    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_COUNTER_DESC),
-}
-
-pub trait ID3D11Counter_Impl: Sized + ID3D11Asynchronous_Impl {
-    fn GetDesc(&self, pdesc: *mut D3D11_COUNTER_DESC);
-}
-
-impl ID3D11Counter_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Counter_Impl, const OFFSET: isize>() -> ID3D11Counter_Vtbl {
-        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Counter_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_COUNTER_DESC) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetDesc(::core::mem::transmute_copy(&pdesc))
-        }
-        Self { base__: ID3D11Asynchronous_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11Counter as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Asynchronous as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11Counter, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Asynchronous);
-
-#[repr(transparent)]
-pub struct ID3D11CommandList(::windows::core::IUnknown);
-impl ID3D11CommandList {
-    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
-        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
-    }
-    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
-    }
-    pub unsafe fn GetContextFlags(&self) -> u32 {
-        (::windows::core::Vtable::vtable(self).GetContextFlags)(::windows::core::Vtable::as_raw(self))
-    }
-}
-impl ::core::cmp::Eq for ID3D11CommandList {}
-impl ::core::cmp::PartialEq for ID3D11CommandList {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for ID3D11CommandList {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for ID3D11CommandList {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ID3D11CommandList").field(&self.0).finish()
-    }
-}
-unsafe impl ::core::marker::Send for ID3D11CommandList {}
-unsafe impl ::core::marker::Sync for ID3D11CommandList {}
-unsafe impl ::windows::core::Vtable for ID3D11CommandList {
-    type Vtable = ID3D11CommandList_Vtbl;
-}
-unsafe impl ::windows::core::Interface for ID3D11CommandList {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xa24bc4d1_769e_43f7_8013_98ff566c18e2);
-}
-
-#[repr(C)]
-pub struct ID3D11CommandList_Vtbl {
-    pub base__: ID3D11DeviceChild_Vtbl,
-    pub GetContextFlags: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> u32,
-}
-
-pub trait ID3D11CommandList_Impl: Sized + ID3D11DeviceChild_Impl {
-    fn GetContextFlags(&self) -> u32;
-}
-
-impl ID3D11CommandList_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11CommandList_Impl, const OFFSET: isize>() -> ID3D11CommandList_Vtbl {
-        unsafe extern "system" fn GetContextFlags<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11CommandList_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> u32 {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetContextFlags()
-        }
-        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(), GetContextFlags: GetContextFlags::<Identity, Impl, OFFSET> }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<ID3D11CommandList as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(ID3D11CommandList, ::windows::core::IUnknown, ID3D11DeviceChild);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_DEVICE_CONTEXT_TYPE(pub i32);
-impl ::core::marker::Copy for D3D11_DEVICE_CONTEXT_TYPE {}
-impl ::core::clone::Clone for D3D11_DEVICE_CONTEXT_TYPE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_DEVICE_CONTEXT_TYPE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_DEVICE_CONTEXT_TYPE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_DEVICE_CONTEXT_TYPE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_DEVICE_CONTEXT_TYPE").field(&self.0).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_FEATURE(pub i32);
-impl ::core::marker::Copy for D3D11_FEATURE {}
-impl ::core::clone::Clone for D3D11_FEATURE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_FEATURE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_FEATURE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_FEATURE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_FEATURE").field(&self.0).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_COUNTER(pub i32);
-impl ::core::marker::Copy for D3D11_COUNTER {}
-impl ::core::clone::Clone for D3D11_COUNTER {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_COUNTER {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_COUNTER {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_COUNTER {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_COUNTER").field(&self.0).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_COUNTER_INFO {
-    pub LastDeviceDependentCounter: D3D11_COUNTER,
-    pub NumSimultaneousCounters: u32,
-    pub NumDetectableParallelUnits: u8,
-}
-impl ::core::marker::Copy for D3D11_COUNTER_INFO {}
-impl ::core::cmp::Eq for D3D11_COUNTER_INFO {}
-impl ::core::cmp::PartialEq for D3D11_COUNTER_INFO {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_COUNTER_INFO>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_COUNTER_INFO {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_COUNTER_INFO {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_COUNTER_INFO {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_COUNTER_INFO {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_COUNTER_INFO").field("LastDeviceDependentCounter", &self.LastDeviceDependentCounter).field("NumSimultaneousCounters", &self.NumSimultaneousCounters).field("NumDetectableParallelUnits", &self.NumDetectableParallelUnits).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_COUNTER_TYPE(pub i32);
-impl ::core::marker::Copy for D3D11_COUNTER_TYPE {}
-impl ::core::clone::Clone for D3D11_COUNTER_TYPE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_COUNTER_TYPE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_COUNTER_TYPE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_COUNTER_TYPE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_COUNTER_TYPE").field(&self.0).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_COUNTER_DESC {
-    pub Counter: D3D11_COUNTER,
-    pub MiscFlags: u32,
-}
-impl ::core::marker::Copy for D3D11_COUNTER_DESC {}
-impl ::core::cmp::Eq for D3D11_COUNTER_DESC {}
-impl ::core::cmp::PartialEq for D3D11_COUNTER_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_COUNTER_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_COUNTER_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_COUNTER_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_COUNTER_DESC {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_COUNTER_DESC {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_COUNTER_DESC").field("Counter", &self.Counter).field("MiscFlags", &self.MiscFlags).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_RTV_DIMENSION(pub i32);
-impl ::core::marker::Copy for D3D11_RTV_DIMENSION {}
-impl ::core::clone::Clone for D3D11_RTV_DIMENSION {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_RTV_DIMENSION {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_RTV_DIMENSION {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_RTV_DIMENSION {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_RTV_DIMENSION").field(&self.0).finish()
-    }
-}
-
-#[repr(C)]#[derive(Clone, Copy)]
-pub union D3D11_BUFFER_RTV_0 {
-    pub FirstElement: u32,
-    pub ElementOffset: u32,
-}
-
-#[repr(C)]#[derive(Clone, Copy)]
-pub union D3D11_BUFFER_RTV_1 {
-    pub NumElements: u32,
-    pub ElementWidth: u32,
-}
-
-#[repr(C)]
-pub struct D3D11_BUFFER_RTV {
-    pub Anonymous1: D3D11_BUFFER_RTV_0,
-    pub Anonymous2: D3D11_BUFFER_RTV_1,
-}
-impl ::core::marker::Copy for D3D11_BUFFER_RTV {}
-impl ::core::cmp::Eq for D3D11_BUFFER_RTV {}
-impl ::core::cmp::PartialEq for D3D11_BUFFER_RTV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_RTV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_BUFFER_RTV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_BUFFER_RTV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_BUFFER_RTV {
-    type Abi = Self;
-}
-
-#[repr(C)]
-pub struct D3D11_TEX1D_RTV {
-    pub MipSlice: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX1D_RTV {}
-impl ::core::cmp::Eq for D3D11_TEX1D_RTV {}
-impl ::core::cmp::PartialEq for D3D11_TEX1D_RTV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_RTV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX1D_RTV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX1D_RTV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX1D_RTV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX1D_RTV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX1D_RTV").field("MipSlice", &self.MipSlice).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX1D_ARRAY_RTV {
-    pub MipSlice: u32,
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX1D_ARRAY_RTV {}
-impl ::core::cmp::Eq for D3D11_TEX1D_ARRAY_RTV {}
-impl ::core::cmp::PartialEq for D3D11_TEX1D_ARRAY_RTV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_ARRAY_RTV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX1D_ARRAY_RTV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX1D_ARRAY_RTV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX1D_ARRAY_RTV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_RTV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX1D_ARRAY_RTV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2D_RTV {
-    pub MipSlice: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2D_RTV {}
-impl ::core::cmp::Eq for D3D11_TEX2D_RTV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2D_RTV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_RTV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2D_RTV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2D_RTV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2D_RTV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2D_RTV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2D_RTV").field("MipSlice", &self.MipSlice).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2D_ARRAY_RTV {
-    pub MipSlice: u32,
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2D_ARRAY_RTV {}
-impl ::core::cmp::Eq for D3D11_TEX2D_ARRAY_RTV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2D_ARRAY_RTV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_ARRAY_RTV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2D_ARRAY_RTV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2D_ARRAY_RTV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2D_ARRAY_RTV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_RTV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2D_ARRAY_RTV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2DMS_RTV {
-    pub UnusedField_NothingToDefine: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2DMS_RTV {}
-impl ::core::cmp::Eq for D3D11_TEX2DMS_RTV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2DMS_RTV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_RTV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2DMS_RTV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2DMS_RTV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_RTV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2DMS_RTV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2DMS_RTV").field("UnusedField_NothingToDefine", &self.UnusedField_NothingToDefine).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2DMS_ARRAY_RTV {
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2DMS_ARRAY_RTV {}
-impl ::core::cmp::Eq for D3D11_TEX2DMS_ARRAY_RTV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2DMS_ARRAY_RTV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_ARRAY_RTV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2DMS_ARRAY_RTV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2DMS_ARRAY_RTV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_ARRAY_RTV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2DMS_ARRAY_RTV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2DMS_ARRAY_RTV").field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX3D_RTV {
-    pub MipSlice: u32,
-    pub FirstWSlice: u32,
-    pub WSize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX3D_RTV {}
-impl ::core::cmp::Eq for D3D11_TEX3D_RTV {}
-impl ::core::cmp::PartialEq for D3D11_TEX3D_RTV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX3D_RTV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX3D_RTV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX3D_RTV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX3D_RTV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX3D_RTV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX3D_RTV").field("MipSlice", &self.MipSlice).field("FirstWSlice", &self.FirstWSlice).field("WSize", &self.WSize).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_MAP(pub i32);
-impl ::core::marker::Copy for D3D11_MAP {}
-impl ::core::clone::Clone for D3D11_MAP {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_MAP {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_MAP {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_MAP {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_MAP").field(&self.0).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_MAPPED_SUBRESOURCE {
-    pub pData: *mut ::core::ffi::c_void,
-    pub RowPitch: u32,
-    pub DepthPitch: u32,
-}
-impl ::core::marker::Copy for D3D11_MAPPED_SUBRESOURCE {}
-impl ::core::cmp::Eq for D3D11_MAPPED_SUBRESOURCE {}
-impl ::core::cmp::PartialEq for D3D11_MAPPED_SUBRESOURCE {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_MAPPED_SUBRESOURCE>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_MAPPED_SUBRESOURCE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_MAPPED_SUBRESOURCE {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_MAPPED_SUBRESOURCE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_MAPPED_SUBRESOURCE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_MAPPED_SUBRESOURCE").field("pData", &self.pData).field("RowPitch", &self.RowPitch).field("DepthPitch", &self.DepthPitch).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_BOX {
-    pub left: u32,
-    pub top: u32,
-    pub front: u32,
-    pub right: u32,
-    pub bottom: u32,
-    pub back: u32,
-}
-impl ::core::marker::Copy for D3D11_BOX {}
-impl ::core::cmp::Eq for D3D11_BOX {}
-impl ::core::cmp::PartialEq for D3D11_BOX {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BOX>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_BOX {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_BOX {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_BOX {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_BOX {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_BOX").field("left", &self.left).field("top", &self.top).field("front", &self.front).field("right", &self.right).field("bottom", &self.bottom).field("back", &self.back).finish()
-    }
-}
-
-#[repr(C)]#[derive(Clone, Copy)]
-pub union D3D11_RENDER_TARGET_VIEW_DESC_0 {
-    pub Buffer: D3D11_BUFFER_RTV,
-    pub Texture1D: D3D11_TEX1D_RTV,
-    pub Texture1DArray: D3D11_TEX1D_ARRAY_RTV,
-    pub Texture2D: D3D11_TEX2D_RTV,
-    pub Texture2DArray: D3D11_TEX2D_ARRAY_RTV,
-    pub Texture2DMS: D3D11_TEX2DMS_RTV,
-    pub Texture2DMSArray: D3D11_TEX2DMS_ARRAY_RTV,
-    pub Texture3D: D3D11_TEX3D_RTV,
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_QUERY(pub i32);
-impl ::core::marker::Copy for D3D11_QUERY {}
-impl ::core::clone::Clone for D3D11_QUERY {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_QUERY {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_QUERY {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_QUERY {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_QUERY").field(&self.0).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_CLASS_INSTANCE_DESC {
-    pub InstanceId: u32,
-    pub InstanceIndex: u32,
-    pub TypeId: u32,
-    pub ConstantBuffer: u32,
-    pub BaseConstantBufferOffset: u32,
-    pub BaseTexture: u32,
-    pub BaseSampler: u32,
-    pub Created: super::super::Foundation::BOOL,
-}
-impl ::core::marker::Copy for D3D11_CLASS_INSTANCE_DESC {}
-impl ::core::cmp::Eq for D3D11_CLASS_INSTANCE_DESC {}
-impl ::core::cmp::PartialEq for D3D11_CLASS_INSTANCE_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_CLASS_INSTANCE_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_CLASS_INSTANCE_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_CLASS_INSTANCE_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_CLASS_INSTANCE_DESC {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_CLASS_INSTANCE_DESC {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_CLASS_INSTANCE_DESC").field("InstanceId", &self.InstanceId).field("InstanceIndex", &self.InstanceIndex).field("TypeId", &self.TypeId).field("ConstantBuffer", &self.ConstantBuffer).field("BaseConstantBufferOffset", &self.BaseConstantBufferOffset).field("BaseTexture", &self.BaseTexture).field("BaseSampler", &self.BaseSampler).field("Created", &self.Created).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_UAV_DIMENSION(pub i32);
-impl ::core::marker::Copy for D3D11_UAV_DIMENSION {}
-impl ::core::clone::Clone for D3D11_UAV_DIMENSION {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_UAV_DIMENSION {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_UAV_DIMENSION {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_UAV_DIMENSION {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_UAV_DIMENSION").field(&self.0).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_BUFFER_UAV {
-    pub FirstElement: u32,
-    pub NumElements: u32,
-    pub Flags: u32,
-}
-impl ::core::marker::Copy for D3D11_BUFFER_UAV {}
-impl ::core::cmp::Eq for D3D11_BUFFER_UAV {}
-impl ::core::cmp::PartialEq for D3D11_BUFFER_UAV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_UAV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_BUFFER_UAV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_BUFFER_UAV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_BUFFER_UAV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_BUFFER_UAV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_BUFFER_UAV").field("FirstElement", &self.FirstElement).field("NumElements", &self.NumElements).field("Flags", &self.Flags).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX1D_UAV {
-    pub MipSlice: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX1D_UAV {}
-impl ::core::cmp::Eq for D3D11_TEX1D_UAV {}
-impl ::core::cmp::PartialEq for D3D11_TEX1D_UAV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_UAV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX1D_UAV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX1D_UAV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX1D_UAV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX1D_UAV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX1D_UAV").field("MipSlice", &self.MipSlice).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX1D_ARRAY_UAV {
-    pub MipSlice: u32,
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX1D_ARRAY_UAV {}
-impl ::core::cmp::Eq for D3D11_TEX1D_ARRAY_UAV {}
-impl ::core::cmp::PartialEq for D3D11_TEX1D_ARRAY_UAV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_ARRAY_UAV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX1D_ARRAY_UAV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX1D_ARRAY_UAV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX1D_ARRAY_UAV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_UAV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX1D_ARRAY_UAV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2D_UAV {
-    pub MipSlice: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2D_UAV {}
-impl ::core::cmp::Eq for D3D11_TEX2D_UAV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2D_UAV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_UAV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2D_UAV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2D_UAV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2D_UAV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2D_UAV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2D_UAV").field("MipSlice", &self.MipSlice).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2D_ARRAY_UAV {
-    pub MipSlice: u32,
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2D_ARRAY_UAV {}
-impl ::core::cmp::Eq for D3D11_TEX2D_ARRAY_UAV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2D_ARRAY_UAV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_ARRAY_UAV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2D_ARRAY_UAV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2D_ARRAY_UAV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2D_ARRAY_UAV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_UAV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2D_ARRAY_UAV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX3D_UAV {
-    pub MipSlice: u32,
-    pub FirstWSlice: u32,
-    pub WSize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX3D_UAV {}
-impl ::core::cmp::Eq for D3D11_TEX3D_UAV {}
-impl ::core::cmp::PartialEq for D3D11_TEX3D_UAV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX3D_UAV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX3D_UAV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX3D_UAV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX3D_UAV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX3D_UAV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX3D_UAV").field("MipSlice", &self.MipSlice).field("FirstWSlice", &self.FirstWSlice).field("WSize", &self.WSize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_BUFFER_SRV {
-    pub Anonymous1: D3D11_BUFFER_SRV_0,
-    pub Anonymous2: D3D11_BUFFER_SRV_1,
-}
-impl ::core::marker::Copy for D3D11_BUFFER_SRV {}
-impl ::core::cmp::Eq for D3D11_BUFFER_SRV {}
-impl ::core::cmp::PartialEq for D3D11_BUFFER_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_BUFFER_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_BUFFER_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_BUFFER_SRV {
-    type Abi = Self;
-}
-
-#[repr(C)]
-pub struct D3D11_TEX1D_SRV {
-    pub MostDetailedMip: u32,
-    pub MipLevels: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX1D_SRV {}
-impl ::core::cmp::Eq for D3D11_TEX1D_SRV {}
-impl ::core::cmp::PartialEq for D3D11_TEX1D_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX1D_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX1D_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX1D_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX1D_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX1D_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX1D_ARRAY_SRV {
-    pub MostDetailedMip: u32,
-    pub MipLevels: u32,
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX1D_ARRAY_SRV {}
-impl ::core::cmp::Eq for D3D11_TEX1D_ARRAY_SRV {}
-impl ::core::cmp::PartialEq for D3D11_TEX1D_ARRAY_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_ARRAY_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX1D_ARRAY_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX1D_ARRAY_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX1D_ARRAY_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX1D_ARRAY_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2D_SRV {
-    pub MostDetailedMip: u32,
-    pub MipLevels: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2D_SRV {}
-impl ::core::cmp::Eq for D3D11_TEX2D_SRV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2D_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2D_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2D_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2D_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2D_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2D_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2D_ARRAY_SRV {
-    pub MostDetailedMip: u32,
-    pub MipLevels: u32,
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2D_ARRAY_SRV {}
-impl ::core::cmp::Eq for D3D11_TEX2D_ARRAY_SRV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2D_ARRAY_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_ARRAY_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2D_ARRAY_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2D_ARRAY_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2D_ARRAY_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2D_ARRAY_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2DMS_SRV {
-    pub UnusedField_NothingToDefine: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2DMS_SRV {}
-impl ::core::cmp::Eq for D3D11_TEX2DMS_SRV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2DMS_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2DMS_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2DMS_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2DMS_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2DMS_SRV").field("UnusedField_NothingToDefine", &self.UnusedField_NothingToDefine).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2DMS_ARRAY_SRV {
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2DMS_ARRAY_SRV {}
-impl ::core::cmp::Eq for D3D11_TEX2DMS_ARRAY_SRV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2DMS_ARRAY_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_ARRAY_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2DMS_ARRAY_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2DMS_ARRAY_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_ARRAY_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2DMS_ARRAY_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2DMS_ARRAY_SRV").field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX3D_SRV {
-    pub MostDetailedMip: u32,
-    pub MipLevels: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX3D_SRV {}
-impl ::core::cmp::Eq for D3D11_TEX3D_SRV {}
-impl ::core::cmp::PartialEq for D3D11_TEX3D_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX3D_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX3D_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX3D_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX3D_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX3D_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX3D_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEXCUBE_SRV {
-    pub MostDetailedMip: u32,
-    pub MipLevels: u32,
-}
-impl ::core::marker::Copy for D3D11_TEXCUBE_SRV {}
-impl ::core::cmp::Eq for D3D11_TEXCUBE_SRV {}
-impl ::core::cmp::PartialEq for D3D11_TEXCUBE_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEXCUBE_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEXCUBE_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEXCUBE_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEXCUBE_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEXCUBE_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEXCUBE_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEXCUBE_ARRAY_SRV {
-    pub MostDetailedMip: u32,
-    pub MipLevels: u32,
-    pub First2DArrayFace: u32,
-    pub NumCubes: u32,
-}
-impl ::core::marker::Copy for D3D11_TEXCUBE_ARRAY_SRV {}
-impl ::core::cmp::Eq for D3D11_TEXCUBE_ARRAY_SRV {}
-impl ::core::cmp::PartialEq for D3D11_TEXCUBE_ARRAY_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEXCUBE_ARRAY_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEXCUBE_ARRAY_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEXCUBE_ARRAY_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEXCUBE_ARRAY_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEXCUBE_ARRAY_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEXCUBE_ARRAY_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).field("First2DArrayFace", &self.First2DArrayFace).field("NumCubes", &self.NumCubes).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_BUFFEREX_SRV {
-    pub FirstElement: u32,
-    pub NumElements: u32,
-    pub Flags: u32,
-}
-impl ::core::marker::Copy for D3D11_BUFFEREX_SRV {}
-impl ::core::cmp::Eq for D3D11_BUFFEREX_SRV {}
-impl ::core::cmp::PartialEq for D3D11_BUFFEREX_SRV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFEREX_SRV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_BUFFEREX_SRV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_BUFFEREX_SRV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_BUFFEREX_SRV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_BUFFEREX_SRV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_BUFFEREX_SRV").field("FirstElement", &self.FirstElement).field("NumElements", &self.NumElements).field("Flags", &self.Flags).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX1D_DSV {
-    pub MipSlice: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX1D_DSV {}
-impl ::core::cmp::Eq for D3D11_TEX1D_DSV {}
-impl ::core::cmp::PartialEq for D3D11_TEX1D_DSV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_DSV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX1D_DSV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX1D_DSV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX1D_DSV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX1D_DSV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX1D_DSV").field("MipSlice", &self.MipSlice).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2D_DSV {
-    pub MipSlice: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2D_DSV {}
-impl ::core::cmp::Eq for D3D11_TEX2D_DSV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2D_DSV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_DSV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2D_DSV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2D_DSV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2D_DSV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2D_DSV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2D_DSV").field("MipSlice", &self.MipSlice).finish()
-    }
-}
-
-#[repr(C)]#[derive(Clone, Copy)]
-pub union D3D11_BUFFER_SRV_0 {
-    pub FirstElement: u32,
-    pub ElementOffset: u32,
-}
-
-#[repr(C)]#[derive(Clone, Copy)]
-pub union D3D11_BUFFER_SRV_1 {
-    pub NumElements: u32,
-    pub ElementWidth: u32,
-}
-
-#[repr(C)]
-pub struct D3D11_TEX1D_ARRAY_DSV {
-    pub MipSlice: u32,
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX1D_ARRAY_DSV {}
-impl ::core::cmp::Eq for D3D11_TEX1D_ARRAY_DSV {}
-impl ::core::cmp::PartialEq for D3D11_TEX1D_ARRAY_DSV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_ARRAY_DSV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX1D_ARRAY_DSV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX1D_ARRAY_DSV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX1D_ARRAY_DSV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_DSV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX1D_ARRAY_DSV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2D_ARRAY_DSV {
-    pub MipSlice: u32,
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2D_ARRAY_DSV {}
-impl ::core::cmp::Eq for D3D11_TEX2D_ARRAY_DSV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2D_ARRAY_DSV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_ARRAY_DSV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2D_ARRAY_DSV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2D_ARRAY_DSV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2D_ARRAY_DSV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_DSV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2D_ARRAY_DSV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2DMS_DSV {
-    pub UnusedField_NothingToDefine: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2DMS_DSV {}
-impl ::core::cmp::Eq for D3D11_TEX2DMS_DSV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2DMS_DSV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_DSV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2DMS_DSV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2DMS_DSV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_DSV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2DMS_DSV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2DMS_DSV").field("UnusedField_NothingToDefine", &self.UnusedField_NothingToDefine).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEX2DMS_ARRAY_DSV {
-    pub FirstArraySlice: u32,
-    pub ArraySize: u32,
-}
-impl ::core::marker::Copy for D3D11_TEX2DMS_ARRAY_DSV {}
-impl ::core::cmp::Eq for D3D11_TEX2DMS_ARRAY_DSV {}
-impl ::core::cmp::PartialEq for D3D11_TEX2DMS_ARRAY_DSV {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_ARRAY_DSV>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEX2DMS_ARRAY_DSV {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEX2DMS_ARRAY_DSV {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_ARRAY_DSV {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEX2DMS_ARRAY_DSV {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEX2DMS_ARRAY_DSV").field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_RENDER_TARGET_VIEW_DESC {
-    pub Format: super::Dxgi::Common::DXGI_FORMAT,
-    pub ViewDimension: D3D11_RTV_DIMENSION,
-    pub Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0,
-}
-impl ::core::marker::Copy for D3D11_RENDER_TARGET_VIEW_DESC {}
-impl ::core::cmp::Eq for D3D11_RENDER_TARGET_VIEW_DESC {}
-impl ::core::cmp::PartialEq for D3D11_RENDER_TARGET_VIEW_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_RENDER_TARGET_VIEW_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_RENDER_TARGET_VIEW_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_RENDER_TARGET_VIEW_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_RENDER_TARGET_VIEW_DESC {
-    type Abi = Self;
-}
-
-#[repr(C)]
-pub struct D3D11_QUERY_DESC {
-    pub Query: D3D11_QUERY,
-    pub MiscFlags: u32,
-}
-impl ::core::marker::Copy for D3D11_QUERY_DESC {}
-impl ::core::cmp::Eq for D3D11_QUERY_DESC {}
-impl ::core::cmp::PartialEq for D3D11_QUERY_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_QUERY_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_QUERY_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_QUERY_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_QUERY_DESC {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_QUERY_DESC {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_QUERY_DESC").field("Query", &self.Query).field("MiscFlags", &self.MiscFlags).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_UNORDERED_ACCESS_VIEW_DESC {
-    pub Format: super::Dxgi::Common::DXGI_FORMAT,
-    pub ViewDimension: D3D11_UAV_DIMENSION,
-    pub Anonymous: D3D11_UNORDERED_ACCESS_VIEW_DESC_0,
-}
-impl ::core::marker::Copy for D3D11_UNORDERED_ACCESS_VIEW_DESC {}
-impl ::core::cmp::Eq for D3D11_UNORDERED_ACCESS_VIEW_DESC {}
-impl ::core::cmp::PartialEq for D3D11_UNORDERED_ACCESS_VIEW_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_UNORDERED_ACCESS_VIEW_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_UNORDERED_ACCESS_VIEW_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_UNORDERED_ACCESS_VIEW_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_UNORDERED_ACCESS_VIEW_DESC {
-    type Abi = Self;
-}
-
-#[repr(C)]#[derive(Clone, Copy)]
-pub union D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {
-    pub Buffer: D3D11_BUFFER_UAV,
-    pub Texture1D: D3D11_TEX1D_UAV,
-    pub Texture1DArray: D3D11_TEX1D_ARRAY_UAV,
-    pub Texture2D: D3D11_TEX2D_UAV,
-    pub Texture2DArray: D3D11_TEX2D_ARRAY_UAV,
-    pub Texture3D: D3D11_TEX3D_UAV,
-}
-
-#[repr(C)]#[derive(Clone, Copy)]
-pub union D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
-    pub Buffer: D3D11_BUFFER_SRV,
-    pub Texture1D: D3D11_TEX1D_SRV,
-    pub Texture1DArray: D3D11_TEX1D_ARRAY_SRV,
-    pub Texture2D: D3D11_TEX2D_SRV,
-    pub Texture2DArray: D3D11_TEX2D_ARRAY_SRV,
-    pub Texture2DMS: D3D11_TEX2DMS_SRV,
-    pub Texture2DMSArray: D3D11_TEX2DMS_ARRAY_SRV,
-    pub Texture3D: D3D11_TEX3D_SRV,
-    pub TextureCube: D3D11_TEXCUBE_SRV,
-    pub TextureCubeArray: D3D11_TEXCUBE_ARRAY_SRV,
-    pub BufferEx: D3D11_BUFFEREX_SRV,
-}
-
-#[repr(C)]#[derive(Clone, Copy)]
-pub union D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
-    pub Texture1D: D3D11_TEX1D_DSV,
-    pub Texture1DArray: D3D11_TEX1D_ARRAY_DSV,
-    pub Texture2D: D3D11_TEX2D_DSV,
-    pub Texture2DArray: D3D11_TEX2D_ARRAY_DSV,
-    pub Texture2DMS: D3D11_TEX2DMS_DSV,
-    pub Texture2DMSArray: D3D11_TEX2DMS_ARRAY_DSV,
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_FILTER(pub i32);
-impl ::core::marker::Copy for D3D11_FILTER {}
-impl ::core::clone::Clone for D3D11_FILTER {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_FILTER {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_FILTER {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_FILTER {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_FILTER").field(&self.0).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_TEXTURE_ADDRESS_MODE(pub i32);
-impl ::core::marker::Copy for D3D11_TEXTURE_ADDRESS_MODE {}
-impl ::core::clone::Clone for D3D11_TEXTURE_ADDRESS_MODE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEXTURE_ADDRESS_MODE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEXTURE_ADDRESS_MODE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEXTURE_ADDRESS_MODE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_TEXTURE_ADDRESS_MODE").field(&self.0).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEXTURE1D_DESC {
-    pub Width: u32,
-    pub MipLevels: u32,
-    pub ArraySize: u32,
-    pub Format: super::Dxgi::Common::DXGI_FORMAT,
-    pub Usage: D3D11_USAGE,
-    pub BindFlags: D3D11_BIND_FLAG,
-    pub CPUAccessFlags: D3D11_CPU_ACCESS_FLAG,
-    pub MiscFlags: D3D11_RESOURCE_MISC_FLAG,
-}
-impl ::core::marker::Copy for D3D11_TEXTURE1D_DESC {}
-impl ::core::cmp::Eq for D3D11_TEXTURE1D_DESC {}
-impl ::core::cmp::PartialEq for D3D11_TEXTURE1D_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEXTURE1D_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEXTURE1D_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEXTURE1D_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEXTURE1D_DESC {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEXTURE1D_DESC {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEXTURE1D_DESC").field("Width", &self.Width).field("MipLevels", &self.MipLevels).field("ArraySize", &self.ArraySize).field("Format", &self.Format).field("Usage", &self.Usage).field("BindFlags", &self.BindFlags).field("CPUAccessFlags", &self.CPUAccessFlags).field("MiscFlags", &self.MiscFlags).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_TEXTURE3D_DESC {
-    pub Width: u32,
-    pub Height: u32,
-    pub Depth: u32,
-    pub MipLevels: u32,
-    pub Format: super::Dxgi::Common::DXGI_FORMAT,
-    pub Usage: D3D11_USAGE,
-    pub BindFlags: D3D11_BIND_FLAG,
-    pub CPUAccessFlags: D3D11_CPU_ACCESS_FLAG,
-    pub MiscFlags: D3D11_RESOURCE_MISC_FLAG,
-}
-impl ::core::marker::Copy for D3D11_TEXTURE3D_DESC {}
-impl ::core::cmp::Eq for D3D11_TEXTURE3D_DESC {}
-impl ::core::cmp::PartialEq for D3D11_TEXTURE3D_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEXTURE3D_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_TEXTURE3D_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_TEXTURE3D_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_TEXTURE3D_DESC {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_TEXTURE3D_DESC {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_TEXTURE3D_DESC").field("Width", &self.Width).field("Height", &self.Height).field("Depth", &self.Depth).field("MipLevels", &self.MipLevels).field("Format", &self.Format).field("Usage", &self.Usage).field("BindFlags", &self.BindFlags).field("CPUAccessFlags", &self.CPUAccessFlags).field("MiscFlags", &self.MiscFlags).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_SHADER_RESOURCE_VIEW_DESC {
-    pub Format: super::Dxgi::Common::DXGI_FORMAT,
-    pub ViewDimension: super::Direct3D::D3D_SRV_DIMENSION,
-    pub Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0,
-}
-impl ::core::marker::Copy for D3D11_SHADER_RESOURCE_VIEW_DESC {}
-impl ::core::cmp::Eq for D3D11_SHADER_RESOURCE_VIEW_DESC {}
-impl ::core::cmp::PartialEq for D3D11_SHADER_RESOURCE_VIEW_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_SHADER_RESOURCE_VIEW_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_SHADER_RESOURCE_VIEW_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_SHADER_RESOURCE_VIEW_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_SHADER_RESOURCE_VIEW_DESC {
-    type Abi = Self;
-}
-
-#[repr(C)]
-pub struct D3D11_SO_DECLARATION_ENTRY {
-    pub Stream: u32,
-    pub SemanticName: ::windows::core::PCSTR,
-    pub SemanticIndex: u32,
-    pub StartComponent: u8,
-    pub ComponentCount: u8,
-    pub OutputSlot: u8,
-}
-impl ::core::marker::Copy for D3D11_SO_DECLARATION_ENTRY {}
-impl ::core::cmp::Eq for D3D11_SO_DECLARATION_ENTRY {}
-impl ::core::cmp::PartialEq for D3D11_SO_DECLARATION_ENTRY {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_SO_DECLARATION_ENTRY>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_SO_DECLARATION_ENTRY {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_SO_DECLARATION_ENTRY {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_SO_DECLARATION_ENTRY {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_SO_DECLARATION_ENTRY {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_SO_DECLARATION_ENTRY").field("Stream", &self.Stream).field("SemanticName", &self.SemanticName).field("SemanticIndex", &self.SemanticIndex).field("StartComponent", &self.StartComponent).field("ComponentCount", &self.ComponentCount).field("OutputSlot", &self.OutputSlot).finish()
-    }
-}
-
-#[repr(C)]
-pub struct D3D11_SAMPLER_DESC {
-    pub Filter: D3D11_FILTER,
-    pub AddressU: D3D11_TEXTURE_ADDRESS_MODE,
-    pub AddressV: D3D11_TEXTURE_ADDRESS_MODE,
-    pub AddressW: D3D11_TEXTURE_ADDRESS_MODE,
-    pub MipLODBias: f32,
-    pub MaxAnisotropy: u32,
-    pub ComparisonFunc: D3D11_COMPARISON_FUNC,
-    pub BorderColor: [f32; 4],
-    pub MinLOD: f32,
-    pub MaxLOD: f32,
-}
-impl ::core::marker::Copy for D3D11_SAMPLER_DESC {}
-impl ::core::cmp::Eq for D3D11_SAMPLER_DESC {}
-impl ::core::cmp::PartialEq for D3D11_SAMPLER_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_SAMPLER_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for D3D11_SAMPLER_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_SAMPLER_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_SAMPLER_DESC {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_SAMPLER_DESC {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("D3D11_SAMPLER_DESC").field("Filter", &self.Filter).field("AddressU", &self.AddressU).field("AddressV", &self.AddressV).field("AddressW", &self.AddressW).field("MipLODBias", &self.MipLODBias).field("MaxAnisotropy", &self.MaxAnisotropy).field("ComparisonFunc", &self.ComparisonFunc).field("BorderColor", &self.BorderColor).field("MinLOD", &self.MinLOD).field("MaxLOD", &self.MaxLOD).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_RESOURCE_DIMENSION(pub i32);
-impl ::core::marker::Copy for D3D11_RESOURCE_DIMENSION {}
-impl ::core::clone::Clone for D3D11_RESOURCE_DIMENSION {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_RESOURCE_DIMENSION {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_RESOURCE_DIMENSION {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_RESOURCE_DIMENSION {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_RESOURCE_DIMENSION").field(&self.0).finish()
-    }
-}
-
 pub const D3D11_BIND_INDEX_BUFFER: D3D11_BIND_FLAG = D3D11_BIND_FLAG(2u32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_BIND_FLAG(pub u32);
-impl ::core::marker::Copy for D3D11_BIND_FLAG {}
-impl ::core::clone::Clone for D3D11_BIND_FLAG {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_BIND_FLAG {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_BIND_FLAG {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_BIND_FLAG {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_BIND_FLAG").field(&self.0).finish()
-    }
-}
-impl ::core::ops::BitOr for D3D11_BIND_FLAG {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-impl ::core::ops::BitAnd for D3D11_BIND_FLAG {
-    type Output = Self;
-    fn bitand(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-}
-impl ::core::ops::BitOrAssign for D3D11_BIND_FLAG {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0.bitor_assign(other.0)
-    }
-}
-impl ::core::ops::BitAndAssign for D3D11_BIND_FLAG {
-    fn bitand_assign(&mut self, other: Self) {
-        self.0.bitand_assign(other.0)
-    }
-}
-impl ::core::ops::Not for D3D11_BIND_FLAG {
-    type Output = Self;
-    fn not(self) -> Self {
-        Self(self.0.not())
-    }
-}
 
 pub const D3D11_BIND_VERTEX_BUFFER: D3D11_BIND_FLAG = D3D11_BIND_FLAG(1u32);
 
@@ -5588,28 +2476,6 @@ impl ::core::fmt::Debug for D3D11_BUFFER_DESC {
 }
 
 pub const D3D11_USAGE_DEFAULT: D3D11_USAGE = D3D11_USAGE(0i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_USAGE(pub i32);
-impl ::core::marker::Copy for D3D11_USAGE {}
-impl ::core::clone::Clone for D3D11_USAGE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_USAGE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_USAGE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_USAGE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_USAGE").field(&self.0).finish()
-    }
-}
 
 pub const D3D11_BIND_CONSTANT_BUFFER: D3D11_BIND_FLAG = D3D11_BIND_FLAG(4u32);
 
@@ -5797,6 +2663,56 @@ impl ::core::ops::Not for D3D11_CREATE_DEVICE_FLAG {
 
 pub const D3D11_SDK_VERSION: u32 = 7u32;
 
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_BIND_FLAG(pub u32);
+impl ::core::marker::Copy for D3D11_BIND_FLAG {}
+impl ::core::clone::Clone for D3D11_BIND_FLAG {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BIND_FLAG {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BIND_FLAG {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_BIND_FLAG {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_BIND_FLAG").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for D3D11_BIND_FLAG {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for D3D11_BIND_FLAG {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for D3D11_BIND_FLAG {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for D3D11_BIND_FLAG {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for D3D11_BIND_FLAG {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
 pub const D3D11_BIND_SHADER_RESOURCE: D3D11_BIND_FLAG = D3D11_BIND_FLAG(8u32);
 
 #[repr(C)]
@@ -5881,51 +2797,7 @@ impl ::core::fmt::Debug for D3D11_DEPTH_STENCIL_DESC {
 
 pub const D3D11_DEPTH_WRITE_MASK_ALL: D3D11_DEPTH_WRITE_MASK = D3D11_DEPTH_WRITE_MASK(1i32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_DEPTH_WRITE_MASK(pub i32);
-impl ::core::marker::Copy for D3D11_DEPTH_WRITE_MASK {}
-impl ::core::clone::Clone for D3D11_DEPTH_WRITE_MASK {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_DEPTH_WRITE_MASK {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_DEPTH_WRITE_MASK {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_DEPTH_WRITE_MASK {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_DEPTH_WRITE_MASK").field(&self.0).finish()
-    }
-}
-
 pub const D3D11_COMPARISON_LESS_EQUAL: D3D11_COMPARISON_FUNC = D3D11_COMPARISON_FUNC(4i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_COMPARISON_FUNC(pub i32);
-impl ::core::marker::Copy for D3D11_COMPARISON_FUNC {}
-impl ::core::clone::Clone for D3D11_COMPARISON_FUNC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_COMPARISON_FUNC {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_COMPARISON_FUNC {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_COMPARISON_FUNC {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_COMPARISON_FUNC").field(&self.0).finish()
-    }
-}
 
 #[repr(C)]
 pub struct D3D11_DEPTH_STENCILOP_DESC {
@@ -5962,28 +2834,6 @@ impl ::core::fmt::Debug for D3D11_DEPTH_STENCILOP_DESC {
 
 pub const D3D11_STENCIL_OP_REPLACE: D3D11_STENCIL_OP = D3D11_STENCIL_OP(3i32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_STENCIL_OP(pub i32);
-impl ::core::marker::Copy for D3D11_STENCIL_OP {}
-impl ::core::clone::Clone for D3D11_STENCIL_OP {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_STENCIL_OP {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_STENCIL_OP {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_STENCIL_OP {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_STENCIL_OP").field(&self.0).finish()
-    }
-}
-
 pub const D3D11_COMPARISON_ALWAYS: D3D11_COMPARISON_FUNC = D3D11_COMPARISON_FUNC(8i32);
 
 #[repr(C)]
@@ -6016,51 +2866,7 @@ unsafe impl ::windows::core::Abi for D3D11_DEPTH_STENCIL_VIEW_DESC {
 
 pub const D3D11_DSV_DIMENSION_TEXTURE2D: D3D11_DSV_DIMENSION = D3D11_DSV_DIMENSION(3i32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_DSV_DIMENSION(pub i32);
-impl ::core::marker::Copy for D3D11_DSV_DIMENSION {}
-impl ::core::clone::Clone for D3D11_DSV_DIMENSION {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_DSV_DIMENSION {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_DSV_DIMENSION {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_DSV_DIMENSION {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_DSV_DIMENSION").field(&self.0).finish()
-    }
-}
-
 pub const D3D11_CLEAR_DEPTH: D3D11_CLEAR_FLAG = D3D11_CLEAR_FLAG(1i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_CLEAR_FLAG(pub i32);
-impl ::core::marker::Copy for D3D11_CLEAR_FLAG {}
-impl ::core::clone::Clone for D3D11_CLEAR_FLAG {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_CLEAR_FLAG {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_CLEAR_FLAG {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_CLEAR_FLAG {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_CLEAR_FLAG").field(&self.0).finish()
-    }
-}
 
 pub const D3D11_CLEAR_STENCIL: D3D11_CLEAR_FLAG = D3D11_CLEAR_FLAG(2i32);
 
@@ -6135,77 +2941,11 @@ impl ::core::fmt::Debug for D3D11_RENDER_TARGET_BLEND_DESC {
 
 pub const D3D11_BLEND_ONE: D3D11_BLEND = D3D11_BLEND(2i32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_BLEND(pub i32);
-impl ::core::marker::Copy for D3D11_BLEND {}
-impl ::core::clone::Clone for D3D11_BLEND {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_BLEND {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_BLEND {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_BLEND {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_BLEND").field(&self.0).finish()
-    }
-}
-
 pub const D3D11_BLEND_INV_SRC_ALPHA: D3D11_BLEND = D3D11_BLEND(6i32);
 
 pub const D3D11_BLEND_OP_ADD: D3D11_BLEND_OP = D3D11_BLEND_OP(1i32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_BLEND_OP(pub i32);
-impl ::core::marker::Copy for D3D11_BLEND_OP {}
-impl ::core::clone::Clone for D3D11_BLEND_OP {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_BLEND_OP {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_BLEND_OP {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_BLEND_OP {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_BLEND_OP").field(&self.0).finish()
-    }
-}
-
 pub const D3D11_COLOR_WRITE_ENABLE_ALL: D3D11_COLOR_WRITE_ENABLE = D3D11_COLOR_WRITE_ENABLE(15i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_COLOR_WRITE_ENABLE(pub i32);
-impl ::core::marker::Copy for D3D11_COLOR_WRITE_ENABLE {}
-impl ::core::clone::Clone for D3D11_COLOR_WRITE_ENABLE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_COLOR_WRITE_ENABLE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_COLOR_WRITE_ENABLE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_COLOR_WRITE_ENABLE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_COLOR_WRITE_ENABLE").field(&self.0).finish()
-    }
-}
 
 #[repr(C)]
 pub struct D3D11_RASTERIZER_DESC {
@@ -6259,51 +2999,7 @@ impl ::core::fmt::Debug for D3D11_RASTERIZER_DESC {
 
 pub const D3D11_CULL_NONE: D3D11_CULL_MODE = D3D11_CULL_MODE(1i32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_CULL_MODE(pub i32);
-impl ::core::marker::Copy for D3D11_CULL_MODE {}
-impl ::core::clone::Clone for D3D11_CULL_MODE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_CULL_MODE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_CULL_MODE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_CULL_MODE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_CULL_MODE").field(&self.0).finish()
-    }
-}
-
 pub const D3D11_FILL_SOLID: D3D11_FILL_MODE = D3D11_FILL_MODE(3i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_FILL_MODE(pub i32);
-impl ::core::marker::Copy for D3D11_FILL_MODE {}
-impl ::core::clone::Clone for D3D11_FILL_MODE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_FILL_MODE {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_FILL_MODE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_FILL_MODE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_FILL_MODE").field(&self.0).finish()
-    }
-}
 
 #[repr(C)]
 pub struct D3D11_INPUT_ELEMENT_DESC {
@@ -6342,28 +3038,6 @@ impl ::core::fmt::Debug for D3D11_INPUT_ELEMENT_DESC {
 }
 
 pub const D3D11_INPUT_PER_VERTEX_DATA: D3D11_INPUT_CLASSIFICATION = D3D11_INPUT_CLASSIFICATION(0i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_INPUT_CLASSIFICATION(pub i32);
-impl ::core::marker::Copy for D3D11_INPUT_CLASSIFICATION {}
-impl ::core::clone::Clone for D3D11_INPUT_CLASSIFICATION {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for D3D11_INPUT_CLASSIFICATION {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for D3D11_INPUT_CLASSIFICATION {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for D3D11_INPUT_CLASSIFICATION {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("D3D11_INPUT_CLASSIFICATION").field(&self.0).finish()
-    }
-}
 
 pub const D3D11_INPUT_PER_INSTANCE_DATA: D3D11_INPUT_CLASSIFICATION = D3D11_INPUT_CLASSIFICATION(1i32);
 
@@ -6624,6 +3298,8 @@ unsafe impl ::windows::core::Vtable for ID3D11Device {
 unsafe impl ::windows::core::Interface for ID3D11Device {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xdb6f6ddb_ac77_4e88_8253_819df9bbf140);
 }
+
+::windows::core::interface_hierarchy!(ID3D11Device, ::windows::core::IUnknown);
 
 #[repr(C)]
 pub struct ID3D11Device_Vtbl {
@@ -7171,8 +3847,6 @@ impl ID3D11Device_Vtbl {
     }
 }
 
-::windows::core::interface_hierarchy!(ID3D11Device, ::windows::core::IUnknown);
-
 #[repr(transparent)]
 pub struct ID3D11DeviceContext(::windows::core::IUnknown);
 impl ID3D11DeviceContext {
@@ -7686,6 +4360,8 @@ unsafe impl ::windows::core::Vtable for ID3D11DeviceContext {
 unsafe impl ::windows::core::Interface for ID3D11DeviceContext {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xc0bfa96c_e089_44fb_8eaf_26f8796190da);
 }
+
+::windows::core::interface_hierarchy!(ID3D11DeviceContext, ::windows::core::IUnknown, ID3D11DeviceChild);
 
 #[repr(C)]
 pub struct ID3D11DeviceContext_Vtbl {
@@ -8615,8 +5291,6 @@ impl ID3D11DeviceContext_Vtbl {
     }
 }
 
-::windows::core::interface_hierarchy!(ID3D11DeviceContext, ::windows::core::IUnknown, ID3D11DeviceChild);
-
 #[repr(transparent)]
 pub struct ID3D11RenderTargetView(::windows::core::IUnknown);
 impl ID3D11RenderTargetView {
@@ -8669,6 +5343,8 @@ unsafe impl ::windows::core::Interface for ID3D11RenderTargetView {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xdfdba067_0b8d_4865_875b_d7b4516cc164);
 }
 
+::windows::core::interface_hierarchy!(ID3D11RenderTargetView, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11View);
+
 #[repr(C)]
 pub struct ID3D11RenderTargetView_Vtbl {
     pub base__: ID3D11View_Vtbl,
@@ -8695,8 +5371,6 @@ impl ID3D11RenderTargetView_Vtbl {
         iid == &<ID3D11RenderTargetView as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11View as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11RenderTargetView, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11View);
 
 #[repr(transparent)]
 pub struct ID3D11Texture2D(::windows::core::IUnknown);
@@ -8756,6 +5430,8 @@ unsafe impl ::windows::core::Interface for ID3D11Texture2D {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x6f15aaf2_d208_4e89_9ab4_489535d34f9c);
 }
 
+::windows::core::interface_hierarchy!(ID3D11Texture2D, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Resource);
+
 #[repr(C)]
 pub struct ID3D11Texture2D_Vtbl {
     pub base__: ID3D11Resource_Vtbl,
@@ -8782,8 +5458,6 @@ impl ID3D11Texture2D_Vtbl {
         iid == &<ID3D11Texture2D as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Resource as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11Texture2D, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Resource);
 
 #[repr(transparent)]
 pub struct ID3D11ShaderResourceView(::windows::core::IUnknown);
@@ -8837,6 +5511,8 @@ unsafe impl ::windows::core::Interface for ID3D11ShaderResourceView {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xb0e06fe0_8192_4e1a_b1ca_36d7414710b2);
 }
 
+::windows::core::interface_hierarchy!(ID3D11ShaderResourceView, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11View);
+
 #[repr(C)]
 pub struct ID3D11ShaderResourceView_Vtbl {
     pub base__: ID3D11View_Vtbl,
@@ -8863,8 +5539,6 @@ impl ID3D11ShaderResourceView_Vtbl {
         iid == &<ID3D11ShaderResourceView as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11View as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11ShaderResourceView, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11View);
 
 #[repr(transparent)]
 pub struct ID3D11DepthStencilView(::windows::core::IUnknown);
@@ -8918,6 +5592,8 @@ unsafe impl ::windows::core::Interface for ID3D11DepthStencilView {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x9fdac92a_1876_48c3_afad_25b94f84a9b6);
 }
 
+::windows::core::interface_hierarchy!(ID3D11DepthStencilView, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11View);
+
 #[repr(C)]
 pub struct ID3D11DepthStencilView_Vtbl {
     pub base__: ID3D11View_Vtbl,
@@ -8944,8 +5620,6 @@ impl ID3D11DepthStencilView_Vtbl {
         iid == &<ID3D11DepthStencilView as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11View as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11DepthStencilView, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11View);
 
 #[repr(transparent)]
 pub struct ID3D11BlendState(::windows::core::IUnknown);
@@ -8996,6 +5670,8 @@ unsafe impl ::windows::core::Interface for ID3D11BlendState {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x75b68faa_347d_4159_8f45_a0640f01cd9a);
 }
 
+::windows::core::interface_hierarchy!(ID3D11BlendState, ::windows::core::IUnknown, ID3D11DeviceChild);
+
 #[repr(C)]
 pub struct ID3D11BlendState_Vtbl {
     pub base__: ID3D11DeviceChild_Vtbl,
@@ -9022,8 +5698,6 @@ impl ID3D11BlendState_Vtbl {
         iid == &<ID3D11BlendState as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11BlendState, ::windows::core::IUnknown, ID3D11DeviceChild);
 
 #[repr(transparent)]
 pub struct ID3D11RasterizerState(::windows::core::IUnknown);
@@ -9074,6 +5748,8 @@ unsafe impl ::windows::core::Interface for ID3D11RasterizerState {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x9bb4ab81_ab1a_4d8f_b506_fc04200b6ee7);
 }
 
+::windows::core::interface_hierarchy!(ID3D11RasterizerState, ::windows::core::IUnknown, ID3D11DeviceChild);
+
 #[repr(C)]
 pub struct ID3D11RasterizerState_Vtbl {
     pub base__: ID3D11DeviceChild_Vtbl,
@@ -9100,8 +5776,6 @@ impl ID3D11RasterizerState_Vtbl {
         iid == &<ID3D11RasterizerState as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11RasterizerState, ::windows::core::IUnknown, ID3D11DeviceChild);
 
 #[repr(transparent)]
 pub struct ID3D11DepthStencilState(::windows::core::IUnknown);
@@ -9152,6 +5826,8 @@ unsafe impl ::windows::core::Interface for ID3D11DepthStencilState {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x03823efb_8d8f_4e1c_9aa2_f64bb2cbfdf1);
 }
 
+::windows::core::interface_hierarchy!(ID3D11DepthStencilState, ::windows::core::IUnknown, ID3D11DeviceChild);
+
 #[repr(C)]
 pub struct ID3D11DepthStencilState_Vtbl {
     pub base__: ID3D11DeviceChild_Vtbl,
@@ -9178,8 +5854,6 @@ impl ID3D11DepthStencilState_Vtbl {
         iid == &<ID3D11DepthStencilState as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11DepthStencilState, ::windows::core::IUnknown, ID3D11DeviceChild);
 
 #[repr(transparent)]
 pub struct ID3D11PixelShader(::windows::core::IUnknown);
@@ -9225,6 +5899,8 @@ unsafe impl ::windows::core::Interface for ID3D11PixelShader {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xea82e40d_51dc_4f33_93d4_db7c9125ae8c);
 }
 
+::windows::core::interface_hierarchy!(ID3D11PixelShader, ::windows::core::IUnknown, ID3D11DeviceChild);
+
 #[repr(C)]
 pub struct ID3D11PixelShader_Vtbl {
     pub base__: ID3D11DeviceChild_Vtbl,
@@ -9240,8 +5916,6 @@ impl ID3D11PixelShader_Vtbl {
         iid == &<ID3D11PixelShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11PixelShader, ::windows::core::IUnknown, ID3D11DeviceChild);
 
 #[repr(transparent)]
 pub struct ID3D11VertexShader(::windows::core::IUnknown);
@@ -9287,6 +5961,8 @@ unsafe impl ::windows::core::Interface for ID3D11VertexShader {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x3b301d64_d678_4289_8897_22f8928b72f3);
 }
 
+::windows::core::interface_hierarchy!(ID3D11VertexShader, ::windows::core::IUnknown, ID3D11DeviceChild);
+
 #[repr(C)]
 pub struct ID3D11VertexShader_Vtbl {
     pub base__: ID3D11DeviceChild_Vtbl,
@@ -9302,8 +5978,6 @@ impl ID3D11VertexShader_Vtbl {
         iid == &<ID3D11VertexShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11VertexShader, ::windows::core::IUnknown, ID3D11DeviceChild);
 
 #[repr(transparent)]
 pub struct ID3D11InputLayout(::windows::core::IUnknown);
@@ -9349,6 +6023,8 @@ unsafe impl ::windows::core::Interface for ID3D11InputLayout {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xe4819ddc_4cf0_4025_bd26_5de82a3e07b7);
 }
 
+::windows::core::interface_hierarchy!(ID3D11InputLayout, ::windows::core::IUnknown, ID3D11DeviceChild);
+
 #[repr(C)]
 pub struct ID3D11InputLayout_Vtbl {
     pub base__: ID3D11DeviceChild_Vtbl,
@@ -9364,8 +6040,6 @@ impl ID3D11InputLayout_Vtbl {
         iid == &<ID3D11InputLayout as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(ID3D11InputLayout, ::windows::core::IUnknown, ID3D11DeviceChild);
 
 #[repr(transparent)]
 pub struct ID3D11Buffer(::windows::core::IUnknown);
@@ -9423,6 +6097,8 @@ unsafe impl ::windows::core::Interface for ID3D11Buffer {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x48570b85_d1ee_4fcd_a250_eb350722b037);
 }
 
+::windows::core::interface_hierarchy!(ID3D11Buffer, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Resource);
+
 #[repr(C)]
 pub struct ID3D11Buffer_Vtbl {
     pub base__: ID3D11Resource_Vtbl,
@@ -9447,8 +6123,6 @@ impl ID3D11Buffer_Vtbl {
     }
 }
 
-::windows::core::interface_hierarchy!(ID3D11Buffer, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Resource);
-
 pub unsafe fn D3D11CreateDevice<'a, P0, P1>(padapter: P0, drivertype: super::Direct3D::D3D_DRIVER_TYPE, software: P1, flags: D3D11_CREATE_DEVICE_FLAG, pfeaturelevels: ::core::option::Option<&[super::Direct3D::D3D_FEATURE_LEVEL]>, sdkversion: u32, ppdevice: ::core::option::Option<*mut ::core::option::Option<ID3D11Device>>, pfeaturelevel: ::core::option::Option<*mut super::Direct3D::D3D_FEATURE_LEVEL>, ppimmediatecontext: ::core::option::Option<*mut ::core::option::Option<ID3D11DeviceContext>>) -> ::windows::core::Result<()>
 where
     P0: ::std::convert::Into<::windows::core::InParam<'a, super::Dxgi::IDXGIAdapter>>,
@@ -9461,9 +6135,4673 @@ where
     D3D11CreateDevice(padapter.into().abi(), drivertype, software.into(), flags, ::core::mem::transmute(pfeaturelevels.as_deref().map_or(::core::ptr::null(), |slice| slice.as_ptr())), pfeaturelevels.as_deref().map_or(0, |slice| slice.len() as _), sdkversion, ::core::mem::transmute(ppdevice.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pfeaturelevel.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(ppimmediatecontext.unwrap_or(::std::ptr::null_mut()))).ok()
 }
 
+#[repr(transparent)]
+pub struct ID3D11Asynchronous(::windows::core::IUnknown);
+impl ID3D11Asynchronous {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetDataSize(&self) -> u32 {
+        (::windows::core::Vtable::vtable(self).GetDataSize)(::windows::core::Vtable::as_raw(self))
+    }
+}
+impl ::core::cmp::Eq for ID3D11Asynchronous {}
+impl ::core::cmp::PartialEq for ID3D11Asynchronous {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11Asynchronous {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11Asynchronous {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11Asynchronous").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11Asynchronous {}
+unsafe impl ::core::marker::Sync for ID3D11Asynchronous {}
+unsafe impl ::windows::core::Vtable for ID3D11Asynchronous {
+    type Vtable = ID3D11Asynchronous_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11Asynchronous {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x4b35d0cd_1e15_4258_9c98_1b1333f6dd3b);
+}
+
+::windows::core::interface_hierarchy!(ID3D11Asynchronous, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11Asynchronous_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+    pub GetDataSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> u32,
+}
+
+pub trait ID3D11Asynchronous_Impl: Sized + ID3D11DeviceChild_Impl {
+    fn GetDataSize(&self) -> u32;
+}
+
+impl ID3D11Asynchronous_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Asynchronous_Impl, const OFFSET: isize>() -> ID3D11Asynchronous_Vtbl {
+        unsafe extern "system" fn GetDataSize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Asynchronous_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> u32 {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDataSize()
+        }
+        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(), GetDataSize: GetDataSize::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11Asynchronous as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11ClassInstance(::windows::core::IUnknown);
+impl ID3D11ClassInstance {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetClassLinkage(&self, pplinkage: *mut ::core::option::Option<ID3D11ClassLinkage>) {
+        (::windows::core::Vtable::vtable(self).GetClassLinkage)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pplinkage))
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_CLASS_INSTANCE_DESC) {
+        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
+    }
+    pub unsafe fn GetInstanceName(&self, pinstancename: ::windows::core::PSTR, pbufferlength: *mut usize) {
+        (::windows::core::Vtable::vtable(self).GetInstanceName)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pinstancename), ::core::mem::transmute(pbufferlength))
+    }
+    pub unsafe fn GetTypeName(&self, ptypename: ::windows::core::PSTR, pbufferlength: *mut usize) {
+        (::windows::core::Vtable::vtable(self).GetTypeName)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ptypename), ::core::mem::transmute(pbufferlength))
+    }
+}
+impl ::core::cmp::Eq for ID3D11ClassInstance {}
+impl ::core::cmp::PartialEq for ID3D11ClassInstance {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11ClassInstance {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11ClassInstance {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11ClassInstance").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11ClassInstance {}
+unsafe impl ::core::marker::Sync for ID3D11ClassInstance {}
+unsafe impl ::windows::core::Vtable for ID3D11ClassInstance {
+    type Vtable = ID3D11ClassInstance_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11ClassInstance {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xa6cd7faa_b0b7_4a2f_9436_8662a65797cb);
+}
+
+::windows::core::interface_hierarchy!(ID3D11ClassInstance, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11ClassInstance_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+    pub GetClassLinkage: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pplinkage: *mut *mut ::core::ffi::c_void),
+    #[cfg(feature = "Win32_Foundation")]
+    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_CLASS_INSTANCE_DESC),
+    #[cfg(not(feature = "Win32_Foundation"))]
+    GetDesc: usize,
+    pub GetInstanceName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pinstancename: ::windows::core::PSTR, pbufferlength: *mut usize),
+    pub GetTypeName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ptypename: ::windows::core::PSTR, pbufferlength: *mut usize),
+}
+
+pub trait ID3D11ClassInstance_Impl: Sized + ID3D11DeviceChild_Impl {
+    fn GetClassLinkage(&self, pplinkage: *mut ::core::option::Option<ID3D11ClassLinkage>);
+    fn GetDesc(&self, pdesc: *mut D3D11_CLASS_INSTANCE_DESC);
+    fn GetInstanceName(&self, pinstancename: ::windows::core::PSTR, pbufferlength: *mut usize);
+    fn GetTypeName(&self, ptypename: ::windows::core::PSTR, pbufferlength: *mut usize);
+}
+
+impl ID3D11ClassInstance_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>() -> ID3D11ClassInstance_Vtbl {
+        unsafe extern "system" fn GetClassLinkage<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pplinkage: *mut *mut ::core::ffi::c_void) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetClassLinkage(::core::mem::transmute_copy(&pplinkage))
+        }
+        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_CLASS_INSTANCE_DESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDesc(::core::mem::transmute_copy(&pdesc))
+        }
+        unsafe extern "system" fn GetInstanceName<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pinstancename: ::windows::core::PSTR, pbufferlength: *mut usize) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetInstanceName(::core::mem::transmute_copy(&pinstancename), ::core::mem::transmute_copy(&pbufferlength))
+        }
+        unsafe extern "system" fn GetTypeName<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ptypename: ::windows::core::PSTR, pbufferlength: *mut usize) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetTypeName(::core::mem::transmute_copy(&ptypename), ::core::mem::transmute_copy(&pbufferlength))
+        }
+        Self {
+            base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(),
+            GetClassLinkage: GetClassLinkage::<Identity, Impl, OFFSET>,
+            GetDesc: GetDesc::<Identity, Impl, OFFSET>,
+            GetInstanceName: GetInstanceName::<Identity, Impl, OFFSET>,
+            GetTypeName: GetTypeName::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11ClassInstance as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11Texture3D(::windows::core::IUnknown);
+impl ID3D11Texture3D {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetType(&self, presourcedimension: *mut D3D11_RESOURCE_DIMENSION) {
+        (::windows::core::Vtable::vtable(self).base__.GetType)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(presourcedimension))
+    }
+    pub unsafe fn SetEvictionPriority(&self, evictionpriority: u32) {
+        (::windows::core::Vtable::vtable(self).base__.SetEvictionPriority)(::windows::core::Vtable::as_raw(self), evictionpriority)
+    }
+    pub unsafe fn GetEvictionPriority(&self) -> u32 {
+        (::windows::core::Vtable::vtable(self).base__.GetEvictionPriority)(::windows::core::Vtable::as_raw(self))
+    }
+    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE3D_DESC) {
+        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
+    }
+}
+impl ::core::cmp::Eq for ID3D11Texture3D {}
+impl ::core::cmp::PartialEq for ID3D11Texture3D {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11Texture3D {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11Texture3D {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11Texture3D").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11Texture3D {}
+unsafe impl ::core::marker::Sync for ID3D11Texture3D {}
+unsafe impl ::windows::core::Vtable for ID3D11Texture3D {
+    type Vtable = ID3D11Texture3D_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11Texture3D {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x037e866e_f56d_4357_a8af_9dabbe6e250e);
+}
+
+::windows::core::interface_hierarchy!(ID3D11Texture3D, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Resource);
+
+#[repr(C)]
+pub struct ID3D11Texture3D_Vtbl {
+    pub base__: ID3D11Resource_Vtbl,
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE3D_DESC),
+    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
+    GetDesc: usize,
+}
+
+pub trait ID3D11Texture3D_Impl: Sized + ID3D11Resource_Impl {
+    fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE3D_DESC);
+}
+
+impl ID3D11Texture3D_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture3D_Impl, const OFFSET: isize>() -> ID3D11Texture3D_Vtbl {
+        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture3D_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE3D_DESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDesc(::core::mem::transmute_copy(&pdesc))
+        }
+        Self { base__: ID3D11Resource_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11Texture3D as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Resource as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11Texture1D(::windows::core::IUnknown);
+impl ID3D11Texture1D {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetType(&self, presourcedimension: *mut D3D11_RESOURCE_DIMENSION) {
+        (::windows::core::Vtable::vtable(self).base__.GetType)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(presourcedimension))
+    }
+    pub unsafe fn SetEvictionPriority(&self, evictionpriority: u32) {
+        (::windows::core::Vtable::vtable(self).base__.SetEvictionPriority)(::windows::core::Vtable::as_raw(self), evictionpriority)
+    }
+    pub unsafe fn GetEvictionPriority(&self) -> u32 {
+        (::windows::core::Vtable::vtable(self).base__.GetEvictionPriority)(::windows::core::Vtable::as_raw(self))
+    }
+    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE1D_DESC) {
+        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
+    }
+}
+impl ::core::cmp::Eq for ID3D11Texture1D {}
+impl ::core::cmp::PartialEq for ID3D11Texture1D {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11Texture1D {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11Texture1D {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11Texture1D").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11Texture1D {}
+unsafe impl ::core::marker::Sync for ID3D11Texture1D {}
+unsafe impl ::windows::core::Vtable for ID3D11Texture1D {
+    type Vtable = ID3D11Texture1D_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11Texture1D {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xf8fb5c27_c6b3_4f75_a4c8_439af2ef564c);
+}
+
+::windows::core::interface_hierarchy!(ID3D11Texture1D, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Resource);
+
+#[repr(C)]
+pub struct ID3D11Texture1D_Vtbl {
+    pub base__: ID3D11Resource_Vtbl,
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE1D_DESC),
+    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
+    GetDesc: usize,
+}
+
+pub trait ID3D11Texture1D_Impl: Sized + ID3D11Resource_Impl {
+    fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE1D_DESC);
+}
+
+impl ID3D11Texture1D_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture1D_Impl, const OFFSET: isize>() -> ID3D11Texture1D_Vtbl {
+        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture1D_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE1D_DESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDesc(::core::mem::transmute_copy(&pdesc))
+        }
+        Self { base__: ID3D11Resource_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11Texture1D as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Resource as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11Resource(::windows::core::IUnknown);
+impl ID3D11Resource {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetType(&self, presourcedimension: *mut D3D11_RESOURCE_DIMENSION) {
+        (::windows::core::Vtable::vtable(self).GetType)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(presourcedimension))
+    }
+    pub unsafe fn SetEvictionPriority(&self, evictionpriority: u32) {
+        (::windows::core::Vtable::vtable(self).SetEvictionPriority)(::windows::core::Vtable::as_raw(self), evictionpriority)
+    }
+    pub unsafe fn GetEvictionPriority(&self) -> u32 {
+        (::windows::core::Vtable::vtable(self).GetEvictionPriority)(::windows::core::Vtable::as_raw(self))
+    }
+}
+impl ::core::cmp::Eq for ID3D11Resource {}
+impl ::core::cmp::PartialEq for ID3D11Resource {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11Resource {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11Resource {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11Resource").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11Resource {}
+unsafe impl ::core::marker::Sync for ID3D11Resource {}
+unsafe impl ::windows::core::Vtable for ID3D11Resource {
+    type Vtable = ID3D11Resource_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11Resource {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xdc8e63f3_d12b_4952_b47b_5e45026a862d);
+}
+
+::windows::core::interface_hierarchy!(ID3D11Resource, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11Resource_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+    pub GetType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, presourcedimension: *mut D3D11_RESOURCE_DIMENSION),
+    pub SetEvictionPriority: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, evictionpriority: u32),
+    pub GetEvictionPriority: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> u32,
+}
+
+pub trait ID3D11Resource_Impl: Sized + ID3D11DeviceChild_Impl {
+    fn GetType(&self, presourcedimension: *mut D3D11_RESOURCE_DIMENSION);
+    fn SetEvictionPriority(&self, evictionpriority: u32);
+    fn GetEvictionPriority(&self) -> u32;
+}
+
+impl ID3D11Resource_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Resource_Impl, const OFFSET: isize>() -> ID3D11Resource_Vtbl {
+        unsafe extern "system" fn GetType<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Resource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, presourcedimension: *mut D3D11_RESOURCE_DIMENSION) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetType(::core::mem::transmute_copy(&presourcedimension))
+        }
+        unsafe extern "system" fn SetEvictionPriority<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Resource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, evictionpriority: u32) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetEvictionPriority(::core::mem::transmute_copy(&evictionpriority))
+        }
+        unsafe extern "system" fn GetEvictionPriority<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Resource_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> u32 {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetEvictionPriority()
+        }
+        Self {
+            base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(),
+            GetType: GetType::<Identity, Impl, OFFSET>,
+            SetEvictionPriority: SetEvictionPriority::<Identity, Impl, OFFSET>,
+            GetEvictionPriority: GetEvictionPriority::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11Resource as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11UnorderedAccessView(::windows::core::IUnknown);
+impl ID3D11UnorderedAccessView {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetResource(&self, ppresource: *mut ::core::option::Option<ID3D11Resource>) {
+        (::windows::core::Vtable::vtable(self).base__.GetResource)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppresource))
+    }
+    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC) {
+        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
+    }
+}
+impl ::core::cmp::Eq for ID3D11UnorderedAccessView {}
+impl ::core::cmp::PartialEq for ID3D11UnorderedAccessView {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11UnorderedAccessView {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11UnorderedAccessView {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11UnorderedAccessView").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11UnorderedAccessView {}
+unsafe impl ::core::marker::Sync for ID3D11UnorderedAccessView {}
+unsafe impl ::windows::core::Vtable for ID3D11UnorderedAccessView {
+    type Vtable = ID3D11UnorderedAccessView_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11UnorderedAccessView {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x28acf509_7f5c_48f6_8611_f316010a6380);
+}
+
+::windows::core::interface_hierarchy!(ID3D11UnorderedAccessView, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11View);
+
+#[repr(C)]
+pub struct ID3D11UnorderedAccessView_Vtbl {
+    pub base__: ID3D11View_Vtbl,
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC),
+    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
+    GetDesc: usize,
+}
+
+pub trait ID3D11UnorderedAccessView_Impl: Sized + ID3D11View_Impl {
+    fn GetDesc(&self, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC);
+}
+
+impl ID3D11UnorderedAccessView_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11UnorderedAccessView_Impl, const OFFSET: isize>() -> ID3D11UnorderedAccessView_Vtbl {
+        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11UnorderedAccessView_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDesc(::core::mem::transmute_copy(&pdesc))
+        }
+        Self { base__: ID3D11View_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11UnorderedAccessView as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11View as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11ClassLinkage(::windows::core::IUnknown);
+impl ID3D11ClassLinkage {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetClassInstance<'a, P0>(&self, pclassinstancename: P0, instanceindex: u32) -> ::windows::core::Result<ID3D11ClassInstance>
+    where
+        P0: ::std::convert::Into<::windows::core::PCSTR>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetClassInstance)(::windows::core::Vtable::as_raw(self), pclassinstancename.into(), instanceindex, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ID3D11ClassInstance>(result__)
+    }
+    pub unsafe fn CreateClassInstance<'a, P0>(&self, pclasstypename: P0, constantbufferoffset: u32, constantvectoroffset: u32, textureoffset: u32, sampleroffset: u32) -> ::windows::core::Result<ID3D11ClassInstance>
+    where
+        P0: ::std::convert::Into<::windows::core::PCSTR>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).CreateClassInstance)(::windows::core::Vtable::as_raw(self), pclasstypename.into(), constantbufferoffset, constantvectoroffset, textureoffset, sampleroffset, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ID3D11ClassInstance>(result__)
+    }
+}
+impl ::core::cmp::Eq for ID3D11ClassLinkage {}
+impl ::core::cmp::PartialEq for ID3D11ClassLinkage {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11ClassLinkage {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11ClassLinkage {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11ClassLinkage").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11ClassLinkage {}
+unsafe impl ::core::marker::Sync for ID3D11ClassLinkage {}
+unsafe impl ::windows::core::Vtable for ID3D11ClassLinkage {
+    type Vtable = ID3D11ClassLinkage_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11ClassLinkage {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xddf57cba_9543_46e4_a12b_f207a0fe7fed);
+}
+
+::windows::core::interface_hierarchy!(ID3D11ClassLinkage, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11ClassLinkage_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+    pub GetClassInstance: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pclassinstancename: ::windows::core::PCSTR, instanceindex: u32, ppinstance: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub CreateClassInstance: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pclasstypename: ::windows::core::PCSTR, constantbufferoffset: u32, constantvectoroffset: u32, textureoffset: u32, sampleroffset: u32, ppinstance: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait ID3D11ClassLinkage_Impl: Sized + ID3D11DeviceChild_Impl {
+    fn GetClassInstance(&self, pclassinstancename: &::windows::core::PCSTR, instanceindex: u32) -> ::windows::core::Result<ID3D11ClassInstance>;
+    fn CreateClassInstance(&self, pclasstypename: &::windows::core::PCSTR, constantbufferoffset: u32, constantvectoroffset: u32, textureoffset: u32, sampleroffset: u32) -> ::windows::core::Result<ID3D11ClassInstance>;
+}
+
+impl ID3D11ClassLinkage_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassLinkage_Impl, const OFFSET: isize>() -> ID3D11ClassLinkage_Vtbl {
+        unsafe extern "system" fn GetClassInstance<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassLinkage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pclassinstancename: ::windows::core::PCSTR, instanceindex: u32, ppinstance: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetClassInstance(::core::mem::transmute(&pclassinstancename), ::core::mem::transmute_copy(&instanceindex)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppinstance, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn CreateClassInstance<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassLinkage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pclasstypename: ::windows::core::PCSTR, constantbufferoffset: u32, constantvectoroffset: u32, textureoffset: u32, sampleroffset: u32, ppinstance: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.CreateClassInstance(::core::mem::transmute(&pclasstypename), ::core::mem::transmute_copy(&constantbufferoffset), ::core::mem::transmute_copy(&constantvectoroffset), ::core::mem::transmute_copy(&textureoffset), ::core::mem::transmute_copy(&sampleroffset)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppinstance, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(),
+            GetClassInstance: GetClassInstance::<Identity, Impl, OFFSET>,
+            CreateClassInstance: CreateClassInstance::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11ClassLinkage as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11GeometryShader(::windows::core::IUnknown);
+impl ID3D11GeometryShader {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+}
+impl ::core::cmp::Eq for ID3D11GeometryShader {}
+impl ::core::cmp::PartialEq for ID3D11GeometryShader {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11GeometryShader {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11GeometryShader {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11GeometryShader").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11GeometryShader {}
+unsafe impl ::core::marker::Sync for ID3D11GeometryShader {}
+unsafe impl ::windows::core::Vtable for ID3D11GeometryShader {
+    type Vtable = ID3D11GeometryShader_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11GeometryShader {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x38325b96_effb_4022_ba02_2e795b70275c);
+}
+
+::windows::core::interface_hierarchy!(ID3D11GeometryShader, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11GeometryShader_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+}
+
+pub trait ID3D11GeometryShader_Impl: Sized + ID3D11DeviceChild_Impl {}
+
+impl ID3D11GeometryShader_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11GeometryShader_Impl, const OFFSET: isize>() -> ID3D11GeometryShader_Vtbl {
+        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11GeometryShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11HullShader(::windows::core::IUnknown);
+impl ID3D11HullShader {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+}
+impl ::core::cmp::Eq for ID3D11HullShader {}
+impl ::core::cmp::PartialEq for ID3D11HullShader {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11HullShader {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11HullShader {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11HullShader").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11HullShader {}
+unsafe impl ::core::marker::Sync for ID3D11HullShader {}
+unsafe impl ::windows::core::Vtable for ID3D11HullShader {
+    type Vtable = ID3D11HullShader_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11HullShader {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x8e5c6061_628a_4c8e_8264_bbe45cb3d5dd);
+}
+
+::windows::core::interface_hierarchy!(ID3D11HullShader, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11HullShader_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+}
+
+pub trait ID3D11HullShader_Impl: Sized + ID3D11DeviceChild_Impl {}
+
+impl ID3D11HullShader_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11HullShader_Impl, const OFFSET: isize>() -> ID3D11HullShader_Vtbl {
+        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11HullShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11DomainShader(::windows::core::IUnknown);
+impl ID3D11DomainShader {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+}
+impl ::core::cmp::Eq for ID3D11DomainShader {}
+impl ::core::cmp::PartialEq for ID3D11DomainShader {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11DomainShader {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11DomainShader {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11DomainShader").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11DomainShader {}
+unsafe impl ::core::marker::Sync for ID3D11DomainShader {}
+unsafe impl ::windows::core::Vtable for ID3D11DomainShader {
+    type Vtable = ID3D11DomainShader_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11DomainShader {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xf582c508_0f36_490c_9977_31eece268cfa);
+}
+
+::windows::core::interface_hierarchy!(ID3D11DomainShader, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11DomainShader_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+}
+
+pub trait ID3D11DomainShader_Impl: Sized + ID3D11DeviceChild_Impl {}
+
+impl ID3D11DomainShader_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DomainShader_Impl, const OFFSET: isize>() -> ID3D11DomainShader_Vtbl {
+        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11DomainShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11ComputeShader(::windows::core::IUnknown);
+impl ID3D11ComputeShader {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+}
+impl ::core::cmp::Eq for ID3D11ComputeShader {}
+impl ::core::cmp::PartialEq for ID3D11ComputeShader {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11ComputeShader {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11ComputeShader {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11ComputeShader").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11ComputeShader {}
+unsafe impl ::core::marker::Sync for ID3D11ComputeShader {}
+unsafe impl ::windows::core::Vtable for ID3D11ComputeShader {
+    type Vtable = ID3D11ComputeShader_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11ComputeShader {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x4f5b196e_c2bd_495e_bd01_1fded38e4969);
+}
+
+::windows::core::interface_hierarchy!(ID3D11ComputeShader, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11ComputeShader_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+}
+
+pub trait ID3D11ComputeShader_Impl: Sized + ID3D11DeviceChild_Impl {}
+
+impl ID3D11ComputeShader_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ComputeShader_Impl, const OFFSET: isize>() -> ID3D11ComputeShader_Vtbl {
+        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11ComputeShader as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11SamplerState(::windows::core::IUnknown);
+impl ID3D11SamplerState {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_SAMPLER_DESC) {
+        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
+    }
+}
+impl ::core::cmp::Eq for ID3D11SamplerState {}
+impl ::core::cmp::PartialEq for ID3D11SamplerState {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11SamplerState {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11SamplerState {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11SamplerState").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11SamplerState {}
+unsafe impl ::core::marker::Sync for ID3D11SamplerState {}
+unsafe impl ::windows::core::Vtable for ID3D11SamplerState {
+    type Vtable = ID3D11SamplerState_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11SamplerState {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xda6fea51_564c_4487_9810_f0d0f9b4e3a5);
+}
+
+::windows::core::interface_hierarchy!(ID3D11SamplerState, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11SamplerState_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_SAMPLER_DESC),
+}
+
+pub trait ID3D11SamplerState_Impl: Sized + ID3D11DeviceChild_Impl {
+    fn GetDesc(&self, pdesc: *mut D3D11_SAMPLER_DESC);
+}
+
+impl ID3D11SamplerState_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11SamplerState_Impl, const OFFSET: isize>() -> ID3D11SamplerState_Vtbl {
+        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11SamplerState_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_SAMPLER_DESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDesc(::core::mem::transmute_copy(&pdesc))
+        }
+        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11SamplerState as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11DeviceChild(::windows::core::IUnknown);
+impl ID3D11DeviceChild {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+}
+impl ::core::cmp::Eq for ID3D11DeviceChild {}
+impl ::core::cmp::PartialEq for ID3D11DeviceChild {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11DeviceChild {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11DeviceChild {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11DeviceChild").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11DeviceChild {}
+unsafe impl ::core::marker::Sync for ID3D11DeviceChild {}
+unsafe impl ::windows::core::Vtable for ID3D11DeviceChild {
+    type Vtable = ID3D11DeviceChild_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11DeviceChild {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x1841e5c8_16b0_489b_bcc8_44cfb0d5deae);
+}
+
+::windows::core::interface_hierarchy!(ID3D11DeviceChild, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct ID3D11DeviceChild_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub GetDevice: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppdevice: *mut *mut ::core::ffi::c_void),
+    pub GetPrivateData: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub SetPrivateData: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub SetPrivateDataInterface: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pdata: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait ID3D11DeviceChild_Impl: Sized {
+    fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>);
+    fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn SetPrivateDataInterface(&self, guid: *const ::windows::core::GUID, pdata: &::core::option::Option<::windows::core::IUnknown>) -> ::windows::core::Result<()>;
+}
+
+impl ID3D11DeviceChild_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>() -> ID3D11DeviceChild_Vtbl {
+        unsafe extern "system" fn GetDevice<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppdevice: *mut *mut ::core::ffi::c_void) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDevice(::core::mem::transmute_copy(&ppdevice))
+        }
+        unsafe extern "system" fn GetPrivateData<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetPrivateData(::core::mem::transmute_copy(&guid), ::core::mem::transmute_copy(&pdatasize), ::core::mem::transmute_copy(&pdata)).into()
+        }
+        unsafe extern "system" fn SetPrivateData<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetPrivateData(::core::mem::transmute_copy(&guid), ::core::mem::transmute_copy(&datasize), ::core::mem::transmute_copy(&pdata)).into()
+        }
+        unsafe extern "system" fn SetPrivateDataInterface<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pdata: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetPrivateDataInterface(::core::mem::transmute_copy(&guid), ::core::mem::transmute(&pdata)).into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetDevice: GetDevice::<Identity, Impl, OFFSET>,
+            GetPrivateData: GetPrivateData::<Identity, Impl, OFFSET>,
+            SetPrivateData: SetPrivateData::<Identity, Impl, OFFSET>,
+            SetPrivateDataInterface: SetPrivateDataInterface::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11View(::windows::core::IUnknown);
+impl ID3D11View {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetResource(&self, ppresource: *mut ::core::option::Option<ID3D11Resource>) {
+        (::windows::core::Vtable::vtable(self).GetResource)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppresource))
+    }
+}
+impl ::core::cmp::Eq for ID3D11View {}
+impl ::core::cmp::PartialEq for ID3D11View {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11View {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11View {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11View").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11View {}
+unsafe impl ::core::marker::Sync for ID3D11View {}
+unsafe impl ::windows::core::Vtable for ID3D11View {
+    type Vtable = ID3D11View_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11View {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x839d1216_bb2e_412b_b7f4_a9dbebe08ed1);
+}
+
+::windows::core::interface_hierarchy!(ID3D11View, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11View_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+    pub GetResource: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppresource: *mut *mut ::core::ffi::c_void),
+}
+
+pub trait ID3D11View_Impl: Sized + ID3D11DeviceChild_Impl {
+    fn GetResource(&self, ppresource: *mut ::core::option::Option<ID3D11Resource>);
+}
+
+impl ID3D11View_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11View_Impl, const OFFSET: isize>() -> ID3D11View_Vtbl {
+        unsafe extern "system" fn GetResource<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11View_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppresource: *mut *mut ::core::ffi::c_void) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetResource(::core::mem::transmute_copy(&ppresource))
+        }
+        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(), GetResource: GetResource::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11View as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11Query(::windows::core::IUnknown);
+impl ID3D11Query {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetDataSize(&self) -> u32 {
+        (::windows::core::Vtable::vtable(self).base__.GetDataSize)(::windows::core::Vtable::as_raw(self))
+    }
+    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_QUERY_DESC) {
+        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
+    }
+}
+impl ::core::cmp::Eq for ID3D11Query {}
+impl ::core::cmp::PartialEq for ID3D11Query {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11Query {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11Query {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11Query").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11Query {}
+unsafe impl ::core::marker::Sync for ID3D11Query {}
+unsafe impl ::windows::core::Vtable for ID3D11Query {
+    type Vtable = ID3D11Query_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11Query {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xd6c00747_87b7_425e_b84d_44d108560afd);
+}
+
+::windows::core::interface_hierarchy!(ID3D11Query, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Asynchronous);
+
+#[repr(C)]
+pub struct ID3D11Query_Vtbl {
+    pub base__: ID3D11Asynchronous_Vtbl,
+    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_QUERY_DESC),
+}
+
+pub trait ID3D11Query_Impl: Sized + ID3D11Asynchronous_Impl {
+    fn GetDesc(&self, pdesc: *mut D3D11_QUERY_DESC);
+}
+
+impl ID3D11Query_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>() -> ID3D11Query_Vtbl {
+        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_QUERY_DESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDesc(::core::mem::transmute_copy(&pdesc))
+        }
+        Self { base__: ID3D11Asynchronous_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11Query as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Asynchronous as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11Predicate(::windows::core::IUnknown);
+impl ID3D11Predicate {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetDataSize(&self) -> u32 {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetDataSize)(::windows::core::Vtable::as_raw(self))
+    }
+    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_QUERY_DESC) {
+        (::windows::core::Vtable::vtable(self).base__.GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
+    }
+}
+impl ::core::cmp::Eq for ID3D11Predicate {}
+impl ::core::cmp::PartialEq for ID3D11Predicate {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11Predicate {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11Predicate {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11Predicate").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11Predicate {}
+unsafe impl ::core::marker::Sync for ID3D11Predicate {}
+unsafe impl ::windows::core::Vtable for ID3D11Predicate {
+    type Vtable = ID3D11Predicate_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11Predicate {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x9eb576dd_9f77_4d86_81aa_8bab5fe490e2);
+}
+
+::windows::core::interface_hierarchy!(ID3D11Predicate, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Asynchronous, ID3D11Query);
+
+#[repr(C)]
+pub struct ID3D11Predicate_Vtbl {
+    pub base__: ID3D11Query_Vtbl,
+}
+
+pub trait ID3D11Predicate_Impl: Sized + ID3D11Query_Impl {}
+
+impl ID3D11Predicate_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Predicate_Impl, const OFFSET: isize>() -> ID3D11Predicate_Vtbl {
+        Self { base__: ID3D11Query_Vtbl::new::<Identity, Impl, OFFSET>() }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11Predicate as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Asynchronous as ::windows::core::Interface>::IID || iid == &<ID3D11Query as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11Counter(::windows::core::IUnknown);
+impl ID3D11Counter {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetDataSize(&self) -> u32 {
+        (::windows::core::Vtable::vtable(self).base__.GetDataSize)(::windows::core::Vtable::as_raw(self))
+    }
+    pub unsafe fn GetDesc(&self, pdesc: *mut D3D11_COUNTER_DESC) {
+        (::windows::core::Vtable::vtable(self).GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdesc))
+    }
+}
+impl ::core::cmp::Eq for ID3D11Counter {}
+impl ::core::cmp::PartialEq for ID3D11Counter {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11Counter {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11Counter {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11Counter").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11Counter {}
+unsafe impl ::core::marker::Sync for ID3D11Counter {}
+unsafe impl ::windows::core::Vtable for ID3D11Counter {
+    type Vtable = ID3D11Counter_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11Counter {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x6e8c49fb_a371_4770_b440_29086022b741);
+}
+
+::windows::core::interface_hierarchy!(ID3D11Counter, ::windows::core::IUnknown, ID3D11DeviceChild, ID3D11Asynchronous);
+
+#[repr(C)]
+pub struct ID3D11Counter_Vtbl {
+    pub base__: ID3D11Asynchronous_Vtbl,
+    pub GetDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_COUNTER_DESC),
+}
+
+pub trait ID3D11Counter_Impl: Sized + ID3D11Asynchronous_Impl {
+    fn GetDesc(&self, pdesc: *mut D3D11_COUNTER_DESC);
+}
+
+impl ID3D11Counter_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Counter_Impl, const OFFSET: isize>() -> ID3D11Counter_Vtbl {
+        unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Counter_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_COUNTER_DESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDesc(::core::mem::transmute_copy(&pdesc))
+        }
+        Self { base__: ID3D11Asynchronous_Vtbl::new::<Identity, Impl, OFFSET>(), GetDesc: GetDesc::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11Counter as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID || iid == &<ID3D11Asynchronous as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ID3D11CommandList(::windows::core::IUnknown);
+impl ID3D11CommandList {
+    pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
+        (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
+    }
+    pub unsafe fn GetPrivateData(&self, guid: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: ::core::option::Option<*mut ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), datasize, ::core::mem::transmute(pdata.unwrap_or(::std::ptr::null()))).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, guid: *const ::windows::core::GUID, pdata: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), pdata.into().abi()).ok()
+    }
+    pub unsafe fn GetContextFlags(&self) -> u32 {
+        (::windows::core::Vtable::vtable(self).GetContextFlags)(::windows::core::Vtable::as_raw(self))
+    }
+}
+impl ::core::cmp::Eq for ID3D11CommandList {}
+impl ::core::cmp::PartialEq for ID3D11CommandList {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3D11CommandList {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3D11CommandList {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3D11CommandList").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3D11CommandList {}
+unsafe impl ::core::marker::Sync for ID3D11CommandList {}
+unsafe impl ::windows::core::Vtable for ID3D11CommandList {
+    type Vtable = ID3D11CommandList_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3D11CommandList {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xa24bc4d1_769e_43f7_8013_98ff566c18e2);
+}
+
+::windows::core::interface_hierarchy!(ID3D11CommandList, ::windows::core::IUnknown, ID3D11DeviceChild);
+
+#[repr(C)]
+pub struct ID3D11CommandList_Vtbl {
+    pub base__: ID3D11DeviceChild_Vtbl,
+    pub GetContextFlags: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> u32,
+}
+
+pub trait ID3D11CommandList_Impl: Sized + ID3D11DeviceChild_Impl {
+    fn GetContextFlags(&self) -> u32;
+}
+
+impl ID3D11CommandList_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11CommandList_Impl, const OFFSET: isize>() -> ID3D11CommandList_Vtbl {
+        unsafe extern "system" fn GetContextFlags<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11CommandList_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> u32 {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetContextFlags()
+        }
+        Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>(), GetContextFlags: GetContextFlags::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3D11CommandList as ::windows::core::Interface>::IID || iid == &<ID3D11DeviceChild as ::windows::core::Interface>::IID
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_USAGE(pub i32);
+impl ::core::marker::Copy for D3D11_USAGE {}
+impl ::core::clone::Clone for D3D11_USAGE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_USAGE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_USAGE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_USAGE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_USAGE").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_DEPTH_WRITE_MASK(pub i32);
+impl ::core::marker::Copy for D3D11_DEPTH_WRITE_MASK {}
+impl ::core::clone::Clone for D3D11_DEPTH_WRITE_MASK {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_DEPTH_WRITE_MASK {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_DEPTH_WRITE_MASK {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_DEPTH_WRITE_MASK {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_DEPTH_WRITE_MASK").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_COMPARISON_FUNC(pub i32);
+impl ::core::marker::Copy for D3D11_COMPARISON_FUNC {}
+impl ::core::clone::Clone for D3D11_COMPARISON_FUNC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_COMPARISON_FUNC {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_COMPARISON_FUNC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_COMPARISON_FUNC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_COMPARISON_FUNC").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_STENCIL_OP(pub i32);
+impl ::core::marker::Copy for D3D11_STENCIL_OP {}
+impl ::core::clone::Clone for D3D11_STENCIL_OP {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_STENCIL_OP {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_STENCIL_OP {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_STENCIL_OP {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_STENCIL_OP").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_DSV_DIMENSION(pub i32);
+impl ::core::marker::Copy for D3D11_DSV_DIMENSION {}
+impl ::core::clone::Clone for D3D11_DSV_DIMENSION {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_DSV_DIMENSION {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_DSV_DIMENSION {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_DSV_DIMENSION {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_DSV_DIMENSION").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_BLEND(pub i32);
+impl ::core::marker::Copy for D3D11_BLEND {}
+impl ::core::clone::Clone for D3D11_BLEND {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BLEND {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BLEND {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_BLEND {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_BLEND").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_BLEND_OP(pub i32);
+impl ::core::marker::Copy for D3D11_BLEND_OP {}
+impl ::core::clone::Clone for D3D11_BLEND_OP {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BLEND_OP {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BLEND_OP {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_BLEND_OP {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_BLEND_OP").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_CLEAR_FLAG(pub i32);
+impl ::core::marker::Copy for D3D11_CLEAR_FLAG {}
+impl ::core::clone::Clone for D3D11_CLEAR_FLAG {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_CLEAR_FLAG {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_CLEAR_FLAG {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_CLEAR_FLAG {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_CLEAR_FLAG").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_COLOR_WRITE_ENABLE(pub i32);
+impl ::core::marker::Copy for D3D11_COLOR_WRITE_ENABLE {}
+impl ::core::clone::Clone for D3D11_COLOR_WRITE_ENABLE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_COLOR_WRITE_ENABLE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_COLOR_WRITE_ENABLE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_COLOR_WRITE_ENABLE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_COLOR_WRITE_ENABLE").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_FILL_MODE(pub i32);
+impl ::core::marker::Copy for D3D11_FILL_MODE {}
+impl ::core::clone::Clone for D3D11_FILL_MODE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_FILL_MODE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_FILL_MODE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_FILL_MODE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_FILL_MODE").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_CULL_MODE(pub i32);
+impl ::core::marker::Copy for D3D11_CULL_MODE {}
+impl ::core::clone::Clone for D3D11_CULL_MODE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_CULL_MODE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_CULL_MODE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_CULL_MODE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_CULL_MODE").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_INPUT_CLASSIFICATION(pub i32);
+impl ::core::marker::Copy for D3D11_INPUT_CLASSIFICATION {}
+impl ::core::clone::Clone for D3D11_INPUT_CLASSIFICATION {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_INPUT_CLASSIFICATION {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_INPUT_CLASSIFICATION {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_INPUT_CLASSIFICATION {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_INPUT_CLASSIFICATION").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_DEVICE_CONTEXT_TYPE(pub i32);
+impl ::core::marker::Copy for D3D11_DEVICE_CONTEXT_TYPE {}
+impl ::core::clone::Clone for D3D11_DEVICE_CONTEXT_TYPE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_DEVICE_CONTEXT_TYPE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_DEVICE_CONTEXT_TYPE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_DEVICE_CONTEXT_TYPE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_DEVICE_CONTEXT_TYPE").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_FEATURE(pub i32);
+impl ::core::marker::Copy for D3D11_FEATURE {}
+impl ::core::clone::Clone for D3D11_FEATURE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_FEATURE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_FEATURE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_FEATURE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_FEATURE").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_COUNTER(pub i32);
+impl ::core::marker::Copy for D3D11_COUNTER {}
+impl ::core::clone::Clone for D3D11_COUNTER {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_COUNTER {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_COUNTER {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_COUNTER {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_COUNTER").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_COUNTER_INFO {
+    pub LastDeviceDependentCounter: D3D11_COUNTER,
+    pub NumSimultaneousCounters: u32,
+    pub NumDetectableParallelUnits: u8,
+}
+impl ::core::marker::Copy for D3D11_COUNTER_INFO {}
+impl ::core::cmp::Eq for D3D11_COUNTER_INFO {}
+impl ::core::cmp::PartialEq for D3D11_COUNTER_INFO {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_COUNTER_INFO>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_COUNTER_INFO {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_COUNTER_INFO {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_COUNTER_INFO {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_COUNTER_INFO {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_COUNTER_INFO").field("LastDeviceDependentCounter", &self.LastDeviceDependentCounter).field("NumSimultaneousCounters", &self.NumSimultaneousCounters).field("NumDetectableParallelUnits", &self.NumDetectableParallelUnits).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_COUNTER_TYPE(pub i32);
+impl ::core::marker::Copy for D3D11_COUNTER_TYPE {}
+impl ::core::clone::Clone for D3D11_COUNTER_TYPE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_COUNTER_TYPE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_COUNTER_TYPE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_COUNTER_TYPE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_COUNTER_TYPE").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_COUNTER_DESC {
+    pub Counter: D3D11_COUNTER,
+    pub MiscFlags: u32,
+}
+impl ::core::marker::Copy for D3D11_COUNTER_DESC {}
+impl ::core::cmp::Eq for D3D11_COUNTER_DESC {}
+impl ::core::cmp::PartialEq for D3D11_COUNTER_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_COUNTER_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_COUNTER_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_COUNTER_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_COUNTER_DESC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_COUNTER_DESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_COUNTER_DESC").field("Counter", &self.Counter).field("MiscFlags", &self.MiscFlags).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_RTV_DIMENSION(pub i32);
+impl ::core::marker::Copy for D3D11_RTV_DIMENSION {}
+impl ::core::clone::Clone for D3D11_RTV_DIMENSION {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_RTV_DIMENSION {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_RTV_DIMENSION {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_RTV_DIMENSION {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_RTV_DIMENSION").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]pub union D3D11_BUFFER_RTV_0 {
+    pub FirstElement: u32,
+    pub ElementOffset: u32,
+}
+impl ::core::marker::Copy for D3D11_BUFFER_RTV_0 {}
+impl ::core::cmp::Eq for D3D11_BUFFER_RTV_0 {}
+impl ::core::cmp::PartialEq for D3D11_BUFFER_RTV_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_RTV_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_BUFFER_RTV_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BUFFER_RTV_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BUFFER_RTV_0 {
+    type Abi = Self;
+}
+
+#[repr(C)]pub union D3D11_BUFFER_RTV_1 {
+    pub NumElements: u32,
+    pub ElementWidth: u32,
+}
+impl ::core::marker::Copy for D3D11_BUFFER_RTV_1 {}
+impl ::core::cmp::Eq for D3D11_BUFFER_RTV_1 {}
+impl ::core::cmp::PartialEq for D3D11_BUFFER_RTV_1 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_RTV_1>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_BUFFER_RTV_1 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BUFFER_RTV_1 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BUFFER_RTV_1 {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct D3D11_BUFFER_RTV {
+    pub Anonymous1: D3D11_BUFFER_RTV_0,
+    pub Anonymous2: D3D11_BUFFER_RTV_1,
+}
+impl ::core::marker::Copy for D3D11_BUFFER_RTV {}
+impl ::core::cmp::Eq for D3D11_BUFFER_RTV {}
+impl ::core::cmp::PartialEq for D3D11_BUFFER_RTV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_RTV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_BUFFER_RTV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BUFFER_RTV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BUFFER_RTV {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct D3D11_TEX1D_RTV {
+    pub MipSlice: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX1D_RTV {}
+impl ::core::cmp::Eq for D3D11_TEX1D_RTV {}
+impl ::core::cmp::PartialEq for D3D11_TEX1D_RTV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_RTV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX1D_RTV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX1D_RTV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX1D_RTV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX1D_RTV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX1D_RTV").field("MipSlice", &self.MipSlice).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX1D_ARRAY_RTV {
+    pub MipSlice: u32,
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX1D_ARRAY_RTV {}
+impl ::core::cmp::Eq for D3D11_TEX1D_ARRAY_RTV {}
+impl ::core::cmp::PartialEq for D3D11_TEX1D_ARRAY_RTV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_ARRAY_RTV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX1D_ARRAY_RTV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX1D_ARRAY_RTV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX1D_ARRAY_RTV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_RTV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX1D_ARRAY_RTV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2D_RTV {
+    pub MipSlice: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2D_RTV {}
+impl ::core::cmp::Eq for D3D11_TEX2D_RTV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2D_RTV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_RTV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2D_RTV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2D_RTV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2D_RTV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2D_RTV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2D_RTV").field("MipSlice", &self.MipSlice).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2D_ARRAY_RTV {
+    pub MipSlice: u32,
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2D_ARRAY_RTV {}
+impl ::core::cmp::Eq for D3D11_TEX2D_ARRAY_RTV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2D_ARRAY_RTV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_ARRAY_RTV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2D_ARRAY_RTV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2D_ARRAY_RTV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2D_ARRAY_RTV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_RTV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2D_ARRAY_RTV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2DMS_RTV {
+    pub UnusedField_NothingToDefine: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2DMS_RTV {}
+impl ::core::cmp::Eq for D3D11_TEX2DMS_RTV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2DMS_RTV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_RTV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2DMS_RTV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2DMS_RTV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_RTV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2DMS_RTV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2DMS_RTV").field("UnusedField_NothingToDefine", &self.UnusedField_NothingToDefine).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2DMS_ARRAY_RTV {
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2DMS_ARRAY_RTV {}
+impl ::core::cmp::Eq for D3D11_TEX2DMS_ARRAY_RTV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2DMS_ARRAY_RTV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_ARRAY_RTV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2DMS_ARRAY_RTV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2DMS_ARRAY_RTV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_ARRAY_RTV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2DMS_ARRAY_RTV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2DMS_ARRAY_RTV").field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX3D_RTV {
+    pub MipSlice: u32,
+    pub FirstWSlice: u32,
+    pub WSize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX3D_RTV {}
+impl ::core::cmp::Eq for D3D11_TEX3D_RTV {}
+impl ::core::cmp::PartialEq for D3D11_TEX3D_RTV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX3D_RTV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX3D_RTV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX3D_RTV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX3D_RTV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX3D_RTV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX3D_RTV").field("MipSlice", &self.MipSlice).field("FirstWSlice", &self.FirstWSlice).field("WSize", &self.WSize).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_MAP(pub i32);
+impl ::core::marker::Copy for D3D11_MAP {}
+impl ::core::clone::Clone for D3D11_MAP {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_MAP {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_MAP {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_MAP {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_MAP").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_MAPPED_SUBRESOURCE {
+    pub pData: *mut ::core::ffi::c_void,
+    pub RowPitch: u32,
+    pub DepthPitch: u32,
+}
+impl ::core::marker::Copy for D3D11_MAPPED_SUBRESOURCE {}
+impl ::core::cmp::Eq for D3D11_MAPPED_SUBRESOURCE {}
+impl ::core::cmp::PartialEq for D3D11_MAPPED_SUBRESOURCE {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_MAPPED_SUBRESOURCE>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_MAPPED_SUBRESOURCE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_MAPPED_SUBRESOURCE {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_MAPPED_SUBRESOURCE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_MAPPED_SUBRESOURCE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_MAPPED_SUBRESOURCE").field("pData", &self.pData).field("RowPitch", &self.RowPitch).field("DepthPitch", &self.DepthPitch).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_BOX {
+    pub left: u32,
+    pub top: u32,
+    pub front: u32,
+    pub right: u32,
+    pub bottom: u32,
+    pub back: u32,
+}
+impl ::core::marker::Copy for D3D11_BOX {}
+impl ::core::cmp::Eq for D3D11_BOX {}
+impl ::core::cmp::PartialEq for D3D11_BOX {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BOX>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_BOX {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BOX {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BOX {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_BOX {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_BOX").field("left", &self.left).field("top", &self.top).field("front", &self.front).field("right", &self.right).field("bottom", &self.bottom).field("back", &self.back).finish()
+    }
+}
+
+#[repr(C)]pub union D3D11_RENDER_TARGET_VIEW_DESC_0 {
+    pub Buffer: D3D11_BUFFER_RTV,
+    pub Texture1D: D3D11_TEX1D_RTV,
+    pub Texture1DArray: D3D11_TEX1D_ARRAY_RTV,
+    pub Texture2D: D3D11_TEX2D_RTV,
+    pub Texture2DArray: D3D11_TEX2D_ARRAY_RTV,
+    pub Texture2DMS: D3D11_TEX2DMS_RTV,
+    pub Texture2DMSArray: D3D11_TEX2DMS_ARRAY_RTV,
+    pub Texture3D: D3D11_TEX3D_RTV,
+}
+impl ::core::marker::Copy for D3D11_RENDER_TARGET_VIEW_DESC_0 {}
+impl ::core::cmp::Eq for D3D11_RENDER_TARGET_VIEW_DESC_0 {}
+impl ::core::cmp::PartialEq for D3D11_RENDER_TARGET_VIEW_DESC_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_RENDER_TARGET_VIEW_DESC_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_RENDER_TARGET_VIEW_DESC_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_RENDER_TARGET_VIEW_DESC_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_RENDER_TARGET_VIEW_DESC_0 {
+    type Abi = Self;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_QUERY(pub i32);
+impl ::core::marker::Copy for D3D11_QUERY {}
+impl ::core::clone::Clone for D3D11_QUERY {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_QUERY {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_QUERY {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_QUERY {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_QUERY").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_CLASS_INSTANCE_DESC {
+    pub InstanceId: u32,
+    pub InstanceIndex: u32,
+    pub TypeId: u32,
+    pub ConstantBuffer: u32,
+    pub BaseConstantBufferOffset: u32,
+    pub BaseTexture: u32,
+    pub BaseSampler: u32,
+    pub Created: super::super::Foundation::BOOL,
+}
+impl ::core::marker::Copy for D3D11_CLASS_INSTANCE_DESC {}
+impl ::core::cmp::Eq for D3D11_CLASS_INSTANCE_DESC {}
+impl ::core::cmp::PartialEq for D3D11_CLASS_INSTANCE_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_CLASS_INSTANCE_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_CLASS_INSTANCE_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_CLASS_INSTANCE_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_CLASS_INSTANCE_DESC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_CLASS_INSTANCE_DESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_CLASS_INSTANCE_DESC").field("InstanceId", &self.InstanceId).field("InstanceIndex", &self.InstanceIndex).field("TypeId", &self.TypeId).field("ConstantBuffer", &self.ConstantBuffer).field("BaseConstantBufferOffset", &self.BaseConstantBufferOffset).field("BaseTexture", &self.BaseTexture).field("BaseSampler", &self.BaseSampler).field("Created", &self.Created).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_UAV_DIMENSION(pub i32);
+impl ::core::marker::Copy for D3D11_UAV_DIMENSION {}
+impl ::core::clone::Clone for D3D11_UAV_DIMENSION {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_UAV_DIMENSION {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_UAV_DIMENSION {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_UAV_DIMENSION {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_UAV_DIMENSION").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_BUFFER_UAV {
+    pub FirstElement: u32,
+    pub NumElements: u32,
+    pub Flags: u32,
+}
+impl ::core::marker::Copy for D3D11_BUFFER_UAV {}
+impl ::core::cmp::Eq for D3D11_BUFFER_UAV {}
+impl ::core::cmp::PartialEq for D3D11_BUFFER_UAV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_UAV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_BUFFER_UAV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BUFFER_UAV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BUFFER_UAV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_BUFFER_UAV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_BUFFER_UAV").field("FirstElement", &self.FirstElement).field("NumElements", &self.NumElements).field("Flags", &self.Flags).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX1D_UAV {
+    pub MipSlice: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX1D_UAV {}
+impl ::core::cmp::Eq for D3D11_TEX1D_UAV {}
+impl ::core::cmp::PartialEq for D3D11_TEX1D_UAV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_UAV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX1D_UAV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX1D_UAV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX1D_UAV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX1D_UAV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX1D_UAV").field("MipSlice", &self.MipSlice).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX1D_ARRAY_UAV {
+    pub MipSlice: u32,
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX1D_ARRAY_UAV {}
+impl ::core::cmp::Eq for D3D11_TEX1D_ARRAY_UAV {}
+impl ::core::cmp::PartialEq for D3D11_TEX1D_ARRAY_UAV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_ARRAY_UAV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX1D_ARRAY_UAV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX1D_ARRAY_UAV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX1D_ARRAY_UAV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_UAV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX1D_ARRAY_UAV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2D_UAV {
+    pub MipSlice: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2D_UAV {}
+impl ::core::cmp::Eq for D3D11_TEX2D_UAV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2D_UAV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_UAV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2D_UAV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2D_UAV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2D_UAV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2D_UAV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2D_UAV").field("MipSlice", &self.MipSlice).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2D_ARRAY_UAV {
+    pub MipSlice: u32,
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2D_ARRAY_UAV {}
+impl ::core::cmp::Eq for D3D11_TEX2D_ARRAY_UAV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2D_ARRAY_UAV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_ARRAY_UAV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2D_ARRAY_UAV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2D_ARRAY_UAV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2D_ARRAY_UAV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_UAV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2D_ARRAY_UAV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX3D_UAV {
+    pub MipSlice: u32,
+    pub FirstWSlice: u32,
+    pub WSize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX3D_UAV {}
+impl ::core::cmp::Eq for D3D11_TEX3D_UAV {}
+impl ::core::cmp::PartialEq for D3D11_TEX3D_UAV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX3D_UAV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX3D_UAV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX3D_UAV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX3D_UAV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX3D_UAV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX3D_UAV").field("MipSlice", &self.MipSlice).field("FirstWSlice", &self.FirstWSlice).field("WSize", &self.WSize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_BUFFER_SRV {
+    pub Anonymous1: D3D11_BUFFER_SRV_0,
+    pub Anonymous2: D3D11_BUFFER_SRV_1,
+}
+impl ::core::marker::Copy for D3D11_BUFFER_SRV {}
+impl ::core::cmp::Eq for D3D11_BUFFER_SRV {}
+impl ::core::cmp::PartialEq for D3D11_BUFFER_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_BUFFER_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BUFFER_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BUFFER_SRV {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct D3D11_TEX1D_SRV {
+    pub MostDetailedMip: u32,
+    pub MipLevels: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX1D_SRV {}
+impl ::core::cmp::Eq for D3D11_TEX1D_SRV {}
+impl ::core::cmp::PartialEq for D3D11_TEX1D_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX1D_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX1D_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX1D_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX1D_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX1D_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX1D_ARRAY_SRV {
+    pub MostDetailedMip: u32,
+    pub MipLevels: u32,
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX1D_ARRAY_SRV {}
+impl ::core::cmp::Eq for D3D11_TEX1D_ARRAY_SRV {}
+impl ::core::cmp::PartialEq for D3D11_TEX1D_ARRAY_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_ARRAY_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX1D_ARRAY_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX1D_ARRAY_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX1D_ARRAY_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX1D_ARRAY_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2D_SRV {
+    pub MostDetailedMip: u32,
+    pub MipLevels: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2D_SRV {}
+impl ::core::cmp::Eq for D3D11_TEX2D_SRV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2D_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2D_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2D_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2D_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2D_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2D_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2D_ARRAY_SRV {
+    pub MostDetailedMip: u32,
+    pub MipLevels: u32,
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2D_ARRAY_SRV {}
+impl ::core::cmp::Eq for D3D11_TEX2D_ARRAY_SRV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2D_ARRAY_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_ARRAY_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2D_ARRAY_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2D_ARRAY_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2D_ARRAY_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2D_ARRAY_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2DMS_SRV {
+    pub UnusedField_NothingToDefine: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2DMS_SRV {}
+impl ::core::cmp::Eq for D3D11_TEX2DMS_SRV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2DMS_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2DMS_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2DMS_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2DMS_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2DMS_SRV").field("UnusedField_NothingToDefine", &self.UnusedField_NothingToDefine).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2DMS_ARRAY_SRV {
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2DMS_ARRAY_SRV {}
+impl ::core::cmp::Eq for D3D11_TEX2DMS_ARRAY_SRV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2DMS_ARRAY_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_ARRAY_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2DMS_ARRAY_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2DMS_ARRAY_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_ARRAY_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2DMS_ARRAY_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2DMS_ARRAY_SRV").field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX3D_SRV {
+    pub MostDetailedMip: u32,
+    pub MipLevels: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX3D_SRV {}
+impl ::core::cmp::Eq for D3D11_TEX3D_SRV {}
+impl ::core::cmp::PartialEq for D3D11_TEX3D_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX3D_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX3D_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX3D_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX3D_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX3D_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX3D_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEXCUBE_SRV {
+    pub MostDetailedMip: u32,
+    pub MipLevels: u32,
+}
+impl ::core::marker::Copy for D3D11_TEXCUBE_SRV {}
+impl ::core::cmp::Eq for D3D11_TEXCUBE_SRV {}
+impl ::core::cmp::PartialEq for D3D11_TEXCUBE_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEXCUBE_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEXCUBE_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEXCUBE_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEXCUBE_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEXCUBE_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEXCUBE_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEXCUBE_ARRAY_SRV {
+    pub MostDetailedMip: u32,
+    pub MipLevels: u32,
+    pub First2DArrayFace: u32,
+    pub NumCubes: u32,
+}
+impl ::core::marker::Copy for D3D11_TEXCUBE_ARRAY_SRV {}
+impl ::core::cmp::Eq for D3D11_TEXCUBE_ARRAY_SRV {}
+impl ::core::cmp::PartialEq for D3D11_TEXCUBE_ARRAY_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEXCUBE_ARRAY_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEXCUBE_ARRAY_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEXCUBE_ARRAY_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEXCUBE_ARRAY_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEXCUBE_ARRAY_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEXCUBE_ARRAY_SRV").field("MostDetailedMip", &self.MostDetailedMip).field("MipLevels", &self.MipLevels).field("First2DArrayFace", &self.First2DArrayFace).field("NumCubes", &self.NumCubes).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_BUFFEREX_SRV {
+    pub FirstElement: u32,
+    pub NumElements: u32,
+    pub Flags: u32,
+}
+impl ::core::marker::Copy for D3D11_BUFFEREX_SRV {}
+impl ::core::cmp::Eq for D3D11_BUFFEREX_SRV {}
+impl ::core::cmp::PartialEq for D3D11_BUFFEREX_SRV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFEREX_SRV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_BUFFEREX_SRV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BUFFEREX_SRV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BUFFEREX_SRV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_BUFFEREX_SRV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_BUFFEREX_SRV").field("FirstElement", &self.FirstElement).field("NumElements", &self.NumElements).field("Flags", &self.Flags).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX1D_DSV {
+    pub MipSlice: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX1D_DSV {}
+impl ::core::cmp::Eq for D3D11_TEX1D_DSV {}
+impl ::core::cmp::PartialEq for D3D11_TEX1D_DSV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_DSV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX1D_DSV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX1D_DSV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX1D_DSV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX1D_DSV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX1D_DSV").field("MipSlice", &self.MipSlice).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2D_DSV {
+    pub MipSlice: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2D_DSV {}
+impl ::core::cmp::Eq for D3D11_TEX2D_DSV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2D_DSV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_DSV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2D_DSV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2D_DSV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2D_DSV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2D_DSV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2D_DSV").field("MipSlice", &self.MipSlice).finish()
+    }
+}
+
+#[repr(C)]pub union D3D11_BUFFER_SRV_0 {
+    pub FirstElement: u32,
+    pub ElementOffset: u32,
+}
+impl ::core::marker::Copy for D3D11_BUFFER_SRV_0 {}
+impl ::core::cmp::Eq for D3D11_BUFFER_SRV_0 {}
+impl ::core::cmp::PartialEq for D3D11_BUFFER_SRV_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_SRV_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_BUFFER_SRV_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BUFFER_SRV_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BUFFER_SRV_0 {
+    type Abi = Self;
+}
+
+#[repr(C)]pub union D3D11_BUFFER_SRV_1 {
+    pub NumElements: u32,
+    pub ElementWidth: u32,
+}
+impl ::core::marker::Copy for D3D11_BUFFER_SRV_1 {}
+impl ::core::cmp::Eq for D3D11_BUFFER_SRV_1 {}
+impl ::core::cmp::PartialEq for D3D11_BUFFER_SRV_1 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_BUFFER_SRV_1>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_BUFFER_SRV_1 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_BUFFER_SRV_1 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_BUFFER_SRV_1 {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct D3D11_TEX1D_ARRAY_DSV {
+    pub MipSlice: u32,
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX1D_ARRAY_DSV {}
+impl ::core::cmp::Eq for D3D11_TEX1D_ARRAY_DSV {}
+impl ::core::cmp::PartialEq for D3D11_TEX1D_ARRAY_DSV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX1D_ARRAY_DSV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX1D_ARRAY_DSV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX1D_ARRAY_DSV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX1D_ARRAY_DSV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_DSV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX1D_ARRAY_DSV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2D_ARRAY_DSV {
+    pub MipSlice: u32,
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2D_ARRAY_DSV {}
+impl ::core::cmp::Eq for D3D11_TEX2D_ARRAY_DSV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2D_ARRAY_DSV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2D_ARRAY_DSV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2D_ARRAY_DSV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2D_ARRAY_DSV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2D_ARRAY_DSV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_DSV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2D_ARRAY_DSV").field("MipSlice", &self.MipSlice).field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2DMS_DSV {
+    pub UnusedField_NothingToDefine: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2DMS_DSV {}
+impl ::core::cmp::Eq for D3D11_TEX2DMS_DSV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2DMS_DSV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_DSV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2DMS_DSV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2DMS_DSV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_DSV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2DMS_DSV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2DMS_DSV").field("UnusedField_NothingToDefine", &self.UnusedField_NothingToDefine).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEX2DMS_ARRAY_DSV {
+    pub FirstArraySlice: u32,
+    pub ArraySize: u32,
+}
+impl ::core::marker::Copy for D3D11_TEX2DMS_ARRAY_DSV {}
+impl ::core::cmp::Eq for D3D11_TEX2DMS_ARRAY_DSV {}
+impl ::core::cmp::PartialEq for D3D11_TEX2DMS_ARRAY_DSV {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEX2DMS_ARRAY_DSV>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEX2DMS_ARRAY_DSV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEX2DMS_ARRAY_DSV {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEX2DMS_ARRAY_DSV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEX2DMS_ARRAY_DSV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEX2DMS_ARRAY_DSV").field("FirstArraySlice", &self.FirstArraySlice).field("ArraySize", &self.ArraySize).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_RENDER_TARGET_VIEW_DESC {
+    pub Format: super::Dxgi::Common::DXGI_FORMAT,
+    pub ViewDimension: D3D11_RTV_DIMENSION,
+    pub Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0,
+}
+impl ::core::marker::Copy for D3D11_RENDER_TARGET_VIEW_DESC {}
+impl ::core::cmp::Eq for D3D11_RENDER_TARGET_VIEW_DESC {}
+impl ::core::cmp::PartialEq for D3D11_RENDER_TARGET_VIEW_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_RENDER_TARGET_VIEW_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_RENDER_TARGET_VIEW_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_RENDER_TARGET_VIEW_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_RENDER_TARGET_VIEW_DESC {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct D3D11_QUERY_DESC {
+    pub Query: D3D11_QUERY,
+    pub MiscFlags: u32,
+}
+impl ::core::marker::Copy for D3D11_QUERY_DESC {}
+impl ::core::cmp::Eq for D3D11_QUERY_DESC {}
+impl ::core::cmp::PartialEq for D3D11_QUERY_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_QUERY_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_QUERY_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_QUERY_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_QUERY_DESC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_QUERY_DESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_QUERY_DESC").field("Query", &self.Query).field("MiscFlags", &self.MiscFlags).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_UNORDERED_ACCESS_VIEW_DESC {
+    pub Format: super::Dxgi::Common::DXGI_FORMAT,
+    pub ViewDimension: D3D11_UAV_DIMENSION,
+    pub Anonymous: D3D11_UNORDERED_ACCESS_VIEW_DESC_0,
+}
+impl ::core::marker::Copy for D3D11_UNORDERED_ACCESS_VIEW_DESC {}
+impl ::core::cmp::Eq for D3D11_UNORDERED_ACCESS_VIEW_DESC {}
+impl ::core::cmp::PartialEq for D3D11_UNORDERED_ACCESS_VIEW_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_UNORDERED_ACCESS_VIEW_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_UNORDERED_ACCESS_VIEW_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_UNORDERED_ACCESS_VIEW_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_UNORDERED_ACCESS_VIEW_DESC {
+    type Abi = Self;
+}
+
+#[repr(C)]pub union D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {
+    pub Buffer: D3D11_BUFFER_UAV,
+    pub Texture1D: D3D11_TEX1D_UAV,
+    pub Texture1DArray: D3D11_TEX1D_ARRAY_UAV,
+    pub Texture2D: D3D11_TEX2D_UAV,
+    pub Texture2DArray: D3D11_TEX2D_ARRAY_UAV,
+    pub Texture3D: D3D11_TEX3D_UAV,
+}
+impl ::core::marker::Copy for D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {}
+impl ::core::cmp::Eq for D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {}
+impl ::core::cmp::PartialEq for D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_UNORDERED_ACCESS_VIEW_DESC_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_UNORDERED_ACCESS_VIEW_DESC_0 {
+    type Abi = Self;
+}
+
+#[repr(C)]pub union D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+    pub Buffer: D3D11_BUFFER_SRV,
+    pub Texture1D: D3D11_TEX1D_SRV,
+    pub Texture1DArray: D3D11_TEX1D_ARRAY_SRV,
+    pub Texture2D: D3D11_TEX2D_SRV,
+    pub Texture2DArray: D3D11_TEX2D_ARRAY_SRV,
+    pub Texture2DMS: D3D11_TEX2DMS_SRV,
+    pub Texture2DMSArray: D3D11_TEX2DMS_ARRAY_SRV,
+    pub Texture3D: D3D11_TEX3D_SRV,
+    pub TextureCube: D3D11_TEXCUBE_SRV,
+    pub TextureCubeArray: D3D11_TEXCUBE_ARRAY_SRV,
+    pub BufferEx: D3D11_BUFFEREX_SRV,
+}
+impl ::core::marker::Copy for D3D11_SHADER_RESOURCE_VIEW_DESC_0 {}
+impl ::core::cmp::Eq for D3D11_SHADER_RESOURCE_VIEW_DESC_0 {}
+impl ::core::cmp::PartialEq for D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_SHADER_RESOURCE_VIEW_DESC_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+    type Abi = Self;
+}
+
+#[repr(C)]pub union D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
+    pub Texture1D: D3D11_TEX1D_DSV,
+    pub Texture1DArray: D3D11_TEX1D_ARRAY_DSV,
+    pub Texture2D: D3D11_TEX2D_DSV,
+    pub Texture2DArray: D3D11_TEX2D_ARRAY_DSV,
+    pub Texture2DMS: D3D11_TEX2DMS_DSV,
+    pub Texture2DMSArray: D3D11_TEX2DMS_ARRAY_DSV,
+}
+impl ::core::marker::Copy for D3D11_DEPTH_STENCIL_VIEW_DESC_0 {}
+impl ::core::cmp::Eq for D3D11_DEPTH_STENCIL_VIEW_DESC_0 {}
+impl ::core::cmp::PartialEq for D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_DEPTH_STENCIL_VIEW_DESC_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
+    type Abi = Self;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_FILTER(pub i32);
+impl ::core::marker::Copy for D3D11_FILTER {}
+impl ::core::clone::Clone for D3D11_FILTER {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_FILTER {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_FILTER {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_FILTER {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_FILTER").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_TEXTURE_ADDRESS_MODE(pub i32);
+impl ::core::marker::Copy for D3D11_TEXTURE_ADDRESS_MODE {}
+impl ::core::clone::Clone for D3D11_TEXTURE_ADDRESS_MODE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEXTURE_ADDRESS_MODE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEXTURE_ADDRESS_MODE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEXTURE_ADDRESS_MODE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_TEXTURE_ADDRESS_MODE").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEXTURE1D_DESC {
+    pub Width: u32,
+    pub MipLevels: u32,
+    pub ArraySize: u32,
+    pub Format: super::Dxgi::Common::DXGI_FORMAT,
+    pub Usage: D3D11_USAGE,
+    pub BindFlags: D3D11_BIND_FLAG,
+    pub CPUAccessFlags: D3D11_CPU_ACCESS_FLAG,
+    pub MiscFlags: D3D11_RESOURCE_MISC_FLAG,
+}
+impl ::core::marker::Copy for D3D11_TEXTURE1D_DESC {}
+impl ::core::cmp::Eq for D3D11_TEXTURE1D_DESC {}
+impl ::core::cmp::PartialEq for D3D11_TEXTURE1D_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEXTURE1D_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEXTURE1D_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEXTURE1D_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEXTURE1D_DESC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEXTURE1D_DESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEXTURE1D_DESC").field("Width", &self.Width).field("MipLevels", &self.MipLevels).field("ArraySize", &self.ArraySize).field("Format", &self.Format).field("Usage", &self.Usage).field("BindFlags", &self.BindFlags).field("CPUAccessFlags", &self.CPUAccessFlags).field("MiscFlags", &self.MiscFlags).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_TEXTURE3D_DESC {
+    pub Width: u32,
+    pub Height: u32,
+    pub Depth: u32,
+    pub MipLevels: u32,
+    pub Format: super::Dxgi::Common::DXGI_FORMAT,
+    pub Usage: D3D11_USAGE,
+    pub BindFlags: D3D11_BIND_FLAG,
+    pub CPUAccessFlags: D3D11_CPU_ACCESS_FLAG,
+    pub MiscFlags: D3D11_RESOURCE_MISC_FLAG,
+}
+impl ::core::marker::Copy for D3D11_TEXTURE3D_DESC {}
+impl ::core::cmp::Eq for D3D11_TEXTURE3D_DESC {}
+impl ::core::cmp::PartialEq for D3D11_TEXTURE3D_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_TEXTURE3D_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_TEXTURE3D_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_TEXTURE3D_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_TEXTURE3D_DESC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_TEXTURE3D_DESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_TEXTURE3D_DESC").field("Width", &self.Width).field("Height", &self.Height).field("Depth", &self.Depth).field("MipLevels", &self.MipLevels).field("Format", &self.Format).field("Usage", &self.Usage).field("BindFlags", &self.BindFlags).field("CPUAccessFlags", &self.CPUAccessFlags).field("MiscFlags", &self.MiscFlags).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_SHADER_RESOURCE_VIEW_DESC {
+    pub Format: super::Dxgi::Common::DXGI_FORMAT,
+    pub ViewDimension: super::Direct3D::D3D_SRV_DIMENSION,
+    pub Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0,
+}
+impl ::core::marker::Copy for D3D11_SHADER_RESOURCE_VIEW_DESC {}
+impl ::core::cmp::Eq for D3D11_SHADER_RESOURCE_VIEW_DESC {}
+impl ::core::cmp::PartialEq for D3D11_SHADER_RESOURCE_VIEW_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_SHADER_RESOURCE_VIEW_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_SHADER_RESOURCE_VIEW_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_SHADER_RESOURCE_VIEW_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_SHADER_RESOURCE_VIEW_DESC {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct D3D11_SO_DECLARATION_ENTRY {
+    pub Stream: u32,
+    pub SemanticName: ::windows::core::PCSTR,
+    pub SemanticIndex: u32,
+    pub StartComponent: u8,
+    pub ComponentCount: u8,
+    pub OutputSlot: u8,
+}
+impl ::core::marker::Copy for D3D11_SO_DECLARATION_ENTRY {}
+impl ::core::cmp::Eq for D3D11_SO_DECLARATION_ENTRY {}
+impl ::core::cmp::PartialEq for D3D11_SO_DECLARATION_ENTRY {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_SO_DECLARATION_ENTRY>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_SO_DECLARATION_ENTRY {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_SO_DECLARATION_ENTRY {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_SO_DECLARATION_ENTRY {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_SO_DECLARATION_ENTRY {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_SO_DECLARATION_ENTRY").field("Stream", &self.Stream).field("SemanticName", &self.SemanticName).field("SemanticIndex", &self.SemanticIndex).field("StartComponent", &self.StartComponent).field("ComponentCount", &self.ComponentCount).field("OutputSlot", &self.OutputSlot).finish()
+    }
+}
+
+#[repr(C)]
+pub struct D3D11_SAMPLER_DESC {
+    pub Filter: D3D11_FILTER,
+    pub AddressU: D3D11_TEXTURE_ADDRESS_MODE,
+    pub AddressV: D3D11_TEXTURE_ADDRESS_MODE,
+    pub AddressW: D3D11_TEXTURE_ADDRESS_MODE,
+    pub MipLODBias: f32,
+    pub MaxAnisotropy: u32,
+    pub ComparisonFunc: D3D11_COMPARISON_FUNC,
+    pub BorderColor: [f32; 4],
+    pub MinLOD: f32,
+    pub MaxLOD: f32,
+}
+impl ::core::marker::Copy for D3D11_SAMPLER_DESC {}
+impl ::core::cmp::Eq for D3D11_SAMPLER_DESC {}
+impl ::core::cmp::PartialEq for D3D11_SAMPLER_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D11_SAMPLER_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D11_SAMPLER_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_SAMPLER_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_SAMPLER_DESC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_SAMPLER_DESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D11_SAMPLER_DESC").field("Filter", &self.Filter).field("AddressU", &self.AddressU).field("AddressV", &self.AddressV).field("AddressW", &self.AddressW).field("MipLODBias", &self.MipLODBias).field("MaxAnisotropy", &self.MaxAnisotropy).field("ComparisonFunc", &self.ComparisonFunc).field("BorderColor", &self.BorderColor).field("MinLOD", &self.MinLOD).field("MaxLOD", &self.MaxLOD).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D11_RESOURCE_DIMENSION(pub i32);
+impl ::core::marker::Copy for D3D11_RESOURCE_DIMENSION {}
+impl ::core::clone::Clone for D3D11_RESOURCE_DIMENSION {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D11_RESOURCE_DIMENSION {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D11_RESOURCE_DIMENSION {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D11_RESOURCE_DIMENSION {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D11_RESOURCE_DIMENSION").field(&self.0).finish()
+    }
+}
+
+}
+pub mod Direct3D{
+pub mod Fxc{
+pub unsafe fn D3DCompile<'a, P0, P1, P2, P3>(psrcdata: *const ::core::ffi::c_void, srcdatasize: usize, psourcename: P0, pdefines: ::core::option::Option<*const super::D3D_SHADER_MACRO>, pinclude: P1, pentrypoint: P2, ptarget: P3, flags1: u32, flags2: u32, ppcode: *mut ::core::option::Option<super::ID3DBlob>, pperrormsgs: ::core::option::Option<*mut ::core::option::Option<super::ID3DBlob>>) -> ::windows::core::Result<()>
+where
+    P0: ::std::convert::Into<::windows::core::PCSTR>,
+    P1: ::std::convert::Into<::windows::core::InParam<'a, super::ID3DInclude>>,
+    P2: ::std::convert::Into<::windows::core::PCSTR>,
+    P3: ::std::convert::Into<::windows::core::PCSTR>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn D3DCompile(psrcdata: *const ::core::ffi::c_void, srcdatasize: usize, psourcename: ::windows::core::PCSTR, pdefines: *const super::D3D_SHADER_MACRO, pinclude: *mut ::core::ffi::c_void, pentrypoint: ::windows::core::PCSTR, ptarget: ::windows::core::PCSTR, flags1: u32, flags2: u32, ppcode: *mut *mut ::core::ffi::c_void, pperrormsgs: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT;
+    }
+    D3DCompile(::core::mem::transmute(psrcdata), srcdatasize, psourcename.into(), ::core::mem::transmute(pdefines.unwrap_or(::std::ptr::null())), pinclude.into().abi(), pentrypoint.into(), ptarget.into(), flags1, flags2, ::core::mem::transmute(ppcode), ::core::mem::transmute(pperrormsgs.unwrap_or(::std::ptr::null_mut()))).ok()
+}
+
+}
+#[repr(transparent)]
+pub struct ID3DBlob(::windows::core::IUnknown);
+impl ID3DBlob {
+    pub unsafe fn GetBufferPointer(&self) -> *mut ::core::ffi::c_void {
+        (::windows::core::Vtable::vtable(self).GetBufferPointer)(::windows::core::Vtable::as_raw(self))
+    }
+    pub unsafe fn GetBufferSize(&self) -> usize {
+        (::windows::core::Vtable::vtable(self).GetBufferSize)(::windows::core::Vtable::as_raw(self))
+    }
+}
+impl ::core::cmp::Eq for ID3DBlob {}
+impl ::core::cmp::PartialEq for ID3DBlob {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3DBlob {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3DBlob {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3DBlob").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3DBlob {}
+unsafe impl ::core::marker::Sync for ID3DBlob {}
+unsafe impl ::windows::core::Vtable for ID3DBlob {
+    type Vtable = ID3DBlob_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ID3DBlob {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x8ba5fb08_5195_40e2_ac58_0d989c3a0102);
+}
+
+::windows::core::interface_hierarchy!(ID3DBlob, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct ID3DBlob_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub GetBufferPointer: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> *mut ::core::ffi::c_void,
+    pub GetBufferSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> usize,
+}
+
+pub trait ID3DBlob_Impl: Sized {
+    fn GetBufferPointer(&self) -> *mut ::core::ffi::c_void;
+    fn GetBufferSize(&self) -> usize;
+}
+
+impl ID3DBlob_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3DBlob_Impl, const OFFSET: isize>() -> ID3DBlob_Vtbl {
+        unsafe extern "system" fn GetBufferPointer<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3DBlob_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> *mut ::core::ffi::c_void {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetBufferPointer()
+        }
+        unsafe extern "system" fn GetBufferSize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3DBlob_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> usize {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetBufferSize()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetBufferPointer: GetBufferPointer::<Identity, Impl, OFFSET>,
+            GetBufferSize: GetBufferSize::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ID3DBlob as ::windows::core::Interface>::IID
+    }
+}
+
+pub const D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST: D3D_PRIMITIVE_TOPOLOGY = D3D_PRIMITIVE_TOPOLOGY(4i32);
+
+pub const D3D_DRIVER_TYPE_UNKNOWN: D3D_DRIVER_TYPE = D3D_DRIVER_TYPE(0i32);
+
+pub const D3D_FEATURE_LEVEL_11_0: D3D_FEATURE_LEVEL = D3D_FEATURE_LEVEL(45056i32);
+
+#[repr(transparent)]
+pub struct ID3DInclude(::std::ptr::NonNull<::std::ffi::c_void>);
+impl ID3DInclude {
+    pub unsafe fn Open<'a, P0>(&self, includetype: D3D_INCLUDE_TYPE, pfilename: P0, pparentdata: *const ::core::ffi::c_void, ppdata: *mut *mut ::core::ffi::c_void, pbytes: *mut u32) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).Open)(::windows::core::Vtable::as_raw(self), includetype, pfilename.into(), ::core::mem::transmute(pparentdata), ::core::mem::transmute(ppdata), ::core::mem::transmute(pbytes)).ok()
+    }
+    pub unsafe fn Close(&self, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Close)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pdata)).ok()
+    }
+}
+impl ::core::cmp::Eq for ID3DInclude {}
+impl ::core::cmp::PartialEq for ID3DInclude {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ID3DInclude {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ID3DInclude {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ID3DInclude").field(&self.0).finish()
+    }
+}
+unsafe impl ::core::marker::Send for ID3DInclude {}
+unsafe impl ::core::marker::Sync for ID3DInclude {}
+unsafe impl ::windows::core::Vtable for ID3DInclude {
+    type Vtable = ID3DInclude_Vtbl;
+}
+
+#[repr(C)]
+pub struct ID3DInclude_Vtbl {
+    pub Open: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, includetype: D3D_INCLUDE_TYPE, pfilename: ::windows::core::PCSTR, pparentdata: *const ::core::ffi::c_void, ppdata: *mut *mut ::core::ffi::c_void, pbytes: *mut u32) -> ::windows::core::HRESULT,
+    pub Close: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdata: *const ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait ID3DInclude_Impl: Sized {
+    fn Open(&self, includetype: D3D_INCLUDE_TYPE, pfilename: &::windows::core::PCSTR, pparentdata: *const ::core::ffi::c_void, ppdata: *mut *mut ::core::ffi::c_void, pbytes: *mut u32) -> ::windows::core::Result<()>;
+    fn Close(&self, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()>;
+}
+
+impl ID3DInclude_Vtbl {
+    pub const fn new<Impl: ID3DInclude_Impl>() -> ID3DInclude_Vtbl {
+        unsafe extern "system" fn Open<Impl: ID3DInclude_Impl>(this: *mut ::core::ffi::c_void, includetype: D3D_INCLUDE_TYPE, pfilename: ::windows::core::PCSTR, pparentdata: *const ::core::ffi::c_void, ppdata: *mut *mut ::core::ffi::c_void, pbytes: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *mut *mut ::core::ffi::c_void) as *const ::windows::core::ScopedHeap;
+            let this = &*((*this).this as *const Impl);
+            this.Open(::core::mem::transmute_copy(&includetype), ::core::mem::transmute(&pfilename), ::core::mem::transmute_copy(&pparentdata), ::core::mem::transmute_copy(&ppdata), ::core::mem::transmute_copy(&pbytes)).into()
+        }
+        unsafe extern "system" fn Close<Impl: ID3DInclude_Impl>(this: *mut ::core::ffi::c_void, pdata: *const ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *mut *mut ::core::ffi::c_void) as *const ::windows::core::ScopedHeap;
+            let this = &*((*this).this as *const Impl);
+            this.Close(::core::mem::transmute_copy(&pdata)).into()
+        }
+        Self { Open: Open::<Impl>, Close: Close::<Impl> }
+    }
+}
+
+#[repr(C)]
+pub struct D3D_SHADER_MACRO {
+    pub Name: ::windows::core::PCSTR,
+    pub Definition: ::windows::core::PCSTR,
+}
+impl ::core::marker::Copy for D3D_SHADER_MACRO {}
+impl ::core::cmp::Eq for D3D_SHADER_MACRO {}
+impl ::core::cmp::PartialEq for D3D_SHADER_MACRO {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<D3D_SHADER_MACRO>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for D3D_SHADER_MACRO {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D_SHADER_MACRO {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for D3D_SHADER_MACRO {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D_SHADER_MACRO {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("D3D_SHADER_MACRO").field("Name", &self.Name).field("Definition", &self.Definition).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D_SRV_DIMENSION(pub i32);
+impl ::core::marker::Copy for D3D_SRV_DIMENSION {}
+impl ::core::clone::Clone for D3D_SRV_DIMENSION {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D_SRV_DIMENSION {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D_SRV_DIMENSION {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D_SRV_DIMENSION {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D_SRV_DIMENSION").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D_INCLUDE_TYPE(pub i32);
+impl ::core::marker::Copy for D3D_INCLUDE_TYPE {}
+impl ::core::clone::Clone for D3D_INCLUDE_TYPE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D_INCLUDE_TYPE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D_INCLUDE_TYPE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D_INCLUDE_TYPE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D_INCLUDE_TYPE").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D_FEATURE_LEVEL(pub i32);
+impl ::core::marker::Copy for D3D_FEATURE_LEVEL {}
+impl ::core::clone::Clone for D3D_FEATURE_LEVEL {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D_FEATURE_LEVEL {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D_FEATURE_LEVEL {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D_FEATURE_LEVEL {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D_FEATURE_LEVEL").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D_PRIMITIVE_TOPOLOGY(pub i32);
+impl ::core::marker::Copy for D3D_PRIMITIVE_TOPOLOGY {}
+impl ::core::clone::Clone for D3D_PRIMITIVE_TOPOLOGY {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D_PRIMITIVE_TOPOLOGY {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D_PRIMITIVE_TOPOLOGY {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D_PRIMITIVE_TOPOLOGY {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D_PRIMITIVE_TOPOLOGY").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct D3D_DRIVER_TYPE(pub i32);
+impl ::core::marker::Copy for D3D_DRIVER_TYPE {}
+impl ::core::clone::Clone for D3D_DRIVER_TYPE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for D3D_DRIVER_TYPE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for D3D_DRIVER_TYPE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for D3D_DRIVER_TYPE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("D3D_DRIVER_TYPE").field(&self.0).finish()
+    }
+}
+
 }
 pub mod Dxgi{
+#[repr(transparent)]
+pub struct IDXGIFactory2(::windows::core::IUnknown);
+impl IDXGIFactory2 {
+    pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, name: *const ::windows::core::GUID, punknown: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), punknown.into().abi()).ok()
+    }
+    pub unsafe fn GetPrivateData(&self, name: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata)).ok()
+    }
+    pub unsafe fn GetParent<T>(&self) -> ::windows::core::Result<T>
+    where
+        T: ::windows::core::Interface,
+    {
+        let mut result__ = ::core::option::Option::None;
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetParent)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
+    }
+    pub unsafe fn EnumAdapters(&self, adapter: u32) -> ::windows::core::Result<IDXGIAdapter> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).base__.base__.EnumAdapters)(::windows::core::Vtable::as_raw(self), adapter, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIAdapter>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn MakeWindowAssociation<'a, P0>(&self, windowhandle: P0, flags: u32) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<super::super::Foundation::HWND>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.MakeWindowAssociation)(::windows::core::Vtable::as_raw(self), windowhandle.into(), flags).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn GetWindowAssociation(&self) -> ::windows::core::Result<super::super::Foundation::HWND> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).base__.base__.GetWindowAssociation)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::Foundation::HWND>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub unsafe fn CreateSwapChain<'a, P0>(&self, pdevice: P0, pdesc: *const DXGI_SWAP_CHAIN_DESC, ppswapchain: *mut ::core::option::Option<IDXGISwapChain>) -> ::windows::core::HRESULT
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.CreateSwapChain)(::windows::core::Vtable::as_raw(self), pdevice.into().abi(), ::core::mem::transmute(pdesc), ::core::mem::transmute(ppswapchain))
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn CreateSoftwareAdapter<'a, P0>(&self, module: P0) -> ::windows::core::Result<IDXGIAdapter>
+    where
+        P0: ::std::convert::Into<super::super::Foundation::HINSTANCE>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).base__.base__.CreateSoftwareAdapter)(::windows::core::Vtable::as_raw(self), module.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIAdapter>(result__)
+    }
+    pub unsafe fn EnumAdapters1(&self, adapter: u32) -> ::windows::core::Result<IDXGIAdapter1> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).base__.EnumAdapters1)(::windows::core::Vtable::as_raw(self), adapter, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIAdapter1>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn IsCurrent(&self) -> super::super::Foundation::BOOL {
+        (::windows::core::Vtable::vtable(self).base__.IsCurrent)(::windows::core::Vtable::as_raw(self))
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn IsWindowedStereoEnabled(&self) -> super::super::Foundation::BOOL {
+        (::windows::core::Vtable::vtable(self).IsWindowedStereoEnabled)(::windows::core::Vtable::as_raw(self))
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub unsafe fn CreateSwapChainForHwnd<'a, P0, P1, P2>(&self, pdevice: P0, hwnd: P1, pdesc: *const DXGI_SWAP_CHAIN_DESC1, pfullscreendesc: ::core::option::Option<*const DXGI_SWAP_CHAIN_FULLSCREEN_DESC>, prestricttooutput: P2) -> ::windows::core::Result<IDXGISwapChain1>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+        P1: ::std::convert::Into<super::super::Foundation::HWND>,
+        P2: ::std::convert::Into<::windows::core::InParam<'a, IDXGIOutput>>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).CreateSwapChainForHwnd)(::windows::core::Vtable::as_raw(self), pdevice.into().abi(), hwnd.into(), ::core::mem::transmute(pdesc), ::core::mem::transmute(pfullscreendesc.unwrap_or(::std::ptr::null())), prestricttooutput.into().abi(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGISwapChain1>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub unsafe fn CreateSwapChainForCoreWindow<'a, P0, P1, P2>(&self, pdevice: P0, pwindow: P1, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: P2) -> ::windows::core::Result<IDXGISwapChain1>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+        P1: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+        P2: ::std::convert::Into<::windows::core::InParam<'a, IDXGIOutput>>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).CreateSwapChainForCoreWindow)(::windows::core::Vtable::as_raw(self), pdevice.into().abi(), pwindow.into().abi(), ::core::mem::transmute(pdesc), prestricttooutput.into().abi(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGISwapChain1>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn GetSharedResourceAdapterLuid<'a, P0>(&self, hresource: P0) -> ::windows::core::Result<super::super::Foundation::LUID>
+    where
+        P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetSharedResourceAdapterLuid)(::windows::core::Vtable::as_raw(self), hresource.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::Foundation::LUID>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn RegisterStereoStatusWindow<'a, P0>(&self, windowhandle: P0, wmsg: u32) -> ::windows::core::Result<u32>
+    where
+        P0: ::std::convert::Into<super::super::Foundation::HWND>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).RegisterStereoStatusWindow)(::windows::core::Vtable::as_raw(self), windowhandle.into(), wmsg, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn RegisterStereoStatusEvent<'a, P0>(&self, hevent: P0) -> ::windows::core::Result<u32>
+    where
+        P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).RegisterStereoStatusEvent)(::windows::core::Vtable::as_raw(self), hevent.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    pub unsafe fn UnregisterStereoStatus(&self, dwcookie: u32) {
+        (::windows::core::Vtable::vtable(self).UnregisterStereoStatus)(::windows::core::Vtable::as_raw(self), dwcookie)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn RegisterOcclusionStatusWindow<'a, P0>(&self, windowhandle: P0, wmsg: u32) -> ::windows::core::Result<u32>
+    where
+        P0: ::std::convert::Into<super::super::Foundation::HWND>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).RegisterOcclusionStatusWindow)(::windows::core::Vtable::as_raw(self), windowhandle.into(), wmsg, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn RegisterOcclusionStatusEvent<'a, P0>(&self, hevent: P0) -> ::windows::core::Result<u32>
+    where
+        P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).RegisterOcclusionStatusEvent)(::windows::core::Vtable::as_raw(self), hevent.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    pub unsafe fn UnregisterOcclusionStatus(&self, dwcookie: u32) {
+        (::windows::core::Vtable::vtable(self).UnregisterOcclusionStatus)(::windows::core::Vtable::as_raw(self), dwcookie)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub unsafe fn CreateSwapChainForComposition<'a, P0, P1>(&self, pdevice: P0, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: P1) -> ::windows::core::Result<IDXGISwapChain1>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+        P1: ::std::convert::Into<::windows::core::InParam<'a, IDXGIOutput>>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).CreateSwapChainForComposition)(::windows::core::Vtable::as_raw(self), pdevice.into().abi(), ::core::mem::transmute(pdesc), prestricttooutput.into().abi(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGISwapChain1>(result__)
+    }
+}
+impl ::core::cmp::Eq for IDXGIFactory2 {}
+impl ::core::cmp::PartialEq for IDXGIFactory2 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IDXGIFactory2 {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IDXGIFactory2 {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IDXGIFactory2").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IDXGIFactory2 {
+    type Vtable = IDXGIFactory2_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IDXGIFactory2 {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x50c83a1c_e072_4c48_87b0_3630fa36a6d0);
+}
+
+::windows::core::interface_hierarchy!(IDXGIFactory2, ::windows::core::IUnknown, IDXGIObject, IDXGIFactory, IDXGIFactory1);
+
+#[repr(C)]
+pub struct IDXGIFactory2_Vtbl {
+    pub base__: IDXGIFactory1_Vtbl,
+    #[cfg(feature = "Win32_Foundation")]
+    pub IsWindowedStereoEnabled: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    IsWindowedStereoEnabled: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub CreateSwapChainForHwnd: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, hwnd: super::super::Foundation::HWND, pdesc: *const DXGI_SWAP_CHAIN_DESC1, pfullscreendesc: *const DXGI_SWAP_CHAIN_FULLSCREEN_DESC, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
+    CreateSwapChainForHwnd: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub CreateSwapChainForCoreWindow: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, pwindow: *mut ::core::ffi::c_void, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
+    CreateSwapChainForCoreWindow: usize,
+    #[cfg(feature = "Win32_Foundation")]
+    pub GetSharedResourceAdapterLuid: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, hresource: super::super::Foundation::HANDLE, pluid: *mut super::super::Foundation::LUID) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    GetSharedResourceAdapterLuid: usize,
+    #[cfg(feature = "Win32_Foundation")]
+    pub RegisterStereoStatusWindow: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, windowhandle: super::super::Foundation::HWND, wmsg: u32, pdwcookie: *mut u32) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    RegisterStereoStatusWindow: usize,
+    #[cfg(feature = "Win32_Foundation")]
+    pub RegisterStereoStatusEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, hevent: super::super::Foundation::HANDLE, pdwcookie: *mut u32) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    RegisterStereoStatusEvent: usize,
+    pub UnregisterStereoStatus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dwcookie: u32),
+    #[cfg(feature = "Win32_Foundation")]
+    pub RegisterOcclusionStatusWindow: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, windowhandle: super::super::Foundation::HWND, wmsg: u32, pdwcookie: *mut u32) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    RegisterOcclusionStatusWindow: usize,
+    #[cfg(feature = "Win32_Foundation")]
+    pub RegisterOcclusionStatusEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, hevent: super::super::Foundation::HANDLE, pdwcookie: *mut u32) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    RegisterOcclusionStatusEvent: usize,
+    pub UnregisterOcclusionStatus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dwcookie: u32),
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub CreateSwapChainForComposition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
+    CreateSwapChainForComposition: usize,
+}
+
+pub trait IDXGIFactory2_Impl: Sized + IDXGIFactory1_Impl {
+    fn IsWindowedStereoEnabled(&self) -> super::super::Foundation::BOOL;
+    fn CreateSwapChainForHwnd(&self, pdevice: &::core::option::Option<::windows::core::IUnknown>, hwnd: super::super::Foundation::HWND, pdesc: *const DXGI_SWAP_CHAIN_DESC1, pfullscreendesc: *const DXGI_SWAP_CHAIN_FULLSCREEN_DESC, prestricttooutput: &::core::option::Option<IDXGIOutput>) -> ::windows::core::Result<IDXGISwapChain1>;
+    fn CreateSwapChainForCoreWindow(&self, pdevice: &::core::option::Option<::windows::core::IUnknown>, pwindow: &::core::option::Option<::windows::core::IUnknown>, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: &::core::option::Option<IDXGIOutput>) -> ::windows::core::Result<IDXGISwapChain1>;
+    fn GetSharedResourceAdapterLuid(&self, hresource: super::super::Foundation::HANDLE) -> ::windows::core::Result<super::super::Foundation::LUID>;
+    fn RegisterStereoStatusWindow(&self, windowhandle: super::super::Foundation::HWND, wmsg: u32) -> ::windows::core::Result<u32>;
+    fn RegisterStereoStatusEvent(&self, hevent: super::super::Foundation::HANDLE) -> ::windows::core::Result<u32>;
+    fn UnregisterStereoStatus(&self, dwcookie: u32);
+    fn RegisterOcclusionStatusWindow(&self, windowhandle: super::super::Foundation::HWND, wmsg: u32) -> ::windows::core::Result<u32>;
+    fn RegisterOcclusionStatusEvent(&self, hevent: super::super::Foundation::HANDLE) -> ::windows::core::Result<u32>;
+    fn UnregisterOcclusionStatus(&self, dwcookie: u32);
+    fn CreateSwapChainForComposition(&self, pdevice: &::core::option::Option<::windows::core::IUnknown>, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: &::core::option::Option<IDXGIOutput>) -> ::windows::core::Result<IDXGISwapChain1>;
+}
+
+impl IDXGIFactory2_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>() -> IDXGIFactory2_Vtbl {
+        unsafe extern "system" fn IsWindowedStereoEnabled<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.IsWindowedStereoEnabled()
+        }
+        unsafe extern "system" fn CreateSwapChainForHwnd<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, hwnd: super::super::Foundation::HWND, pdesc: *const DXGI_SWAP_CHAIN_DESC1, pfullscreendesc: *const DXGI_SWAP_CHAIN_FULLSCREEN_DESC, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.CreateSwapChainForHwnd(::core::mem::transmute(&pdevice), ::core::mem::transmute_copy(&hwnd), ::core::mem::transmute_copy(&pdesc), ::core::mem::transmute_copy(&pfullscreendesc), ::core::mem::transmute(&prestricttooutput)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppswapchain, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn CreateSwapChainForCoreWindow<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, pwindow: *mut ::core::ffi::c_void, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.CreateSwapChainForCoreWindow(::core::mem::transmute(&pdevice), ::core::mem::transmute(&pwindow), ::core::mem::transmute_copy(&pdesc), ::core::mem::transmute(&prestricttooutput)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppswapchain, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetSharedResourceAdapterLuid<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, hresource: super::super::Foundation::HANDLE, pluid: *mut super::super::Foundation::LUID) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetSharedResourceAdapterLuid(::core::mem::transmute_copy(&hresource)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pluid, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn RegisterStereoStatusWindow<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, windowhandle: super::super::Foundation::HWND, wmsg: u32, pdwcookie: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.RegisterStereoStatusWindow(::core::mem::transmute_copy(&windowhandle), ::core::mem::transmute_copy(&wmsg)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwcookie, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn RegisterStereoStatusEvent<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, hevent: super::super::Foundation::HANDLE, pdwcookie: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.RegisterStereoStatusEvent(::core::mem::transmute_copy(&hevent)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwcookie, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn UnregisterStereoStatus<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dwcookie: u32) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.UnregisterStereoStatus(::core::mem::transmute_copy(&dwcookie))
+        }
+        unsafe extern "system" fn RegisterOcclusionStatusWindow<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, windowhandle: super::super::Foundation::HWND, wmsg: u32, pdwcookie: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.RegisterOcclusionStatusWindow(::core::mem::transmute_copy(&windowhandle), ::core::mem::transmute_copy(&wmsg)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwcookie, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn RegisterOcclusionStatusEvent<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, hevent: super::super::Foundation::HANDLE, pdwcookie: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.RegisterOcclusionStatusEvent(::core::mem::transmute_copy(&hevent)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwcookie, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn UnregisterOcclusionStatus<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dwcookie: u32) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.UnregisterOcclusionStatus(::core::mem::transmute_copy(&dwcookie))
+        }
+        unsafe extern "system" fn CreateSwapChainForComposition<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.CreateSwapChainForComposition(::core::mem::transmute(&pdevice), ::core::mem::transmute_copy(&pdesc), ::core::mem::transmute(&prestricttooutput)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppswapchain, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: IDXGIFactory1_Vtbl::new::<Identity, Impl, OFFSET>(),
+            IsWindowedStereoEnabled: IsWindowedStereoEnabled::<Identity, Impl, OFFSET>,
+            CreateSwapChainForHwnd: CreateSwapChainForHwnd::<Identity, Impl, OFFSET>,
+            CreateSwapChainForCoreWindow: CreateSwapChainForCoreWindow::<Identity, Impl, OFFSET>,
+            GetSharedResourceAdapterLuid: GetSharedResourceAdapterLuid::<Identity, Impl, OFFSET>,
+            RegisterStereoStatusWindow: RegisterStereoStatusWindow::<Identity, Impl, OFFSET>,
+            RegisterStereoStatusEvent: RegisterStereoStatusEvent::<Identity, Impl, OFFSET>,
+            UnregisterStereoStatus: UnregisterStereoStatus::<Identity, Impl, OFFSET>,
+            RegisterOcclusionStatusWindow: RegisterOcclusionStatusWindow::<Identity, Impl, OFFSET>,
+            RegisterOcclusionStatusEvent: RegisterOcclusionStatusEvent::<Identity, Impl, OFFSET>,
+            UnregisterOcclusionStatus: UnregisterOcclusionStatus::<Identity, Impl, OFFSET>,
+            CreateSwapChainForComposition: CreateSwapChainForComposition::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IDXGIFactory2 as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID || iid == &<IDXGIFactory as ::windows::core::Interface>::IID || iid == &<IDXGIFactory1 as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct IDXGISwapChain1(::windows::core::IUnknown);
+impl IDXGISwapChain1 {
+    pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
+    }
+    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, name: *const ::windows::core::GUID, punknown: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), punknown.into().abi()).ok()
+    }
+    pub unsafe fn GetPrivateData(&self, name: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata)).ok()
+    }
+    pub unsafe fn GetParent<T>(&self) -> ::windows::core::Result<T>
+    where
+        T: ::windows::core::Interface,
+    {
+        let mut result__ = ::core::option::Option::None;
+        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetParent)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
+    }
+    pub unsafe fn GetDevice<T>(&self) -> ::windows::core::Result<T>
+    where
+        T: ::windows::core::Interface,
+    {
+        let mut result__ = ::core::option::Option::None;
+        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
+    }
+    pub unsafe fn Present(&self, syncinterval: u32, flags: u32) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).base__.Present)(::windows::core::Vtable::as_raw(self), syncinterval, flags)
+    }
+    pub unsafe fn GetBuffer<T>(&self, buffer: u32) -> ::windows::core::Result<T>
+    where
+        T: ::windows::core::Interface,
+    {
+        let mut result__ = ::core::option::Option::None;
+        (::windows::core::Vtable::vtable(self).base__.GetBuffer)(::windows::core::Vtable::as_raw(self), buffer, &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn SetFullscreenState<'a, P0, P1>(&self, fullscreen: P0, ptarget: P1) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<super::super::Foundation::BOOL>,
+        P1: ::std::convert::Into<::windows::core::InParam<'a, IDXGIOutput>>,
+    {
+        (::windows::core::Vtable::vtable(self).base__.SetFullscreenState)(::windows::core::Vtable::as_raw(self), fullscreen.into(), ptarget.into().abi()).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn GetFullscreenState(&self, pfullscreen: ::core::option::Option<*mut super::super::Foundation::BOOL>, pptarget: ::core::option::Option<*mut ::core::option::Option<IDXGIOutput>>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.GetFullscreenState)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pfullscreen.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pptarget.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub unsafe fn GetDesc(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_DESC> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).base__.GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_SWAP_CHAIN_DESC>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub unsafe fn ResizeBuffers(&self, buffercount: u32, width: u32, height: u32, newformat: Common::DXGI_FORMAT, swapchainflags: u32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.ResizeBuffers)(::windows::core::Vtable::as_raw(self), buffercount, width, height, newformat, swapchainflags).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub unsafe fn ResizeTarget(&self, pnewtargetparameters: *const Common::DXGI_MODE_DESC) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).base__.ResizeTarget)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pnewtargetparameters)).ok()
+    }
+    pub unsafe fn GetContainingOutput(&self) -> ::windows::core::Result<IDXGIOutput> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).base__.GetContainingOutput)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIOutput>(result__)
+    }
+    pub unsafe fn GetFrameStatistics(&self) -> ::windows::core::Result<DXGI_FRAME_STATISTICS> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).base__.GetFrameStatistics)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_FRAME_STATISTICS>(result__)
+    }
+    pub unsafe fn GetLastPresentCount(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).base__.GetLastPresentCount)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub unsafe fn GetDesc1(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_DESC1> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetDesc1)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_SWAP_CHAIN_DESC1>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub unsafe fn GetFullscreenDesc(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_FULLSCREEN_DESC> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetFullscreenDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_SWAP_CHAIN_FULLSCREEN_DESC>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn GetHwnd(&self) -> ::windows::core::Result<super::super::Foundation::HWND> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetHwnd)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::Foundation::HWND>(result__)
+    }
+    pub unsafe fn GetCoreWindow<T>(&self) -> ::windows::core::Result<T>
+    where
+        T: ::windows::core::Interface,
+    {
+        let mut result__ = ::core::option::Option::None;
+        (::windows::core::Vtable::vtable(self).GetCoreWindow)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn Present1(&self, syncinterval: u32, presentflags: u32, ppresentparameters: *const DXGI_PRESENT_PARAMETERS) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).Present1)(::windows::core::Vtable::as_raw(self), syncinterval, presentflags, ::core::mem::transmute(ppresentparameters))
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn IsTemporaryMonoSupported(&self) -> super::super::Foundation::BOOL {
+        (::windows::core::Vtable::vtable(self).IsTemporaryMonoSupported)(::windows::core::Vtable::as_raw(self))
+    }
+    pub unsafe fn GetRestrictToOutput(&self) -> ::windows::core::Result<IDXGIOutput> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetRestrictToOutput)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIOutput>(result__)
+    }
+    pub unsafe fn SetBackgroundColor(&self, pcolor: *const DXGI_RGBA) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).SetBackgroundColor)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pcolor)).ok()
+    }
+    pub unsafe fn GetBackgroundColor(&self) -> ::windows::core::Result<DXGI_RGBA> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetBackgroundColor)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_RGBA>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub unsafe fn SetRotation(&self, rotation: Common::DXGI_MODE_ROTATION) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).SetRotation)(::windows::core::Vtable::as_raw(self), rotation).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub unsafe fn GetRotation(&self) -> ::windows::core::Result<Common::DXGI_MODE_ROTATION> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetRotation)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<Common::DXGI_MODE_ROTATION>(result__)
+    }
+}
+impl ::core::cmp::Eq for IDXGISwapChain1 {}
+impl ::core::cmp::PartialEq for IDXGISwapChain1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IDXGISwapChain1 {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IDXGISwapChain1 {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IDXGISwapChain1").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IDXGISwapChain1 {
+    type Vtable = IDXGISwapChain1_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IDXGISwapChain1 {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x790a45f7_0d42_4876_983a_0a55cfe6f4aa);
+}
+
+::windows::core::interface_hierarchy!(IDXGISwapChain1, ::windows::core::IUnknown, IDXGIObject, IDXGIDeviceSubObject, IDXGISwapChain);
+
+#[repr(C)]
+pub struct IDXGISwapChain1_Vtbl {
+    pub base__: IDXGISwapChain_Vtbl,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub GetDesc1: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_SWAP_CHAIN_DESC1) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
+    GetDesc1: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
+    pub GetFullscreenDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_SWAP_CHAIN_FULLSCREEN_DESC) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
+    GetFullscreenDesc: usize,
+    #[cfg(feature = "Win32_Foundation")]
+    pub GetHwnd: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, phwnd: *mut super::super::Foundation::HWND) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    GetHwnd: usize,
+    pub GetCoreWindow: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, refiid: *const ::windows::core::GUID, ppunk: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub Present1: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, syncinterval: u32, presentflags: u32, ppresentparameters: *const DXGI_PRESENT_PARAMETERS) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    Present1: usize,
+    #[cfg(feature = "Win32_Foundation")]
+    pub IsTemporaryMonoSupported: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    IsTemporaryMonoSupported: usize,
+    pub GetRestrictToOutput: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pprestricttooutput: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub SetBackgroundColor: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcolor: *const DXGI_RGBA) -> ::windows::core::HRESULT,
+    pub GetBackgroundColor: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcolor: *mut DXGI_RGBA) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub SetRotation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, rotation: Common::DXGI_MODE_ROTATION) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
+    SetRotation: usize,
+    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
+    pub GetRotation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, protation: *mut Common::DXGI_MODE_ROTATION) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
+    GetRotation: usize,
+}
+
+pub trait IDXGISwapChain1_Impl: Sized + IDXGISwapChain_Impl {
+    fn GetDesc1(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_DESC1>;
+    fn GetFullscreenDesc(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_FULLSCREEN_DESC>;
+    fn GetHwnd(&self) -> ::windows::core::Result<super::super::Foundation::HWND>;
+    fn GetCoreWindow(&self, refiid: *const ::windows::core::GUID, ppunk: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn Present1(&self, syncinterval: u32, presentflags: u32, ppresentparameters: *const DXGI_PRESENT_PARAMETERS) -> ::windows::core::HRESULT;
+    fn IsTemporaryMonoSupported(&self) -> super::super::Foundation::BOOL;
+    fn GetRestrictToOutput(&self) -> ::windows::core::Result<IDXGIOutput>;
+    fn SetBackgroundColor(&self, pcolor: *const DXGI_RGBA) -> ::windows::core::Result<()>;
+    fn GetBackgroundColor(&self) -> ::windows::core::Result<DXGI_RGBA>;
+    fn SetRotation(&self, rotation: Common::DXGI_MODE_ROTATION) -> ::windows::core::Result<()>;
+    fn GetRotation(&self) -> ::windows::core::Result<Common::DXGI_MODE_ROTATION>;
+}
+
+impl IDXGISwapChain1_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>() -> IDXGISwapChain1_Vtbl {
+        unsafe extern "system" fn GetDesc1<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_SWAP_CHAIN_DESC1) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetDesc1() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdesc, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetFullscreenDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_SWAP_CHAIN_FULLSCREEN_DESC) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetFullscreenDesc() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdesc, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetHwnd<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, phwnd: *mut super::super::Foundation::HWND) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetHwnd() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(phwnd, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetCoreWindow<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, refiid: *const ::windows::core::GUID, ppunk: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetCoreWindow(::core::mem::transmute_copy(&refiid), ::core::mem::transmute_copy(&ppunk)).into()
+        }
+        unsafe extern "system" fn Present1<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, syncinterval: u32, presentflags: u32, ppresentparameters: *const DXGI_PRESENT_PARAMETERS) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Present1(::core::mem::transmute_copy(&syncinterval), ::core::mem::transmute_copy(&presentflags), ::core::mem::transmute_copy(&ppresentparameters))
+        }
+        unsafe extern "system" fn IsTemporaryMonoSupported<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.IsTemporaryMonoSupported()
+        }
+        unsafe extern "system" fn GetRestrictToOutput<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pprestricttooutput: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetRestrictToOutput() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pprestricttooutput, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn SetBackgroundColor<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcolor: *const DXGI_RGBA) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetBackgroundColor(::core::mem::transmute_copy(&pcolor)).into()
+        }
+        unsafe extern "system" fn GetBackgroundColor<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcolor: *mut DXGI_RGBA) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetBackgroundColor() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pcolor, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn SetRotation<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, rotation: Common::DXGI_MODE_ROTATION) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetRotation(::core::mem::transmute_copy(&rotation)).into()
+        }
+        unsafe extern "system" fn GetRotation<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, protation: *mut Common::DXGI_MODE_ROTATION) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetRotation() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(protation, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: IDXGISwapChain_Vtbl::new::<Identity, Impl, OFFSET>(),
+            GetDesc1: GetDesc1::<Identity, Impl, OFFSET>,
+            GetFullscreenDesc: GetFullscreenDesc::<Identity, Impl, OFFSET>,
+            GetHwnd: GetHwnd::<Identity, Impl, OFFSET>,
+            GetCoreWindow: GetCoreWindow::<Identity, Impl, OFFSET>,
+            Present1: Present1::<Identity, Impl, OFFSET>,
+            IsTemporaryMonoSupported: IsTemporaryMonoSupported::<Identity, Impl, OFFSET>,
+            GetRestrictToOutput: GetRestrictToOutput::<Identity, Impl, OFFSET>,
+            SetBackgroundColor: SetBackgroundColor::<Identity, Impl, OFFSET>,
+            GetBackgroundColor: GetBackgroundColor::<Identity, Impl, OFFSET>,
+            SetRotation: SetRotation::<Identity, Impl, OFFSET>,
+            GetRotation: GetRotation::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IDXGISwapChain1 as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID || iid == &<IDXGIDeviceSubObject as ::windows::core::Interface>::IID || iid == &<IDXGISwapChain as ::windows::core::Interface>::IID
+    }
+}
+
+pub unsafe fn CreateDXGIFactory2<T>(flags: u32) -> ::windows::core::Result<T>
+where
+    T: ::windows::core::Interface,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn CreateDXGIFactory2(flags: u32, riid: *const ::windows::core::GUID, ppfactory: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT;
+    }
+    let mut result__ = ::core::option::Option::None;
+    CreateDXGIFactory2(flags, &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
+}
+
+#[repr(C)]
+pub struct DXGI_SWAP_CHAIN_DESC1 {
+    pub Width: u32,
+    pub Height: u32,
+    pub Format: Common::DXGI_FORMAT,
+    pub Stereo: super::super::Foundation::BOOL,
+    pub SampleDesc: Common::DXGI_SAMPLE_DESC,
+    pub BufferUsage: u32,
+    pub BufferCount: u32,
+    pub Scaling: DXGI_SCALING,
+    pub SwapEffect: DXGI_SWAP_EFFECT,
+    pub AlphaMode: Common::DXGI_ALPHA_MODE,
+    pub Flags: u32,
+}
+impl ::core::marker::Copy for DXGI_SWAP_CHAIN_DESC1 {}
+impl ::core::cmp::Eq for DXGI_SWAP_CHAIN_DESC1 {}
+impl ::core::cmp::PartialEq for DXGI_SWAP_CHAIN_DESC1 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DXGI_SWAP_CHAIN_DESC1>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DXGI_SWAP_CHAIN_DESC1 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DXGI_SWAP_CHAIN_DESC1 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DXGI_SWAP_CHAIN_DESC1 {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DXGI_SWAP_CHAIN_DESC1 {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DXGI_SWAP_CHAIN_DESC1").field("Width", &self.Width).field("Height", &self.Height).field("Format", &self.Format).field("Stereo", &self.Stereo).field("SampleDesc", &self.SampleDesc).field("BufferUsage", &self.BufferUsage).field("BufferCount", &self.BufferCount).field("Scaling", &self.Scaling).field("SwapEffect", &self.SwapEffect).field("AlphaMode", &self.AlphaMode).field("Flags", &self.Flags).finish()
+    }
+}
+
+pub const DXGI_USAGE_RENDER_TARGET_OUTPUT: u32 = 32u32;
+
+pub const DXGI_SCALING_NONE: DXGI_SCALING = DXGI_SCALING(1i32);
+
+pub const DXGI_SWAP_EFFECT_FLIP_DISCARD: DXGI_SWAP_EFFECT = DXGI_SWAP_EFFECT(4i32);
+
 pub mod Common{
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct DXGI_FORMAT(pub u32);
+impl ::core::marker::Copy for DXGI_FORMAT {}
+impl ::core::clone::Clone for DXGI_FORMAT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DXGI_FORMAT {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for DXGI_FORMAT {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DXGI_FORMAT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DXGI_FORMAT").field(&self.0).finish()
+    }
+}
+
+pub const DXGI_ALPHA_MODE_IGNORE: DXGI_ALPHA_MODE = DXGI_ALPHA_MODE(3u32);
+
+pub const DXGI_FORMAT_R8G8B8A8_UNORM: DXGI_FORMAT = DXGI_FORMAT(28u32);
+
+pub const DXGI_FORMAT_B8G8R8A8_UNORM: DXGI_FORMAT = DXGI_FORMAT(87u32);
+
+#[repr(C)]
+pub struct DXGI_SAMPLE_DESC {
+    pub Count: u32,
+    pub Quality: u32,
+}
+impl ::core::marker::Copy for DXGI_SAMPLE_DESC {}
+impl ::core::cmp::Eq for DXGI_SAMPLE_DESC {}
+impl ::core::cmp::PartialEq for DXGI_SAMPLE_DESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DXGI_SAMPLE_DESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DXGI_SAMPLE_DESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DXGI_SAMPLE_DESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DXGI_SAMPLE_DESC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DXGI_SAMPLE_DESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DXGI_SAMPLE_DESC").field("Count", &self.Count).field("Quality", &self.Quality).finish()
+    }
+}
+
+pub const DXGI_FORMAT_R32G32B32A32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(2u32);
+
+pub const DXGI_FORMAT_D32_FLOAT_S8X24_UINT: DXGI_FORMAT = DXGI_FORMAT(20u32);
+
+pub const DXGI_FORMAT_R32_UINT: DXGI_FORMAT = DXGI_FORMAT(42u32);
+
+pub const DXGI_FORMAT_R32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(41u32);
+
+pub const DXGI_FORMAT_R32G32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(16u32);
+
+pub const DXGI_FORMAT_R32G32B32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(6u32);
+
 #[repr(C)]
 pub struct DXGI_MODE_DESC {
     pub Width: u32,
@@ -9695,30 +11033,6 @@ impl ::core::fmt::Debug for DXGI_RGB {
 }
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_FORMAT(pub u32);
-impl ::core::marker::Copy for DXGI_FORMAT {}
-impl ::core::clone::Clone for DXGI_FORMAT {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DXGI_FORMAT {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for DXGI_FORMAT {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for DXGI_FORMAT {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("DXGI_FORMAT").field(&self.0).finish()
-    }
-}
-
-pub const DXGI_ALPHA_MODE_IGNORE: DXGI_ALPHA_MODE = DXGI_ALPHA_MODE(3u32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
 pub struct DXGI_ALPHA_MODE(pub u32);
 impl ::core::marker::Copy for DXGI_ALPHA_MODE {}
 impl ::core::clone::Clone for DXGI_ALPHA_MODE {
@@ -9739,53 +11053,6 @@ impl ::core::fmt::Debug for DXGI_ALPHA_MODE {
         f.debug_tuple("DXGI_ALPHA_MODE").field(&self.0).finish()
     }
 }
-
-pub const DXGI_FORMAT_R8G8B8A8_UNORM: DXGI_FORMAT = DXGI_FORMAT(28u32);
-
-pub const DXGI_FORMAT_B8G8R8A8_UNORM: DXGI_FORMAT = DXGI_FORMAT(87u32);
-
-#[repr(C)]
-pub struct DXGI_SAMPLE_DESC {
-    pub Count: u32,
-    pub Quality: u32,
-}
-impl ::core::marker::Copy for DXGI_SAMPLE_DESC {}
-impl ::core::cmp::Eq for DXGI_SAMPLE_DESC {}
-impl ::core::cmp::PartialEq for DXGI_SAMPLE_DESC {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DXGI_SAMPLE_DESC>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for DXGI_SAMPLE_DESC {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DXGI_SAMPLE_DESC {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for DXGI_SAMPLE_DESC {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for DXGI_SAMPLE_DESC {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("DXGI_SAMPLE_DESC").field("Count", &self.Count).field("Quality", &self.Quality).finish()
-    }
-}
-
-pub const DXGI_FORMAT_R32G32B32A32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(2u32);
-
-pub const DXGI_FORMAT_D32_FLOAT_S8X24_UINT: DXGI_FORMAT = DXGI_FORMAT(20u32);
-
-pub const DXGI_FORMAT_R32_UINT: DXGI_FORMAT = DXGI_FORMAT(42u32);
-
-pub const DXGI_FORMAT_R32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(41u32);
-
-pub const DXGI_FORMAT_R32G32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(16u32);
-
-pub const DXGI_FORMAT_R32G32B32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(6u32);
 
 }
 #[repr(C)]
@@ -10133,6 +11400,50 @@ impl ::core::fmt::Debug for DXGI_SWAP_CHAIN_FULLSCREEN_DESC {
     }
 }
 
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct DXGI_SCALING(pub i32);
+impl ::core::marker::Copy for DXGI_SCALING {}
+impl ::core::clone::Clone for DXGI_SCALING {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DXGI_SCALING {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for DXGI_SCALING {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DXGI_SCALING {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DXGI_SCALING").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct DXGI_SWAP_EFFECT(pub i32);
+impl ::core::marker::Copy for DXGI_SWAP_EFFECT {}
+impl ::core::clone::Clone for DXGI_SWAP_EFFECT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DXGI_SWAP_EFFECT {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for DXGI_SWAP_EFFECT {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DXGI_SWAP_EFFECT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DXGI_SWAP_EFFECT").field(&self.0).finish()
+    }
+}
+
 #[repr(transparent)]
 pub struct IDXGIAdapter1(::windows::core::IUnknown);
 impl IDXGIAdapter1 {
@@ -10199,6 +11510,8 @@ unsafe impl ::windows::core::Interface for IDXGIAdapter1 {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x29038f61_3839_4626_91fd_086879011a05);
 }
 
+::windows::core::interface_hierarchy!(IDXGIAdapter1, ::windows::core::IUnknown, IDXGIObject, IDXGIAdapter);
+
 #[repr(C)]
 pub struct IDXGIAdapter1_Vtbl {
     pub base__: IDXGIAdapter_Vtbl,
@@ -10231,8 +11544,6 @@ impl IDXGIAdapter1_Vtbl {
         iid == &<IDXGIAdapter1 as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID || iid == &<IDXGIAdapter as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(IDXGIAdapter1, ::windows::core::IUnknown, IDXGIObject, IDXGIAdapter);
 
 #[repr(transparent)]
 pub struct IDXGISurface(::windows::core::IUnknown);
@@ -10299,6 +11610,8 @@ unsafe impl ::windows::core::Interface for IDXGISurface {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xcafcb56c_6ac3_4889_bf47_9e23bbd260ec);
 }
 
+::windows::core::interface_hierarchy!(IDXGISurface, ::windows::core::IUnknown, IDXGIObject, IDXGIDeviceSubObject);
+
 #[repr(C)]
 pub struct IDXGISurface_Vtbl {
     pub base__: IDXGIDeviceSubObject_Vtbl,
@@ -10350,8 +11663,6 @@ impl IDXGISurface_Vtbl {
         iid == &<IDXGISurface as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID || iid == &<IDXGIDeviceSubObject as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(IDXGISurface, ::windows::core::IUnknown, IDXGIObject, IDXGIDeviceSubObject);
 
 #[repr(transparent)]
 pub struct IDXGIOutput(::windows::core::IUnknown);
@@ -10465,6 +11776,8 @@ unsafe impl ::windows::core::Vtable for IDXGIOutput {
 unsafe impl ::windows::core::Interface for IDXGIOutput {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xae02eedb_c735_4690_8d52_5a8dc20213aa);
 }
+
+::windows::core::interface_hierarchy!(IDXGIOutput, ::windows::core::IUnknown, IDXGIObject);
 
 #[repr(C)]
 pub struct IDXGIOutput_Vtbl {
@@ -10626,8 +11939,6 @@ impl IDXGIOutput_Vtbl {
     }
 }
 
-::windows::core::interface_hierarchy!(IDXGIOutput, ::windows::core::IUnknown, IDXGIObject);
-
 #[repr(transparent)]
 pub struct IDXGIAdapter(::windows::core::IUnknown);
 impl IDXGIAdapter {
@@ -10687,6 +11998,8 @@ unsafe impl ::windows::core::Vtable for IDXGIAdapter {
 unsafe impl ::windows::core::Interface for IDXGIAdapter {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x2411e7e1_12ac_4ccf_bd14_9798e8534dc0);
 }
+
+::windows::core::interface_hierarchy!(IDXGIAdapter, ::windows::core::IUnknown, IDXGIObject);
 
 #[repr(C)]
 pub struct IDXGIAdapter_Vtbl {
@@ -10752,8 +12065,6 @@ impl IDXGIAdapter_Vtbl {
     }
 }
 
-::windows::core::interface_hierarchy!(IDXGIAdapter, ::windows::core::IUnknown, IDXGIObject);
-
 #[repr(transparent)]
 pub struct IDXGIObject(::windows::core::IUnknown);
 impl IDXGIObject {
@@ -10799,6 +12110,8 @@ unsafe impl ::windows::core::Vtable for IDXGIObject {
 unsafe impl ::windows::core::Interface for IDXGIObject {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xaec22fb8_76f3_4639_9be0_28eb43a67a2e);
 }
+
+::windows::core::interface_hierarchy!(IDXGIObject, ::windows::core::IUnknown);
 
 #[repr(C)]
 pub struct IDXGIObject_Vtbl {
@@ -10850,8 +12163,6 @@ impl IDXGIObject_Vtbl {
         iid == &<IDXGIObject as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(IDXGIObject, ::windows::core::IUnknown);
 
 #[repr(transparent)]
 pub struct IDXGIFactory(::windows::core::IUnknown);
@@ -10933,6 +12244,8 @@ unsafe impl ::windows::core::Vtable for IDXGIFactory {
 unsafe impl ::windows::core::Interface for IDXGIFactory {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x7b7166ec_21c7_44ae_b21a_c9ae321ae369);
 }
+
+::windows::core::interface_hierarchy!(IDXGIFactory, ::windows::core::IUnknown, IDXGIObject);
 
 #[repr(C)]
 pub struct IDXGIFactory_Vtbl {
@@ -11023,8 +12336,6 @@ impl IDXGIFactory_Vtbl {
     }
 }
 
-::windows::core::interface_hierarchy!(IDXGIFactory, ::windows::core::IUnknown, IDXGIObject);
-
 #[repr(transparent)]
 pub struct IDXGIDeviceSubObject(::windows::core::IUnknown);
 impl IDXGIDeviceSubObject {
@@ -11078,6 +12389,8 @@ unsafe impl ::windows::core::Interface for IDXGIDeviceSubObject {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x3d3e0379_f9de_4d58_bb6c_18d62992f1a6);
 }
 
+::windows::core::interface_hierarchy!(IDXGIDeviceSubObject, ::windows::core::IUnknown, IDXGIObject);
+
 #[repr(C)]
 pub struct IDXGIDeviceSubObject_Vtbl {
     pub base__: IDXGIObject_Vtbl,
@@ -11101,8 +12414,6 @@ impl IDXGIDeviceSubObject_Vtbl {
         iid == &<IDXGIDeviceSubObject as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(IDXGIDeviceSubObject, ::windows::core::IUnknown, IDXGIObject);
 
 #[repr(transparent)]
 pub struct IDXGIFactory1(::windows::core::IUnknown);
@@ -11194,6 +12505,8 @@ unsafe impl ::windows::core::Interface for IDXGIFactory1 {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x770aae78_f26f_4dba_a829_253c83d1b387);
 }
 
+::windows::core::interface_hierarchy!(IDXGIFactory1, ::windows::core::IUnknown, IDXGIObject, IDXGIFactory);
+
 #[repr(C)]
 pub struct IDXGIFactory1_Vtbl {
     pub base__: IDXGIFactory_Vtbl,
@@ -11237,8 +12550,6 @@ impl IDXGIFactory1_Vtbl {
         iid == &<IDXGIFactory1 as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID || iid == &<IDXGIFactory as ::windows::core::Interface>::IID
     }
 }
-
-::windows::core::interface_hierarchy!(IDXGIFactory1, ::windows::core::IUnknown, IDXGIObject, IDXGIFactory);
 
 #[repr(transparent)]
 pub struct IDXGISwapChain(::windows::core::IUnknown);
@@ -11344,6 +12655,8 @@ unsafe impl ::windows::core::Vtable for IDXGISwapChain {
 unsafe impl ::windows::core::Interface for IDXGISwapChain {
     const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x310d36a0_d2e7_4c0a_aa04_6a9d23b8886a);
 }
+
+::windows::core::interface_hierarchy!(IDXGISwapChain, ::windows::core::IUnknown, IDXGIObject, IDXGIDeviceSubObject);
 
 #[repr(C)]
 pub struct IDXGISwapChain_Vtbl {
@@ -11480,800 +12793,6 @@ impl IDXGISwapChain_Vtbl {
     }
     pub fn matches(iid: &windows::core::GUID) -> bool {
         iid == &<IDXGISwapChain as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID || iid == &<IDXGIDeviceSubObject as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(IDXGISwapChain, ::windows::core::IUnknown, IDXGIObject, IDXGIDeviceSubObject);
-
-#[repr(transparent)]
-pub struct IDXGIFactory2(::windows::core::IUnknown);
-impl IDXGIFactory2 {
-    pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, name: *const ::windows::core::GUID, punknown: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), punknown.into().abi()).ok()
-    }
-    pub unsafe fn GetPrivateData(&self, name: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata)).ok()
-    }
-    pub unsafe fn GetParent<T>(&self) -> ::windows::core::Result<T>
-    where
-        T: ::windows::core::Interface,
-    {
-        let mut result__ = ::core::option::Option::None;
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetParent)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
-    }
-    pub unsafe fn EnumAdapters(&self, adapter: u32) -> ::windows::core::Result<IDXGIAdapter> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).base__.base__.EnumAdapters)(::windows::core::Vtable::as_raw(self), adapter, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIAdapter>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn MakeWindowAssociation<'a, P0>(&self, windowhandle: P0, flags: u32) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<super::super::Foundation::HWND>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.MakeWindowAssociation)(::windows::core::Vtable::as_raw(self), windowhandle.into(), flags).ok()
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn GetWindowAssociation(&self) -> ::windows::core::Result<super::super::Foundation::HWND> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).base__.base__.GetWindowAssociation)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::Foundation::HWND>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub unsafe fn CreateSwapChain<'a, P0>(&self, pdevice: P0, pdesc: *const DXGI_SWAP_CHAIN_DESC, ppswapchain: *mut ::core::option::Option<IDXGISwapChain>) -> ::windows::core::HRESULT
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.CreateSwapChain)(::windows::core::Vtable::as_raw(self), pdevice.into().abi(), ::core::mem::transmute(pdesc), ::core::mem::transmute(ppswapchain))
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn CreateSoftwareAdapter<'a, P0>(&self, module: P0) -> ::windows::core::Result<IDXGIAdapter>
-    where
-        P0: ::std::convert::Into<super::super::Foundation::HINSTANCE>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).base__.base__.CreateSoftwareAdapter)(::windows::core::Vtable::as_raw(self), module.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIAdapter>(result__)
-    }
-    pub unsafe fn EnumAdapters1(&self, adapter: u32) -> ::windows::core::Result<IDXGIAdapter1> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).base__.EnumAdapters1)(::windows::core::Vtable::as_raw(self), adapter, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIAdapter1>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn IsCurrent(&self) -> super::super::Foundation::BOOL {
-        (::windows::core::Vtable::vtable(self).base__.IsCurrent)(::windows::core::Vtable::as_raw(self))
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn IsWindowedStereoEnabled(&self) -> super::super::Foundation::BOOL {
-        (::windows::core::Vtable::vtable(self).IsWindowedStereoEnabled)(::windows::core::Vtable::as_raw(self))
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub unsafe fn CreateSwapChainForHwnd<'a, P0, P1, P2>(&self, pdevice: P0, hwnd: P1, pdesc: *const DXGI_SWAP_CHAIN_DESC1, pfullscreendesc: ::core::option::Option<*const DXGI_SWAP_CHAIN_FULLSCREEN_DESC>, prestricttooutput: P2) -> ::windows::core::Result<IDXGISwapChain1>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-        P1: ::std::convert::Into<super::super::Foundation::HWND>,
-        P2: ::std::convert::Into<::windows::core::InParam<'a, IDXGIOutput>>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).CreateSwapChainForHwnd)(::windows::core::Vtable::as_raw(self), pdevice.into().abi(), hwnd.into(), ::core::mem::transmute(pdesc), ::core::mem::transmute(pfullscreendesc.unwrap_or(::std::ptr::null())), prestricttooutput.into().abi(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGISwapChain1>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub unsafe fn CreateSwapChainForCoreWindow<'a, P0, P1, P2>(&self, pdevice: P0, pwindow: P1, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: P2) -> ::windows::core::Result<IDXGISwapChain1>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-        P1: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-        P2: ::std::convert::Into<::windows::core::InParam<'a, IDXGIOutput>>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).CreateSwapChainForCoreWindow)(::windows::core::Vtable::as_raw(self), pdevice.into().abi(), pwindow.into().abi(), ::core::mem::transmute(pdesc), prestricttooutput.into().abi(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGISwapChain1>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn GetSharedResourceAdapterLuid<'a, P0>(&self, hresource: P0) -> ::windows::core::Result<super::super::Foundation::LUID>
-    where
-        P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetSharedResourceAdapterLuid)(::windows::core::Vtable::as_raw(self), hresource.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::Foundation::LUID>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn RegisterStereoStatusWindow<'a, P0>(&self, windowhandle: P0, wmsg: u32) -> ::windows::core::Result<u32>
-    where
-        P0: ::std::convert::Into<super::super::Foundation::HWND>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).RegisterStereoStatusWindow)(::windows::core::Vtable::as_raw(self), windowhandle.into(), wmsg, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn RegisterStereoStatusEvent<'a, P0>(&self, hevent: P0) -> ::windows::core::Result<u32>
-    where
-        P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).RegisterStereoStatusEvent)(::windows::core::Vtable::as_raw(self), hevent.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
-    }
-    pub unsafe fn UnregisterStereoStatus(&self, dwcookie: u32) {
-        (::windows::core::Vtable::vtable(self).UnregisterStereoStatus)(::windows::core::Vtable::as_raw(self), dwcookie)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn RegisterOcclusionStatusWindow<'a, P0>(&self, windowhandle: P0, wmsg: u32) -> ::windows::core::Result<u32>
-    where
-        P0: ::std::convert::Into<super::super::Foundation::HWND>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).RegisterOcclusionStatusWindow)(::windows::core::Vtable::as_raw(self), windowhandle.into(), wmsg, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn RegisterOcclusionStatusEvent<'a, P0>(&self, hevent: P0) -> ::windows::core::Result<u32>
-    where
-        P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).RegisterOcclusionStatusEvent)(::windows::core::Vtable::as_raw(self), hevent.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
-    }
-    pub unsafe fn UnregisterOcclusionStatus(&self, dwcookie: u32) {
-        (::windows::core::Vtable::vtable(self).UnregisterOcclusionStatus)(::windows::core::Vtable::as_raw(self), dwcookie)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub unsafe fn CreateSwapChainForComposition<'a, P0, P1>(&self, pdevice: P0, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: P1) -> ::windows::core::Result<IDXGISwapChain1>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-        P1: ::std::convert::Into<::windows::core::InParam<'a, IDXGIOutput>>,
-    {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).CreateSwapChainForComposition)(::windows::core::Vtable::as_raw(self), pdevice.into().abi(), ::core::mem::transmute(pdesc), prestricttooutput.into().abi(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGISwapChain1>(result__)
-    }
-}
-impl ::core::cmp::Eq for IDXGIFactory2 {}
-impl ::core::cmp::PartialEq for IDXGIFactory2 {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for IDXGIFactory2 {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for IDXGIFactory2 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("IDXGIFactory2").field(&self.0).finish()
-    }
-}
-unsafe impl ::windows::core::Vtable for IDXGIFactory2 {
-    type Vtable = IDXGIFactory2_Vtbl;
-}
-unsafe impl ::windows::core::Interface for IDXGIFactory2 {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x50c83a1c_e072_4c48_87b0_3630fa36a6d0);
-}
-
-#[repr(C)]
-pub struct IDXGIFactory2_Vtbl {
-    pub base__: IDXGIFactory1_Vtbl,
-    #[cfg(feature = "Win32_Foundation")]
-    pub IsWindowedStereoEnabled: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL,
-    #[cfg(not(feature = "Win32_Foundation"))]
-    IsWindowedStereoEnabled: usize,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub CreateSwapChainForHwnd: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, hwnd: super::super::Foundation::HWND, pdesc: *const DXGI_SWAP_CHAIN_DESC1, pfullscreendesc: *const DXGI_SWAP_CHAIN_FULLSCREEN_DESC, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
-    CreateSwapChainForHwnd: usize,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub CreateSwapChainForCoreWindow: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, pwindow: *mut ::core::ffi::c_void, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
-    CreateSwapChainForCoreWindow: usize,
-    #[cfg(feature = "Win32_Foundation")]
-    pub GetSharedResourceAdapterLuid: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, hresource: super::super::Foundation::HANDLE, pluid: *mut super::super::Foundation::LUID) -> ::windows::core::HRESULT,
-    #[cfg(not(feature = "Win32_Foundation"))]
-    GetSharedResourceAdapterLuid: usize,
-    #[cfg(feature = "Win32_Foundation")]
-    pub RegisterStereoStatusWindow: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, windowhandle: super::super::Foundation::HWND, wmsg: u32, pdwcookie: *mut u32) -> ::windows::core::HRESULT,
-    #[cfg(not(feature = "Win32_Foundation"))]
-    RegisterStereoStatusWindow: usize,
-    #[cfg(feature = "Win32_Foundation")]
-    pub RegisterStereoStatusEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, hevent: super::super::Foundation::HANDLE, pdwcookie: *mut u32) -> ::windows::core::HRESULT,
-    #[cfg(not(feature = "Win32_Foundation"))]
-    RegisterStereoStatusEvent: usize,
-    pub UnregisterStereoStatus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dwcookie: u32),
-    #[cfg(feature = "Win32_Foundation")]
-    pub RegisterOcclusionStatusWindow: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, windowhandle: super::super::Foundation::HWND, wmsg: u32, pdwcookie: *mut u32) -> ::windows::core::HRESULT,
-    #[cfg(not(feature = "Win32_Foundation"))]
-    RegisterOcclusionStatusWindow: usize,
-    #[cfg(feature = "Win32_Foundation")]
-    pub RegisterOcclusionStatusEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, hevent: super::super::Foundation::HANDLE, pdwcookie: *mut u32) -> ::windows::core::HRESULT,
-    #[cfg(not(feature = "Win32_Foundation"))]
-    RegisterOcclusionStatusEvent: usize,
-    pub UnregisterOcclusionStatus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dwcookie: u32),
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub CreateSwapChainForComposition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
-    CreateSwapChainForComposition: usize,
-}
-
-pub trait IDXGIFactory2_Impl: Sized + IDXGIFactory1_Impl {
-    fn IsWindowedStereoEnabled(&self) -> super::super::Foundation::BOOL;
-    fn CreateSwapChainForHwnd(&self, pdevice: &::core::option::Option<::windows::core::IUnknown>, hwnd: super::super::Foundation::HWND, pdesc: *const DXGI_SWAP_CHAIN_DESC1, pfullscreendesc: *const DXGI_SWAP_CHAIN_FULLSCREEN_DESC, prestricttooutput: &::core::option::Option<IDXGIOutput>) -> ::windows::core::Result<IDXGISwapChain1>;
-    fn CreateSwapChainForCoreWindow(&self, pdevice: &::core::option::Option<::windows::core::IUnknown>, pwindow: &::core::option::Option<::windows::core::IUnknown>, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: &::core::option::Option<IDXGIOutput>) -> ::windows::core::Result<IDXGISwapChain1>;
-    fn GetSharedResourceAdapterLuid(&self, hresource: super::super::Foundation::HANDLE) -> ::windows::core::Result<super::super::Foundation::LUID>;
-    fn RegisterStereoStatusWindow(&self, windowhandle: super::super::Foundation::HWND, wmsg: u32) -> ::windows::core::Result<u32>;
-    fn RegisterStereoStatusEvent(&self, hevent: super::super::Foundation::HANDLE) -> ::windows::core::Result<u32>;
-    fn UnregisterStereoStatus(&self, dwcookie: u32);
-    fn RegisterOcclusionStatusWindow(&self, windowhandle: super::super::Foundation::HWND, wmsg: u32) -> ::windows::core::Result<u32>;
-    fn RegisterOcclusionStatusEvent(&self, hevent: super::super::Foundation::HANDLE) -> ::windows::core::Result<u32>;
-    fn UnregisterOcclusionStatus(&self, dwcookie: u32);
-    fn CreateSwapChainForComposition(&self, pdevice: &::core::option::Option<::windows::core::IUnknown>, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: &::core::option::Option<IDXGIOutput>) -> ::windows::core::Result<IDXGISwapChain1>;
-}
-
-impl IDXGIFactory2_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>() -> IDXGIFactory2_Vtbl {
-        unsafe extern "system" fn IsWindowedStereoEnabled<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.IsWindowedStereoEnabled()
-        }
-        unsafe extern "system" fn CreateSwapChainForHwnd<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, hwnd: super::super::Foundation::HWND, pdesc: *const DXGI_SWAP_CHAIN_DESC1, pfullscreendesc: *const DXGI_SWAP_CHAIN_FULLSCREEN_DESC, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.CreateSwapChainForHwnd(::core::mem::transmute(&pdevice), ::core::mem::transmute_copy(&hwnd), ::core::mem::transmute_copy(&pdesc), ::core::mem::transmute_copy(&pfullscreendesc), ::core::mem::transmute(&prestricttooutput)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(ppswapchain, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn CreateSwapChainForCoreWindow<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, pwindow: *mut ::core::ffi::c_void, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.CreateSwapChainForCoreWindow(::core::mem::transmute(&pdevice), ::core::mem::transmute(&pwindow), ::core::mem::transmute_copy(&pdesc), ::core::mem::transmute(&prestricttooutput)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(ppswapchain, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn GetSharedResourceAdapterLuid<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, hresource: super::super::Foundation::HANDLE, pluid: *mut super::super::Foundation::LUID) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.GetSharedResourceAdapterLuid(::core::mem::transmute_copy(&hresource)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pluid, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn RegisterStereoStatusWindow<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, windowhandle: super::super::Foundation::HWND, wmsg: u32, pdwcookie: *mut u32) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.RegisterStereoStatusWindow(::core::mem::transmute_copy(&windowhandle), ::core::mem::transmute_copy(&wmsg)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pdwcookie, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn RegisterStereoStatusEvent<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, hevent: super::super::Foundation::HANDLE, pdwcookie: *mut u32) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.RegisterStereoStatusEvent(::core::mem::transmute_copy(&hevent)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pdwcookie, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn UnregisterStereoStatus<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dwcookie: u32) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.UnregisterStereoStatus(::core::mem::transmute_copy(&dwcookie))
-        }
-        unsafe extern "system" fn RegisterOcclusionStatusWindow<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, windowhandle: super::super::Foundation::HWND, wmsg: u32, pdwcookie: *mut u32) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.RegisterOcclusionStatusWindow(::core::mem::transmute_copy(&windowhandle), ::core::mem::transmute_copy(&wmsg)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pdwcookie, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn RegisterOcclusionStatusEvent<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, hevent: super::super::Foundation::HANDLE, pdwcookie: *mut u32) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.RegisterOcclusionStatusEvent(::core::mem::transmute_copy(&hevent)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pdwcookie, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn UnregisterOcclusionStatus<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dwcookie: u32) {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.UnregisterOcclusionStatus(::core::mem::transmute_copy(&dwcookie))
-        }
-        unsafe extern "system" fn CreateSwapChainForComposition<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdevice: *mut ::core::ffi::c_void, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: *mut ::core::ffi::c_void, ppswapchain: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.CreateSwapChainForComposition(::core::mem::transmute(&pdevice), ::core::mem::transmute_copy(&pdesc), ::core::mem::transmute(&prestricttooutput)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(ppswapchain, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        Self {
-            base__: IDXGIFactory1_Vtbl::new::<Identity, Impl, OFFSET>(),
-            IsWindowedStereoEnabled: IsWindowedStereoEnabled::<Identity, Impl, OFFSET>,
-            CreateSwapChainForHwnd: CreateSwapChainForHwnd::<Identity, Impl, OFFSET>,
-            CreateSwapChainForCoreWindow: CreateSwapChainForCoreWindow::<Identity, Impl, OFFSET>,
-            GetSharedResourceAdapterLuid: GetSharedResourceAdapterLuid::<Identity, Impl, OFFSET>,
-            RegisterStereoStatusWindow: RegisterStereoStatusWindow::<Identity, Impl, OFFSET>,
-            RegisterStereoStatusEvent: RegisterStereoStatusEvent::<Identity, Impl, OFFSET>,
-            UnregisterStereoStatus: UnregisterStereoStatus::<Identity, Impl, OFFSET>,
-            RegisterOcclusionStatusWindow: RegisterOcclusionStatusWindow::<Identity, Impl, OFFSET>,
-            RegisterOcclusionStatusEvent: RegisterOcclusionStatusEvent::<Identity, Impl, OFFSET>,
-            UnregisterOcclusionStatus: UnregisterOcclusionStatus::<Identity, Impl, OFFSET>,
-            CreateSwapChainForComposition: CreateSwapChainForComposition::<Identity, Impl, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<IDXGIFactory2 as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID || iid == &<IDXGIFactory as ::windows::core::Interface>::IID || iid == &<IDXGIFactory1 as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(IDXGIFactory2, ::windows::core::IUnknown, IDXGIObject, IDXGIFactory, IDXGIFactory1);
-
-#[repr(transparent)]
-pub struct IDXGISwapChain1(::windows::core::IUnknown);
-impl IDXGISwapChain1 {
-    pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
-    }
-    pub unsafe fn SetPrivateDataInterface<'a, P0>(&self, name: *const ::windows::core::GUID, punknown: P0) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateDataInterface)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), punknown.into().abi()).ok()
-    }
-    pub unsafe fn GetPrivateData(&self, name: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), ::core::mem::transmute(pdatasize), ::core::mem::transmute(pdata)).ok()
-    }
-    pub unsafe fn GetParent<T>(&self) -> ::windows::core::Result<T>
-    where
-        T: ::windows::core::Interface,
-    {
-        let mut result__ = ::core::option::Option::None;
-        (::windows::core::Vtable::vtable(self).base__.base__.base__.GetParent)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
-    }
-    pub unsafe fn GetDevice<T>(&self) -> ::windows::core::Result<T>
-    where
-        T: ::windows::core::Interface,
-    {
-        let mut result__ = ::core::option::Option::None;
-        (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
-    }
-    pub unsafe fn Present(&self, syncinterval: u32, flags: u32) -> ::windows::core::HRESULT {
-        (::windows::core::Vtable::vtable(self).base__.Present)(::windows::core::Vtable::as_raw(self), syncinterval, flags)
-    }
-    pub unsafe fn GetBuffer<T>(&self, buffer: u32) -> ::windows::core::Result<T>
-    where
-        T: ::windows::core::Interface,
-    {
-        let mut result__ = ::core::option::Option::None;
-        (::windows::core::Vtable::vtable(self).base__.GetBuffer)(::windows::core::Vtable::as_raw(self), buffer, &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn SetFullscreenState<'a, P0, P1>(&self, fullscreen: P0, ptarget: P1) -> ::windows::core::Result<()>
-    where
-        P0: ::std::convert::Into<super::super::Foundation::BOOL>,
-        P1: ::std::convert::Into<::windows::core::InParam<'a, IDXGIOutput>>,
-    {
-        (::windows::core::Vtable::vtable(self).base__.SetFullscreenState)(::windows::core::Vtable::as_raw(self), fullscreen.into(), ptarget.into().abi()).ok()
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn GetFullscreenState(&self, pfullscreen: ::core::option::Option<*mut super::super::Foundation::BOOL>, pptarget: ::core::option::Option<*mut ::core::option::Option<IDXGIOutput>>) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.GetFullscreenState)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pfullscreen.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pptarget.unwrap_or(::std::ptr::null_mut()))).ok()
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub unsafe fn GetDesc(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_DESC> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).base__.GetDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_SWAP_CHAIN_DESC>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub unsafe fn ResizeBuffers(&self, buffercount: u32, width: u32, height: u32, newformat: Common::DXGI_FORMAT, swapchainflags: u32) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.ResizeBuffers)(::windows::core::Vtable::as_raw(self), buffercount, width, height, newformat, swapchainflags).ok()
-    }
-    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub unsafe fn ResizeTarget(&self, pnewtargetparameters: *const Common::DXGI_MODE_DESC) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).base__.ResizeTarget)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pnewtargetparameters)).ok()
-    }
-    pub unsafe fn GetContainingOutput(&self) -> ::windows::core::Result<IDXGIOutput> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).base__.GetContainingOutput)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIOutput>(result__)
-    }
-    pub unsafe fn GetFrameStatistics(&self) -> ::windows::core::Result<DXGI_FRAME_STATISTICS> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).base__.GetFrameStatistics)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_FRAME_STATISTICS>(result__)
-    }
-    pub unsafe fn GetLastPresentCount(&self) -> ::windows::core::Result<u32> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).base__.GetLastPresentCount)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub unsafe fn GetDesc1(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_DESC1> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetDesc1)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_SWAP_CHAIN_DESC1>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub unsafe fn GetFullscreenDesc(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_FULLSCREEN_DESC> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetFullscreenDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_SWAP_CHAIN_FULLSCREEN_DESC>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn GetHwnd(&self) -> ::windows::core::Result<super::super::Foundation::HWND> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetHwnd)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::Foundation::HWND>(result__)
-    }
-    pub unsafe fn GetCoreWindow<T>(&self) -> ::windows::core::Result<T>
-    where
-        T: ::windows::core::Interface,
-    {
-        let mut result__ = ::core::option::Option::None;
-        (::windows::core::Vtable::vtable(self).GetCoreWindow)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn Present1(&self, syncinterval: u32, presentflags: u32, ppresentparameters: *const DXGI_PRESENT_PARAMETERS) -> ::windows::core::HRESULT {
-        (::windows::core::Vtable::vtable(self).Present1)(::windows::core::Vtable::as_raw(self), syncinterval, presentflags, ::core::mem::transmute(ppresentparameters))
-    }
-    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
-    #[cfg(feature = "Win32_Foundation")]
-    pub unsafe fn IsTemporaryMonoSupported(&self) -> super::super::Foundation::BOOL {
-        (::windows::core::Vtable::vtable(self).IsTemporaryMonoSupported)(::windows::core::Vtable::as_raw(self))
-    }
-    pub unsafe fn GetRestrictToOutput(&self) -> ::windows::core::Result<IDXGIOutput> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetRestrictToOutput)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IDXGIOutput>(result__)
-    }
-    pub unsafe fn SetBackgroundColor(&self, pcolor: *const DXGI_RGBA) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).SetBackgroundColor)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pcolor)).ok()
-    }
-    pub unsafe fn GetBackgroundColor(&self) -> ::windows::core::Result<DXGI_RGBA> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetBackgroundColor)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<DXGI_RGBA>(result__)
-    }
-    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub unsafe fn SetRotation(&self, rotation: Common::DXGI_MODE_ROTATION) -> ::windows::core::Result<()> {
-        (::windows::core::Vtable::vtable(self).SetRotation)(::windows::core::Vtable::as_raw(self), rotation).ok()
-    }
-    #[doc = "*Required features: `\"Win32_Graphics_Dxgi_Common\"`*"]
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub unsafe fn GetRotation(&self) -> ::windows::core::Result<Common::DXGI_MODE_ROTATION> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetRotation)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<Common::DXGI_MODE_ROTATION>(result__)
-    }
-}
-impl ::core::cmp::Eq for IDXGISwapChain1 {}
-impl ::core::cmp::PartialEq for IDXGISwapChain1 {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl ::core::clone::Clone for IDXGISwapChain1 {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl ::core::fmt::Debug for IDXGISwapChain1 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("IDXGISwapChain1").field(&self.0).finish()
-    }
-}
-unsafe impl ::windows::core::Vtable for IDXGISwapChain1 {
-    type Vtable = IDXGISwapChain1_Vtbl;
-}
-unsafe impl ::windows::core::Interface for IDXGISwapChain1 {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x790a45f7_0d42_4876_983a_0a55cfe6f4aa);
-}
-
-#[repr(C)]
-pub struct IDXGISwapChain1_Vtbl {
-    pub base__: IDXGISwapChain_Vtbl,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub GetDesc1: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_SWAP_CHAIN_DESC1) -> ::windows::core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
-    GetDesc1: usize,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common"))]
-    pub GetFullscreenDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_SWAP_CHAIN_FULLSCREEN_DESC) -> ::windows::core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_Graphics_Dxgi_Common")))]
-    GetFullscreenDesc: usize,
-    #[cfg(feature = "Win32_Foundation")]
-    pub GetHwnd: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, phwnd: *mut super::super::Foundation::HWND) -> ::windows::core::HRESULT,
-    #[cfg(not(feature = "Win32_Foundation"))]
-    GetHwnd: usize,
-    pub GetCoreWindow: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, refiid: *const ::windows::core::GUID, ppunk: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    #[cfg(feature = "Win32_Foundation")]
-    pub Present1: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, syncinterval: u32, presentflags: u32, ppresentparameters: *const DXGI_PRESENT_PARAMETERS) -> ::windows::core::HRESULT,
-    #[cfg(not(feature = "Win32_Foundation"))]
-    Present1: usize,
-    #[cfg(feature = "Win32_Foundation")]
-    pub IsTemporaryMonoSupported: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL,
-    #[cfg(not(feature = "Win32_Foundation"))]
-    IsTemporaryMonoSupported: usize,
-    pub GetRestrictToOutput: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pprestricttooutput: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    pub SetBackgroundColor: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcolor: *const DXGI_RGBA) -> ::windows::core::HRESULT,
-    pub GetBackgroundColor: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcolor: *mut DXGI_RGBA) -> ::windows::core::HRESULT,
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub SetRotation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, rotation: Common::DXGI_MODE_ROTATION) -> ::windows::core::HRESULT,
-    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
-    SetRotation: usize,
-    #[cfg(feature = "Win32_Graphics_Dxgi_Common")]
-    pub GetRotation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, protation: *mut Common::DXGI_MODE_ROTATION) -> ::windows::core::HRESULT,
-    #[cfg(not(feature = "Win32_Graphics_Dxgi_Common"))]
-    GetRotation: usize,
-}
-
-pub trait IDXGISwapChain1_Impl: Sized + IDXGISwapChain_Impl {
-    fn GetDesc1(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_DESC1>;
-    fn GetFullscreenDesc(&self) -> ::windows::core::Result<DXGI_SWAP_CHAIN_FULLSCREEN_DESC>;
-    fn GetHwnd(&self) -> ::windows::core::Result<super::super::Foundation::HWND>;
-    fn GetCoreWindow(&self, refiid: *const ::windows::core::GUID, ppunk: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
-    fn Present1(&self, syncinterval: u32, presentflags: u32, ppresentparameters: *const DXGI_PRESENT_PARAMETERS) -> ::windows::core::HRESULT;
-    fn IsTemporaryMonoSupported(&self) -> super::super::Foundation::BOOL;
-    fn GetRestrictToOutput(&self) -> ::windows::core::Result<IDXGIOutput>;
-    fn SetBackgroundColor(&self, pcolor: *const DXGI_RGBA) -> ::windows::core::Result<()>;
-    fn GetBackgroundColor(&self) -> ::windows::core::Result<DXGI_RGBA>;
-    fn SetRotation(&self, rotation: Common::DXGI_MODE_ROTATION) -> ::windows::core::Result<()>;
-    fn GetRotation(&self) -> ::windows::core::Result<Common::DXGI_MODE_ROTATION>;
-}
-
-impl IDXGISwapChain1_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>() -> IDXGISwapChain1_Vtbl {
-        unsafe extern "system" fn GetDesc1<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_SWAP_CHAIN_DESC1) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.GetDesc1() {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pdesc, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn GetFullscreenDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_SWAP_CHAIN_FULLSCREEN_DESC) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.GetFullscreenDesc() {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pdesc, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn GetHwnd<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, phwnd: *mut super::super::Foundation::HWND) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.GetHwnd() {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(phwnd, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn GetCoreWindow<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, refiid: *const ::windows::core::GUID, ppunk: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.GetCoreWindow(::core::mem::transmute_copy(&refiid), ::core::mem::transmute_copy(&ppunk)).into()
-        }
-        unsafe extern "system" fn Present1<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, syncinterval: u32, presentflags: u32, ppresentparameters: *const DXGI_PRESENT_PARAMETERS) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.Present1(::core::mem::transmute_copy(&syncinterval), ::core::mem::transmute_copy(&presentflags), ::core::mem::transmute_copy(&ppresentparameters))
-        }
-        unsafe extern "system" fn IsTemporaryMonoSupported<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.IsTemporaryMonoSupported()
-        }
-        unsafe extern "system" fn GetRestrictToOutput<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pprestricttooutput: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.GetRestrictToOutput() {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pprestricttooutput, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn SetBackgroundColor<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcolor: *const DXGI_RGBA) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.SetBackgroundColor(::core::mem::transmute_copy(&pcolor)).into()
-        }
-        unsafe extern "system" fn GetBackgroundColor<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcolor: *mut DXGI_RGBA) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.GetBackgroundColor() {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pcolor, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn SetRotation<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, rotation: Common::DXGI_MODE_ROTATION) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            this.SetRotation(::core::mem::transmute_copy(&rotation)).into()
-        }
-        unsafe extern "system" fn GetRotation<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, protation: *mut Common::DXGI_MODE_ROTATION) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.GetRotation() {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(protation, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        Self {
-            base__: IDXGISwapChain_Vtbl::new::<Identity, Impl, OFFSET>(),
-            GetDesc1: GetDesc1::<Identity, Impl, OFFSET>,
-            GetFullscreenDesc: GetFullscreenDesc::<Identity, Impl, OFFSET>,
-            GetHwnd: GetHwnd::<Identity, Impl, OFFSET>,
-            GetCoreWindow: GetCoreWindow::<Identity, Impl, OFFSET>,
-            Present1: Present1::<Identity, Impl, OFFSET>,
-            IsTemporaryMonoSupported: IsTemporaryMonoSupported::<Identity, Impl, OFFSET>,
-            GetRestrictToOutput: GetRestrictToOutput::<Identity, Impl, OFFSET>,
-            SetBackgroundColor: SetBackgroundColor::<Identity, Impl, OFFSET>,
-            GetBackgroundColor: GetBackgroundColor::<Identity, Impl, OFFSET>,
-            SetRotation: SetRotation::<Identity, Impl, OFFSET>,
-            GetRotation: GetRotation::<Identity, Impl, OFFSET>,
-        }
-    }
-    pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<IDXGISwapChain1 as ::windows::core::Interface>::IID || iid == &<IDXGIObject as ::windows::core::Interface>::IID || iid == &<IDXGIDeviceSubObject as ::windows::core::Interface>::IID || iid == &<IDXGISwapChain as ::windows::core::Interface>::IID
-    }
-}
-
-::windows::core::interface_hierarchy!(IDXGISwapChain1, ::windows::core::IUnknown, IDXGIObject, IDXGIDeviceSubObject, IDXGISwapChain);
-
-pub unsafe fn CreateDXGIFactory2<T>(flags: u32) -> ::windows::core::Result<T>
-where
-    T: ::windows::core::Interface,
-{
-    #[cfg_attr(windows, link(name = "windows"))]
-    extern "system" {
-        fn CreateDXGIFactory2(flags: u32, riid: *const ::windows::core::GUID, ppfactory: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT;
-    }
-    let mut result__ = ::core::option::Option::None;
-    CreateDXGIFactory2(flags, &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
-}
-
-#[repr(C)]
-pub struct DXGI_SWAP_CHAIN_DESC1 {
-    pub Width: u32,
-    pub Height: u32,
-    pub Format: Common::DXGI_FORMAT,
-    pub Stereo: super::super::Foundation::BOOL,
-    pub SampleDesc: Common::DXGI_SAMPLE_DESC,
-    pub BufferUsage: u32,
-    pub BufferCount: u32,
-    pub Scaling: DXGI_SCALING,
-    pub SwapEffect: DXGI_SWAP_EFFECT,
-    pub AlphaMode: Common::DXGI_ALPHA_MODE,
-    pub Flags: u32,
-}
-impl ::core::marker::Copy for DXGI_SWAP_CHAIN_DESC1 {}
-impl ::core::cmp::Eq for DXGI_SWAP_CHAIN_DESC1 {}
-impl ::core::cmp::PartialEq for DXGI_SWAP_CHAIN_DESC1 {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DXGI_SWAP_CHAIN_DESC1>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for DXGI_SWAP_CHAIN_DESC1 {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DXGI_SWAP_CHAIN_DESC1 {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for DXGI_SWAP_CHAIN_DESC1 {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for DXGI_SWAP_CHAIN_DESC1 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("DXGI_SWAP_CHAIN_DESC1").field("Width", &self.Width).field("Height", &self.Height).field("Format", &self.Format).field("Stereo", &self.Stereo).field("SampleDesc", &self.SampleDesc).field("BufferUsage", &self.BufferUsage).field("BufferCount", &self.BufferCount).field("Scaling", &self.Scaling).field("SwapEffect", &self.SwapEffect).field("AlphaMode", &self.AlphaMode).field("Flags", &self.Flags).finish()
-    }
-}
-
-pub const DXGI_USAGE_RENDER_TARGET_OUTPUT: u32 = 32u32;
-
-pub const DXGI_SCALING_NONE: DXGI_SCALING = DXGI_SCALING(1i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_SCALING(pub i32);
-impl ::core::marker::Copy for DXGI_SCALING {}
-impl ::core::clone::Clone for DXGI_SCALING {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DXGI_SCALING {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for DXGI_SCALING {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for DXGI_SCALING {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("DXGI_SCALING").field(&self.0).finish()
-    }
-}
-
-pub const DXGI_SWAP_EFFECT_FLIP_DISCARD: DXGI_SWAP_EFFECT = DXGI_SWAP_EFFECT(4i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_SWAP_EFFECT(pub i32);
-impl ::core::marker::Copy for DXGI_SWAP_EFFECT {}
-impl ::core::clone::Clone for DXGI_SWAP_EFFECT {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DXGI_SWAP_EFFECT {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for DXGI_SWAP_EFFECT {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for DXGI_SWAP_EFFECT {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("DXGI_SWAP_EFFECT").field(&self.0).finish()
     }
 }
 
@@ -12497,6 +13016,4688 @@ pub unsafe fn CloseClipboard() -> super::super::Foundation::BOOL {
         fn CloseClipboard() -> super::super::Foundation::BOOL;
     }
     CloseClipboard()
+}
+
+}
+pub mod Com{
+pub unsafe fn CoCreateInstance<'a, P0, T>(rclsid: *const ::windows::core::GUID, punkouter: P0, dwclscontext: CLSCTX) -> ::windows::core::Result<T>
+where
+    P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+    T: ::windows::core::Interface,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn CoCreateInstance(rclsid: *const ::windows::core::GUID, punkouter: *mut ::core::ffi::c_void, dwclscontext: CLSCTX, riid: *const ::windows::core::GUID, ppv: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT;
+    }
+    let mut result__ = ::core::option::Option::None;
+    CoCreateInstance(::core::mem::transmute(rclsid), punkouter.into().abi(), dwclscontext, &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
+}
+
+pub const CLSCTX_ALL: CLSCTX = CLSCTX(23u32);
+
+#[repr(transparent)]
+pub struct ITypeComp(::windows::core::IUnknown);
+impl ITypeComp {
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Ole\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub unsafe fn Bind<'a, P0>(&self, szname: P0, lhashval: u32, wflags: u16, pptinfo: *mut ::core::option::Option<ITypeInfo>, pdesckind: *mut DESCKIND, pbindptr: *mut BINDPTR) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).Bind)(::windows::core::Vtable::as_raw(self), szname.into(), lhashval, wflags, ::core::mem::transmute(pptinfo), ::core::mem::transmute(pdesckind), ::core::mem::transmute(pbindptr)).ok()
+    }
+    pub unsafe fn BindType<'a, P0>(&self, szname: P0, lhashval: u32, pptinfo: *mut ::core::option::Option<ITypeInfo>, pptcomp: *mut ::core::option::Option<ITypeComp>) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).BindType)(::windows::core::Vtable::as_raw(self), szname.into(), lhashval, ::core::mem::transmute(pptinfo), ::core::mem::transmute(pptcomp)).ok()
+    }
+}
+impl ::core::cmp::Eq for ITypeComp {}
+impl ::core::cmp::PartialEq for ITypeComp {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ITypeComp {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ITypeComp {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ITypeComp").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for ITypeComp {
+    type Vtable = ITypeComp_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ITypeComp {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x00020403_0000_0000_c000_000000000046);
+}
+
+::windows::core::interface_hierarchy!(ITypeComp, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct ITypeComp_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub Bind: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, szname: ::windows::core::PCWSTR, lhashval: u32, wflags: u16, pptinfo: *mut *mut ::core::ffi::c_void, pdesckind: *mut DESCKIND, pbindptr: *mut ::core::mem::ManuallyDrop<BINDPTR>) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Ole")))]
+    Bind: usize,
+    pub BindType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, szname: ::windows::core::PCWSTR, lhashval: u32, pptinfo: *mut *mut ::core::ffi::c_void, pptcomp: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait ITypeComp_Impl: Sized {
+    fn Bind(&self, szname: &::windows::core::PCWSTR, lhashval: u32, wflags: u16, pptinfo: *mut ::core::option::Option<ITypeInfo>, pdesckind: *mut DESCKIND, pbindptr: *mut BINDPTR) -> ::windows::core::Result<()>;
+    fn BindType(&self, szname: &::windows::core::PCWSTR, lhashval: u32, pptinfo: *mut ::core::option::Option<ITypeInfo>, pptcomp: *mut ::core::option::Option<ITypeComp>) -> ::windows::core::Result<()>;
+}
+
+impl ITypeComp_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeComp_Impl, const OFFSET: isize>() -> ITypeComp_Vtbl {
+        unsafe extern "system" fn Bind<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeComp_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, szname: ::windows::core::PCWSTR, lhashval: u32, wflags: u16, pptinfo: *mut *mut ::core::ffi::c_void, pdesckind: *mut DESCKIND, pbindptr: *mut ::core::mem::ManuallyDrop<BINDPTR>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Bind(::core::mem::transmute(&szname), ::core::mem::transmute_copy(&lhashval), ::core::mem::transmute_copy(&wflags), ::core::mem::transmute_copy(&pptinfo), ::core::mem::transmute_copy(&pdesckind), ::core::mem::transmute_copy(&pbindptr)).into()
+        }
+        unsafe extern "system" fn BindType<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeComp_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, szname: ::windows::core::PCWSTR, lhashval: u32, pptinfo: *mut *mut ::core::ffi::c_void, pptcomp: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.BindType(::core::mem::transmute(&szname), ::core::mem::transmute_copy(&lhashval), ::core::mem::transmute_copy(&pptinfo), ::core::mem::transmute_copy(&pptcomp)).into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Bind: Bind::<Identity, Impl, OFFSET>,
+            BindType: BindType::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ITypeComp as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ITypeLib(::windows::core::IUnknown);
+impl ITypeLib {
+    pub unsafe fn GetTypeInfoCount(&self) -> u32 {
+        (::windows::core::Vtable::vtable(self).GetTypeInfoCount)(::windows::core::Vtable::as_raw(self))
+    }
+    pub unsafe fn GetTypeInfo(&self, index: u32) -> ::windows::core::Result<ITypeInfo> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetTypeInfo)(::windows::core::Vtable::as_raw(self), index, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ITypeInfo>(result__)
+    }
+    pub unsafe fn GetTypeInfoType(&self, index: u32) -> ::windows::core::Result<TYPEKIND> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetTypeInfoType)(::windows::core::Vtable::as_raw(self), index, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<TYPEKIND>(result__)
+    }
+    pub unsafe fn GetTypeInfoOfGuid(&self, guid: *const ::windows::core::GUID) -> ::windows::core::Result<ITypeInfo> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetTypeInfoOfGuid)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(guid), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ITypeInfo>(result__)
+    }
+    pub unsafe fn GetLibAttr(&self) -> ::windows::core::Result<*mut TLIBATTR> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetLibAttr)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<*mut TLIBATTR>(result__)
+    }
+    pub unsafe fn GetTypeComp(&self) -> ::windows::core::Result<ITypeComp> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetTypeComp)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ITypeComp>(result__)
+    }
+    pub unsafe fn GetDocumentation(&self, index: i32, pbstrname: ::core::option::Option<*mut ::windows::core::BSTR>, pbstrdocstring: ::core::option::Option<*mut ::windows::core::BSTR>, pdwhelpcontext: *mut u32, pbstrhelpfile: ::core::option::Option<*mut ::windows::core::BSTR>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetDocumentation)(::windows::core::Vtable::as_raw(self), index, ::core::mem::transmute(pbstrname.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pbstrdocstring.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pdwhelpcontext), ::core::mem::transmute(pbstrhelpfile.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn IsName(&self, sznamebuf: ::windows::core::PWSTR, lhashval: u32, pfname: *mut super::super::Foundation::BOOL) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).IsName)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(sznamebuf), lhashval, ::core::mem::transmute(pfname)).ok()
+    }
+    pub unsafe fn FindName(&self, sznamebuf: ::windows::core::PWSTR, lhashval: u32, pptinfo: *mut ::core::option::Option<ITypeInfo>, rgmemid: *mut i32, pcfound: *mut u16) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).FindName)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(sznamebuf), lhashval, ::core::mem::transmute(pptinfo), ::core::mem::transmute(rgmemid), ::core::mem::transmute(pcfound)).ok()
+    }
+    pub unsafe fn ReleaseTLibAttr(&self, ptlibattr: *const TLIBATTR) {
+        (::windows::core::Vtable::vtable(self).ReleaseTLibAttr)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ptlibattr))
+    }
+}
+impl ::core::cmp::Eq for ITypeLib {}
+impl ::core::cmp::PartialEq for ITypeLib {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ITypeLib {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ITypeLib {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ITypeLib").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for ITypeLib {
+    type Vtable = ITypeLib_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ITypeLib {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x00020402_0000_0000_c000_000000000046);
+}
+
+::windows::core::interface_hierarchy!(ITypeLib, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct ITypeLib_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub GetTypeInfoCount: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> u32,
+    pub GetTypeInfo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, index: u32, pptinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub GetTypeInfoType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, index: u32, ptkind: *mut TYPEKIND) -> ::windows::core::HRESULT,
+    pub GetTypeInfoOfGuid: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pptinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub GetLibAttr: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pptlibattr: *mut *mut TLIBATTR) -> ::windows::core::HRESULT,
+    pub GetTypeComp: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pptcomp: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub GetDocumentation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, index: i32, pbstrname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pbstrdocstring: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pdwhelpcontext: *mut u32, pbstrhelpfile: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub IsName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, sznamebuf: ::windows::core::PWSTR, lhashval: u32, pfname: *mut super::super::Foundation::BOOL) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    IsName: usize,
+    pub FindName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, sznamebuf: ::windows::core::PWSTR, lhashval: u32, pptinfo: *mut *mut ::core::ffi::c_void, rgmemid: *mut i32, pcfound: *mut u16) -> ::windows::core::HRESULT,
+    pub ReleaseTLibAttr: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ptlibattr: *const TLIBATTR),
+}
+
+pub trait ITypeLib_Impl: Sized {
+    fn GetTypeInfoCount(&self) -> u32;
+    fn GetTypeInfo(&self, index: u32) -> ::windows::core::Result<ITypeInfo>;
+    fn GetTypeInfoType(&self, index: u32) -> ::windows::core::Result<TYPEKIND>;
+    fn GetTypeInfoOfGuid(&self, guid: *const ::windows::core::GUID) -> ::windows::core::Result<ITypeInfo>;
+    fn GetLibAttr(&self) -> ::windows::core::Result<*mut TLIBATTR>;
+    fn GetTypeComp(&self) -> ::windows::core::Result<ITypeComp>;
+    fn GetDocumentation(&self, index: i32, pbstrname: *mut ::windows::core::BSTR, pbstrdocstring: *mut ::windows::core::BSTR, pdwhelpcontext: *mut u32, pbstrhelpfile: *mut ::windows::core::BSTR) -> ::windows::core::Result<()>;
+    fn IsName(&self, sznamebuf: &::windows::core::PWSTR, lhashval: u32, pfname: *mut super::super::Foundation::BOOL) -> ::windows::core::Result<()>;
+    fn FindName(&self, sznamebuf: &::windows::core::PWSTR, lhashval: u32, pptinfo: *mut ::core::option::Option<ITypeInfo>, rgmemid: *mut i32, pcfound: *mut u16) -> ::windows::core::Result<()>;
+    fn ReleaseTLibAttr(&self, ptlibattr: *const TLIBATTR);
+}
+
+impl ITypeLib_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>() -> ITypeLib_Vtbl {
+        unsafe extern "system" fn GetTypeInfoCount<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> u32 {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetTypeInfoCount()
+        }
+        unsafe extern "system" fn GetTypeInfo<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, index: u32, pptinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTypeInfo(::core::mem::transmute_copy(&index)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pptinfo, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetTypeInfoType<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, index: u32, ptkind: *mut TYPEKIND) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTypeInfoType(::core::mem::transmute_copy(&index)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ptkind, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetTypeInfoOfGuid<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, guid: *const ::windows::core::GUID, pptinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTypeInfoOfGuid(::core::mem::transmute_copy(&guid)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pptinfo, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetLibAttr<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pptlibattr: *mut *mut TLIBATTR) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetLibAttr() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pptlibattr, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetTypeComp<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pptcomp: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTypeComp() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pptcomp, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetDocumentation<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, index: i32, pbstrname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pbstrdocstring: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pdwhelpcontext: *mut u32, pbstrhelpfile: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDocumentation(::core::mem::transmute_copy(&index), ::core::mem::transmute_copy(&pbstrname), ::core::mem::transmute_copy(&pbstrdocstring), ::core::mem::transmute_copy(&pdwhelpcontext), ::core::mem::transmute_copy(&pbstrhelpfile)).into()
+        }
+        unsafe extern "system" fn IsName<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, sznamebuf: ::windows::core::PWSTR, lhashval: u32, pfname: *mut super::super::Foundation::BOOL) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.IsName(::core::mem::transmute(&sznamebuf), ::core::mem::transmute_copy(&lhashval), ::core::mem::transmute_copy(&pfname)).into()
+        }
+        unsafe extern "system" fn FindName<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, sznamebuf: ::windows::core::PWSTR, lhashval: u32, pptinfo: *mut *mut ::core::ffi::c_void, rgmemid: *mut i32, pcfound: *mut u16) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.FindName(::core::mem::transmute(&sznamebuf), ::core::mem::transmute_copy(&lhashval), ::core::mem::transmute_copy(&pptinfo), ::core::mem::transmute_copy(&rgmemid), ::core::mem::transmute_copy(&pcfound)).into()
+        }
+        unsafe extern "system" fn ReleaseTLibAttr<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ptlibattr: *const TLIBATTR) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.ReleaseTLibAttr(::core::mem::transmute_copy(&ptlibattr))
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetTypeInfoCount: GetTypeInfoCount::<Identity, Impl, OFFSET>,
+            GetTypeInfo: GetTypeInfo::<Identity, Impl, OFFSET>,
+            GetTypeInfoType: GetTypeInfoType::<Identity, Impl, OFFSET>,
+            GetTypeInfoOfGuid: GetTypeInfoOfGuid::<Identity, Impl, OFFSET>,
+            GetLibAttr: GetLibAttr::<Identity, Impl, OFFSET>,
+            GetTypeComp: GetTypeComp::<Identity, Impl, OFFSET>,
+            GetDocumentation: GetDocumentation::<Identity, Impl, OFFSET>,
+            IsName: IsName::<Identity, Impl, OFFSET>,
+            FindName: FindName::<Identity, Impl, OFFSET>,
+            ReleaseTLibAttr: ReleaseTLibAttr::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ITypeLib as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(C)]
+pub struct TYPEATTR {
+    pub guid: ::windows::core::GUID,
+    pub lcid: u32,
+    pub dwReserved: u32,
+    pub memidConstructor: i32,
+    pub memidDestructor: i32,
+    pub lpstrSchema: ::windows::core::PWSTR,
+    pub cbSizeInstance: u32,
+    pub typekind: TYPEKIND,
+    pub cFuncs: u16,
+    pub cVars: u16,
+    pub cImplTypes: u16,
+    pub cbSizeVft: u16,
+    pub cbAlignment: u16,
+    pub wTypeFlags: u16,
+    pub wMajorVerNum: u16,
+    pub wMinorVerNum: u16,
+    pub tdescAlias: TYPEDESC,
+    pub idldescType: IDLDESC,
+}
+impl ::core::marker::Copy for TYPEATTR {}
+impl ::core::cmp::Eq for TYPEATTR {}
+impl ::core::cmp::PartialEq for TYPEATTR {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<TYPEATTR>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for TYPEATTR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for TYPEATTR {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for TYPEATTR {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct FUNCDESC {
+    pub memid: i32,
+    pub lprgscode: *mut i32,
+    pub lprgelemdescParam: *mut ELEMDESC,
+    pub funckind: FUNCKIND,
+    pub invkind: INVOKEKIND,
+    pub callconv: CALLCONV,
+    pub cParams: i16,
+    pub cParamsOpt: i16,
+    pub oVft: i16,
+    pub cScodes: i16,
+    pub elemdescFunc: ELEMDESC,
+    pub wFuncFlags: FUNCFLAGS,
+}
+impl ::core::marker::Copy for FUNCDESC {}
+impl ::core::cmp::Eq for FUNCDESC {}
+impl ::core::cmp::PartialEq for FUNCDESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<FUNCDESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for FUNCDESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for FUNCDESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for FUNCDESC {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct VARDESC {
+    pub memid: i32,
+    pub lpstrSchema: ::windows::core::PWSTR,
+    pub Anonymous: VARDESC_0,
+    pub elemdescVar: ELEMDESC,
+    pub wVarFlags: VARFLAGS,
+    pub varkind: VARKIND,
+}
+impl ::core::marker::Copy for VARDESC {}
+impl ::core::cmp::Eq for VARDESC {}
+impl ::core::cmp::PartialEq for VARDESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<VARDESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for VARDESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for VARDESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for VARDESC {
+    type Abi = Self;
+}
+
+#[repr(transparent)]
+pub struct IDispatch(::windows::core::IUnknown);
+impl IDispatch {
+    pub unsafe fn GetTypeInfoCount(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetTypeInfoCount)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    pub unsafe fn GetTypeInfo(&self, itinfo: u32, lcid: u32) -> ::windows::core::Result<ITypeInfo> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetTypeInfo)(::windows::core::Vtable::as_raw(self), itinfo, lcid, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ITypeInfo>(result__)
+    }
+    pub unsafe fn GetIDsOfNames(&self, riid: *const ::windows::core::GUID, rgsznames: *const ::windows::core::PWSTR, cnames: u32, lcid: u32) -> ::windows::core::Result<i32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetIDsOfNames)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(riid), ::core::mem::transmute(rgsznames), cnames, lcid, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<i32>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Ole\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub unsafe fn Invoke(&self, dispidmember: i32, riid: *const ::windows::core::GUID, lcid: u32, wflags: DISPATCH_FLAGS, pdispparams: *const DISPPARAMS, pvarresult: ::core::option::Option<*mut VARIANT>, pexcepinfo: ::core::option::Option<*mut EXCEPINFO>, puargerr: ::core::option::Option<*mut u32>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Invoke)(::windows::core::Vtable::as_raw(self), dispidmember, ::core::mem::transmute(riid), lcid, wflags, ::core::mem::transmute(pdispparams), ::core::mem::transmute(pvarresult.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pexcepinfo.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(puargerr.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+}
+impl ::core::cmp::Eq for IDispatch {}
+impl ::core::cmp::PartialEq for IDispatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IDispatch {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IDispatch {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IDispatch").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IDispatch {
+    type Vtable = IDispatch_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IDispatch {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x00020400_0000_0000_c000_000000000046);
+}
+
+::windows::core::interface_hierarchy!(IDispatch, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IDispatch_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub GetTypeInfoCount: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pctinfo: *mut u32) -> ::windows::core::HRESULT,
+    pub GetTypeInfo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, itinfo: u32, lcid: u32, pptinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub GetIDsOfNames: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, riid: *const ::windows::core::GUID, rgsznames: *const ::windows::core::PWSTR, cnames: u32, lcid: u32, rgdispid: *mut i32) -> ::windows::core::HRESULT,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub Invoke: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dispidmember: i32, riid: *const ::windows::core::GUID, lcid: u32, wflags: DISPATCH_FLAGS, pdispparams: *const DISPPARAMS, pvarresult: *mut ::core::mem::ManuallyDrop<VARIANT>, pexcepinfo: *mut ::core::mem::ManuallyDrop<EXCEPINFO>, puargerr: *mut u32) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Ole")))]
+    Invoke: usize,
+}
+
+pub trait IDispatch_Impl: Sized {
+    fn GetTypeInfoCount(&self) -> ::windows::core::Result<u32>;
+    fn GetTypeInfo(&self, itinfo: u32, lcid: u32) -> ::windows::core::Result<ITypeInfo>;
+    fn GetIDsOfNames(&self, riid: *const ::windows::core::GUID, rgsznames: *const ::windows::core::PWSTR, cnames: u32, lcid: u32) -> ::windows::core::Result<i32>;
+    fn Invoke(&self, dispidmember: i32, riid: *const ::windows::core::GUID, lcid: u32, wflags: DISPATCH_FLAGS, pdispparams: *const DISPPARAMS, pvarresult: *mut VARIANT, pexcepinfo: *mut EXCEPINFO, puargerr: *mut u32) -> ::windows::core::Result<()>;
+}
+
+impl IDispatch_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDispatch_Impl, const OFFSET: isize>() -> IDispatch_Vtbl {
+        unsafe extern "system" fn GetTypeInfoCount<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDispatch_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pctinfo: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTypeInfoCount() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pctinfo, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetTypeInfo<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDispatch_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, itinfo: u32, lcid: u32, pptinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTypeInfo(::core::mem::transmute_copy(&itinfo), ::core::mem::transmute_copy(&lcid)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pptinfo, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetIDsOfNames<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDispatch_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, riid: *const ::windows::core::GUID, rgsznames: *const ::windows::core::PWSTR, cnames: u32, lcid: u32, rgdispid: *mut i32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetIDsOfNames(::core::mem::transmute_copy(&riid), ::core::mem::transmute_copy(&rgsznames), ::core::mem::transmute_copy(&cnames), ::core::mem::transmute_copy(&lcid)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(rgdispid, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn Invoke<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDispatch_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dispidmember: i32, riid: *const ::windows::core::GUID, lcid: u32, wflags: DISPATCH_FLAGS, pdispparams: *const DISPPARAMS, pvarresult: *mut ::core::mem::ManuallyDrop<VARIANT>, pexcepinfo: *mut ::core::mem::ManuallyDrop<EXCEPINFO>, puargerr: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Invoke(::core::mem::transmute_copy(&dispidmember), ::core::mem::transmute_copy(&riid), ::core::mem::transmute_copy(&lcid), ::core::mem::transmute_copy(&wflags), ::core::mem::transmute_copy(&pdispparams), ::core::mem::transmute_copy(&pvarresult), ::core::mem::transmute_copy(&pexcepinfo), ::core::mem::transmute_copy(&puargerr)).into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetTypeInfoCount: GetTypeInfoCount::<Identity, Impl, OFFSET>,
+            GetTypeInfo: GetTypeInfo::<Identity, Impl, OFFSET>,
+            GetIDsOfNames: GetIDsOfNames::<Identity, Impl, OFFSET>,
+            Invoke: Invoke::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IDispatch as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct IStream(::windows::core::IUnknown);
+impl IStream {
+    pub unsafe fn Read(&self, pv: *mut ::core::ffi::c_void, cb: u32, pcbread: ::core::option::Option<*mut u32>) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).base__.Read)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pv), cb, ::core::mem::transmute(pcbread.unwrap_or(::std::ptr::null_mut())))
+    }
+    pub unsafe fn Write(&self, pv: *const ::core::ffi::c_void, cb: u32, pcbwritten: ::core::option::Option<*mut u32>) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).base__.Write)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pv), cb, ::core::mem::transmute(pcbwritten.unwrap_or(::std::ptr::null_mut())))
+    }
+    pub unsafe fn Seek(&self, dlibmove: i64, dworigin: STREAM_SEEK) -> ::windows::core::Result<u64> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).Seek)(::windows::core::Vtable::as_raw(self), dlibmove, dworigin, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u64>(result__)
+    }
+    pub unsafe fn SetSize(&self, libnewsize: u64) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).SetSize)(::windows::core::Vtable::as_raw(self), libnewsize).ok()
+    }
+    pub unsafe fn CopyTo<'a, P0>(&self, pstm: P0, cb: u64, pcbread: ::core::option::Option<*mut u64>, pcbwritten: ::core::option::Option<*mut u64>) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, IStream>>,
+    {
+        (::windows::core::Vtable::vtable(self).CopyTo)(::windows::core::Vtable::as_raw(self), pstm.into().abi(), cb, ::core::mem::transmute(pcbread.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pcbwritten.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn Commit(&self, grfcommitflags: STGC) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Commit)(::windows::core::Vtable::as_raw(self), grfcommitflags).ok()
+    }
+    pub unsafe fn Revert(&self) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Revert)(::windows::core::Vtable::as_raw(self)).ok()
+    }
+    pub unsafe fn LockRegion(&self, liboffset: u64, cb: u64, dwlocktype: LOCKTYPE) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).LockRegion)(::windows::core::Vtable::as_raw(self), liboffset, cb, dwlocktype).ok()
+    }
+    pub unsafe fn UnlockRegion(&self, liboffset: u64, cb: u64, dwlocktype: u32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).UnlockRegion)(::windows::core::Vtable::as_raw(self), liboffset, cb, dwlocktype).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn Stat(&self, pstatstg: *mut STATSTG, grfstatflag: STATFLAG) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Stat)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pstatstg), grfstatflag).ok()
+    }
+    pub unsafe fn Clone(&self) -> ::windows::core::Result<IStream> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).Clone)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IStream>(result__)
+    }
+}
+impl ::core::cmp::Eq for IStream {}
+impl ::core::cmp::PartialEq for IStream {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IStream {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IStream {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IStream").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IStream {
+    type Vtable = IStream_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IStream {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x0000000c_0000_0000_c000_000000000046);
+}
+
+::windows::core::interface_hierarchy!(IStream, ::windows::core::IUnknown, ISequentialStream);
+
+#[repr(C)]
+pub struct IStream_Vtbl {
+    pub base__: ISequentialStream_Vtbl,
+    pub Seek: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dlibmove: i64, dworigin: STREAM_SEEK, plibnewposition: *mut u64) -> ::windows::core::HRESULT,
+    pub SetSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, libnewsize: u64) -> ::windows::core::HRESULT,
+    pub CopyTo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pstm: *mut ::core::ffi::c_void, cb: u64, pcbread: *mut u64, pcbwritten: *mut u64) -> ::windows::core::HRESULT,
+    pub Commit: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, grfcommitflags: STGC) -> ::windows::core::HRESULT,
+    pub Revert: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub LockRegion: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, liboffset: u64, cb: u64, dwlocktype: LOCKTYPE) -> ::windows::core::HRESULT,
+    pub UnlockRegion: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, liboffset: u64, cb: u64, dwlocktype: u32) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub Stat: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pstatstg: *mut STATSTG, grfstatflag: STATFLAG) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    Stat: usize,
+    pub Clone: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppstm: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait IStream_Impl: Sized + ISequentialStream_Impl {
+    fn Seek(&self, dlibmove: i64, dworigin: STREAM_SEEK) -> ::windows::core::Result<u64>;
+    fn SetSize(&self, libnewsize: u64) -> ::windows::core::Result<()>;
+    fn CopyTo(&self, pstm: &::core::option::Option<IStream>, cb: u64, pcbread: *mut u64, pcbwritten: *mut u64) -> ::windows::core::Result<()>;
+    fn Commit(&self, grfcommitflags: STGC) -> ::windows::core::Result<()>;
+    fn Revert(&self) -> ::windows::core::Result<()>;
+    fn LockRegion(&self, liboffset: u64, cb: u64, dwlocktype: LOCKTYPE) -> ::windows::core::Result<()>;
+    fn UnlockRegion(&self, liboffset: u64, cb: u64, dwlocktype: u32) -> ::windows::core::Result<()>;
+    fn Stat(&self, pstatstg: *mut STATSTG, grfstatflag: STATFLAG) -> ::windows::core::Result<()>;
+    fn Clone(&self) -> ::windows::core::Result<IStream>;
+}
+
+impl IStream_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>() -> IStream_Vtbl {
+        unsafe extern "system" fn Seek<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dlibmove: i64, dworigin: STREAM_SEEK, plibnewposition: *mut u64) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Seek(::core::mem::transmute_copy(&dlibmove), ::core::mem::transmute_copy(&dworigin)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(plibnewposition, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn SetSize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, libnewsize: u64) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetSize(::core::mem::transmute_copy(&libnewsize)).into()
+        }
+        unsafe extern "system" fn CopyTo<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pstm: *mut ::core::ffi::c_void, cb: u64, pcbread: *mut u64, pcbwritten: *mut u64) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.CopyTo(::core::mem::transmute(&pstm), ::core::mem::transmute_copy(&cb), ::core::mem::transmute_copy(&pcbread), ::core::mem::transmute_copy(&pcbwritten)).into()
+        }
+        unsafe extern "system" fn Commit<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, grfcommitflags: STGC) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Commit(::core::mem::transmute_copy(&grfcommitflags)).into()
+        }
+        unsafe extern "system" fn Revert<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Revert().into()
+        }
+        unsafe extern "system" fn LockRegion<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, liboffset: u64, cb: u64, dwlocktype: LOCKTYPE) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.LockRegion(::core::mem::transmute_copy(&liboffset), ::core::mem::transmute_copy(&cb), ::core::mem::transmute_copy(&dwlocktype)).into()
+        }
+        unsafe extern "system" fn UnlockRegion<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, liboffset: u64, cb: u64, dwlocktype: u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.UnlockRegion(::core::mem::transmute_copy(&liboffset), ::core::mem::transmute_copy(&cb), ::core::mem::transmute_copy(&dwlocktype)).into()
+        }
+        unsafe extern "system" fn Stat<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pstatstg: *mut STATSTG, grfstatflag: STATFLAG) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Stat(::core::mem::transmute_copy(&pstatstg), ::core::mem::transmute_copy(&grfstatflag)).into()
+        }
+        unsafe extern "system" fn Clone<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppstm: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Clone() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppstm, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ISequentialStream_Vtbl::new::<Identity, Impl, OFFSET>(),
+            Seek: Seek::<Identity, Impl, OFFSET>,
+            SetSize: SetSize::<Identity, Impl, OFFSET>,
+            CopyTo: CopyTo::<Identity, Impl, OFFSET>,
+            Commit: Commit::<Identity, Impl, OFFSET>,
+            Revert: Revert::<Identity, Impl, OFFSET>,
+            LockRegion: LockRegion::<Identity, Impl, OFFSET>,
+            UnlockRegion: UnlockRegion::<Identity, Impl, OFFSET>,
+            Stat: Stat::<Identity, Impl, OFFSET>,
+            Clone: Clone::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IStream as ::windows::core::Interface>::IID || iid == &<ISequentialStream as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ITypeInfo(::windows::core::IUnknown);
+impl ITypeInfo {
+    #[doc = "*Required features: `\"Win32_System_Ole\"`*"]
+    #[cfg(feature = "Win32_System_Ole")]
+    pub unsafe fn GetTypeAttr(&self) -> ::windows::core::Result<*mut TYPEATTR> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetTypeAttr)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<*mut TYPEATTR>(result__)
+    }
+    pub unsafe fn GetTypeComp(&self) -> ::windows::core::Result<ITypeComp> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetTypeComp)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ITypeComp>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Ole\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub unsafe fn GetFuncDesc(&self, index: u32) -> ::windows::core::Result<*mut FUNCDESC> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetFuncDesc)(::windows::core::Vtable::as_raw(self), index, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<*mut FUNCDESC>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Ole\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub unsafe fn GetVarDesc(&self, index: u32) -> ::windows::core::Result<*mut VARDESC> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetVarDesc)(::windows::core::Vtable::as_raw(self), index, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<*mut VARDESC>(result__)
+    }
+    pub unsafe fn GetNames(&self, memid: i32, rgbstrnames: *mut ::windows::core::BSTR, cmaxnames: u32, pcnames: *mut u32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetNames)(::windows::core::Vtable::as_raw(self), memid, ::core::mem::transmute(rgbstrnames), cmaxnames, ::core::mem::transmute(pcnames)).ok()
+    }
+    pub unsafe fn GetRefTypeOfImplType(&self, index: u32) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetRefTypeOfImplType)(::windows::core::Vtable::as_raw(self), index, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    pub unsafe fn GetImplTypeFlags(&self, index: u32) -> ::windows::core::Result<i32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetImplTypeFlags)(::windows::core::Vtable::as_raw(self), index, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<i32>(result__)
+    }
+    pub unsafe fn GetIDsOfNames(&self, rgsznames: *const ::windows::core::PWSTR, cnames: u32) -> ::windows::core::Result<i32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetIDsOfNames)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(rgsznames), cnames, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<i32>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Ole\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub unsafe fn Invoke(&self, pvinstance: *const ::core::ffi::c_void, memid: i32, wflags: DISPATCH_FLAGS, pdispparams: *mut DISPPARAMS, pvarresult: *mut VARIANT, pexcepinfo: *mut EXCEPINFO, puargerr: *mut u32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Invoke)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvinstance), memid, wflags, ::core::mem::transmute(pdispparams), ::core::mem::transmute(pvarresult), ::core::mem::transmute(pexcepinfo), ::core::mem::transmute(puargerr)).ok()
+    }
+    pub unsafe fn GetDocumentation(&self, memid: i32, pbstrname: ::core::option::Option<*mut ::windows::core::BSTR>, pbstrdocstring: ::core::option::Option<*mut ::windows::core::BSTR>, pdwhelpcontext: *mut u32, pbstrhelpfile: ::core::option::Option<*mut ::windows::core::BSTR>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetDocumentation)(::windows::core::Vtable::as_raw(self), memid, ::core::mem::transmute(pbstrname.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pbstrdocstring.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pdwhelpcontext), ::core::mem::transmute(pbstrhelpfile.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn GetDllEntry(&self, memid: i32, invkind: INVOKEKIND, pbstrdllname: ::core::option::Option<*mut ::windows::core::BSTR>, pbstrname: ::core::option::Option<*mut ::windows::core::BSTR>, pwordinal: *mut u16) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetDllEntry)(::windows::core::Vtable::as_raw(self), memid, invkind, ::core::mem::transmute(pbstrdllname.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pbstrname.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pwordinal)).ok()
+    }
+    pub unsafe fn GetRefTypeInfo(&self, hreftype: u32) -> ::windows::core::Result<ITypeInfo> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetRefTypeInfo)(::windows::core::Vtable::as_raw(self), hreftype, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<ITypeInfo>(result__)
+    }
+    pub unsafe fn AddressOfMember(&self, memid: i32, invkind: INVOKEKIND, ppv: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).AddressOfMember)(::windows::core::Vtable::as_raw(self), memid, invkind, ::core::mem::transmute(ppv)).ok()
+    }
+    pub unsafe fn CreateInstance<'a, P0, T>(&self, punkouter: P0) -> ::windows::core::Result<T>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
+        T: ::windows::core::Interface,
+    {
+        let mut result__ = ::core::option::Option::None;
+        (::windows::core::Vtable::vtable(self).CreateInstance)(::windows::core::Vtable::as_raw(self), punkouter.into().abi(), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
+    }
+    pub unsafe fn GetMops(&self, memid: i32) -> ::windows::core::Result<::windows::core::BSTR> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetMops)(::windows::core::Vtable::as_raw(self), memid, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<::windows::core::BSTR>(result__)
+    }
+    pub unsafe fn GetContainingTypeLib(&self, pptlib: *mut ::core::option::Option<ITypeLib>, pindex: *mut u32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetContainingTypeLib)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pptlib), ::core::mem::transmute(pindex)).ok()
+    }
+    #[doc = "*Required features: `\"Win32_System_Ole\"`*"]
+    #[cfg(feature = "Win32_System_Ole")]
+    pub unsafe fn ReleaseTypeAttr(&self, ptypeattr: *const TYPEATTR) {
+        (::windows::core::Vtable::vtable(self).ReleaseTypeAttr)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ptypeattr))
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Ole\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub unsafe fn ReleaseFuncDesc(&self, pfuncdesc: *const FUNCDESC) {
+        (::windows::core::Vtable::vtable(self).ReleaseFuncDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pfuncdesc))
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Ole\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub unsafe fn ReleaseVarDesc(&self, pvardesc: *const VARDESC) {
+        (::windows::core::Vtable::vtable(self).ReleaseVarDesc)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvardesc))
+    }
+}
+impl ::core::cmp::Eq for ITypeInfo {}
+impl ::core::cmp::PartialEq for ITypeInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ITypeInfo {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ITypeInfo {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ITypeInfo").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for ITypeInfo {
+    type Vtable = ITypeInfo_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ITypeInfo {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x00020401_0000_0000_c000_000000000046);
+}
+
+::windows::core::interface_hierarchy!(ITypeInfo, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct ITypeInfo_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    #[cfg(feature = "Win32_System_Ole")]
+    pub GetTypeAttr: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pptypeattr: *mut *mut TYPEATTR) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_System_Ole"))]
+    GetTypeAttr: usize,
+    pub GetTypeComp: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pptcomp: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub GetFuncDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, index: u32, ppfuncdesc: *mut *mut FUNCDESC) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Ole")))]
+    GetFuncDesc: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub GetVarDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, index: u32, ppvardesc: *mut *mut VARDESC) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Ole")))]
+    GetVarDesc: usize,
+    pub GetNames: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, memid: i32, rgbstrnames: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, cmaxnames: u32, pcnames: *mut u32) -> ::windows::core::HRESULT,
+    pub GetRefTypeOfImplType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, index: u32, preftype: *mut u32) -> ::windows::core::HRESULT,
+    pub GetImplTypeFlags: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, index: u32, pimpltypeflags: *mut i32) -> ::windows::core::HRESULT,
+    pub GetIDsOfNames: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, rgsznames: *const ::windows::core::PWSTR, cnames: u32, pmemid: *mut i32) -> ::windows::core::HRESULT,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub Invoke: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pvinstance: *const ::core::ffi::c_void, memid: i32, wflags: DISPATCH_FLAGS, pdispparams: *mut DISPPARAMS, pvarresult: *mut ::core::mem::ManuallyDrop<VARIANT>, pexcepinfo: *mut ::core::mem::ManuallyDrop<EXCEPINFO>, puargerr: *mut u32) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Ole")))]
+    Invoke: usize,
+    pub GetDocumentation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, memid: i32, pbstrname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pbstrdocstring: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pdwhelpcontext: *mut u32, pbstrhelpfile: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT,
+    pub GetDllEntry: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, memid: i32, invkind: INVOKEKIND, pbstrdllname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pbstrname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pwordinal: *mut u16) -> ::windows::core::HRESULT,
+    pub GetRefTypeInfo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, hreftype: u32, pptinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub AddressOfMember: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, memid: i32, invkind: INVOKEKIND, ppv: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub CreateInstance: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, punkouter: *mut ::core::ffi::c_void, riid: *const ::windows::core::GUID, ppvobj: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub GetMops: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, memid: i32, pbstrmops: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT,
+    pub GetContainingTypeLib: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pptlib: *mut *mut ::core::ffi::c_void, pindex: *mut u32) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_System_Ole")]
+    pub ReleaseTypeAttr: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ptypeattr: *const TYPEATTR),
+    #[cfg(not(feature = "Win32_System_Ole"))]
+    ReleaseTypeAttr: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub ReleaseFuncDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pfuncdesc: *const FUNCDESC),
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Ole")))]
+    ReleaseFuncDesc: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
+    pub ReleaseVarDesc: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pvardesc: *const VARDESC),
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Ole")))]
+    ReleaseVarDesc: usize,
+}
+
+pub trait ITypeInfo_Impl: Sized {
+    fn GetTypeAttr(&self) -> ::windows::core::Result<*mut TYPEATTR>;
+    fn GetTypeComp(&self) -> ::windows::core::Result<ITypeComp>;
+    fn GetFuncDesc(&self, index: u32) -> ::windows::core::Result<*mut FUNCDESC>;
+    fn GetVarDesc(&self, index: u32) -> ::windows::core::Result<*mut VARDESC>;
+    fn GetNames(&self, memid: i32, rgbstrnames: *mut ::windows::core::BSTR, cmaxnames: u32, pcnames: *mut u32) -> ::windows::core::Result<()>;
+    fn GetRefTypeOfImplType(&self, index: u32) -> ::windows::core::Result<u32>;
+    fn GetImplTypeFlags(&self, index: u32) -> ::windows::core::Result<i32>;
+    fn GetIDsOfNames(&self, rgsznames: *const ::windows::core::PWSTR, cnames: u32) -> ::windows::core::Result<i32>;
+    fn Invoke(&self, pvinstance: *const ::core::ffi::c_void, memid: i32, wflags: DISPATCH_FLAGS, pdispparams: *mut DISPPARAMS, pvarresult: *mut VARIANT, pexcepinfo: *mut EXCEPINFO, puargerr: *mut u32) -> ::windows::core::Result<()>;
+    fn GetDocumentation(&self, memid: i32, pbstrname: *mut ::windows::core::BSTR, pbstrdocstring: *mut ::windows::core::BSTR, pdwhelpcontext: *mut u32, pbstrhelpfile: *mut ::windows::core::BSTR) -> ::windows::core::Result<()>;
+    fn GetDllEntry(&self, memid: i32, invkind: INVOKEKIND, pbstrdllname: *mut ::windows::core::BSTR, pbstrname: *mut ::windows::core::BSTR, pwordinal: *mut u16) -> ::windows::core::Result<()>;
+    fn GetRefTypeInfo(&self, hreftype: u32) -> ::windows::core::Result<ITypeInfo>;
+    fn AddressOfMember(&self, memid: i32, invkind: INVOKEKIND, ppv: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn CreateInstance(&self, punkouter: &::core::option::Option<::windows::core::IUnknown>, riid: *const ::windows::core::GUID, ppvobj: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn GetMops(&self, memid: i32) -> ::windows::core::Result<::windows::core::BSTR>;
+    fn GetContainingTypeLib(&self, pptlib: *mut ::core::option::Option<ITypeLib>, pindex: *mut u32) -> ::windows::core::Result<()>;
+    fn ReleaseTypeAttr(&self, ptypeattr: *const TYPEATTR);
+    fn ReleaseFuncDesc(&self, pfuncdesc: *const FUNCDESC);
+    fn ReleaseVarDesc(&self, pvardesc: *const VARDESC);
+}
+
+impl ITypeInfo_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>() -> ITypeInfo_Vtbl {
+        unsafe extern "system" fn GetTypeAttr<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pptypeattr: *mut *mut TYPEATTR) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTypeAttr() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pptypeattr, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetTypeComp<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pptcomp: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTypeComp() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pptcomp, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetFuncDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, index: u32, ppfuncdesc: *mut *mut FUNCDESC) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetFuncDesc(::core::mem::transmute_copy(&index)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppfuncdesc, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetVarDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, index: u32, ppvardesc: *mut *mut VARDESC) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetVarDesc(::core::mem::transmute_copy(&index)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppvardesc, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetNames<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, memid: i32, rgbstrnames: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, cmaxnames: u32, pcnames: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetNames(::core::mem::transmute_copy(&memid), ::core::mem::transmute_copy(&rgbstrnames), ::core::mem::transmute_copy(&cmaxnames), ::core::mem::transmute_copy(&pcnames)).into()
+        }
+        unsafe extern "system" fn GetRefTypeOfImplType<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, index: u32, preftype: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetRefTypeOfImplType(::core::mem::transmute_copy(&index)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(preftype, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetImplTypeFlags<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, index: u32, pimpltypeflags: *mut i32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetImplTypeFlags(::core::mem::transmute_copy(&index)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pimpltypeflags, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetIDsOfNames<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, rgsznames: *const ::windows::core::PWSTR, cnames: u32, pmemid: *mut i32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetIDsOfNames(::core::mem::transmute_copy(&rgsznames), ::core::mem::transmute_copy(&cnames)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pmemid, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn Invoke<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pvinstance: *const ::core::ffi::c_void, memid: i32, wflags: DISPATCH_FLAGS, pdispparams: *mut DISPPARAMS, pvarresult: *mut ::core::mem::ManuallyDrop<VARIANT>, pexcepinfo: *mut ::core::mem::ManuallyDrop<EXCEPINFO>, puargerr: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Invoke(::core::mem::transmute_copy(&pvinstance), ::core::mem::transmute_copy(&memid), ::core::mem::transmute_copy(&wflags), ::core::mem::transmute_copy(&pdispparams), ::core::mem::transmute_copy(&pvarresult), ::core::mem::transmute_copy(&pexcepinfo), ::core::mem::transmute_copy(&puargerr)).into()
+        }
+        unsafe extern "system" fn GetDocumentation<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, memid: i32, pbstrname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pbstrdocstring: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pdwhelpcontext: *mut u32, pbstrhelpfile: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDocumentation(::core::mem::transmute_copy(&memid), ::core::mem::transmute_copy(&pbstrname), ::core::mem::transmute_copy(&pbstrdocstring), ::core::mem::transmute_copy(&pdwhelpcontext), ::core::mem::transmute_copy(&pbstrhelpfile)).into()
+        }
+        unsafe extern "system" fn GetDllEntry<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, memid: i32, invkind: INVOKEKIND, pbstrdllname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pbstrname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>, pwordinal: *mut u16) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDllEntry(::core::mem::transmute_copy(&memid), ::core::mem::transmute_copy(&invkind), ::core::mem::transmute_copy(&pbstrdllname), ::core::mem::transmute_copy(&pbstrname), ::core::mem::transmute_copy(&pwordinal)).into()
+        }
+        unsafe extern "system" fn GetRefTypeInfo<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, hreftype: u32, pptinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetRefTypeInfo(::core::mem::transmute_copy(&hreftype)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pptinfo, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn AddressOfMember<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, memid: i32, invkind: INVOKEKIND, ppv: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.AddressOfMember(::core::mem::transmute_copy(&memid), ::core::mem::transmute_copy(&invkind), ::core::mem::transmute_copy(&ppv)).into()
+        }
+        unsafe extern "system" fn CreateInstance<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, punkouter: *mut ::core::ffi::c_void, riid: *const ::windows::core::GUID, ppvobj: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.CreateInstance(::core::mem::transmute(&punkouter), ::core::mem::transmute_copy(&riid), ::core::mem::transmute_copy(&ppvobj)).into()
+        }
+        unsafe extern "system" fn GetMops<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, memid: i32, pbstrmops: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetMops(::core::mem::transmute_copy(&memid)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pbstrmops, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetContainingTypeLib<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pptlib: *mut *mut ::core::ffi::c_void, pindex: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetContainingTypeLib(::core::mem::transmute_copy(&pptlib), ::core::mem::transmute_copy(&pindex)).into()
+        }
+        unsafe extern "system" fn ReleaseTypeAttr<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ptypeattr: *const TYPEATTR) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.ReleaseTypeAttr(::core::mem::transmute_copy(&ptypeattr))
+        }
+        unsafe extern "system" fn ReleaseFuncDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pfuncdesc: *const FUNCDESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.ReleaseFuncDesc(::core::mem::transmute_copy(&pfuncdesc))
+        }
+        unsafe extern "system" fn ReleaseVarDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pvardesc: *const VARDESC) {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.ReleaseVarDesc(::core::mem::transmute_copy(&pvardesc))
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetTypeAttr: GetTypeAttr::<Identity, Impl, OFFSET>,
+            GetTypeComp: GetTypeComp::<Identity, Impl, OFFSET>,
+            GetFuncDesc: GetFuncDesc::<Identity, Impl, OFFSET>,
+            GetVarDesc: GetVarDesc::<Identity, Impl, OFFSET>,
+            GetNames: GetNames::<Identity, Impl, OFFSET>,
+            GetRefTypeOfImplType: GetRefTypeOfImplType::<Identity, Impl, OFFSET>,
+            GetImplTypeFlags: GetImplTypeFlags::<Identity, Impl, OFFSET>,
+            GetIDsOfNames: GetIDsOfNames::<Identity, Impl, OFFSET>,
+            Invoke: Invoke::<Identity, Impl, OFFSET>,
+            GetDocumentation: GetDocumentation::<Identity, Impl, OFFSET>,
+            GetDllEntry: GetDllEntry::<Identity, Impl, OFFSET>,
+            GetRefTypeInfo: GetRefTypeInfo::<Identity, Impl, OFFSET>,
+            AddressOfMember: AddressOfMember::<Identity, Impl, OFFSET>,
+            CreateInstance: CreateInstance::<Identity, Impl, OFFSET>,
+            GetMops: GetMops::<Identity, Impl, OFFSET>,
+            GetContainingTypeLib: GetContainingTypeLib::<Identity, Impl, OFFSET>,
+            ReleaseTypeAttr: ReleaseTypeAttr::<Identity, Impl, OFFSET>,
+            ReleaseFuncDesc: ReleaseFuncDesc::<Identity, Impl, OFFSET>,
+            ReleaseVarDesc: ReleaseVarDesc::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ITypeInfo as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct ISequentialStream(::windows::core::IUnknown);
+impl ISequentialStream {
+    pub unsafe fn Read(&self, pv: *mut ::core::ffi::c_void, cb: u32, pcbread: ::core::option::Option<*mut u32>) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).Read)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pv), cb, ::core::mem::transmute(pcbread.unwrap_or(::std::ptr::null_mut())))
+    }
+    pub unsafe fn Write(&self, pv: *const ::core::ffi::c_void, cb: u32, pcbwritten: ::core::option::Option<*mut u32>) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).Write)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pv), cb, ::core::mem::transmute(pcbwritten.unwrap_or(::std::ptr::null_mut())))
+    }
+}
+impl ::core::cmp::Eq for ISequentialStream {}
+impl ::core::cmp::PartialEq for ISequentialStream {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for ISequentialStream {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for ISequentialStream {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ISequentialStream").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for ISequentialStream {
+    type Vtable = ISequentialStream_Vtbl;
+}
+unsafe impl ::windows::core::Interface for ISequentialStream {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x0c733a30_2a1c_11ce_ade5_00aa0044773d);
+}
+
+::windows::core::interface_hierarchy!(ISequentialStream, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct ISequentialStream_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub Read: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pv: *mut ::core::ffi::c_void, cb: u32, pcbread: *mut u32) -> ::windows::core::HRESULT,
+    pub Write: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pv: *const ::core::ffi::c_void, cb: u32, pcbwritten: *mut u32) -> ::windows::core::HRESULT,
+}
+
+pub trait ISequentialStream_Impl: Sized {
+    fn Read(&self, pv: *mut ::core::ffi::c_void, cb: u32, pcbread: *mut u32) -> ::windows::core::HRESULT;
+    fn Write(&self, pv: *const ::core::ffi::c_void, cb: u32, pcbwritten: *mut u32) -> ::windows::core::HRESULT;
+}
+
+impl ISequentialStream_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ISequentialStream_Impl, const OFFSET: isize>() -> ISequentialStream_Vtbl {
+        unsafe extern "system" fn Read<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ISequentialStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pv: *mut ::core::ffi::c_void, cb: u32, pcbread: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Read(::core::mem::transmute_copy(&pv), ::core::mem::transmute_copy(&cb), ::core::mem::transmute_copy(&pcbread))
+        }
+        unsafe extern "system" fn Write<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ISequentialStream_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pv: *const ::core::ffi::c_void, cb: u32, pcbwritten: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Write(::core::mem::transmute_copy(&pv), ::core::mem::transmute_copy(&cb), ::core::mem::transmute_copy(&pcbwritten))
+        }
+        Self { base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(), Read: Read::<Identity, Impl, OFFSET>, Write: Write::<Identity, Impl, OFFSET> }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<ISequentialStream as ::windows::core::Interface>::IID
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct CLSCTX(pub u32);
+impl ::core::marker::Copy for CLSCTX {}
+impl ::core::clone::Clone for CLSCTX {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CLSCTX {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for CLSCTX {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CLSCTX {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("CLSCTX").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for CLSCTX {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for CLSCTX {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for CLSCTX {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for CLSCTX {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for CLSCTX {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct STGM(pub u32);
+impl ::core::marker::Copy for STGM {}
+impl ::core::clone::Clone for STGM {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for STGM {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for STGM {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for STGM {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("STGM").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for STGM {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for STGM {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for STGM {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for STGM {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for STGM {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct DESCKIND(pub i32);
+impl ::core::marker::Copy for DESCKIND {}
+impl ::core::clone::Clone for DESCKIND {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DESCKIND {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for DESCKIND {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DESCKIND {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DESCKIND").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]pub union BINDPTR {
+    pub lpfuncdesc: *mut FUNCDESC,
+    pub lpvardesc: *mut VARDESC,
+    pub lptcomp: ::core::mem::ManuallyDrop<::core::option::Option<ITypeComp>>,
+}
+impl ::core::cmp::Eq for BINDPTR {}
+impl ::core::cmp::PartialEq for BINDPTR {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<BINDPTR>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for BINDPTR {
+    fn clone(&self) -> Self {
+        unsafe { ::core::mem::transmute_copy(self) }
+    }
+}
+impl ::core::default::Default for BINDPTR {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for BINDPTR {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct TYPEKIND(pub i32);
+impl ::core::marker::Copy for TYPEKIND {}
+impl ::core::clone::Clone for TYPEKIND {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for TYPEKIND {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for TYPEKIND {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for TYPEKIND {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("TYPEKIND").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]
+pub struct TYPEDESC {
+    pub Anonymous: TYPEDESC_0,
+    pub vt: VARENUM,
+}
+impl ::core::marker::Copy for TYPEDESC {}
+impl ::core::cmp::Eq for TYPEDESC {}
+impl ::core::cmp::PartialEq for TYPEDESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<TYPEDESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for TYPEDESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for TYPEDESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for TYPEDESC {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct IDLDESC {
+    pub dwReserved: usize,
+    pub wIDLFlags: IDLFLAGS,
+}
+impl ::core::marker::Copy for IDLDESC {}
+impl ::core::cmp::Eq for IDLDESC {}
+impl ::core::cmp::PartialEq for IDLDESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<IDLDESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for IDLDESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for IDLDESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for IDLDESC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for IDLDESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("IDLDESC").field("dwReserved", &self.dwReserved).field("wIDLFlags", &self.wIDLFlags).finish()
+    }
+}
+
+#[repr(C)]
+pub struct ELEMDESC {
+    pub tdesc: TYPEDESC,
+    pub Anonymous: ELEMDESC_0,
+}
+impl ::core::marker::Copy for ELEMDESC {}
+impl ::core::cmp::Eq for ELEMDESC {}
+impl ::core::cmp::PartialEq for ELEMDESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<ELEMDESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for ELEMDESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for ELEMDESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for ELEMDESC {
+    type Abi = Self;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct FUNCKIND(pub i32);
+impl ::core::marker::Copy for FUNCKIND {}
+impl ::core::clone::Clone for FUNCKIND {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for FUNCKIND {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for FUNCKIND {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for FUNCKIND {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("FUNCKIND").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct INVOKEKIND(pub i32);
+impl ::core::marker::Copy for INVOKEKIND {}
+impl ::core::clone::Clone for INVOKEKIND {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for INVOKEKIND {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for INVOKEKIND {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for INVOKEKIND {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("INVOKEKIND").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct CALLCONV(pub i32);
+impl ::core::marker::Copy for CALLCONV {}
+impl ::core::clone::Clone for CALLCONV {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CALLCONV {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for CALLCONV {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CALLCONV {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("CALLCONV").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct FUNCFLAGS(pub u16);
+impl ::core::marker::Copy for FUNCFLAGS {}
+impl ::core::clone::Clone for FUNCFLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for FUNCFLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for FUNCFLAGS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for FUNCFLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("FUNCFLAGS").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]pub union VARDESC_0 {
+    pub oInst: u32,
+    pub lpvarValue: *mut VARIANT,
+}
+impl ::core::marker::Copy for VARDESC_0 {}
+impl ::core::cmp::Eq for VARDESC_0 {}
+impl ::core::cmp::PartialEq for VARDESC_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<VARDESC_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for VARDESC_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for VARDESC_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for VARDESC_0 {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct TLIBATTR {
+    pub guid: ::windows::core::GUID,
+    pub lcid: u32,
+    pub syskind: SYSKIND,
+    pub wMajorVerNum: u16,
+    pub wMinorVerNum: u16,
+    pub wLibFlags: u16,
+}
+impl ::core::marker::Copy for TLIBATTR {}
+impl ::core::cmp::Eq for TLIBATTR {}
+impl ::core::cmp::PartialEq for TLIBATTR {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<TLIBATTR>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for TLIBATTR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for TLIBATTR {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for TLIBATTR {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for TLIBATTR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("TLIBATTR").field("guid", &self.guid).field("lcid", &self.lcid).field("syskind", &self.syskind).field("wMajorVerNum", &self.wMajorVerNum).field("wMinorVerNum", &self.wMinorVerNum).field("wLibFlags", &self.wLibFlags).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct DISPATCH_FLAGS(pub u16);
+impl ::core::marker::Copy for DISPATCH_FLAGS {}
+impl ::core::clone::Clone for DISPATCH_FLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DISPATCH_FLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for DISPATCH_FLAGS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DISPATCH_FLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("DISPATCH_FLAGS").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for DISPATCH_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for DISPATCH_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for DISPATCH_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for DISPATCH_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for DISPATCH_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[repr(C)]
+pub struct DISPPARAMS {
+    pub rgvarg: *mut VARIANT,
+    pub rgdispidNamedArgs: *mut i32,
+    pub cArgs: u32,
+    pub cNamedArgs: u32,
+}
+impl ::core::marker::Copy for DISPPARAMS {}
+impl ::core::cmp::Eq for DISPPARAMS {}
+impl ::core::cmp::PartialEq for DISPPARAMS {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DISPPARAMS>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DISPPARAMS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DISPPARAMS {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DISPPARAMS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DISPPARAMS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DISPPARAMS").field("rgvarg", &self.rgvarg).field("rgdispidNamedArgs", &self.rgdispidNamedArgs).field("cArgs", &self.cArgs).field("cNamedArgs", &self.cNamedArgs).finish()
+    }
+}
+
+#[repr(C)]
+pub struct VARIANT {
+    pub Anonymous: VARIANT_0,
+}
+impl ::core::cmp::Eq for VARIANT {}
+impl ::core::cmp::PartialEq for VARIANT {
+    fn eq(&self, other: &Self) -> bool {
+        self.Anonymous == other.Anonymous
+    }
+}
+impl ::core::clone::Clone for VARIANT {
+    fn clone(&self) -> Self {
+        Self { Anonymous: self.Anonymous.clone() }
+    }
+}
+impl ::core::default::Default for VARIANT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for VARIANT {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+#[repr(C)]
+pub struct EXCEPINFO {
+    pub wCode: u16,
+    pub wReserved: u16,
+    pub bstrSource: ::windows::core::BSTR,
+    pub bstrDescription: ::windows::core::BSTR,
+    pub bstrHelpFile: ::windows::core::BSTR,
+    pub dwHelpContext: u32,
+    pub pvReserved: *mut ::core::ffi::c_void,
+    pub pfnDeferredFillIn: LPEXCEPFINO_DEFERRED_FILLIN,
+    pub scode: i32,
+}
+impl ::core::cmp::Eq for EXCEPINFO {}
+impl ::core::cmp::PartialEq for EXCEPINFO {
+    fn eq(&self, other: &Self) -> bool {
+        self.wCode == other.wCode && self.wReserved == other.wReserved && self.bstrSource == other.bstrSource && self.bstrDescription == other.bstrDescription && self.bstrHelpFile == other.bstrHelpFile && self.dwHelpContext == other.dwHelpContext && self.pvReserved == other.pvReserved && self.pfnDeferredFillIn.map(|f| f as usize) == other.pfnDeferredFillIn.map(|f| f as usize) && self.scode == other.scode
+    }
+}
+impl ::core::clone::Clone for EXCEPINFO {
+    fn clone(&self) -> Self {
+        Self {
+            wCode: self.wCode,
+            wReserved: self.wReserved,
+            bstrSource: self.bstrSource.clone(),
+            bstrDescription: self.bstrDescription.clone(),
+            bstrHelpFile: self.bstrHelpFile.clone(),
+            dwHelpContext: self.dwHelpContext,
+            pvReserved: self.pvReserved,
+            pfnDeferredFillIn: self.pfnDeferredFillIn,
+            scode: self.scode,
+        }
+    }
+}
+impl ::core::default::Default for EXCEPINFO {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for EXCEPINFO {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+impl ::core::fmt::Debug for EXCEPINFO {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("EXCEPINFO").field("wCode", &self.wCode).field("wReserved", &self.wReserved).field("bstrSource", &self.bstrSource).field("bstrDescription", &self.bstrDescription).field("bstrHelpFile", &self.bstrHelpFile).field("dwHelpContext", &self.dwHelpContext).field("pvReserved", &self.pvReserved).field("pfnDeferredFillIn", &self.pfnDeferredFillIn.map(|f| f as usize)).field("scode", &self.scode).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct STREAM_SEEK(pub u32);
+impl ::core::marker::Copy for STREAM_SEEK {}
+impl ::core::clone::Clone for STREAM_SEEK {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for STREAM_SEEK {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for STREAM_SEEK {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for STREAM_SEEK {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("STREAM_SEEK").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct STGC(pub u32);
+impl ::core::marker::Copy for STGC {}
+impl ::core::clone::Clone for STGC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for STGC {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for STGC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for STGC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("STGC").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for STGC {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for STGC {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for STGC {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for STGC {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for STGC {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct LOCKTYPE(pub i32);
+impl ::core::marker::Copy for LOCKTYPE {}
+impl ::core::clone::Clone for LOCKTYPE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for LOCKTYPE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for LOCKTYPE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for LOCKTYPE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("LOCKTYPE").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]
+pub struct STATSTG {
+    pub pwcsName: ::windows::core::PWSTR,
+    pub r#type: u32,
+    pub cbSize: u64,
+    pub mtime: super::super::Foundation::FILETIME,
+    pub ctime: super::super::Foundation::FILETIME,
+    pub atime: super::super::Foundation::FILETIME,
+    pub grfMode: STGM,
+    pub grfLocksSupported: LOCKTYPE,
+    pub clsid: ::windows::core::GUID,
+    pub grfStateBits: u32,
+    pub reserved: u32,
+}
+impl ::core::marker::Copy for STATSTG {}
+impl ::core::cmp::Eq for STATSTG {}
+impl ::core::cmp::PartialEq for STATSTG {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<STATSTG>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for STATSTG {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for STATSTG {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for STATSTG {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for STATSTG {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("STATSTG").field("pwcsName", &self.pwcsName).field("type", &self.r#type).field("cbSize", &self.cbSize).field("mtime", &self.mtime).field("ctime", &self.ctime).field("atime", &self.atime).field("grfMode", &self.grfMode).field("grfLocksSupported", &self.grfLocksSupported).field("clsid", &self.clsid).field("grfStateBits", &self.grfStateBits).field("reserved", &self.reserved).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct STATFLAG(pub i32);
+impl ::core::marker::Copy for STATFLAG {}
+impl ::core::clone::Clone for STATFLAG {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for STATFLAG {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for STATFLAG {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for STATFLAG {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("STATFLAG").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct VARFLAGS(pub u16);
+impl ::core::marker::Copy for VARFLAGS {}
+impl ::core::clone::Clone for VARFLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for VARFLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for VARFLAGS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for VARFLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("VARFLAGS").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct VARKIND(pub i32);
+impl ::core::marker::Copy for VARKIND {}
+impl ::core::clone::Clone for VARKIND {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for VARKIND {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for VARKIND {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for VARKIND {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("VARKIND").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]pub union TYPEDESC_0 {
+    pub lptdesc: *mut TYPEDESC,
+    pub lpadesc: *mut super::Ole::ARRAYDESC,
+    pub hreftype: u32,
+}
+impl ::core::marker::Copy for TYPEDESC_0 {}
+impl ::core::cmp::Eq for TYPEDESC_0 {}
+impl ::core::cmp::PartialEq for TYPEDESC_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<TYPEDESC_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for TYPEDESC_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for TYPEDESC_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for TYPEDESC_0 {
+    type Abi = Self;
+}
+
+#[repr(C)]pub union ELEMDESC_0 {
+    pub idldesc: IDLDESC,
+    pub paramdesc: super::Ole::PARAMDESC,
+}
+impl ::core::marker::Copy for ELEMDESC_0 {}
+impl ::core::cmp::Eq for ELEMDESC_0 {}
+impl ::core::cmp::PartialEq for ELEMDESC_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<ELEMDESC_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for ELEMDESC_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for ELEMDESC_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for ELEMDESC_0 {
+    type Abi = Self;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct SYSKIND(pub i32);
+impl ::core::marker::Copy for SYSKIND {}
+impl ::core::clone::Clone for SYSKIND {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for SYSKIND {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for SYSKIND {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for SYSKIND {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("SYSKIND").field(&self.0).finish()
+    }
+}
+
+#[repr(C)]pub union VARIANT_0 {
+    pub Anonymous: ::core::mem::ManuallyDrop<VARIANT_0_0>,
+    pub decVal: super::super::Foundation::DECIMAL,
+}
+impl ::core::cmp::Eq for VARIANT_0 {}
+impl ::core::cmp::PartialEq for VARIANT_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<VARIANT_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for VARIANT_0 {
+    fn clone(&self) -> Self {
+        unsafe { ::core::mem::transmute_copy(self) }
+    }
+}
+impl ::core::default::Default for VARIANT_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for VARIANT_0 {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+pub type LPEXCEPFINO_DEFERRED_FILLIN = ::core::option::Option<unsafe extern "system" fn(pexcepinfo: *mut EXCEPINFO) -> ::windows::core::HRESULT>;
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct VARENUM(pub u16);
+impl ::core::marker::Copy for VARENUM {}
+impl ::core::clone::Clone for VARENUM {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for VARENUM {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for VARENUM {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for VARENUM {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("VARENUM").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct IDLFLAGS(pub u16);
+impl ::core::marker::Copy for IDLFLAGS {}
+impl ::core::clone::Clone for IDLFLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for IDLFLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for IDLFLAGS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for IDLFLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IDLFLAGS").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for IDLFLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for IDLFLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for IDLFLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for IDLFLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for IDLFLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[repr(C)]
+pub struct VARIANT_0_0 {
+    pub vt: VARENUM,
+    pub wReserved1: u16,
+    pub wReserved2: u16,
+    pub wReserved3: u16,
+    pub Anonymous: VARIANT_0_0_0,
+}
+impl ::core::cmp::Eq for VARIANT_0_0 {}
+impl ::core::cmp::PartialEq for VARIANT_0_0 {
+    fn eq(&self, other: &Self) -> bool {
+        self.vt == other.vt && self.wReserved1 == other.wReserved1 && self.wReserved2 == other.wReserved2 && self.wReserved3 == other.wReserved3 && self.Anonymous == other.Anonymous
+    }
+}
+impl ::core::clone::Clone for VARIANT_0_0 {
+    fn clone(&self) -> Self {
+        Self { vt: self.vt, wReserved1: self.wReserved1, wReserved2: self.wReserved2, wReserved3: self.wReserved3, Anonymous: self.Anonymous.clone() }
+    }
+}
+impl ::core::default::Default for VARIANT_0_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for VARIANT_0_0 {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+#[repr(C)]pub union VARIANT_0_0_0 {
+    pub llVal: i64,
+    pub lVal: i32,
+    pub bVal: u8,
+    pub iVal: i16,
+    pub fltVal: f32,
+    pub dblVal: f64,
+    pub boolVal: i16,
+    pub __OBSOLETE__VARIANT_BOOL: i16,
+    pub scode: i32,
+    pub cyVal: CY,
+    pub date: f64,
+    pub bstrVal: ::core::mem::ManuallyDrop<::windows::core::BSTR>,
+    pub punkVal: ::core::mem::ManuallyDrop<::core::option::Option<::windows::core::IUnknown>>,
+    pub pdispVal: ::core::mem::ManuallyDrop<::core::option::Option<IDispatch>>,
+    pub parray: *mut SAFEARRAY,
+    pub pbVal: *mut u8,
+    pub piVal: *mut i16,
+    pub plVal: *mut i32,
+    pub pllVal: *mut i64,
+    pub pfltVal: *mut f32,
+    pub pdblVal: *mut f64,
+    pub pboolVal: *mut i16,
+    pub __OBSOLETE__VARIANT_PBOOL: *mut i16,
+    pub pscode: *mut i32,
+    pub pcyVal: *mut CY,
+    pub pdate: *mut f64,
+    pub pbstrVal: *mut ::windows::core::BSTR,
+    pub ppunkVal: *mut ::core::option::Option<::windows::core::IUnknown>,
+    pub ppdispVal: *mut ::core::option::Option<IDispatch>,
+    pub pparray: *mut *mut SAFEARRAY,
+    pub pvarVal: *mut VARIANT,
+    pub byref: *mut ::core::ffi::c_void,
+    pub cVal: super::super::Foundation::CHAR,
+    pub uiVal: u16,
+    pub ulVal: u32,
+    pub ullVal: u64,
+    pub intVal: i32,
+    pub uintVal: u32,
+    pub pdecVal: *mut super::super::Foundation::DECIMAL,
+    pub pcVal: ::windows::core::PSTR,
+    pub puiVal: *mut u16,
+    pub pulVal: *mut u32,
+    pub pullVal: *mut u64,
+    pub pintVal: *mut i32,
+    pub puintVal: *mut u32,
+    pub Anonymous: ::core::mem::ManuallyDrop<VARIANT_0_0_0_0>,
+}
+impl ::core::cmp::Eq for VARIANT_0_0_0 {}
+impl ::core::cmp::PartialEq for VARIANT_0_0_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<VARIANT_0_0_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for VARIANT_0_0_0 {
+    fn clone(&self) -> Self {
+        unsafe { ::core::mem::transmute_copy(self) }
+    }
+}
+impl ::core::default::Default for VARIANT_0_0_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for VARIANT_0_0_0 {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+#[repr(C)]
+pub struct VARIANT_0_0_0_0 {
+    pub pvRecord: *mut ::core::ffi::c_void,
+    pub pRecInfo: ::core::option::Option<super::Ole::IRecordInfo>,
+}
+impl ::core::cmp::Eq for VARIANT_0_0_0_0 {}
+impl ::core::cmp::PartialEq for VARIANT_0_0_0_0 {
+    fn eq(&self, other: &Self) -> bool {
+        self.pvRecord == other.pvRecord && self.pRecInfo == other.pRecInfo
+    }
+}
+impl ::core::clone::Clone for VARIANT_0_0_0_0 {
+    fn clone(&self) -> Self {
+        Self { pvRecord: self.pvRecord, pRecInfo: self.pRecInfo.clone() }
+    }
+}
+impl ::core::default::Default for VARIANT_0_0_0_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for VARIANT_0_0_0_0 {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+impl ::core::fmt::Debug for VARIANT_0_0_0_0 {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("VARIANT_0_0_0_0").field("pvRecord", &self.pvRecord).field("pRecInfo", &self.pRecInfo).finish()
+    }
+}
+
+#[repr(C)]
+pub struct SAFEARRAY {
+    pub cDims: u16,
+    pub fFeatures: ADVANCED_FEATURE_FLAGS,
+    pub cbElements: u32,
+    pub cLocks: u32,
+    pub pvData: *mut ::core::ffi::c_void,
+    pub rgsabound: [SAFEARRAYBOUND; 1],
+}
+impl ::core::marker::Copy for SAFEARRAY {}
+impl ::core::cmp::Eq for SAFEARRAY {}
+impl ::core::cmp::PartialEq for SAFEARRAY {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<SAFEARRAY>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for SAFEARRAY {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for SAFEARRAY {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for SAFEARRAY {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for SAFEARRAY {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("SAFEARRAY").field("cDims", &self.cDims).field("fFeatures", &self.fFeatures).field("cbElements", &self.cbElements).field("cLocks", &self.cLocks).field("pvData", &self.pvData).field("rgsabound", &self.rgsabound).finish()
+    }
+}
+
+#[repr(C)]
+pub struct BLOB {
+    pub cbSize: u32,
+    pub pBlobData: *mut u8,
+}
+impl ::core::marker::Copy for BLOB {}
+impl ::core::cmp::Eq for BLOB {}
+impl ::core::cmp::PartialEq for BLOB {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<BLOB>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for BLOB {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for BLOB {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for BLOB {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for BLOB {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("BLOB").field("cbSize", &self.cbSize).field("pBlobData", &self.pBlobData).finish()
+    }
+}
+
+#[repr(C)]pub union CY {
+    pub Anonymous: CY_0,
+    pub int64: i64,
+}
+impl ::core::marker::Copy for CY {}
+impl ::core::cmp::Eq for CY {}
+impl ::core::cmp::PartialEq for CY {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CY>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CY {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CY {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CY {
+    type Abi = Self;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct ADVANCED_FEATURE_FLAGS(pub u16);
+impl ::core::marker::Copy for ADVANCED_FEATURE_FLAGS {}
+impl ::core::clone::Clone for ADVANCED_FEATURE_FLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for ADVANCED_FEATURE_FLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for ADVANCED_FEATURE_FLAGS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for ADVANCED_FEATURE_FLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ADVANCED_FEATURE_FLAGS").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for ADVANCED_FEATURE_FLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for ADVANCED_FEATURE_FLAGS {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for ADVANCED_FEATURE_FLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for ADVANCED_FEATURE_FLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for ADVANCED_FEATURE_FLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[repr(C)]
+pub struct SAFEARRAYBOUND {
+    pub cElements: u32,
+    pub lLbound: i32,
+}
+impl ::core::marker::Copy for SAFEARRAYBOUND {}
+impl ::core::cmp::Eq for SAFEARRAYBOUND {}
+impl ::core::cmp::PartialEq for SAFEARRAYBOUND {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<SAFEARRAYBOUND>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for SAFEARRAYBOUND {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for SAFEARRAYBOUND {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for SAFEARRAYBOUND {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for SAFEARRAYBOUND {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("SAFEARRAYBOUND").field("cElements", &self.cElements).field("lLbound", &self.lLbound).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CY_0 {
+    pub Lo: u32,
+    pub Hi: i32,
+}
+impl ::core::marker::Copy for CY_0 {}
+impl ::core::cmp::Eq for CY_0 {}
+impl ::core::cmp::PartialEq for CY_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CY_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CY_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CY_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CY_0 {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CY_0 {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CY_0").field("Lo", &self.Lo).field("Hi", &self.Hi).finish()
+    }
+}
+
+pub mod StructuredStorage{
+#[repr(transparent)]
+pub struct IEnumSTATSTG(::windows::core::IUnknown);
+impl IEnumSTATSTG {
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn Next(&self, rgelt: &mut [super::STATSTG], pceltfetched: ::core::option::Option<*mut u32>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Next)(::windows::core::Vtable::as_raw(self), rgelt.len() as _, ::core::mem::transmute(rgelt.as_ptr()), ::core::mem::transmute(pceltfetched.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn Skip(&self, celt: u32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Skip)(::windows::core::Vtable::as_raw(self), celt).ok()
+    }
+    pub unsafe fn Reset(&self) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Reset)(::windows::core::Vtable::as_raw(self)).ok()
+    }
+    pub unsafe fn Clone(&self) -> ::windows::core::Result<IEnumSTATSTG> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).Clone)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IEnumSTATSTG>(result__)
+    }
+}
+impl ::core::cmp::Eq for IEnumSTATSTG {}
+impl ::core::cmp::PartialEq for IEnumSTATSTG {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IEnumSTATSTG {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IEnumSTATSTG {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IEnumSTATSTG").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IEnumSTATSTG {
+    type Vtable = IEnumSTATSTG_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IEnumSTATSTG {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x0000000d_0000_0000_c000_000000000046);
+}
+
+::windows::core::interface_hierarchy!(IEnumSTATSTG, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IEnumSTATSTG_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    #[cfg(feature = "Win32_Foundation")]
+    pub Next: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut super::STATSTG, pceltfetched: *mut u32) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    Next: usize,
+    pub Skip: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows::core::HRESULT,
+    pub Reset: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub Clone: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait IEnumSTATSTG_Impl: Sized {
+    fn Next(&self, celt: u32, rgelt: *mut super::STATSTG, pceltfetched: *mut u32) -> ::windows::core::Result<()>;
+    fn Skip(&self, celt: u32) -> ::windows::core::Result<()>;
+    fn Reset(&self) -> ::windows::core::Result<()>;
+    fn Clone(&self) -> ::windows::core::Result<IEnumSTATSTG>;
+}
+
+impl IEnumSTATSTG_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATSTG_Impl, const OFFSET: isize>() -> IEnumSTATSTG_Vtbl {
+        unsafe extern "system" fn Next<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATSTG_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut super::STATSTG, pceltfetched: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Next(::core::mem::transmute_copy(&celt), ::core::mem::transmute_copy(&rgelt), ::core::mem::transmute_copy(&pceltfetched)).into()
+        }
+        unsafe extern "system" fn Skip<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATSTG_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Skip(::core::mem::transmute_copy(&celt)).into()
+        }
+        unsafe extern "system" fn Reset<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATSTG_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Reset().into()
+        }
+        unsafe extern "system" fn Clone<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATSTG_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Clone() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppenum, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Next: Next::<Identity, Impl, OFFSET>,
+            Skip: Skip::<Identity, Impl, OFFSET>,
+            Reset: Reset::<Identity, Impl, OFFSET>,
+            Clone: Clone::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IEnumSTATSTG as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(C)]
+pub struct CAC {
+    pub cElems: u32,
+    pub pElems: ::windows::core::PSTR,
+}
+impl ::core::marker::Copy for CAC {}
+impl ::core::cmp::Eq for CAC {}
+impl ::core::cmp::PartialEq for CAC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAC").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAPROPVARIANT {
+    pub cElems: u32,
+    pub pElems: *mut PROPVARIANT,
+}
+impl ::core::marker::Copy for CAPROPVARIANT {}
+impl ::core::cmp::Eq for CAPROPVARIANT {}
+impl ::core::cmp::PartialEq for CAPROPVARIANT {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAPROPVARIANT>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAPROPVARIANT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAPROPVARIANT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAPROPVARIANT {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAPROPVARIANT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAPROPVARIANT").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAUB {
+    pub cElems: u32,
+    pub pElems: *mut u8,
+}
+impl ::core::marker::Copy for CAUB {}
+impl ::core::cmp::Eq for CAUB {}
+impl ::core::cmp::PartialEq for CAUB {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAUB>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAUB {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAUB {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAUB {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAUB {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAUB").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAUI {
+    pub cElems: u32,
+    pub pElems: *mut u16,
+}
+impl ::core::marker::Copy for CAUI {}
+impl ::core::cmp::Eq for CAUI {}
+impl ::core::cmp::PartialEq for CAUI {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAUI>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAUI {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAUI {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAUI {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAUI {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAUI").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CASCODE {
+    pub cElems: u32,
+    pub pElems: *mut i32,
+}
+impl ::core::marker::Copy for CASCODE {}
+impl ::core::cmp::Eq for CASCODE {}
+impl ::core::cmp::PartialEq for CASCODE {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CASCODE>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CASCODE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CASCODE {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CASCODE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CASCODE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CASCODE").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CACY {
+    pub cElems: u32,
+    pub pElems: *mut super::CY,
+}
+impl ::core::marker::Copy for CACY {}
+impl ::core::cmp::Eq for CACY {}
+impl ::core::cmp::PartialEq for CACY {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CACY>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CACY {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CACY {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CACY {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CACY {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CACY").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CACLIPDATA {
+    pub cElems: u32,
+    pub pElems: *mut CLIPDATA,
+}
+impl ::core::marker::Copy for CACLIPDATA {}
+impl ::core::cmp::Eq for CACLIPDATA {}
+impl ::core::cmp::PartialEq for CACLIPDATA {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CACLIPDATA>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CACLIPDATA {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CACLIPDATA {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CACLIPDATA {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CACLIPDATA {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CACLIPDATA").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CABSTR {
+    pub cElems: u32,
+    pub pElems: *mut ::windows::core::BSTR,
+}
+impl ::core::marker::Copy for CABSTR {}
+impl ::core::cmp::Eq for CABSTR {}
+impl ::core::cmp::PartialEq for CABSTR {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CABSTR>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CABSTR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CABSTR {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CABSTR {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CABSTR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CABSTR").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CABSTRBLOB {
+    pub cElems: u32,
+    pub pElems: *mut BSTRBLOB,
+}
+impl ::core::marker::Copy for CABSTRBLOB {}
+impl ::core::cmp::Eq for CABSTRBLOB {}
+impl ::core::cmp::PartialEq for CABSTRBLOB {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CABSTRBLOB>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CABSTRBLOB {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CABSTRBLOB {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CABSTRBLOB {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CABSTRBLOB {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CABSTRBLOB").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CALPSTR {
+    pub cElems: u32,
+    pub pElems: *mut ::windows::core::PSTR,
+}
+impl ::core::marker::Copy for CALPSTR {}
+impl ::core::cmp::Eq for CALPSTR {}
+impl ::core::cmp::PartialEq for CALPSTR {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CALPSTR>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CALPSTR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CALPSTR {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CALPSTR {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CALPSTR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CALPSTR").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CALPWSTR {
+    pub cElems: u32,
+    pub pElems: *mut ::windows::core::PWSTR,
+}
+impl ::core::marker::Copy for CALPWSTR {}
+impl ::core::cmp::Eq for CALPWSTR {}
+impl ::core::cmp::PartialEq for CALPWSTR {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CALPWSTR>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CALPWSTR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CALPWSTR {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CALPWSTR {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CALPWSTR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CALPWSTR").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAI {
+    pub cElems: u32,
+    pub pElems: *mut i16,
+}
+impl ::core::marker::Copy for CAI {}
+impl ::core::cmp::Eq for CAI {}
+impl ::core::cmp::PartialEq for CAI {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAI>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAI {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAI {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAI {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAI {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAI").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAL {
+    pub cElems: u32,
+    pub pElems: *mut i32,
+}
+impl ::core::marker::Copy for CAL {}
+impl ::core::cmp::Eq for CAL {}
+impl ::core::cmp::PartialEq for CAL {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAL>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAL {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAL {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAL {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAL {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAL").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAUL {
+    pub cElems: u32,
+    pub pElems: *mut u32,
+}
+impl ::core::marker::Copy for CAUL {}
+impl ::core::cmp::Eq for CAUL {}
+impl ::core::cmp::PartialEq for CAUL {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAUL>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAUL {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAUL {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAUL {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAUL {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAUL").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAH {
+    pub cElems: u32,
+    pub pElems: *mut i64,
+}
+impl ::core::marker::Copy for CAH {}
+impl ::core::cmp::Eq for CAH {}
+impl ::core::cmp::PartialEq for CAH {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAH>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAH {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAH {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAH {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAH {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAH").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAUH {
+    pub cElems: u32,
+    pub pElems: *mut u64,
+}
+impl ::core::marker::Copy for CAUH {}
+impl ::core::cmp::Eq for CAUH {}
+impl ::core::cmp::PartialEq for CAUH {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAUH>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAUH {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAUH {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAUH {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAUH {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAUH").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAFLT {
+    pub cElems: u32,
+    pub pElems: *mut f32,
+}
+impl ::core::marker::Copy for CAFLT {}
+impl ::core::cmp::Eq for CAFLT {}
+impl ::core::cmp::PartialEq for CAFLT {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAFLT>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAFLT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAFLT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAFLT {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAFLT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAFLT").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CADBL {
+    pub cElems: u32,
+    pub pElems: *mut f64,
+}
+impl ::core::marker::Copy for CADBL {}
+impl ::core::cmp::Eq for CADBL {}
+impl ::core::cmp::PartialEq for CADBL {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CADBL>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CADBL {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CADBL {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CADBL {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CADBL {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CADBL").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CABOOL {
+    pub cElems: u32,
+    pub pElems: *mut i16,
+}
+impl ::core::marker::Copy for CABOOL {}
+impl ::core::cmp::Eq for CABOOL {}
+impl ::core::cmp::PartialEq for CABOOL {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CABOOL>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CABOOL {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CABOOL {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CABOOL {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CABOOL {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CABOOL").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CADATE {
+    pub cElems: u32,
+    pub pElems: *mut f64,
+}
+impl ::core::marker::Copy for CADATE {}
+impl ::core::cmp::Eq for CADATE {}
+impl ::core::cmp::PartialEq for CADATE {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CADATE>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CADATE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CADATE {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CADATE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CADATE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CADATE").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CAFILETIME {
+    pub cElems: u32,
+    pub pElems: *mut super::super::super::Foundation::FILETIME,
+}
+impl ::core::marker::Copy for CAFILETIME {}
+impl ::core::cmp::Eq for CAFILETIME {}
+impl ::core::cmp::PartialEq for CAFILETIME {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CAFILETIME>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CAFILETIME {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CAFILETIME {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CAFILETIME {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CAFILETIME {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CAFILETIME").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct CACLSID {
+    pub cElems: u32,
+    pub pElems: *mut ::windows::core::GUID,
+}
+impl ::core::marker::Copy for CACLSID {}
+impl ::core::cmp::Eq for CACLSID {}
+impl ::core::cmp::PartialEq for CACLSID {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CACLSID>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CACLSID {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CACLSID {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CACLSID {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CACLSID {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CACLSID").field("cElems", &self.cElems).field("pElems", &self.pElems).finish()
+    }
+}
+
+#[repr(C)]
+pub struct VERSIONEDSTREAM {
+    pub guidVersion: ::windows::core::GUID,
+    pub pStream: ::core::option::Option<super::IStream>,
+}
+impl ::core::cmp::Eq for VERSIONEDSTREAM {}
+impl ::core::cmp::PartialEq for VERSIONEDSTREAM {
+    fn eq(&self, other: &Self) -> bool {
+        self.guidVersion == other.guidVersion && self.pStream == other.pStream
+    }
+}
+impl ::core::clone::Clone for VERSIONEDSTREAM {
+    fn clone(&self) -> Self {
+        Self { guidVersion: self.guidVersion, pStream: self.pStream.clone() }
+    }
+}
+impl ::core::default::Default for VERSIONEDSTREAM {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for VERSIONEDSTREAM {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+impl ::core::fmt::Debug for VERSIONEDSTREAM {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("VERSIONEDSTREAM").field("guidVersion", &self.guidVersion).field("pStream", &self.pStream).finish()
+    }
+}
+
+#[repr(transparent)]
+pub struct IStorage(::windows::core::IUnknown);
+impl IStorage {
+    pub unsafe fn CreateStream<'a, P0>(&self, pwcsname: P0, grfmode: super::STGM, reserved1: u32, reserved2: u32) -> ::windows::core::Result<super::IStream>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).CreateStream)(::windows::core::Vtable::as_raw(self), pwcsname.into(), grfmode, reserved1, reserved2, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::IStream>(result__)
+    }
+    pub unsafe fn OpenStream<'a, P0>(&self, pwcsname: P0, reserved1: ::core::option::Option<*mut ::core::ffi::c_void>, grfmode: super::STGM, reserved2: u32, ppstm: *mut ::core::option::Option<super::IStream>) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).OpenStream)(::windows::core::Vtable::as_raw(self), pwcsname.into(), ::core::mem::transmute(reserved1.unwrap_or(::std::ptr::null_mut())), grfmode, reserved2, ::core::mem::transmute(ppstm)).ok()
+    }
+    pub unsafe fn CreateStorage<'a, P0>(&self, pwcsname: P0, grfmode: super::STGM, reserved1: u32, reserved2: u32) -> ::windows::core::Result<IStorage>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).CreateStorage)(::windows::core::Vtable::as_raw(self), pwcsname.into(), grfmode, reserved1, reserved2, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IStorage>(result__)
+    }
+    pub unsafe fn OpenStorage<'a, P0, P1>(&self, pwcsname: P0, pstgpriority: P1, grfmode: super::STGM, snbexclude: *const *const u16, reserved: u32) -> ::windows::core::Result<IStorage>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+        P1: ::std::convert::Into<::windows::core::InParam<'a, IStorage>>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).OpenStorage)(::windows::core::Vtable::as_raw(self), pwcsname.into(), pstgpriority.into().abi(), grfmode, ::core::mem::transmute(snbexclude), reserved, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IStorage>(result__)
+    }
+    pub unsafe fn CopyTo<'a, P0>(&self, rgiidexclude: ::core::option::Option<&[::windows::core::GUID]>, snbexclude: ::core::option::Option<*const *const u16>, pstgdest: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, IStorage>>,
+    {
+        (::windows::core::Vtable::vtable(self).CopyTo)(::windows::core::Vtable::as_raw(self), rgiidexclude.as_deref().map_or(0, |slice| slice.len() as _), ::core::mem::transmute(rgiidexclude.as_deref().map_or(::core::ptr::null(), |slice| slice.as_ptr())), ::core::mem::transmute(snbexclude.unwrap_or(::std::ptr::null())), pstgdest.into().abi()).ok()
+    }
+    pub unsafe fn MoveElementTo<'a, P0, P1, P2>(&self, pwcsname: P0, pstgdest: P1, pwcsnewname: P2, grfflags: STGMOVE) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+        P1: ::std::convert::Into<::windows::core::InParam<'a, IStorage>>,
+        P2: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).MoveElementTo)(::windows::core::Vtable::as_raw(self), pwcsname.into(), pstgdest.into().abi(), pwcsnewname.into(), grfflags).ok()
+    }
+    pub unsafe fn Commit(&self, grfcommitflags: super::STGC) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Commit)(::windows::core::Vtable::as_raw(self), grfcommitflags).ok()
+    }
+    pub unsafe fn Revert(&self) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Revert)(::windows::core::Vtable::as_raw(self)).ok()
+    }
+    pub unsafe fn EnumElements(&self, reserved1: u32, reserved2: ::core::option::Option<*mut ::core::ffi::c_void>, reserved3: u32, ppenum: *mut ::core::option::Option<IEnumSTATSTG>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).EnumElements)(::windows::core::Vtable::as_raw(self), reserved1, ::core::mem::transmute(reserved2.unwrap_or(::std::ptr::null_mut())), reserved3, ::core::mem::transmute(ppenum)).ok()
+    }
+    pub unsafe fn DestroyElement<'a, P0>(&self, pwcsname: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).DestroyElement)(::windows::core::Vtable::as_raw(self), pwcsname.into()).ok()
+    }
+    pub unsafe fn RenameElement<'a, P0, P1>(&self, pwcsoldname: P0, pwcsnewname: P1) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+        P1: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).RenameElement)(::windows::core::Vtable::as_raw(self), pwcsoldname.into(), pwcsnewname.into()).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn SetElementTimes<'a, P0>(&self, pwcsname: P0, pctime: *const super::super::super::Foundation::FILETIME, patime: *const super::super::super::Foundation::FILETIME, pmtime: *const super::super::super::Foundation::FILETIME) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).SetElementTimes)(::windows::core::Vtable::as_raw(self), pwcsname.into(), ::core::mem::transmute(pctime), ::core::mem::transmute(patime), ::core::mem::transmute(pmtime)).ok()
+    }
+    pub unsafe fn SetClass(&self, clsid: *const ::windows::core::GUID) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).SetClass)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(clsid)).ok()
+    }
+    pub unsafe fn SetStateBits(&self, grfstatebits: u32, grfmask: u32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).SetStateBits)(::windows::core::Vtable::as_raw(self), grfstatebits, grfmask).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn Stat(&self, pstatstg: *mut super::STATSTG, grfstatflag: super::STATFLAG) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Stat)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pstatstg), grfstatflag).ok()
+    }
+}
+impl ::core::cmp::Eq for IStorage {}
+impl ::core::cmp::PartialEq for IStorage {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IStorage {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IStorage {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IStorage").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IStorage {
+    type Vtable = IStorage_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IStorage {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x0000000b_0000_0000_c000_000000000046);
+}
+
+::windows::core::interface_hierarchy!(IStorage, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IStorage_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub CreateStream: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, grfmode: super::STGM, reserved1: u32, reserved2: u32, ppstm: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub OpenStream: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, reserved1: *mut ::core::ffi::c_void, grfmode: super::STGM, reserved2: u32, ppstm: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub CreateStorage: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, grfmode: super::STGM, reserved1: u32, reserved2: u32, ppstg: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub OpenStorage: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, pstgpriority: *mut ::core::ffi::c_void, grfmode: super::STGM, snbexclude: *const *const u16, reserved: u32, ppstg: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub CopyTo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ciidexclude: u32, rgiidexclude: *const ::windows::core::GUID, snbexclude: *const *const u16, pstgdest: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub MoveElementTo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, pstgdest: *mut ::core::ffi::c_void, pwcsnewname: ::windows::core::PCWSTR, grfflags: STGMOVE) -> ::windows::core::HRESULT,
+    pub Commit: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, grfcommitflags: super::STGC) -> ::windows::core::HRESULT,
+    pub Revert: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub EnumElements: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, reserved1: u32, reserved2: *mut ::core::ffi::c_void, reserved3: u32, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub DestroyElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR) -> ::windows::core::HRESULT,
+    pub RenameElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwcsoldname: ::windows::core::PCWSTR, pwcsnewname: ::windows::core::PCWSTR) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub SetElementTimes: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, pctime: *const super::super::super::Foundation::FILETIME, patime: *const super::super::super::Foundation::FILETIME, pmtime: *const super::super::super::Foundation::FILETIME) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    SetElementTimes: usize,
+    pub SetClass: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, clsid: *const ::windows::core::GUID) -> ::windows::core::HRESULT,
+    pub SetStateBits: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, grfstatebits: u32, grfmask: u32) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub Stat: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pstatstg: *mut super::STATSTG, grfstatflag: super::STATFLAG) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    Stat: usize,
+}
+
+pub trait IStorage_Impl: Sized {
+    fn CreateStream(&self, pwcsname: &::windows::core::PCWSTR, grfmode: super::STGM, reserved1: u32, reserved2: u32) -> ::windows::core::Result<super::IStream>;
+    fn OpenStream(&self, pwcsname: &::windows::core::PCWSTR, reserved1: *mut ::core::ffi::c_void, grfmode: super::STGM, reserved2: u32, ppstm: *mut ::core::option::Option<super::IStream>) -> ::windows::core::Result<()>;
+    fn CreateStorage(&self, pwcsname: &::windows::core::PCWSTR, grfmode: super::STGM, reserved1: u32, reserved2: u32) -> ::windows::core::Result<IStorage>;
+    fn OpenStorage(&self, pwcsname: &::windows::core::PCWSTR, pstgpriority: &::core::option::Option<IStorage>, grfmode: super::STGM, snbexclude: *const *const u16, reserved: u32) -> ::windows::core::Result<IStorage>;
+    fn CopyTo(&self, ciidexclude: u32, rgiidexclude: *const ::windows::core::GUID, snbexclude: *const *const u16, pstgdest: &::core::option::Option<IStorage>) -> ::windows::core::Result<()>;
+    fn MoveElementTo(&self, pwcsname: &::windows::core::PCWSTR, pstgdest: &::core::option::Option<IStorage>, pwcsnewname: &::windows::core::PCWSTR, grfflags: STGMOVE) -> ::windows::core::Result<()>;
+    fn Commit(&self, grfcommitflags: super::STGC) -> ::windows::core::Result<()>;
+    fn Revert(&self) -> ::windows::core::Result<()>;
+    fn EnumElements(&self, reserved1: u32, reserved2: *mut ::core::ffi::c_void, reserved3: u32, ppenum: *mut ::core::option::Option<IEnumSTATSTG>) -> ::windows::core::Result<()>;
+    fn DestroyElement(&self, pwcsname: &::windows::core::PCWSTR) -> ::windows::core::Result<()>;
+    fn RenameElement(&self, pwcsoldname: &::windows::core::PCWSTR, pwcsnewname: &::windows::core::PCWSTR) -> ::windows::core::Result<()>;
+    fn SetElementTimes(&self, pwcsname: &::windows::core::PCWSTR, pctime: *const super::super::super::Foundation::FILETIME, patime: *const super::super::super::Foundation::FILETIME, pmtime: *const super::super::super::Foundation::FILETIME) -> ::windows::core::Result<()>;
+    fn SetClass(&self, clsid: *const ::windows::core::GUID) -> ::windows::core::Result<()>;
+    fn SetStateBits(&self, grfstatebits: u32, grfmask: u32) -> ::windows::core::Result<()>;
+    fn Stat(&self, pstatstg: *mut super::STATSTG, grfstatflag: super::STATFLAG) -> ::windows::core::Result<()>;
+}
+
+impl IStorage_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>() -> IStorage_Vtbl {
+        unsafe extern "system" fn CreateStream<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, grfmode: super::STGM, reserved1: u32, reserved2: u32, ppstm: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.CreateStream(::core::mem::transmute(&pwcsname), ::core::mem::transmute_copy(&grfmode), ::core::mem::transmute_copy(&reserved1), ::core::mem::transmute_copy(&reserved2)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppstm, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn OpenStream<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, reserved1: *mut ::core::ffi::c_void, grfmode: super::STGM, reserved2: u32, ppstm: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OpenStream(::core::mem::transmute(&pwcsname), ::core::mem::transmute_copy(&reserved1), ::core::mem::transmute_copy(&grfmode), ::core::mem::transmute_copy(&reserved2), ::core::mem::transmute_copy(&ppstm)).into()
+        }
+        unsafe extern "system" fn CreateStorage<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, grfmode: super::STGM, reserved1: u32, reserved2: u32, ppstg: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.CreateStorage(::core::mem::transmute(&pwcsname), ::core::mem::transmute_copy(&grfmode), ::core::mem::transmute_copy(&reserved1), ::core::mem::transmute_copy(&reserved2)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppstg, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn OpenStorage<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, pstgpriority: *mut ::core::ffi::c_void, grfmode: super::STGM, snbexclude: *const *const u16, reserved: u32, ppstg: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.OpenStorage(::core::mem::transmute(&pwcsname), ::core::mem::transmute(&pstgpriority), ::core::mem::transmute_copy(&grfmode), ::core::mem::transmute_copy(&snbexclude), ::core::mem::transmute_copy(&reserved)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppstg, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn CopyTo<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ciidexclude: u32, rgiidexclude: *const ::windows::core::GUID, snbexclude: *const *const u16, pstgdest: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.CopyTo(::core::mem::transmute_copy(&ciidexclude), ::core::mem::transmute_copy(&rgiidexclude), ::core::mem::transmute_copy(&snbexclude), ::core::mem::transmute(&pstgdest)).into()
+        }
+        unsafe extern "system" fn MoveElementTo<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, pstgdest: *mut ::core::ffi::c_void, pwcsnewname: ::windows::core::PCWSTR, grfflags: STGMOVE) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.MoveElementTo(::core::mem::transmute(&pwcsname), ::core::mem::transmute(&pstgdest), ::core::mem::transmute(&pwcsnewname), ::core::mem::transmute_copy(&grfflags)).into()
+        }
+        unsafe extern "system" fn Commit<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, grfcommitflags: super::STGC) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Commit(::core::mem::transmute_copy(&grfcommitflags)).into()
+        }
+        unsafe extern "system" fn Revert<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Revert().into()
+        }
+        unsafe extern "system" fn EnumElements<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, reserved1: u32, reserved2: *mut ::core::ffi::c_void, reserved3: u32, ppenum: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.EnumElements(::core::mem::transmute_copy(&reserved1), ::core::mem::transmute_copy(&reserved2), ::core::mem::transmute_copy(&reserved3), ::core::mem::transmute_copy(&ppenum)).into()
+        }
+        unsafe extern "system" fn DestroyElement<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.DestroyElement(::core::mem::transmute(&pwcsname)).into()
+        }
+        unsafe extern "system" fn RenameElement<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwcsoldname: ::windows::core::PCWSTR, pwcsnewname: ::windows::core::PCWSTR) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RenameElement(::core::mem::transmute(&pwcsoldname), ::core::mem::transmute(&pwcsnewname)).into()
+        }
+        unsafe extern "system" fn SetElementTimes<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, pctime: *const super::super::super::Foundation::FILETIME, patime: *const super::super::super::Foundation::FILETIME, pmtime: *const super::super::super::Foundation::FILETIME) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetElementTimes(::core::mem::transmute(&pwcsname), ::core::mem::transmute_copy(&pctime), ::core::mem::transmute_copy(&patime), ::core::mem::transmute_copy(&pmtime)).into()
+        }
+        unsafe extern "system" fn SetClass<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, clsid: *const ::windows::core::GUID) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetClass(::core::mem::transmute_copy(&clsid)).into()
+        }
+        unsafe extern "system" fn SetStateBits<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, grfstatebits: u32, grfmask: u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetStateBits(::core::mem::transmute_copy(&grfstatebits), ::core::mem::transmute_copy(&grfmask)).into()
+        }
+        unsafe extern "system" fn Stat<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pstatstg: *mut super::STATSTG, grfstatflag: super::STATFLAG) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Stat(::core::mem::transmute_copy(&pstatstg), ::core::mem::transmute_copy(&grfstatflag)).into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            CreateStream: CreateStream::<Identity, Impl, OFFSET>,
+            OpenStream: OpenStream::<Identity, Impl, OFFSET>,
+            CreateStorage: CreateStorage::<Identity, Impl, OFFSET>,
+            OpenStorage: OpenStorage::<Identity, Impl, OFFSET>,
+            CopyTo: CopyTo::<Identity, Impl, OFFSET>,
+            MoveElementTo: MoveElementTo::<Identity, Impl, OFFSET>,
+            Commit: Commit::<Identity, Impl, OFFSET>,
+            Revert: Revert::<Identity, Impl, OFFSET>,
+            EnumElements: EnumElements::<Identity, Impl, OFFSET>,
+            DestroyElement: DestroyElement::<Identity, Impl, OFFSET>,
+            RenameElement: RenameElement::<Identity, Impl, OFFSET>,
+            SetElementTimes: SetElementTimes::<Identity, Impl, OFFSET>,
+            SetClass: SetClass::<Identity, Impl, OFFSET>,
+            SetStateBits: SetStateBits::<Identity, Impl, OFFSET>,
+            Stat: Stat::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IStorage as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(C)]
+pub struct CLIPDATA {
+    pub cbSize: u32,
+    pub ulClipFmt: i32,
+    pub pClipData: *mut u8,
+}
+impl ::core::marker::Copy for CLIPDATA {}
+impl ::core::cmp::Eq for CLIPDATA {}
+impl ::core::cmp::PartialEq for CLIPDATA {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<CLIPDATA>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for CLIPDATA {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CLIPDATA {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CLIPDATA {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CLIPDATA {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CLIPDATA").field("cbSize", &self.cbSize).field("ulClipFmt", &self.ulClipFmt).field("pClipData", &self.pClipData).finish()
+    }
+}
+
+#[repr(C)]
+pub struct BSTRBLOB {
+    pub cbSize: u32,
+    pub pData: *mut u8,
+}
+impl ::core::marker::Copy for BSTRBLOB {}
+impl ::core::cmp::Eq for BSTRBLOB {}
+impl ::core::cmp::PartialEq for BSTRBLOB {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<BSTRBLOB>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for BSTRBLOB {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for BSTRBLOB {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for BSTRBLOB {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for BSTRBLOB {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("BSTRBLOB").field("cbSize", &self.cbSize).field("pData", &self.pData).finish()
+    }
+}
+
+#[repr(C)]
+pub struct PROPVARIANT {
+    pub Anonymous: PROPVARIANT_0,
+}
+impl ::core::cmp::Eq for PROPVARIANT {}
+impl ::core::cmp::PartialEq for PROPVARIANT {
+    fn eq(&self, other: &Self) -> bool {
+        self.Anonymous == other.Anonymous
+    }
+}
+impl ::core::clone::Clone for PROPVARIANT {
+    fn clone(&self) -> Self {
+        Self { Anonymous: self.Anonymous.clone() }
+    }
+}
+impl ::core::default::Default for PROPVARIANT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for PROPVARIANT {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+#[repr(C)]pub union PROPVARIANT_0 {
+    pub Anonymous: ::core::mem::ManuallyDrop<PROPVARIANT_0_0>,
+    pub decVal: super::super::super::Foundation::DECIMAL,
+}
+impl ::core::cmp::Eq for PROPVARIANT_0 {}
+impl ::core::cmp::PartialEq for PROPVARIANT_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<PROPVARIANT_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for PROPVARIANT_0 {
+    fn clone(&self) -> Self {
+        unsafe { ::core::mem::transmute_copy(self) }
+    }
+}
+impl ::core::default::Default for PROPVARIANT_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for PROPVARIANT_0 {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+#[repr(C)]
+pub struct PROPVARIANT_0_0 {
+    pub vt: super::VARENUM,
+    pub wReserved1: u16,
+    pub wReserved2: u16,
+    pub wReserved3: u16,
+    pub Anonymous: PROPVARIANT_0_0_0,
+}
+impl ::core::cmp::Eq for PROPVARIANT_0_0 {}
+impl ::core::cmp::PartialEq for PROPVARIANT_0_0 {
+    fn eq(&self, other: &Self) -> bool {
+        self.vt == other.vt && self.wReserved1 == other.wReserved1 && self.wReserved2 == other.wReserved2 && self.wReserved3 == other.wReserved3 && self.Anonymous == other.Anonymous
+    }
+}
+impl ::core::clone::Clone for PROPVARIANT_0_0 {
+    fn clone(&self) -> Self {
+        Self { vt: self.vt, wReserved1: self.wReserved1, wReserved2: self.wReserved2, wReserved3: self.wReserved3, Anonymous: self.Anonymous.clone() }
+    }
+}
+impl ::core::default::Default for PROPVARIANT_0_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for PROPVARIANT_0_0 {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+#[repr(C)]pub union PROPVARIANT_0_0_0 {
+    pub cVal: super::super::super::Foundation::CHAR,
+    pub bVal: u8,
+    pub iVal: i16,
+    pub uiVal: u16,
+    pub lVal: i32,
+    pub ulVal: u32,
+    pub intVal: i32,
+    pub uintVal: u32,
+    pub hVal: i64,
+    pub uhVal: u64,
+    pub fltVal: f32,
+    pub dblVal: f64,
+    pub boolVal: i16,
+    pub __OBSOLETE__VARIANT_BOOL: i16,
+    pub scode: i32,
+    pub cyVal: super::CY,
+    pub date: f64,
+    pub filetime: super::super::super::Foundation::FILETIME,
+    pub puuid: *mut ::windows::core::GUID,
+    pub pclipdata: *mut CLIPDATA,
+    pub bstrVal: ::core::mem::ManuallyDrop<::windows::core::BSTR>,
+    pub bstrblobVal: BSTRBLOB,
+    pub blob: super::BLOB,
+    pub pszVal: ::windows::core::PSTR,
+    pub pwszVal: ::windows::core::PWSTR,
+    pub punkVal: ::core::mem::ManuallyDrop<::core::option::Option<::windows::core::IUnknown>>,
+    pub pdispVal: ::core::mem::ManuallyDrop<::core::option::Option<super::IDispatch>>,
+    pub pStream: ::core::mem::ManuallyDrop<::core::option::Option<super::IStream>>,
+    pub pStorage: ::core::mem::ManuallyDrop<::core::option::Option<IStorage>>,
+    pub pVersionedStream: *mut VERSIONEDSTREAM,
+    pub parray: *mut super::SAFEARRAY,
+    pub cac: CAC,
+    pub caub: CAUB,
+    pub cai: CAI,
+    pub caui: CAUI,
+    pub cal: CAL,
+    pub caul: CAUL,
+    pub cah: CAH,
+    pub cauh: CAUH,
+    pub caflt: CAFLT,
+    pub cadbl: CADBL,
+    pub cabool: CABOOL,
+    pub cascode: CASCODE,
+    pub cacy: CACY,
+    pub cadate: CADATE,
+    pub cafiletime: CAFILETIME,
+    pub cauuid: CACLSID,
+    pub caclipdata: CACLIPDATA,
+    pub cabstr: CABSTR,
+    pub cabstrblob: CABSTRBLOB,
+    pub calpstr: CALPSTR,
+    pub calpwstr: CALPWSTR,
+    pub capropvar: CAPROPVARIANT,
+    pub pcVal: ::windows::core::PSTR,
+    pub pbVal: *mut u8,
+    pub piVal: *mut i16,
+    pub puiVal: *mut u16,
+    pub plVal: *mut i32,
+    pub pulVal: *mut u32,
+    pub pintVal: *mut i32,
+    pub puintVal: *mut u32,
+    pub pfltVal: *mut f32,
+    pub pdblVal: *mut f64,
+    pub pboolVal: *mut i16,
+    pub pdecVal: *mut super::super::super::Foundation::DECIMAL,
+    pub pscode: *mut i32,
+    pub pcyVal: *mut super::CY,
+    pub pdate: *mut f64,
+    pub pbstrVal: *mut ::windows::core::BSTR,
+    pub ppunkVal: *mut ::core::option::Option<::windows::core::IUnknown>,
+    pub ppdispVal: *mut ::core::option::Option<super::IDispatch>,
+    pub pparray: *mut *mut super::SAFEARRAY,
+    pub pvarVal: *mut PROPVARIANT,
+}
+impl ::core::cmp::Eq for PROPVARIANT_0_0_0 {}
+impl ::core::cmp::PartialEq for PROPVARIANT_0_0_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<PROPVARIANT_0_0_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for PROPVARIANT_0_0_0 {
+    fn clone(&self) -> Self {
+        unsafe { ::core::mem::transmute_copy(self) }
+    }
+}
+impl ::core::default::Default for PROPVARIANT_0_0_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for PROPVARIANT_0_0_0 {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct STGMOVE(pub i32);
+impl ::core::marker::Copy for STGMOVE {}
+impl ::core::clone::Clone for STGMOVE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for STGMOVE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for STGMOVE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for STGMOVE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("STGMOVE").field(&self.0).finish()
+    }
+}
+
+}
+}
+pub mod Ole{
+#[repr(transparent)]
+pub struct IRecordInfo(::windows::core::IUnknown);
+impl IRecordInfo {
+    pub unsafe fn RecordInit(&self, pvnew: *mut ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).RecordInit)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvnew)).ok()
+    }
+    pub unsafe fn RecordClear(&self, pvexisting: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).RecordClear)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvexisting)).ok()
+    }
+    pub unsafe fn RecordCopy(&self, pvexisting: *const ::core::ffi::c_void, pvnew: *mut ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).RecordCopy)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvexisting), ::core::mem::transmute(pvnew)).ok()
+    }
+    pub unsafe fn GetGuid(&self) -> ::windows::core::Result<::windows::core::GUID> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetGuid)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<::windows::core::GUID>(result__)
+    }
+    pub unsafe fn GetName(&self) -> ::windows::core::Result<::windows::core::BSTR> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetName)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<::windows::core::BSTR>(result__)
+    }
+    pub unsafe fn GetSize(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetSize)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_System_Com\"`*"]
+    #[cfg(feature = "Win32_System_Com")]
+    pub unsafe fn GetTypeInfo(&self) -> ::windows::core::Result<super::Com::ITypeInfo> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetTypeInfo)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::Com::ITypeInfo>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com"))]
+    pub unsafe fn GetField<'a, P0>(&self, pvdata: *const ::core::ffi::c_void, szfieldname: P0) -> ::windows::core::Result<super::Com::VARIANT>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetField)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvdata), szfieldname.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::Com::VARIANT>(result__)
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com"))]
+    pub unsafe fn GetFieldNoCopy<'a, P0>(&self, pvdata: *const ::core::ffi::c_void, szfieldname: P0, pvarfield: *mut super::Com::VARIANT, ppvdatacarray: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).GetFieldNoCopy)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvdata), szfieldname.into(), ::core::mem::transmute(pvarfield), ::core::mem::transmute(ppvdatacarray)).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com"))]
+    pub unsafe fn PutField<'a, P0>(&self, wflags: super::Com::INVOKEKIND, pvdata: *mut ::core::ffi::c_void, szfieldname: P0, pvarfield: *const super::Com::VARIANT) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).PutField)(::windows::core::Vtable::as_raw(self), wflags, ::core::mem::transmute(pvdata), szfieldname.into(), ::core::mem::transmute(pvarfield)).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com"))]
+    pub unsafe fn PutFieldNoCopy<'a, P0>(&self, wflags: super::Com::INVOKEKIND, pvdata: *mut ::core::ffi::c_void, szfieldname: P0, pvarfield: *const super::Com::VARIANT) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).PutFieldNoCopy)(::windows::core::Vtable::as_raw(self), wflags, ::core::mem::transmute(pvdata), szfieldname.into(), ::core::mem::transmute(pvarfield)).ok()
+    }
+    pub unsafe fn GetFieldNames(&self, pcnames: *mut u32, rgbstrnames: *mut ::windows::core::BSTR) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetFieldNames)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pcnames), ::core::mem::transmute(rgbstrnames)).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn IsMatchingType<'a, P0>(&self, precordinfo: P0) -> super::super::Foundation::BOOL
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, IRecordInfo>>,
+    {
+        (::windows::core::Vtable::vtable(self).IsMatchingType)(::windows::core::Vtable::as_raw(self), precordinfo.into().abi())
+    }
+    pub unsafe fn RecordCreate(&self) -> *mut ::core::ffi::c_void {
+        (::windows::core::Vtable::vtable(self).RecordCreate)(::windows::core::Vtable::as_raw(self))
+    }
+    pub unsafe fn RecordCreateCopy(&self, pvsource: *const ::core::ffi::c_void, ppvdest: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).RecordCreateCopy)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvsource), ::core::mem::transmute(ppvdest)).ok()
+    }
+    pub unsafe fn RecordDestroy(&self, pvrecord: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).RecordDestroy)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvrecord)).ok()
+    }
+}
+impl ::core::cmp::Eq for IRecordInfo {}
+impl ::core::cmp::PartialEq for IRecordInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IRecordInfo {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IRecordInfo {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IRecordInfo").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IRecordInfo {
+    type Vtable = IRecordInfo_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IRecordInfo {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x0000002f_0000_0000_c000_000000000046);
+}
+
+::windows::core::interface_hierarchy!(IRecordInfo, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IRecordInfo_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub RecordInit: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pvnew: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub RecordClear: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pvexisting: *const ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub RecordCopy: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pvexisting: *const ::core::ffi::c_void, pvnew: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub GetGuid: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pguid: *mut ::windows::core::GUID) -> ::windows::core::HRESULT,
+    pub GetName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbstrname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT,
+    pub GetSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcbsize: *mut u32) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_System_Com")]
+    pub GetTypeInfo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pptypeinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_System_Com"))]
+    GetTypeInfo: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com"))]
+    pub GetField: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pvdata: *const ::core::ffi::c_void, szfieldname: ::windows::core::PCWSTR, pvarfield: *mut ::core::mem::ManuallyDrop<super::Com::VARIANT>) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com")))]
+    GetField: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com"))]
+    pub GetFieldNoCopy: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pvdata: *const ::core::ffi::c_void, szfieldname: ::windows::core::PCWSTR, pvarfield: *mut ::core::mem::ManuallyDrop<super::Com::VARIANT>, ppvdatacarray: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com")))]
+    GetFieldNoCopy: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com"))]
+    pub PutField: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, wflags: super::Com::INVOKEKIND, pvdata: *mut ::core::ffi::c_void, szfieldname: ::windows::core::PCWSTR, pvarfield: *const ::core::mem::ManuallyDrop<super::Com::VARIANT>) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com")))]
+    PutField: usize,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com"))]
+    pub PutFieldNoCopy: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, wflags: super::Com::INVOKEKIND, pvdata: *mut ::core::ffi::c_void, szfieldname: ::windows::core::PCWSTR, pvarfield: *const ::core::mem::ManuallyDrop<super::Com::VARIANT>) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com")))]
+    PutFieldNoCopy: usize,
+    pub GetFieldNames: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcnames: *mut u32, rgbstrnames: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub IsMatchingType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, precordinfo: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    IsMatchingType: usize,
+    pub RecordCreate: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> *mut ::core::ffi::c_void,
+    pub RecordCreateCopy: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pvsource: *const ::core::ffi::c_void, ppvdest: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub RecordDestroy: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pvrecord: *const ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait IRecordInfo_Impl: Sized {
+    fn RecordInit(&self, pvnew: *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn RecordClear(&self, pvexisting: *const ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn RecordCopy(&self, pvexisting: *const ::core::ffi::c_void, pvnew: *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn GetGuid(&self) -> ::windows::core::Result<::windows::core::GUID>;
+    fn GetName(&self) -> ::windows::core::Result<::windows::core::BSTR>;
+    fn GetSize(&self) -> ::windows::core::Result<u32>;
+    fn GetTypeInfo(&self) -> ::windows::core::Result<super::Com::ITypeInfo>;
+    fn GetField(&self, pvdata: *const ::core::ffi::c_void, szfieldname: &::windows::core::PCWSTR) -> ::windows::core::Result<super::Com::VARIANT>;
+    fn GetFieldNoCopy(&self, pvdata: *const ::core::ffi::c_void, szfieldname: &::windows::core::PCWSTR, pvarfield: *mut super::Com::VARIANT, ppvdatacarray: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn PutField(&self, wflags: super::Com::INVOKEKIND, pvdata: *mut ::core::ffi::c_void, szfieldname: &::windows::core::PCWSTR, pvarfield: *const super::Com::VARIANT) -> ::windows::core::Result<()>;
+    fn PutFieldNoCopy(&self, wflags: super::Com::INVOKEKIND, pvdata: *mut ::core::ffi::c_void, szfieldname: &::windows::core::PCWSTR, pvarfield: *const super::Com::VARIANT) -> ::windows::core::Result<()>;
+    fn GetFieldNames(&self, pcnames: *mut u32, rgbstrnames: *mut ::windows::core::BSTR) -> ::windows::core::Result<()>;
+    fn IsMatchingType(&self, precordinfo: &::core::option::Option<IRecordInfo>) -> super::super::Foundation::BOOL;
+    fn RecordCreate(&self) -> *mut ::core::ffi::c_void;
+    fn RecordCreateCopy(&self, pvsource: *const ::core::ffi::c_void, ppvdest: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn RecordDestroy(&self, pvrecord: *const ::core::ffi::c_void) -> ::windows::core::Result<()>;
+}
+
+impl IRecordInfo_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>() -> IRecordInfo_Vtbl {
+        unsafe extern "system" fn RecordInit<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pvnew: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RecordInit(::core::mem::transmute_copy(&pvnew)).into()
+        }
+        unsafe extern "system" fn RecordClear<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pvexisting: *const ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RecordClear(::core::mem::transmute_copy(&pvexisting)).into()
+        }
+        unsafe extern "system" fn RecordCopy<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pvexisting: *const ::core::ffi::c_void, pvnew: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RecordCopy(::core::mem::transmute_copy(&pvexisting), ::core::mem::transmute_copy(&pvnew)).into()
+        }
+        unsafe extern "system" fn GetGuid<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pguid: *mut ::windows::core::GUID) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetGuid() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pguid, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetName<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbstrname: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetName() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pbstrname, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetSize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcbsize: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetSize() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pcbsize, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetTypeInfo<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pptypeinfo: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetTypeInfo() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pptypeinfo, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetField<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pvdata: *const ::core::ffi::c_void, szfieldname: ::windows::core::PCWSTR, pvarfield: *mut ::core::mem::ManuallyDrop<super::Com::VARIANT>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetField(::core::mem::transmute_copy(&pvdata), ::core::mem::transmute(&szfieldname)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pvarfield, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetFieldNoCopy<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pvdata: *const ::core::ffi::c_void, szfieldname: ::windows::core::PCWSTR, pvarfield: *mut ::core::mem::ManuallyDrop<super::Com::VARIANT>, ppvdatacarray: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetFieldNoCopy(::core::mem::transmute_copy(&pvdata), ::core::mem::transmute(&szfieldname), ::core::mem::transmute_copy(&pvarfield), ::core::mem::transmute_copy(&ppvdatacarray)).into()
+        }
+        unsafe extern "system" fn PutField<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, wflags: super::Com::INVOKEKIND, pvdata: *mut ::core::ffi::c_void, szfieldname: ::windows::core::PCWSTR, pvarfield: *const ::core::mem::ManuallyDrop<super::Com::VARIANT>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.PutField(::core::mem::transmute_copy(&wflags), ::core::mem::transmute_copy(&pvdata), ::core::mem::transmute(&szfieldname), ::core::mem::transmute_copy(&pvarfield)).into()
+        }
+        unsafe extern "system" fn PutFieldNoCopy<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, wflags: super::Com::INVOKEKIND, pvdata: *mut ::core::ffi::c_void, szfieldname: ::windows::core::PCWSTR, pvarfield: *const ::core::mem::ManuallyDrop<super::Com::VARIANT>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.PutFieldNoCopy(::core::mem::transmute_copy(&wflags), ::core::mem::transmute_copy(&pvdata), ::core::mem::transmute(&szfieldname), ::core::mem::transmute_copy(&pvarfield)).into()
+        }
+        unsafe extern "system" fn GetFieldNames<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcnames: *mut u32, rgbstrnames: *mut ::core::mem::ManuallyDrop<::windows::core::BSTR>) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetFieldNames(::core::mem::transmute_copy(&pcnames), ::core::mem::transmute_copy(&rgbstrnames)).into()
+        }
+        unsafe extern "system" fn IsMatchingType<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, precordinfo: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.IsMatchingType(::core::mem::transmute(&precordinfo))
+        }
+        unsafe extern "system" fn RecordCreate<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> *mut ::core::ffi::c_void {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RecordCreate()
+        }
+        unsafe extern "system" fn RecordCreateCopy<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pvsource: *const ::core::ffi::c_void, ppvdest: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RecordCreateCopy(::core::mem::transmute_copy(&pvsource), ::core::mem::transmute_copy(&ppvdest)).into()
+        }
+        unsafe extern "system" fn RecordDestroy<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pvrecord: *const ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RecordDestroy(::core::mem::transmute_copy(&pvrecord)).into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            RecordInit: RecordInit::<Identity, Impl, OFFSET>,
+            RecordClear: RecordClear::<Identity, Impl, OFFSET>,
+            RecordCopy: RecordCopy::<Identity, Impl, OFFSET>,
+            GetGuid: GetGuid::<Identity, Impl, OFFSET>,
+            GetName: GetName::<Identity, Impl, OFFSET>,
+            GetSize: GetSize::<Identity, Impl, OFFSET>,
+            GetTypeInfo: GetTypeInfo::<Identity, Impl, OFFSET>,
+            GetField: GetField::<Identity, Impl, OFFSET>,
+            GetFieldNoCopy: GetFieldNoCopy::<Identity, Impl, OFFSET>,
+            PutField: PutField::<Identity, Impl, OFFSET>,
+            PutFieldNoCopy: PutFieldNoCopy::<Identity, Impl, OFFSET>,
+            GetFieldNames: GetFieldNames::<Identity, Impl, OFFSET>,
+            IsMatchingType: IsMatchingType::<Identity, Impl, OFFSET>,
+            RecordCreate: RecordCreate::<Identity, Impl, OFFSET>,
+            RecordCreateCopy: RecordCreateCopy::<Identity, Impl, OFFSET>,
+            RecordDestroy: RecordDestroy::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IRecordInfo as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(C)]
+pub struct PARAMDESCEX {
+    pub cBytes: u32,
+    pub varDefaultValue: super::Com::VARIANT,
+}
+impl ::core::cmp::Eq for PARAMDESCEX {}
+impl ::core::cmp::PartialEq for PARAMDESCEX {
+    fn eq(&self, other: &Self) -> bool {
+        self.cBytes == other.cBytes && self.varDefaultValue == other.varDefaultValue
+    }
+}
+impl ::core::clone::Clone for PARAMDESCEX {
+    fn clone(&self) -> Self {
+        Self { cBytes: self.cBytes, varDefaultValue: self.varDefaultValue.clone() }
+    }
+}
+impl ::core::default::Default for PARAMDESCEX {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for PARAMDESCEX {
+    type Abi = ::core::mem::ManuallyDrop<Self>;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct PARAMFLAGS(pub u16);
+impl ::core::marker::Copy for PARAMFLAGS {}
+impl ::core::clone::Clone for PARAMFLAGS {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for PARAMFLAGS {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for PARAMFLAGS {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for PARAMFLAGS {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("PARAMFLAGS").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for PARAMFLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for PARAMFLAGS { 
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for PARAMFLAGS {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for PARAMFLAGS {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for PARAMFLAGS {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
+}
+
+#[repr(C)]
+pub struct ARRAYDESC {
+    pub tdescElem: super::Com::TYPEDESC,
+    pub cDims: u16,
+    pub rgbounds: [super::Com::SAFEARRAYBOUND; 1],
+}
+impl ::core::marker::Copy for ARRAYDESC {}
+impl ::core::cmp::Eq for ARRAYDESC {}
+impl ::core::cmp::PartialEq for ARRAYDESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<ARRAYDESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for ARRAYDESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for ARRAYDESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for ARRAYDESC {
+    type Abi = Self;
+}
+
+#[repr(C)]
+pub struct PARAMDESC {
+    pub pparamdescex: *mut PARAMDESCEX,
+    pub wParamFlags: PARAMFLAGS,
+}
+impl ::core::marker::Copy for PARAMDESC {}
+impl ::core::cmp::Eq for PARAMDESC {}
+impl ::core::cmp::PartialEq for PARAMDESC {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<PARAMDESC>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for PARAMDESC {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for PARAMDESC {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for PARAMDESC {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for PARAMDESC {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("PARAMDESC").field("pparamdescex", &self.pparamdescex).field("wParamFlags", &self.wParamFlags).finish()
+    }
+}
+
+}
+}
+pub mod Media{
+pub mod Audio{
+pub const MMDeviceEnumerator: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xbcde0395_e52f_467c_8e3d_c4579291692e);
+
+#[repr(transparent)]
+pub struct IMMDeviceEnumerator(::windows::core::IUnknown);
+impl IMMDeviceEnumerator {
+    pub unsafe fn EnumAudioEndpoints(&self, dataflow: EDataFlow, dwstatemask: u32) -> ::windows::core::Result<IMMDeviceCollection> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).EnumAudioEndpoints)(::windows::core::Vtable::as_raw(self), dataflow, dwstatemask, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IMMDeviceCollection>(result__)
+    }
+    pub unsafe fn GetDefaultAudioEndpoint(&self, dataflow: EDataFlow, role: ERole) -> ::windows::core::Result<IMMDevice> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetDefaultAudioEndpoint)(::windows::core::Vtable::as_raw(self), dataflow, role, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IMMDevice>(result__)
+    }
+    pub unsafe fn GetDevice<'a, P0>(&self, pwstrid: P0) -> ::windows::core::Result<IMMDevice>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetDevice)(::windows::core::Vtable::as_raw(self), pwstrid.into(), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IMMDevice>(result__)
+    }
+    pub unsafe fn RegisterEndpointNotificationCallback<'a, P0>(&self, pclient: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, IMMNotificationClient>>,
+    {
+        (::windows::core::Vtable::vtable(self).RegisterEndpointNotificationCallback)(::windows::core::Vtable::as_raw(self), pclient.into().abi()).ok()
+    }
+    pub unsafe fn UnregisterEndpointNotificationCallback<'a, P0>(&self, pclient: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::InParam<'a, IMMNotificationClient>>,
+    {
+        (::windows::core::Vtable::vtable(self).UnregisterEndpointNotificationCallback)(::windows::core::Vtable::as_raw(self), pclient.into().abi()).ok()
+    }
+}
+impl ::core::cmp::Eq for IMMDeviceEnumerator {}
+impl ::core::cmp::PartialEq for IMMDeviceEnumerator {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IMMDeviceEnumerator {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IMMDeviceEnumerator {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IMMDeviceEnumerator").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IMMDeviceEnumerator {
+    type Vtable = IMMDeviceEnumerator_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IMMDeviceEnumerator {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xa95664d2_9614_4f35_a746_de8db63617e6);
+}
+
+::windows::core::interface_hierarchy!(IMMDeviceEnumerator, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IMMDeviceEnumerator_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub EnumAudioEndpoints: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dataflow: EDataFlow, dwstatemask: u32, ppdevices: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub GetDefaultAudioEndpoint: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, dataflow: EDataFlow, role: ERole, ppendpoint: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub GetDevice: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwstrid: ::windows::core::PCWSTR, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub RegisterEndpointNotificationCallback: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pclient: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub UnregisterEndpointNotificationCallback: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pclient: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait IMMDeviceEnumerator_Impl: Sized {
+    fn EnumAudioEndpoints(&self, dataflow: EDataFlow, dwstatemask: u32) -> ::windows::core::Result<IMMDeviceCollection>;
+    fn GetDefaultAudioEndpoint(&self, dataflow: EDataFlow, role: ERole) -> ::windows::core::Result<IMMDevice>;
+    fn GetDevice(&self, pwstrid: &::windows::core::PCWSTR) -> ::windows::core::Result<IMMDevice>;
+    fn RegisterEndpointNotificationCallback(&self, pclient: &::core::option::Option<IMMNotificationClient>) -> ::windows::core::Result<()>;
+    fn UnregisterEndpointNotificationCallback(&self, pclient: &::core::option::Option<IMMNotificationClient>) -> ::windows::core::Result<()>;
+}
+
+impl IMMDeviceEnumerator_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceEnumerator_Impl, const OFFSET: isize>() -> IMMDeviceEnumerator_Vtbl {
+        unsafe extern "system" fn EnumAudioEndpoints<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceEnumerator_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dataflow: EDataFlow, dwstatemask: u32, ppdevices: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.EnumAudioEndpoints(::core::mem::transmute_copy(&dataflow), ::core::mem::transmute_copy(&dwstatemask)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppdevices, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetDefaultAudioEndpoint<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceEnumerator_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dataflow: EDataFlow, role: ERole, ppendpoint: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetDefaultAudioEndpoint(::core::mem::transmute_copy(&dataflow), ::core::mem::transmute_copy(&role)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppendpoint, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetDevice<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceEnumerator_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwstrid: ::windows::core::PCWSTR, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetDevice(::core::mem::transmute(&pwstrid)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppdevice, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn RegisterEndpointNotificationCallback<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceEnumerator_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pclient: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.RegisterEndpointNotificationCallback(::core::mem::transmute(&pclient)).into()
+        }
+        unsafe extern "system" fn UnregisterEndpointNotificationCallback<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceEnumerator_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pclient: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.UnregisterEndpointNotificationCallback(::core::mem::transmute(&pclient)).into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            EnumAudioEndpoints: EnumAudioEndpoints::<Identity, Impl, OFFSET>,
+            GetDefaultAudioEndpoint: GetDefaultAudioEndpoint::<Identity, Impl, OFFSET>,
+            GetDevice: GetDevice::<Identity, Impl, OFFSET>,
+            RegisterEndpointNotificationCallback: RegisterEndpointNotificationCallback::<Identity, Impl, OFFSET>,
+            UnregisterEndpointNotificationCallback: UnregisterEndpointNotificationCallback::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IMMDeviceEnumerator as ::windows::core::Interface>::IID
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct EDataFlow(pub i32);
+impl ::core::marker::Copy for EDataFlow {}
+impl ::core::clone::Clone for EDataFlow {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for EDataFlow {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for EDataFlow {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for EDataFlow {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("EDataFlow").field(&self.0).finish()
+    }
+}
+
+#[repr(transparent)]
+pub struct IMMDeviceCollection(::windows::core::IUnknown);
+impl IMMDeviceCollection {
+    pub unsafe fn GetCount(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetCount)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    pub unsafe fn Item(&self, ndevice: u32) -> ::windows::core::Result<IMMDevice> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).Item)(::windows::core::Vtable::as_raw(self), ndevice, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IMMDevice>(result__)
+    }
+}
+impl ::core::cmp::Eq for IMMDeviceCollection {}
+impl ::core::cmp::PartialEq for IMMDeviceCollection {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IMMDeviceCollection {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IMMDeviceCollection {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IMMDeviceCollection").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IMMDeviceCollection {
+    type Vtable = IMMDeviceCollection_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IMMDeviceCollection {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x0bd7a1be_7a1a_44db_8397_cc5392387b5e);
+}
+
+::windows::core::interface_hierarchy!(IMMDeviceCollection, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IMMDeviceCollection_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub GetCount: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcdevices: *mut u32) -> ::windows::core::HRESULT,
+    pub Item: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ndevice: u32, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait IMMDeviceCollection_Impl: Sized {
+    fn GetCount(&self) -> ::windows::core::Result<u32>;
+    fn Item(&self, ndevice: u32) -> ::windows::core::Result<IMMDevice>;
+}
+
+impl IMMDeviceCollection_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>() -> IMMDeviceCollection_Vtbl {
+        unsafe extern "system" fn GetCount<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcdevices: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetCount() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pcdevices, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn Item<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ndevice: u32, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Item(::core::mem::transmute_copy(&ndevice)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppdevice, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetCount: GetCount::<Identity, Impl, OFFSET>,
+            Item: Item::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IMMDeviceCollection as ::windows::core::Interface>::IID
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct ERole(pub i32);
+impl ::core::marker::Copy for ERole {}
+impl ::core::clone::Clone for ERole {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for ERole {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for ERole {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for ERole {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ERole").field(&self.0).finish()
+    }
+}
+
+#[repr(transparent)]
+pub struct IMMDevice(::windows::core::IUnknown);
+impl IMMDevice {
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
+    pub unsafe fn Activate<T>(&self, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: ::core::option::Option<*const super::super::System::Com::StructuredStorage::PROPVARIANT>) -> ::windows::core::Result<T>
+    where
+        T: ::windows::core::Interface,
+    {
+        let mut result__ = ::core::option::Option::None;
+        (::windows::core::Vtable::vtable(self).Activate)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, dwclsctx, ::core::mem::transmute(pactivationparams.unwrap_or(::std::ptr::null())), &mut result__ as *mut _ as *mut _).and_some(result__)
+    }
+    #[doc = "*Required features: `\"Win32_System_Com\"`, `\"Win32_UI_Shell_PropertiesSystem\"`*"]
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_UI_Shell_PropertiesSystem"))]
+    pub unsafe fn OpenPropertyStore(&self, stgmaccess: super::super::System::Com::STGM) -> ::windows::core::Result<super::super::UI::Shell::PropertiesSystem::IPropertyStore> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).OpenPropertyStore)(::windows::core::Vtable::as_raw(self), stgmaccess, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::UI::Shell::PropertiesSystem::IPropertyStore>(result__)
+    }
+    pub unsafe fn GetId(&self) -> ::windows::core::Result<::windows::core::PWSTR> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetId)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<::windows::core::PWSTR>(result__)
+    }
+    pub unsafe fn GetState(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetState)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+}
+impl ::core::cmp::Eq for IMMDevice {}
+impl ::core::cmp::PartialEq for IMMDevice {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IMMDevice {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IMMDevice {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IMMDevice").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IMMDevice {
+    type Vtable = IMMDevice_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IMMDevice {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xd666063f_1587_4e43_81f1_b948e807363f);
+}
+
+::windows::core::interface_hierarchy!(IMMDevice, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IMMDevice_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
+    pub Activate: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, iid: *const ::windows::core::GUID, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: *const ::core::mem::ManuallyDrop<super::super::System::Com::StructuredStorage::PROPVARIANT>, ppinterface: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage")))]
+    Activate: usize,
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_UI_Shell_PropertiesSystem"))]
+    pub OpenPropertyStore: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, stgmaccess: super::super::System::Com::STGM, ppproperties: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_UI_Shell_PropertiesSystem")))]
+    OpenPropertyStore: usize,
+    pub GetId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppstrid: *mut ::windows::core::PWSTR) -> ::windows::core::HRESULT,
+    pub GetState: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdwstate: *mut u32) -> ::windows::core::HRESULT,
+}
+
+pub trait IMMDevice_Impl: Sized {
+    fn Activate(&self, iid: *const ::windows::core::GUID, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: *const super::super::System::Com::StructuredStorage::PROPVARIANT, ppinterface: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn OpenPropertyStore(&self, stgmaccess: super::super::System::Com::STGM) -> ::windows::core::Result<super::super::UI::Shell::PropertiesSystem::IPropertyStore>;
+    fn GetId(&self) -> ::windows::core::Result<::windows::core::PWSTR>;
+    fn GetState(&self) -> ::windows::core::Result<u32>;
+}
+
+impl IMMDevice_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>() -> IMMDevice_Vtbl {
+        unsafe extern "system" fn Activate<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, iid: *const ::windows::core::GUID, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: *const ::core::mem::ManuallyDrop<super::super::System::Com::StructuredStorage::PROPVARIANT>, ppinterface: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Activate(::core::mem::transmute_copy(&iid), ::core::mem::transmute_copy(&dwclsctx), ::core::mem::transmute_copy(&pactivationparams), ::core::mem::transmute_copy(&ppinterface)).into()
+        }
+        unsafe extern "system" fn OpenPropertyStore<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, stgmaccess: super::super::System::Com::STGM, ppproperties: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.OpenPropertyStore(::core::mem::transmute_copy(&stgmaccess)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppproperties, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetId<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppstrid: *mut ::windows::core::PWSTR) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetId() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppstrid, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetState<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdwstate: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetState() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwstate, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Activate: Activate::<Identity, Impl, OFFSET>,
+            OpenPropertyStore: OpenPropertyStore::<Identity, Impl, OFFSET>,
+            GetId: GetId::<Identity, Impl, OFFSET>,
+            GetState: GetState::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IMMDevice as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]
+pub struct IMMNotificationClient(::windows::core::IUnknown);
+impl IMMNotificationClient {
+    pub unsafe fn OnDeviceStateChanged<'a, P0>(&self, pwstrdeviceid: P0, dwnewstate: u32) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).OnDeviceStateChanged)(::windows::core::Vtable::as_raw(self), pwstrdeviceid.into(), dwnewstate).ok()
+    }
+    pub unsafe fn OnDeviceAdded<'a, P0>(&self, pwstrdeviceid: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).OnDeviceAdded)(::windows::core::Vtable::as_raw(self), pwstrdeviceid.into()).ok()
+    }
+    pub unsafe fn OnDeviceRemoved<'a, P0>(&self, pwstrdeviceid: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).OnDeviceRemoved)(::windows::core::Vtable::as_raw(self), pwstrdeviceid.into()).ok()
+    }
+    pub unsafe fn OnDefaultDeviceChanged<'a, P0>(&self, flow: EDataFlow, role: ERole, pwstrdefaultdeviceid: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).OnDefaultDeviceChanged)(::windows::core::Vtable::as_raw(self), flow, role, pwstrdefaultdeviceid.into()).ok()
+    }
+    #[doc = "*Required features: `\"Win32_UI_Shell_PropertiesSystem\"`*"]
+    #[cfg(feature = "Win32_UI_Shell_PropertiesSystem")]
+    pub unsafe fn OnPropertyValueChanged<'a, P0>(&self, pwstrdeviceid: P0, key: super::super::UI::Shell::PropertiesSystem::PROPERTYKEY) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<::windows::core::PCWSTR>,
+    {
+        (::windows::core::Vtable::vtable(self).OnPropertyValueChanged)(::windows::core::Vtable::as_raw(self), pwstrdeviceid.into(), ::core::mem::transmute(key)).ok()
+    }
+}
+impl ::core::cmp::Eq for IMMNotificationClient {}
+impl ::core::cmp::PartialEq for IMMNotificationClient {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IMMNotificationClient {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IMMNotificationClient {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IMMNotificationClient").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IMMNotificationClient {
+    type Vtable = IMMNotificationClient_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IMMNotificationClient {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x7991eec9_7e89_4d85_8390_6c703cec60c0);
+}
+
+::windows::core::interface_hierarchy!(IMMNotificationClient, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IMMNotificationClient_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub OnDeviceStateChanged: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwstrdeviceid: ::windows::core::PCWSTR, dwnewstate: u32) -> ::windows::core::HRESULT,
+    pub OnDeviceAdded: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwstrdeviceid: ::windows::core::PCWSTR) -> ::windows::core::HRESULT,
+    pub OnDeviceRemoved: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwstrdeviceid: ::windows::core::PCWSTR) -> ::windows::core::HRESULT,
+    pub OnDefaultDeviceChanged: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, flow: EDataFlow, role: ERole, pwstrdefaultdeviceid: ::windows::core::PCWSTR) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_UI_Shell_PropertiesSystem")]
+    pub OnPropertyValueChanged: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pwstrdeviceid: ::windows::core::PCWSTR, key: super::super::UI::Shell::PropertiesSystem::PROPERTYKEY) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_UI_Shell_PropertiesSystem"))]
+    OnPropertyValueChanged: usize,
+}
+
+pub trait IMMNotificationClient_Impl: Sized {
+    fn OnDeviceStateChanged(&self, pwstrdeviceid: &::windows::core::PCWSTR, dwnewstate: u32) -> ::windows::core::Result<()>;
+    fn OnDeviceAdded(&self, pwstrdeviceid: &::windows::core::PCWSTR) -> ::windows::core::Result<()>;
+    fn OnDeviceRemoved(&self, pwstrdeviceid: &::windows::core::PCWSTR) -> ::windows::core::Result<()>;
+    fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, pwstrdefaultdeviceid: &::windows::core::PCWSTR) -> ::windows::core::Result<()>;
+    fn OnPropertyValueChanged(&self, pwstrdeviceid: &::windows::core::PCWSTR, key: &super::super::UI::Shell::PropertiesSystem::PROPERTYKEY) -> ::windows::core::Result<()>;
+}
+
+impl IMMNotificationClient_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMNotificationClient_Impl, const OFFSET: isize>() -> IMMNotificationClient_Vtbl {
+        unsafe extern "system" fn OnDeviceStateChanged<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMNotificationClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwstrdeviceid: ::windows::core::PCWSTR, dwnewstate: u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnDeviceStateChanged(::core::mem::transmute(&pwstrdeviceid), ::core::mem::transmute_copy(&dwnewstate)).into()
+        }
+        unsafe extern "system" fn OnDeviceAdded<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMNotificationClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwstrdeviceid: ::windows::core::PCWSTR) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnDeviceAdded(::core::mem::transmute(&pwstrdeviceid)).into()
+        }
+        unsafe extern "system" fn OnDeviceRemoved<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMNotificationClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwstrdeviceid: ::windows::core::PCWSTR) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnDeviceRemoved(::core::mem::transmute(&pwstrdeviceid)).into()
+        }
+        unsafe extern "system" fn OnDefaultDeviceChanged<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMNotificationClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, flow: EDataFlow, role: ERole, pwstrdefaultdeviceid: ::windows::core::PCWSTR) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnDefaultDeviceChanged(::core::mem::transmute_copy(&flow), ::core::mem::transmute_copy(&role), ::core::mem::transmute(&pwstrdefaultdeviceid)).into()
+        }
+        unsafe extern "system" fn OnPropertyValueChanged<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMNotificationClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwstrdeviceid: ::windows::core::PCWSTR, key: super::super::UI::Shell::PropertiesSystem::PROPERTYKEY) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.OnPropertyValueChanged(::core::mem::transmute(&pwstrdeviceid), ::core::mem::transmute(&key)).into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            OnDeviceStateChanged: OnDeviceStateChanged::<Identity, Impl, OFFSET>,
+            OnDeviceAdded: OnDeviceAdded::<Identity, Impl, OFFSET>,
+            OnDeviceRemoved: OnDeviceRemoved::<Identity, Impl, OFFSET>,
+            OnDefaultDeviceChanged: OnDefaultDeviceChanged::<Identity, Impl, OFFSET>,
+            OnPropertyValueChanged: OnPropertyValueChanged::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IMMNotificationClient as ::windows::core::Interface>::IID
+    }
 }
 
 }

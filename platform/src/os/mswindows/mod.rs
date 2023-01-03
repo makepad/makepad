@@ -2,6 +2,8 @@
 pub mod win32_app;
 pub mod win32_window;
 pub mod win32_event;
+pub mod wasapi;
+pub mod media;
 //pub mod com_sys;
 pub mod d3d11;
 pub mod mswindows;
