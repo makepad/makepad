@@ -144,7 +144,7 @@ impl Win32App {
         };
         
         unsafe {
-            let ret = RegisterClassExW(&class);
+            RegisterClassExW(&class);
             IsGUIThread(TRUE);
         }
         
