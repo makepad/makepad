@@ -123,6 +123,7 @@ pub enum Win32Timer {
 
 impl Win32App {
     pub fn new(event_callback: Box<dyn FnMut(&mut Win32App, Vec<Win32Event>) -> EventFlow>) -> Win32App {
+
         let window_class_name = encode_wide("MakepadWindow\0");
         let class = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
