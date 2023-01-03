@@ -1,9 +1,9 @@
 #![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]
 pub mod Win32{
 pub mod Foundation{
-#[derive(PartialEq, Eq)]#[repr(transparent)]
+#[derive(PartialEq, Eq)]#[repr(transparent)] 
 pub struct WPARAM(pub usize);
-impl ::core::marker::Copy for WPARAM {}
+impl ::core::marker::Copy for WPARAM {} 
 impl ::core::clone::Clone for WPARAM {
     fn clone(&self) -> Self {
         *self
@@ -268,6 +268,61 @@ impl ::core::fmt::Debug for HINSTANCE {
 impl ::core::convert::From<::core::option::Option<HINSTANCE>> for HINSTANCE {
     fn from(optional: ::core::option::Option<HINSTANCE>) -> HINSTANCE {
         optional.unwrap_or_default()
+    }
+}
+
+pub const WAIT_OBJECT_0: WIN32_ERROR = WIN32_ERROR(0u32);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct WIN32_ERROR(pub u32);
+impl WIN32_ERROR {
+    #[inline]
+    pub const fn is_ok(self) -> bool {
+        self.0 == 0
+    }
+    #[inline]
+    pub const fn is_err(self) -> bool {
+        !self.is_ok()
+    }
+    #[inline]
+    pub const fn to_hresult(self) -> ::windows::core::HRESULT {
+        ::windows::core::HRESULT(if self.0 == 0 { self.0 } else { (self.0 & 0x0000_FFFF) | (7 << 16) | 0x8000_0000 } as _)
+    }
+    #[inline]
+    pub fn from_error(error: &::windows::core::Error) -> ::core::option::Option<Self> {
+        let hresult = error.code().0 as u32;
+        if ((hresult >> 16) & 0x7FF) == 7 {
+            Some(Self(hresult & 0xFFFF))
+        } else {
+            None
+        }
+    }
+    #[inline]
+    pub const fn ok(self) -> ::windows::core::Result<()> {
+        if self.is_ok() {
+            Ok(())
+        } else {
+            Err(::windows::core::Error { code: self.to_hresult(), info: None })
+        }
+    }
+}
+impl ::core::marker::Copy for WIN32_ERROR {}
+impl ::core::clone::Clone for WIN32_ERROR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WIN32_ERROR {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for WIN32_ERROR {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for WIN32_ERROR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("WIN32_ERROR").field(&self.0).finish()
     }
 }
 
@@ -13020,6 +13075,14 @@ pub unsafe fn CloseClipboard() -> super::super::Foundation::BOOL {
 
 }
 pub mod Com{
+pub unsafe fn CoInitialize(pvreserved: ::core::option::Option<*const ::core::ffi::c_void>) -> ::windows::core::Result<()> {
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn CoInitialize(pvreserved: *const ::core::ffi::c_void) -> ::windows::core::HRESULT;
+    }
+    CoInitialize(::core::mem::transmute(pvreserved.unwrap_or(::std::ptr::null()))).ok()
+}
+
 pub unsafe fn CoCreateInstance<'a, P0, T>(rclsid: *const ::windows::core::GUID, punkouter: P0, dwclscontext: CLSCTX) -> ::windows::core::Result<T>
 where
     P0: ::std::convert::Into<::windows::core::InParam<'a, ::windows::core::IUnknown>>,
@@ -13034,6 +13097,10 @@ where
 }
 
 pub const CLSCTX_ALL: CLSCTX = CLSCTX(23u32);
+
+pub const STGM_READ: STGM = STGM(0u32);
+
+pub const VT_LPWSTR: VARENUM = VARENUM(31u16);
 
 #[repr(transparent)]
 pub struct ITypeComp(::windows::core::IUnknown);
@@ -16745,6 +16812,33 @@ impl ::core::fmt::Debug for STGMOVE {
 
 }
 }
+pub mod Threading{
+pub unsafe fn WaitForSingleObject<'a, P0>(hhandle: P0, dwmilliseconds: u32) -> super::super::Foundation::WIN32_ERROR
+where
+    P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn WaitForSingleObject(hhandle: super::super::Foundation::HANDLE, dwmilliseconds: u32) -> super::super::Foundation::WIN32_ERROR;
+    }
+    WaitForSingleObject(hhandle.into(), dwmilliseconds)
+}
+
+pub unsafe fn CreateEventA<'a, P0, P1, P2>(lpeventattributes: ::core::option::Option<*const super::super::Security::SECURITY_ATTRIBUTES>, bmanualreset: P0, binitialstate: P1, lpname: P2) -> ::windows::core::Result<super::super::Foundation::HANDLE>
+where
+    P0: ::std::convert::Into<super::super::Foundation::BOOL>,
+    P1: ::std::convert::Into<super::super::Foundation::BOOL>,
+    P2: ::std::convert::Into<::windows::core::PCSTR>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn CreateEventA(lpeventattributes: *const super::super::Security::SECURITY_ATTRIBUTES, bmanualreset: super::super::Foundation::BOOL, binitialstate: super::super::Foundation::BOOL, lpname: ::windows::core::PCSTR) -> super::super::Foundation::HANDLE;
+    }
+    let result__ = CreateEventA(::core::mem::transmute(lpeventattributes.unwrap_or(::std::ptr::null())), bmanualreset.into(), binitialstate.into(), lpname.into());
+    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows::core::Error::from_win32)
+}
+
+}
 pub mod Ole{
 #[repr(transparent)]
 pub struct IRecordInfo(::windows::core::IUnknown);
@@ -17102,7 +17196,7 @@ impl ::core::ops::BitOr for PARAMFLAGS {
         Self(self.0 | other.0)
     }
 }
-impl ::core::ops::BitAnd for PARAMFLAGS { 
+impl ::core::ops::BitAnd for PARAMFLAGS {
     type Output = Self;
     fn bitand(self, other: Self) -> Self {
         Self(self.0 & other.0)
@@ -17322,131 +17416,233 @@ impl IMMDeviceEnumerator_Vtbl {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct EDataFlow(pub i32);
-impl ::core::marker::Copy for EDataFlow {}
-impl ::core::clone::Clone for EDataFlow {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for EDataFlow {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for EDataFlow {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for EDataFlow {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("EDataFlow").field(&self.0).finish()
-    }
-}
+pub const DEVICE_STATE_ACTIVE: u32 = 1u32;
+
+pub const AUDCLNT_SHAREMODE_SHARED: AUDCLNT_SHAREMODE = AUDCLNT_SHAREMODE(0i32);
+
+pub const AUDCLNT_STREAMFLAGS_EVENTCALLBACK: u32 = 262144u32;
+
+pub const eRender: EDataFlow = EDataFlow(0i32);
+
+pub const eConsole: ERole = ERole(0i32);
 
 #[repr(transparent)]
-pub struct IMMDeviceCollection(::windows::core::IUnknown);
-impl IMMDeviceCollection {
-    pub unsafe fn GetCount(&self) -> ::windows::core::Result<u32> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetCount)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+pub struct IAudioClient(::windows::core::IUnknown);
+impl IAudioClient {
+    pub unsafe fn Initialize(&self, sharemode: AUDCLNT_SHAREMODE, streamflags: u32, hnsbufferduration: i64, hnsperiodicity: i64, pformat: *const WAVEFORMATEX, audiosessionguid: ::core::option::Option<*const ::windows::core::GUID>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Initialize)(::windows::core::Vtable::as_raw(self), sharemode, streamflags, hnsbufferduration, hnsperiodicity, ::core::mem::transmute(pformat), ::core::mem::transmute(audiosessionguid.unwrap_or(::std::ptr::null()))).ok()
     }
-    pub unsafe fn Item(&self, ndevice: u32) -> ::windows::core::Result<IMMDevice> {
+    pub unsafe fn GetBufferSize(&self) -> ::windows::core::Result<u32> {
         let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).Item)(::windows::core::Vtable::as_raw(self), ndevice, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IMMDevice>(result__)
+        (::windows::core::Vtable::vtable(self).GetBufferSize)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    pub unsafe fn GetStreamLatency(&self) -> ::windows::core::Result<i64> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetStreamLatency)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<i64>(result__)
+    }
+    pub unsafe fn GetCurrentPadding(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetCurrentPadding)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    pub unsafe fn IsFormatSupported(&self, sharemode: AUDCLNT_SHAREMODE, pformat: *const WAVEFORMATEX, ppclosestmatch: ::core::option::Option<*mut *mut WAVEFORMATEX>) -> ::windows::core::HRESULT {
+        (::windows::core::Vtable::vtable(self).IsFormatSupported)(::windows::core::Vtable::as_raw(self), sharemode, ::core::mem::transmute(pformat), ::core::mem::transmute(ppclosestmatch.unwrap_or(::std::ptr::null_mut())))
+    }
+    pub unsafe fn GetMixFormat(&self) -> ::windows::core::Result<*mut WAVEFORMATEX> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetMixFormat)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<*mut WAVEFORMATEX>(result__)
+    }
+    pub unsafe fn GetDevicePeriod(&self, phnsdefaultdeviceperiod: ::core::option::Option<*mut i64>, phnsminimumdeviceperiod: ::core::option::Option<*mut i64>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetDevicePeriod)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(phnsdefaultdeviceperiod.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(phnsminimumdeviceperiod.unwrap_or(::std::ptr::null_mut()))).ok()
+    }
+    pub unsafe fn Start(&self) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Start)(::windows::core::Vtable::as_raw(self)).ok()
+    }
+    pub unsafe fn Stop(&self) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Stop)(::windows::core::Vtable::as_raw(self)).ok()
+    }
+    pub unsafe fn Reset(&self) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Reset)(::windows::core::Vtable::as_raw(self)).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn SetEventHandle<'a, P0>(&self, eventhandle: P0) -> ::windows::core::Result<()>
+    where
+        P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
+    {
+        (::windows::core::Vtable::vtable(self).SetEventHandle)(::windows::core::Vtable::as_raw(self), eventhandle.into()).ok()
+    }
+    pub unsafe fn GetService<T>(&self) -> ::windows::core::Result<T>
+    where
+        T: ::windows::core::Interface,
+    {
+        let mut result__ = ::core::option::Option::None;
+        (::windows::core::Vtable::vtable(self).GetService)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
     }
 }
-impl ::core::cmp::Eq for IMMDeviceCollection {}
-impl ::core::cmp::PartialEq for IMMDeviceCollection {
+impl ::core::cmp::Eq for IAudioClient {}
+impl ::core::cmp::PartialEq for IAudioClient {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
 }
-impl ::core::clone::Clone for IMMDeviceCollection {
+impl ::core::clone::Clone for IAudioClient {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
-impl ::core::fmt::Debug for IMMDeviceCollection {
+impl ::core::fmt::Debug for IAudioClient {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("IMMDeviceCollection").field(&self.0).finish()
+        f.debug_tuple("IAudioClient").field(&self.0).finish()
     }
 }
-unsafe impl ::windows::core::Vtable for IMMDeviceCollection {
-    type Vtable = IMMDeviceCollection_Vtbl;
+unsafe impl ::windows::core::Vtable for IAudioClient {
+    type Vtable = IAudioClient_Vtbl;
 }
-unsafe impl ::windows::core::Interface for IMMDeviceCollection {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x0bd7a1be_7a1a_44db_8397_cc5392387b5e);
+unsafe impl ::windows::core::Interface for IAudioClient {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x1cb9ad4c_dbfa_4c32_b178_c2f568a703b2);
 }
 
-::windows::core::interface_hierarchy!(IMMDeviceCollection, ::windows::core::IUnknown);
+::windows::core::interface_hierarchy!(IAudioClient, ::windows::core::IUnknown);
 
 #[repr(C)]
-pub struct IMMDeviceCollection_Vtbl {
+pub struct IAudioClient_Vtbl {
     pub base__: ::windows::core::IUnknown_Vtbl,
-    pub GetCount: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcdevices: *mut u32) -> ::windows::core::HRESULT,
-    pub Item: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ndevice: u32, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub Initialize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, sharemode: AUDCLNT_SHAREMODE, streamflags: u32, hnsbufferduration: i64, hnsperiodicity: i64, pformat: *const WAVEFORMATEX, audiosessionguid: *const ::windows::core::GUID) -> ::windows::core::HRESULT,
+    pub GetBufferSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pnumbufferframes: *mut u32) -> ::windows::core::HRESULT,
+    pub GetStreamLatency: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, phnslatency: *mut i64) -> ::windows::core::HRESULT,
+    pub GetCurrentPadding: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pnumpaddingframes: *mut u32) -> ::windows::core::HRESULT,
+    pub IsFormatSupported: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, sharemode: AUDCLNT_SHAREMODE, pformat: *const WAVEFORMATEX, ppclosestmatch: *mut *mut WAVEFORMATEX) -> ::windows::core::HRESULT,
+    pub GetMixFormat: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppdeviceformat: *mut *mut WAVEFORMATEX) -> ::windows::core::HRESULT,
+    pub GetDevicePeriod: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, phnsdefaultdeviceperiod: *mut i64, phnsminimumdeviceperiod: *mut i64) -> ::windows::core::HRESULT,
+    pub Start: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub Stop: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub Reset: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub SetEventHandle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, eventhandle: super::super::Foundation::HANDLE) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    SetEventHandle: usize,
+    pub GetService: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, riid: *const ::windows::core::GUID, ppv: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
 }
 
-pub trait IMMDeviceCollection_Impl: Sized {
-    fn GetCount(&self) -> ::windows::core::Result<u32>;
-    fn Item(&self, ndevice: u32) -> ::windows::core::Result<IMMDevice>;
+pub trait IAudioClient_Impl: Sized {
+    fn Initialize(&self, sharemode: AUDCLNT_SHAREMODE, streamflags: u32, hnsbufferduration: i64, hnsperiodicity: i64, pformat: *const WAVEFORMATEX, audiosessionguid: *const ::windows::core::GUID) -> ::windows::core::Result<()>;
+    fn GetBufferSize(&self) -> ::windows::core::Result<u32>;
+    fn GetStreamLatency(&self) -> ::windows::core::Result<i64>;
+    fn GetCurrentPadding(&self) -> ::windows::core::Result<u32>;
+    fn IsFormatSupported(&self, sharemode: AUDCLNT_SHAREMODE, pformat: *const WAVEFORMATEX, ppclosestmatch: *mut *mut WAVEFORMATEX) -> ::windows::core::HRESULT;
+    fn GetMixFormat(&self) -> ::windows::core::Result<*mut WAVEFORMATEX>;
+    fn GetDevicePeriod(&self, phnsdefaultdeviceperiod: *mut i64, phnsminimumdeviceperiod: *mut i64) -> ::windows::core::Result<()>;
+    fn Start(&self) -> ::windows::core::Result<()>;
+    fn Stop(&self) -> ::windows::core::Result<()>;
+    fn Reset(&self) -> ::windows::core::Result<()>;
+    fn SetEventHandle(&self, eventhandle: super::super::Foundation::HANDLE) -> ::windows::core::Result<()>;
+    fn GetService(&self, riid: *const ::windows::core::GUID, ppv: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
 }
 
-impl IMMDeviceCollection_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>() -> IMMDeviceCollection_Vtbl {
-        unsafe extern "system" fn GetCount<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcdevices: *mut u32) -> ::windows::core::HRESULT {
+impl IAudioClient_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>() -> IAudioClient_Vtbl {
+        unsafe extern "system" fn Initialize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, sharemode: AUDCLNT_SHAREMODE, streamflags: u32, hnsbufferduration: i64, hnsperiodicity: i64, pformat: *const WAVEFORMATEX, audiosessionguid: *const ::windows::core::GUID) -> ::windows::core::HRESULT {
             let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
             let this = (*this).get_impl();
-            match this.GetCount() {
+            this.Initialize(::core::mem::transmute_copy(&sharemode), ::core::mem::transmute_copy(&streamflags), ::core::mem::transmute_copy(&hnsbufferduration), ::core::mem::transmute_copy(&hnsperiodicity), ::core::mem::transmute_copy(&pformat), ::core::mem::transmute_copy(&audiosessionguid)).into()
+        }
+        unsafe extern "system" fn GetBufferSize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pnumbufferframes: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetBufferSize() {
                 ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pcdevices, ::core::mem::transmute(ok__));
+                    ::core::ptr::write(pnumbufferframes, ::core::mem::transmute(ok__));
                     ::windows::core::HRESULT(0)
                 }
                 ::core::result::Result::Err(err) => err.into(),
             }
         }
-        unsafe extern "system" fn Item<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ndevice: u32, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+        unsafe extern "system" fn GetStreamLatency<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, phnslatency: *mut i64) -> ::windows::core::HRESULT {
             let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
             let this = (*this).get_impl();
-            match this.Item(::core::mem::transmute_copy(&ndevice)) {
+            match this.GetStreamLatency() {
                 ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(ppdevice, ::core::mem::transmute(ok__));
+                    ::core::ptr::write(phnslatency, ::core::mem::transmute(ok__));
                     ::windows::core::HRESULT(0)
                 }
                 ::core::result::Result::Err(err) => err.into(),
             }
+        }
+        unsafe extern "system" fn GetCurrentPadding<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pnumpaddingframes: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetCurrentPadding() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pnumpaddingframes, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn IsFormatSupported<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, sharemode: AUDCLNT_SHAREMODE, pformat: *const WAVEFORMATEX, ppclosestmatch: *mut *mut WAVEFORMATEX) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.IsFormatSupported(::core::mem::transmute_copy(&sharemode), ::core::mem::transmute_copy(&pformat), ::core::mem::transmute_copy(&ppclosestmatch))
+        }
+        unsafe extern "system" fn GetMixFormat<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppdeviceformat: *mut *mut WAVEFORMATEX) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetMixFormat() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppdeviceformat, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetDevicePeriod<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, phnsdefaultdeviceperiod: *mut i64, phnsminimumdeviceperiod: *mut i64) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetDevicePeriod(::core::mem::transmute_copy(&phnsdefaultdeviceperiod), ::core::mem::transmute_copy(&phnsminimumdeviceperiod)).into()
+        }
+        unsafe extern "system" fn Start<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Start().into()
+        }
+        unsafe extern "system" fn Stop<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Stop().into()
+        }
+        unsafe extern "system" fn Reset<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Reset().into()
+        }
+        unsafe extern "system" fn SetEventHandle<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, eventhandle: super::super::Foundation::HANDLE) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.SetEventHandle(::core::mem::transmute_copy(&eventhandle)).into()
+        }
+        unsafe extern "system" fn GetService<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, riid: *const ::windows::core::GUID, ppv: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetService(::core::mem::transmute_copy(&riid), ::core::mem::transmute_copy(&ppv)).into()
         }
         Self {
             base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
-            GetCount: GetCount::<Identity, Impl, OFFSET>,
-            Item: Item::<Identity, Impl, OFFSET>,
+            Initialize: Initialize::<Identity, Impl, OFFSET>,
+            GetBufferSize: GetBufferSize::<Identity, Impl, OFFSET>,
+            GetStreamLatency: GetStreamLatency::<Identity, Impl, OFFSET>,
+            GetCurrentPadding: GetCurrentPadding::<Identity, Impl, OFFSET>,
+            IsFormatSupported: IsFormatSupported::<Identity, Impl, OFFSET>,
+            GetMixFormat: GetMixFormat::<Identity, Impl, OFFSET>,
+            GetDevicePeriod: GetDevicePeriod::<Identity, Impl, OFFSET>,
+            Start: Start::<Identity, Impl, OFFSET>,
+            Stop: Stop::<Identity, Impl, OFFSET>,
+            Reset: Reset::<Identity, Impl, OFFSET>,
+            SetEventHandle: SetEventHandle::<Identity, Impl, OFFSET>,
+            GetService: GetService::<Identity, Impl, OFFSET>,
         }
     }
     pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<IMMDeviceCollection as ::windows::core::Interface>::IID
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct ERole(pub i32);
-impl ::core::marker::Copy for ERole {}
-impl ::core::clone::Clone for ERole {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for ERole {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for ERole {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for ERole {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("ERole").field(&self.0).finish()
+        iid == &<IAudioClient as ::windows::core::Interface>::IID
     }
 }
 
@@ -17578,6 +17774,264 @@ impl IMMDevice_Vtbl {
 }
 
 #[repr(transparent)]
+pub struct IAudioRenderClient(::windows::core::IUnknown);
+impl IAudioRenderClient {
+    pub unsafe fn GetBuffer(&self, numframesrequested: u32) -> ::windows::core::Result<*mut u8> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetBuffer)(::windows::core::Vtable::as_raw(self), numframesrequested, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<*mut u8>(result__)
+    }
+    pub unsafe fn ReleaseBuffer(&self, numframeswritten: u32, dwflags: u32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).ReleaseBuffer)(::windows::core::Vtable::as_raw(self), numframeswritten, dwflags).ok()
+    }
+}
+impl ::core::cmp::Eq for IAudioRenderClient {}
+impl ::core::cmp::PartialEq for IAudioRenderClient {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IAudioRenderClient {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IAudioRenderClient {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IAudioRenderClient").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IAudioRenderClient {
+    type Vtable = IAudioRenderClient_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IAudioRenderClient {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xf294acfc_3146_4483_a7bf_addca7c260e2);
+}
+
+::windows::core::interface_hierarchy!(IAudioRenderClient, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IAudioRenderClient_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub GetBuffer: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, numframesrequested: u32, ppdata: *mut *mut u8) -> ::windows::core::HRESULT,
+    pub ReleaseBuffer: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, numframeswritten: u32, dwflags: u32) -> ::windows::core::HRESULT,
+}
+
+pub trait IAudioRenderClient_Impl: Sized {
+    fn GetBuffer(&self, numframesrequested: u32) -> ::windows::core::Result<*mut u8>;
+    fn ReleaseBuffer(&self, numframeswritten: u32, dwflags: u32) -> ::windows::core::Result<()>;
+}
+
+impl IAudioRenderClient_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioRenderClient_Impl, const OFFSET: isize>() -> IAudioRenderClient_Vtbl {
+        unsafe extern "system" fn GetBuffer<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioRenderClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, numframesrequested: u32, ppdata: *mut *mut u8) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetBuffer(::core::mem::transmute_copy(&numframesrequested)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppdata, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn ReleaseBuffer<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioRenderClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, numframeswritten: u32, dwflags: u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.ReleaseBuffer(::core::mem::transmute_copy(&numframeswritten), ::core::mem::transmute_copy(&dwflags)).into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetBuffer: GetBuffer::<Identity, Impl, OFFSET>,
+            ReleaseBuffer: ReleaseBuffer::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IAudioRenderClient as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(C)]
+pub struct WAVEFORMATEX {
+    pub wFormatTag: u16,
+    pub nChannels: u16,
+    pub nSamplesPerSec: u32,
+    pub nAvgBytesPerSec: u32,
+    pub nBlockAlign: u16,
+    pub wBitsPerSample: u16,
+    pub cbSize: u16,
+}
+impl ::core::marker::Copy for WAVEFORMATEX {}
+impl ::core::cmp::Eq for WAVEFORMATEX {}
+impl ::core::cmp::PartialEq for WAVEFORMATEX {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<WAVEFORMATEX>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for WAVEFORMATEX {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WAVEFORMATEX {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for WAVEFORMATEX {
+    type Abi = Self;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct AUDCLNT_SHAREMODE(pub i32);
+impl ::core::marker::Copy for AUDCLNT_SHAREMODE {}
+impl ::core::clone::Clone for AUDCLNT_SHAREMODE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for AUDCLNT_SHAREMODE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for AUDCLNT_SHAREMODE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for AUDCLNT_SHAREMODE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("AUDCLNT_SHAREMODE").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct EDataFlow(pub i32);
+impl ::core::marker::Copy for EDataFlow {}
+impl ::core::clone::Clone for EDataFlow {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for EDataFlow {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for EDataFlow {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for EDataFlow {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("EDataFlow").field(&self.0).finish()
+    }
+}
+
+#[repr(transparent)]
+pub struct IMMDeviceCollection(::windows::core::IUnknown);
+impl IMMDeviceCollection {
+    pub unsafe fn GetCount(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetCount)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+    pub unsafe fn Item(&self, ndevice: u32) -> ::windows::core::Result<IMMDevice> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).Item)(::windows::core::Vtable::as_raw(self), ndevice, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<IMMDevice>(result__)
+    }
+}
+impl ::core::cmp::Eq for IMMDeviceCollection {}
+impl ::core::cmp::PartialEq for IMMDeviceCollection {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IMMDeviceCollection {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IMMDeviceCollection {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IMMDeviceCollection").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IMMDeviceCollection {
+    type Vtable = IMMDeviceCollection_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IMMDeviceCollection {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x0bd7a1be_7a1a_44db_8397_cc5392387b5e);
+}
+
+::windows::core::interface_hierarchy!(IMMDeviceCollection, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IMMDeviceCollection_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub GetCount: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcdevices: *mut u32) -> ::windows::core::HRESULT,
+    pub Item: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ndevice: u32, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+}
+
+pub trait IMMDeviceCollection_Impl: Sized {
+    fn GetCount(&self) -> ::windows::core::Result<u32>;
+    fn Item(&self, ndevice: u32) -> ::windows::core::Result<IMMDevice>;
+}
+
+impl IMMDeviceCollection_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>() -> IMMDeviceCollection_Vtbl {
+        unsafe extern "system" fn GetCount<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcdevices: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetCount() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pcdevices, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn Item<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ndevice: u32, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.Item(::core::mem::transmute_copy(&ndevice)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppdevice, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            GetCount: GetCount::<Identity, Impl, OFFSET>,
+            Item: Item::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IMMDeviceCollection as ::windows::core::Interface>::IID
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]
+pub struct ERole(pub i32);
+impl ::core::marker::Copy for ERole {}
+impl ::core::clone::Clone for ERole {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for ERole {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for ERole {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for ERole {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("ERole").field(&self.0).finish()
+    }
+}
+
+#[repr(transparent)]
 pub struct IMMNotificationClient(::windows::core::IUnknown);
 impl IMMNotificationClient {
     pub unsafe fn OnDeviceStateChanged<'a, P0>(&self, pwstrdeviceid: P0, dwnewstate: u32) -> ::windows::core::Result<()>
@@ -17701,6 +18155,46 @@ impl IMMNotificationClient_Vtbl {
 }
 
 }
+}
+pub mod Devices{
+pub mod FunctionDiscovery{
+pub const PKEY_Device_FriendlyName: super::super::UI::Shell::PropertiesSystem::PROPERTYKEY = super::super::UI::Shell::PropertiesSystem::PROPERTYKEY { fmtid: ::windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 14u32 };
+
+}
+}
+pub mod Security{
+#[repr(C)]
+pub struct SECURITY_ATTRIBUTES {
+    pub nLength: u32,
+    pub lpSecurityDescriptor: *mut ::core::ffi::c_void,
+    pub bInheritHandle: super::Foundation::BOOL,
+}
+impl ::core::marker::Copy for SECURITY_ATTRIBUTES {}
+impl ::core::cmp::Eq for SECURITY_ATTRIBUTES {}
+impl ::core::cmp::PartialEq for SECURITY_ATTRIBUTES {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<SECURITY_ATTRIBUTES>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for SECURITY_ATTRIBUTES {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for SECURITY_ATTRIBUTES {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for SECURITY_ATTRIBUTES {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for SECURITY_ATTRIBUTES {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("SECURITY_ATTRIBUTES").field("nLength", &self.nLength).field("lpSecurityDescriptor", &self.lpSecurityDescriptor).field("bInheritHandle", &self.bInheritHandle).finish()
+    }
+}
+
 }
 
 }

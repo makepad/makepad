@@ -9,21 +9,8 @@ pub struct AudioTime {
 pub trait AudioOutputBuffer{
     fn frame_count(&self)->usize;
     fn channel_count(&self)->usize;
-    fn channel_mut(&mut self, channel: usize) -> &mut [f32];
     fn zero(&mut self);
-    fn copy_from_buffer(&mut self, buffer:&AudioBuffer){
-        if self.channel_count() != buffer.channel_count{
-            panic!("Output buffer channel_count != buffer channel_count {} {}",self.channel_count(), buffer.channel_count );
-        }
-        if self.frame_count() != buffer.frame_count{
-            panic!("Output buffer frame_count != buffer frame_count ");
-        }
-        for i in 0..self.channel_count(){
-            let output = self.channel_mut(i);
-            let input = buffer.channel(i);
-            output.copy_from_slice(input);
-        }        
-    }
+    fn copy_from_buffer(&mut self, buffer:&AudioBuffer);
 }
 
 #[derive(Clone, Default)]
