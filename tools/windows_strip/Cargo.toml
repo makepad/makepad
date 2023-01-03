@@ -1,9 +1,9 @@
 [package]
-name = "makepad-build"
+name = "makepad-windows-strip"
 version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad build tool"
+description = "Makepad windows library strip"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"

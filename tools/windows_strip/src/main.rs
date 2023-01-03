@@ -319,7 +319,7 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node){
     
     for sym in symbols {
         // allright lets open the module
-        let mut path = format!("./platform/bind/windows/generate/src/Windows/Win32");
+        let mut path = format!("./tools/windows_strip/windows_source/src/Windows/Win32");
         // ok so everything is going to go into the module Win32
         // but how do we sort the substructure
         for i in 0..sym.len() - 1 { 
@@ -388,8 +388,8 @@ fn main() {
     let mut output = Node::Sub(Vec::new());
     generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_app.rs",&mut output);
     generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_window.rs",&mut output);
-    generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_deps.rs",&mut output);
     generate_win32_outputs_from_file("./platform/src/os/mswindows/d3d11.rs",&mut output);
+    generate_win32_outputs_from_file("./tools/windows_strip/platform_win32_deps.rs",&mut output);
     
     fn generate_string_from_outputs(node:&Node, output:&mut String){
         match node{

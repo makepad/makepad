@@ -17,7 +17,7 @@ workspace.members = [
     "examples/touch",
     "libs/wasm_bridge/test",
     "studio",
-    "tools/build",
+    "tools/windows_strip",
     "tools/auto_version",
     "tools/web_server", 
     "tools/file_router",
