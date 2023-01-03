@@ -57,10 +57,7 @@ pub struct AudioUnitOutputBuffer {
     channel_count: usize
 }
 
-impl AudioOutputBuffer for AudioUnitOutputBuffer {
-    fn frame_count(&self)->usize{self.frame_count}
-    fn channel_count(&self)->usize{self.channel_count}
-
+impl AudioUnitOutputBuffer{
     fn channel_mut(&mut self, channel: usize) -> &mut [f32] {
         unsafe {
             std::slice::from_raw_parts_mut(
@@ -68,7 +65,12 @@ impl AudioOutputBuffer for AudioUnitOutputBuffer {
                 self.frame_count as usize
             )
         }
-    }
+    }    
+}
+
+impl AudioOutputBuffer for AudioUnitOutputBuffer {
+    fn frame_count(&self)->usize{self.frame_count}
+    fn channel_count(&self)->usize{self.channel_count}
     
     fn zero(&mut self) {
         for i in 0..self.channel_count {

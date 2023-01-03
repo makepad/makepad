@@ -8,9 +8,6 @@ use {
         makepad_live_id::*,
         cx::*,
         event::*,
-        media_api::CxMediaApi,
-        audio::*,
-        midi::*,
         os::{
             mswindows::win32_event::*,
             mswindows::d3d11::{D3d11Window, D3d11Cx},
