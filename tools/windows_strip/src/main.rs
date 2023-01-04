@@ -24,9 +24,10 @@ pub trait TokenSliceApi {
     fn find_tokens_index(&self, tokens: &[TokenWithString]) -> Option<usize>;
     fn find_str_index(&self, what: &str) -> Option<usize>;
     fn after(&self, what: &str) -> Option<&[TokenWithString]>;
-    fn at(&self, what: &str) -> Option<&[TokenWithString]>;
+    fn at(&self, what: &str) -> Option<(&[TokenWithString],&[TokenWithString])>;
     fn find_close(&self, delim: Delim) -> Option<&[TokenWithString]>;
     fn find_token(&self, token: FullToken) -> Option<&[TokenWithString]>;
+    fn find_strs_rev(&self, what:&[Vec<TokenWithString>]) -> Option<usize>;
     fn parse_use(&self) -> Vec<Vec<LiveId >>;
     fn to_string(&self) -> String;
 }
@@ -55,6 +56,25 @@ impl<T> TokenSliceApi for T where T: AsRef<[TokenWithString]> {
         None
     }
     
+    fn find_strs_rev(&self, what:&[Vec<TokenWithString>])->Option<usize>{
+        let source = self.as_ref();
+        for i in (0..source.len()).rev() {
+            for (index, what) in what.iter().enumerate(){
+                if what.len() <= source.len() - i{
+                    for j in 0..what.len() {
+                        if source[i+j].token != what[j].token {
+                            break;
+                        }
+                        if j == what.len() - 1 {
+                            return Some(index)
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn find_str_index(&self, what: &str) -> Option<usize> {
         self.find_tokens_index(&parse_to_tokens(what))
     }
@@ -68,11 +88,11 @@ impl<T> TokenSliceApi for T where T: AsRef<[TokenWithString]> {
         None
     }
     
-    fn at(&self, what: &str) -> Option<&[TokenWithString]> {
+    fn at(&self, what: &str) -> Option<(&[TokenWithString],&[TokenWithString])> {
         let source = self.as_ref();
         let what = &parse_to_tokens(what);
         if let Some(pos) = source.find_tokens_index(what) {
-            return Some(&source[pos..])
+            return Some((&source[..pos], &source[pos..]))
         }
         None
     }
@@ -266,7 +286,7 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
     }
 
     fn add_impl(out:&mut String,input:&[TokenWithString], at:String,  )->bool{
-        if let Some(is_impl) = input.at(&at){
+        if let Some((_,is_impl)) = input.at(&at){
             let is_impl = is_impl.find_close(Delim::Brace).unwrap();
             out.push_str(&is_impl.to_string());
             true
@@ -275,6 +295,8 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
             false
         }
     }    
+    let prefixes_str = ["#[repr(C)]", "#[repr(C, packed(1))]", "#[repr(transparent)]"];
+    let prefixes_tok = [parse_to_tokens(prefixes_str[0]), parse_to_tokens(prefixes_str[1]), parse_to_tokens(prefixes_str[2])];
     
     for sym in symbols {
         // allright lets open the module
@@ -289,22 +311,27 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
 
         let sym_id = sym[sym.len()-1];
 
-        if let Some(is_fn) = mod_tokens.at(&format!("pub unsafe fn {}", sym_id)){
+        if let Some((_,is_fn)) = mod_tokens.at(&format!("pub unsafe fn {}", sym_id)){
             let is_fun = is_fn.find_close(Delim::Brace).unwrap();
             //  ok so how do we do this
             push_unique(output, &sym, is_fun.to_string());
         }
-        else if let Some(is_const) = mod_tokens.at(&format!("pub const {}", sym_id)){
+        else if let Some((_,is_const)) = mod_tokens.at(&format!("pub const {}", sym_id)){
             let is_const = is_const.find_token(FullToken::Punct(live_id!(;))).unwrap();
             push_unique(output, &sym, is_const.to_string());
         }
-        else if let Some(is_type) = mod_tokens.at(&format!("pub type {}", sym_id)){
+        else if let Some((_,is_type)) = mod_tokens.at(&format!("pub type {}", sym_id)){
             let is_type = is_type.find_token(FullToken::Punct(live_id!(;))).unwrap();
             push_unique(output, &sym, is_type.to_string());
         }
-        else if let Some(is_union) = mod_tokens.at(&format!("pub union {}", sym_id)){
+        else if let Some((pre_union,is_union)) = mod_tokens.at(&format!("pub union {}", sym_id)){
             let is_union = is_union.find_close(Delim::Brace).unwrap();
-            let mut out = format!("#[repr(C)]{}",is_union.to_string());
+            let pre = if let Some(pre) = pre_union.find_strs_rev(&prefixes_tok){prefixes_str[pre]}else{""};
+            
+            let mut out = String::new();
+            out.push_str(pre);
+            out.push_str(&is_union.to_string());
+
             add_impl(&mut out, mod_tokens, format!("impl ::core::marker::Copy for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::Eq for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::PartialEq for {}", sym_id));
@@ -313,17 +340,19 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
             add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows::core::Abi for {}", sym_id));
             push_unique(output, &sym, out);
         }
-        else if let Some(is_struct) = mod_tokens.at(&format!("pub struct {}", sym_id)){
+        else if let Some((pre_struct,is_struct)) = mod_tokens.at(&format!("pub struct {}", sym_id)){
             let mut out = String::new();
             let is_struct = if let FullToken::Open(Delim::Paren) = is_struct[3].token{
-                out.push_str("#[repr(transparent)]\n");
-                //out.push_str("#[derive(::core::cmp::PartialEq, ::core::cmp::Eq)]\n");
                 is_struct.find_token(FullToken::Punct(live_id!(;))).unwrap()
             }
             else{
-                out.push_str("#[repr(C)]\n");
                 is_struct.find_close(Delim::Brace).unwrap()
             };
+            
+            let pre = if let Some(pre) = pre_struct.find_strs_rev(&prefixes_tok){prefixes_str[pre]}else{""};
+
+            out.push_str(&pre);
+            
             out.push_str(&is_struct.to_string());
             
             add_impl(&mut out, mod_tokens, format!("impl {}", sym_id));
@@ -354,11 +383,11 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
             push_unique(output, &sym, out);
         }
         
-        if let Some(is_com) = mod_tokens.at(&format!("pub struct {}_Vtbl", sym_id)){
+        if let Some((_,is_com)) = mod_tokens.at(&format!("pub struct {}_Vtbl", sym_id)){
             let mut sym = sym.clone();
             let sym_end = sym.len() -1;
             
-            if let Some(is_hier) = mod_tokens.at(&format!("::windows::core::interface_hierarchy!({}", sym_id)){
+            if let Some((_,is_hier)) = mod_tokens.at(&format!("::windows::core::interface_hierarchy!({}", sym_id)){
                 let is_hier = is_hier.find_token(FullToken::Punct(live_id!(;))).unwrap();
                 sym[sym_end] = LiveId::from_str(&format!("{}_hierarchy",sym_id)).unwrap();
                 push_unique(output, &sym, is_hier.to_string());
@@ -372,12 +401,12 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
             
             let impl_tokens = parse_file(&format!("{}/impl.rs", path), cache).unwrap();
             
-            let is_trait = impl_tokens.at(&format!("pub trait {}_Impl", sym_id)).unwrap();
+            let (_,is_trait) = impl_tokens.at(&format!("pub trait {}_Impl", sym_id)).unwrap();
             let is_trait = is_trait.find_close(Delim::Brace).unwrap();
             sym[sym_end] = LiveId::from_str(&format!("{}_Impl",sym_id)).unwrap();
             push_unique(output, &sym, is_trait.to_string());
             
-            let is_impl = impl_tokens.at(&format!("impl {}_Vtbl", sym_id)).unwrap();
+            let (_,is_impl) = impl_tokens.at(&format!("impl {}_Vtbl", sym_id)).unwrap();
             let is_impl = is_impl.find_close(Delim::Brace).unwrap();
             sym[sym_end] = LiveId::from_str(&format!("{}_Vtbl2",sym_id)).unwrap();
             push_unique(output, &sym, is_impl.to_string());
