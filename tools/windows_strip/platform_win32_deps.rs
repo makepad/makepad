@@ -151,6 +151,7 @@ use {
                 IDXGISwapChain,
             },
             Win32::Foundation::{
+                COLORREF,
                 WIN32_ERROR,
                 CHAR,
                 FILETIME,
