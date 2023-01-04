@@ -1,5 +1,5 @@
 
-use{
+use {
     crate::{
         makepad_live_id::*,
         makepad_error_log::*,
@@ -10,20 +10,20 @@ use{
         midi::*,
         media_api::CxMediaApi,
         os::apple::audio_unit::*,
-        os::apple::core_midi::*   
+        os::apple::core_midi::*
     }
 };
 
-impl CxMediaApi for Cx{
+impl CxMediaApi for Cx {
     
-    fn send_midi_data(&mut self, data:MidiData){
-         self.os.midi_access.as_ref().unwrap().send_midi_1_data(data);
+    fn send_midi_data(&mut self, data: MidiData) {
+        self.os.midi_access.as_ref().unwrap().send_midi_1_data(data);
     }
     
-    fn handle_midi_received(&mut self, event:&Event)->Vec<MidiInputData>{
-        if let Event::Signal(se) = event{
+    fn handle_midi_received(&mut self, event: &Event) -> Vec<MidiInputData> {
+        if let Event::Signal(se) = event {
             if se.signals.contains(&live_id!(CoreMidiInputData).into()) {
-               let out_data = if let Ok(data) = self.os.midi_input_data.lock() {
+                let out_data = if let Ok(data) = self.os.midi_input_data.lock() {
                     let mut data = data.borrow_mut();
                     let out_data = data.clone();
                     data.clear();
@@ -38,8 +38,8 @@ impl CxMediaApi for Cx{
         Vec::new()
     }
     
-    fn handle_midi_inputs(&mut self, event:&Event)->Vec<MidiInputInfo>{
-        if let Event::Signal(se) = event{
+    fn handle_midi_inputs(&mut self, event: &Event) -> Vec<MidiInputInfo> {
+        if let Event::Signal(se) = event {
             if se.signals.contains(&live_id!(CoreMidiInputsChanged).into()) {
                 let inputs = self.os.midi_access.as_ref().unwrap().connect_all_inputs();
                 self.os.midi_access.as_mut().unwrap().update_destinations();
@@ -68,7 +68,7 @@ impl CxMediaApi for Cx{
         Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
     }
     
-    fn start_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static {
+    fn start_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static {
         let fbox = std::sync::Arc::new(std::sync::Mutex::new(Box::new(f)));
         std::thread::spawn(move || {
             let out = &AudioUnitFactory::query_audio_units(AudioUnitType::DefaultOutput)[0];
@@ -91,5 +91,9 @@ impl CxMediaApi for Cx{
             });
         });
     }
+    
+    fn start_audio_input<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static {
+    }
+    
 }
 

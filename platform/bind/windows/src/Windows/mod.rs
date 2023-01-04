@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]
-pub mod Win32{
-pub mod UI{ 
+pub mod Win32{ 
+pub mod UI{
 pub mod WindowsAndMessaging{
 #[repr(C)]pub struct WNDCLASSEXW {
     pub cbSize: u32,
@@ -10055,6 +10055,38 @@ pub const DXGI_SCALING_NONE: DXGI_SCALING = DXGI_SCALING(1i32);
 
 pub const DXGI_SWAP_EFFECT_FLIP_DISCARD: DXGI_SWAP_EFFECT = DXGI_SWAP_EFFECT(4i32);
 
+#[repr(C)]pub struct DXGI_RGBA {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+impl ::core::marker::Copy for DXGI_RGBA {}
+impl ::core::cmp::Eq for DXGI_RGBA {}
+impl ::core::cmp::PartialEq for DXGI_RGBA {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DXGI_RGBA>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DXGI_RGBA {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DXGI_RGBA {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DXGI_RGBA {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DXGI_RGBA {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DXGI_RGBA").field("r", &self.r).field("g", &self.g).field("b", &self.b).field("a", &self.a).finish()
+    }
+}
+
 pub mod Common{
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DXGI_FORMAT(pub u32);
 impl ::core::marker::Copy for DXGI_FORMAT {}
@@ -10369,38 +10401,6 @@ impl ::core::fmt::Debug for DXGI_ALPHA_MODE {
 }
 
 }
-#[repr(C)]pub struct DXGI_RGBA {
-    pub r: f32,
-    pub g: f32,
-    pub b: f32,
-    pub a: f32,
-}
-impl ::core::marker::Copy for DXGI_RGBA {}
-impl ::core::cmp::Eq for DXGI_RGBA {}
-impl ::core::cmp::PartialEq for DXGI_RGBA {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DXGI_RGBA>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for DXGI_RGBA {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DXGI_RGBA {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for DXGI_RGBA {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for DXGI_RGBA {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("DXGI_RGBA").field("r", &self.r).field("g", &self.g).field("b", &self.b).field("a", &self.a).finish()
-    }
-}
-
 #[repr(C)]pub struct DXGI_PRESENT_PARAMETERS {
     pub DirtyRectsCount: u32,
     pub pDirtyRects: *mut super::super::Foundation::RECT,
@@ -12092,6 +12092,32 @@ impl IDXGISwapChain_Vtbl {
 }
 }
 pub mod Foundation{
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct COLORREF(pub u32);
+impl ::core::marker::Copy for COLORREF {}
+impl ::core::clone::Clone for COLORREF {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for COLORREF {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for COLORREF {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for COLORREF {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("COLORREF").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<COLORREF>> for COLORREF {
+    fn from(optional: ::core::option::Option<COLORREF>) -> COLORREF {
+        optional.unwrap_or_default()
+    }
+}
+
 pub const S_OK: ::windows::core::HRESULT = ::windows::core::HRESULT(0i32);
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HWND(pub isize);
@@ -12355,32 +12381,6 @@ impl ::core::convert::From<::core::option::Option<HINSTANCE>> for HINSTANCE {
 }
 
 pub const WAIT_OBJECT_0: WIN32_ERROR = WIN32_ERROR(0u32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct COLORREF(pub u32);
-impl ::core::marker::Copy for COLORREF {}
-impl ::core::clone::Clone for COLORREF {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for COLORREF {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for COLORREF {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for COLORREF {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("COLORREF").field(&self.0).finish()
-    }
-}
-impl ::core::convert::From<::core::option::Option<COLORREF>> for COLORREF {
-    fn from(optional: ::core::option::Option<COLORREF>) -> COLORREF {
-        optional.unwrap_or_default()
-    }
-}
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WIN32_ERROR(pub u32);
 impl WIN32_ERROR {
@@ -12930,10 +12930,6 @@ where
 }
 
 pub const CLSCTX_ALL: CLSCTX = CLSCTX(23u32);
-
-pub const STGM_READ: STGM = STGM(0u32);
-
-pub const VT_LPWSTR: VARENUM = VARENUM(31u16);
 
 #[repr(transparent)]pub struct ITypeComp(::windows::core::IUnknown);
 impl ITypeComp {
@@ -17262,8 +17258,6 @@ impl IMMDeviceEnumerator_Vtbl {
     }
 }
 
-pub const DEVICE_STATE_ACTIVE: u32 = 1u32;
-
 pub const AUDCLNT_SHAREMODE_SHARED: AUDCLNT_SHAREMODE = AUDCLNT_SHAREMODE(0i32);
 
 pub const AUDCLNT_STREAMFLAGS_EVENTCALLBACK: u32 = 262144u32;
@@ -17273,6 +17267,8 @@ pub const AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM: u32 = 2147483648u32;
 pub const AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY: u32 = 134217728u32;
 
 pub const eRender: EDataFlow = EDataFlow(0i32);
+
+pub const eCapture: EDataFlow = EDataFlow(1i32);
 
 pub const eConsole: ERole = ERole(0i32);
 
@@ -17495,114 +17491,76 @@ impl IAudioClient_Vtbl {
     }
 }
 
-#[repr(transparent)]pub struct IMMDevice(::windows::core::IUnknown);
-impl IMMDevice {
-    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
-    pub unsafe fn Activate<T>(&self, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: ::core::option::Option<*const super::super::System::Com::StructuredStorage::PROPVARIANT>) -> ::windows::core::Result<T>
-    where
-        T: ::windows::core::Interface,
-    {
-        let mut result__ = ::core::option::Option::None;
-        (::windows::core::Vtable::vtable(self).Activate)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, dwclsctx, ::core::mem::transmute(pactivationparams.unwrap_or(::std::ptr::null())), &mut result__ as *mut _ as *mut _).and_some(result__)
+#[repr(transparent)]pub struct IAudioCaptureClient(::windows::core::IUnknown);
+impl IAudioCaptureClient {
+    pub unsafe fn GetBuffer(&self, ppdata: *mut *mut u8, pnumframestoread: *mut u32, pdwflags: *mut u32, pu64deviceposition: ::core::option::Option<*mut u64>, pu64qpcposition: ::core::option::Option<*mut u64>) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetBuffer)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdata), ::core::mem::transmute(pnumframestoread), ::core::mem::transmute(pdwflags), ::core::mem::transmute(pu64deviceposition.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pu64qpcposition.unwrap_or(::std::ptr::null_mut()))).ok()
     }
-    #[doc = "*Required features: `\"Win32_System_Com\"`, `\"Win32_UI_Shell_PropertiesSystem\"`*"]
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_UI_Shell_PropertiesSystem"))]
-    pub unsafe fn OpenPropertyStore(&self, stgmaccess: super::super::System::Com::STGM) -> ::windows::core::Result<super::super::UI::Shell::PropertiesSystem::IPropertyStore> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).OpenPropertyStore)(::windows::core::Vtable::as_raw(self), stgmaccess, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::UI::Shell::PropertiesSystem::IPropertyStore>(result__)
+    pub unsafe fn ReleaseBuffer(&self, numframesread: u32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).ReleaseBuffer)(::windows::core::Vtable::as_raw(self), numframesread).ok()
     }
-    pub unsafe fn GetId(&self) -> ::windows::core::Result<::windows::core::PWSTR> {
+    pub unsafe fn GetNextPacketSize(&self) -> ::windows::core::Result<u32> {
         let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetId)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<::windows::core::PWSTR>(result__)
-    }
-    pub unsafe fn GetState(&self) -> ::windows::core::Result<u32> {
-        let mut result__ = ::core::mem::MaybeUninit::zeroed();
-        (::windows::core::Vtable::vtable(self).GetState)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+        (::windows::core::Vtable::vtable(self).GetNextPacketSize)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
     }
 }
-impl ::core::cmp::Eq for IMMDevice {}
-impl ::core::cmp::PartialEq for IMMDevice {
+impl ::core::cmp::Eq for IAudioCaptureClient {}
+impl ::core::cmp::PartialEq for IAudioCaptureClient {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
 }
-impl ::core::clone::Clone for IMMDevice {
+impl ::core::clone::Clone for IAudioCaptureClient {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
-impl ::core::fmt::Debug for IMMDevice {
+impl ::core::fmt::Debug for IAudioCaptureClient {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("IMMDevice").field(&self.0).finish()
+        f.debug_tuple("IAudioCaptureClient").field(&self.0).finish()
     }
 }
-unsafe impl ::windows::core::Vtable for IMMDevice {
-    type Vtable = IMMDevice_Vtbl;
+unsafe impl ::windows::core::Vtable for IAudioCaptureClient {
+    type Vtable = IAudioCaptureClient_Vtbl;
 }
-unsafe impl ::windows::core::Interface for IMMDevice {
-    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xd666063f_1587_4e43_81f1_b948e807363f);
+unsafe impl ::windows::core::Interface for IAudioCaptureClient {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xc8adbd64_e71e_48a0_a4de_185c395cd317);
 }
 
-::windows::core::interface_hierarchy!(IMMDevice, ::windows::core::IUnknown);
+::windows::core::interface_hierarchy!(IAudioCaptureClient, ::windows::core::IUnknown);
 
 #[repr(C)]
-pub struct IMMDevice_Vtbl {
+pub struct IAudioCaptureClient_Vtbl {
     pub base__: ::windows::core::IUnknown_Vtbl,
-    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
-    pub Activate: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, iid: *const ::windows::core::GUID, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: *const ::core::mem::ManuallyDrop<super::super::System::Com::StructuredStorage::PROPVARIANT>, ppinterface: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage")))]
-    Activate: usize,
-    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_UI_Shell_PropertiesSystem"))]
-    pub OpenPropertyStore: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, stgmaccess: super::super::System::Com::STGM, ppproperties: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
-    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_UI_Shell_PropertiesSystem")))]
-    OpenPropertyStore: usize,
-    pub GetId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppstrid: *mut ::windows::core::PWSTR) -> ::windows::core::HRESULT,
-    pub GetState: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdwstate: *mut u32) -> ::windows::core::HRESULT,
+    pub GetBuffer: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppdata: *mut *mut u8, pnumframestoread: *mut u32, pdwflags: *mut u32, pu64deviceposition: *mut u64, pu64qpcposition: *mut u64) -> ::windows::core::HRESULT,
+    pub ReleaseBuffer: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, numframesread: u32) -> ::windows::core::HRESULT,
+    pub GetNextPacketSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pnumframesinnextpacket: *mut u32) -> ::windows::core::HRESULT,
 }
 
-pub trait IMMDevice_Impl: Sized {
-    fn Activate(&self, iid: *const ::windows::core::GUID, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: *const super::super::System::Com::StructuredStorage::PROPVARIANT, ppinterface: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
-    fn OpenPropertyStore(&self, stgmaccess: super::super::System::Com::STGM) -> ::windows::core::Result<super::super::UI::Shell::PropertiesSystem::IPropertyStore>;
-    fn GetId(&self) -> ::windows::core::Result<::windows::core::PWSTR>;
-    fn GetState(&self) -> ::windows::core::Result<u32>;
+pub trait IAudioCaptureClient_Impl: Sized {
+    fn GetBuffer(&self, ppdata: *mut *mut u8, pnumframestoread: *mut u32, pdwflags: *mut u32, pu64deviceposition: *mut u64, pu64qpcposition: *mut u64) -> ::windows::core::Result<()>;
+    fn ReleaseBuffer(&self, numframesread: u32) -> ::windows::core::Result<()>;
+    fn GetNextPacketSize(&self) -> ::windows::core::Result<u32>;
 }
 
-impl IMMDevice_Vtbl {
-    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>() -> IMMDevice_Vtbl {
-        unsafe extern "system" fn Activate<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, iid: *const ::windows::core::GUID, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: *const ::core::mem::ManuallyDrop<super::super::System::Com::StructuredStorage::PROPVARIANT>, ppinterface: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+impl IAudioCaptureClient_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioCaptureClient_Impl, const OFFSET: isize>() -> IAudioCaptureClient_Vtbl {
+        unsafe extern "system" fn GetBuffer<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioCaptureClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppdata: *mut *mut u8, pnumframestoread: *mut u32, pdwflags: *mut u32, pu64deviceposition: *mut u64, pu64qpcposition: *mut u64) -> ::windows::core::HRESULT {
             let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
             let this = (*this).get_impl();
-            this.Activate(::core::mem::transmute_copy(&iid), ::core::mem::transmute_copy(&dwclsctx), ::core::mem::transmute_copy(&pactivationparams), ::core::mem::transmute_copy(&ppinterface)).into()
+            this.GetBuffer(::core::mem::transmute_copy(&ppdata), ::core::mem::transmute_copy(&pnumframestoread), ::core::mem::transmute_copy(&pdwflags), ::core::mem::transmute_copy(&pu64deviceposition), ::core::mem::transmute_copy(&pu64qpcposition)).into()
         }
-        unsafe extern "system" fn OpenPropertyStore<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, stgmaccess: super::super::System::Com::STGM, ppproperties: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+        unsafe extern "system" fn ReleaseBuffer<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioCaptureClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, numframesread: u32) -> ::windows::core::HRESULT {
             let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
             let this = (*this).get_impl();
-            match this.OpenPropertyStore(::core::mem::transmute_copy(&stgmaccess)) {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(ppproperties, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
+            this.ReleaseBuffer(::core::mem::transmute_copy(&numframesread)).into()
         }
-        unsafe extern "system" fn GetId<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppstrid: *mut ::windows::core::PWSTR) -> ::windows::core::HRESULT {
+        unsafe extern "system" fn GetNextPacketSize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioCaptureClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pnumframesinnextpacket: *mut u32) -> ::windows::core::HRESULT {
             let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
             let this = (*this).get_impl();
-            match this.GetId() {
+            match this.GetNextPacketSize() {
                 ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(ppstrid, ::core::mem::transmute(ok__));
-                    ::windows::core::HRESULT(0)
-                }
-                ::core::result::Result::Err(err) => err.into(),
-            }
-        }
-        unsafe extern "system" fn GetState<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdwstate: *mut u32) -> ::windows::core::HRESULT {
-            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
-            let this = (*this).get_impl();
-            match this.GetState() {
-                ::core::result::Result::Ok(ok__) => {
-                    ::core::ptr::write(pdwstate, ::core::mem::transmute(ok__));
+                    ::core::ptr::write(pnumframesinnextpacket, ::core::mem::transmute(ok__));
                     ::windows::core::HRESULT(0)
                 }
                 ::core::result::Result::Err(err) => err.into(),
@@ -17610,14 +17568,13 @@ impl IMMDevice_Vtbl {
         }
         Self {
             base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
-            Activate: Activate::<Identity, Impl, OFFSET>,
-            OpenPropertyStore: OpenPropertyStore::<Identity, Impl, OFFSET>,
-            GetId: GetId::<Identity, Impl, OFFSET>,
-            GetState: GetState::<Identity, Impl, OFFSET>,
+            GetBuffer: GetBuffer::<Identity, Impl, OFFSET>,
+            ReleaseBuffer: ReleaseBuffer::<Identity, Impl, OFFSET>,
+            GetNextPacketSize: GetNextPacketSize::<Identity, Impl, OFFSET>,
         }
     }
     pub fn matches(iid: &windows::core::GUID) -> bool {
-        iid == &<IMMDevice as ::windows::core::Interface>::IID
+        iid == &<IAudioCaptureClient as ::windows::core::Interface>::IID
     }
 }
 
@@ -17843,6 +17800,132 @@ impl ::core::fmt::Debug for ERole {
     }
 }
 
+#[repr(transparent)]pub struct IMMDevice(::windows::core::IUnknown);
+impl IMMDevice {
+    #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
+    pub unsafe fn Activate<T>(&self, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: ::core::option::Option<*const super::super::System::Com::StructuredStorage::PROPVARIANT>) -> ::windows::core::Result<T>
+    where
+        T: ::windows::core::Interface,
+    {
+        let mut result__ = ::core::option::Option::None;
+        (::windows::core::Vtable::vtable(self).Activate)(::windows::core::Vtable::as_raw(self), &<T as ::windows::core::Interface>::IID, dwclsctx, ::core::mem::transmute(pactivationparams.unwrap_or(::std::ptr::null())), &mut result__ as *mut _ as *mut _).and_some(result__)
+    }
+    #[doc = "*Required features: `\"Win32_System_Com\"`, `\"Win32_UI_Shell_PropertiesSystem\"`*"]
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_UI_Shell_PropertiesSystem"))]
+    pub unsafe fn OpenPropertyStore(&self, stgmaccess: super::super::System::Com::STGM) -> ::windows::core::Result<super::super::UI::Shell::PropertiesSystem::IPropertyStore> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).OpenPropertyStore)(::windows::core::Vtable::as_raw(self), stgmaccess, ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<super::super::UI::Shell::PropertiesSystem::IPropertyStore>(result__)
+    }
+    pub unsafe fn GetId(&self) -> ::windows::core::Result<::windows::core::PWSTR> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetId)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<::windows::core::PWSTR>(result__)
+    }
+    pub unsafe fn GetState(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetState)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(result__.as_mut_ptr())).from_abi::<u32>(result__)
+    }
+}
+impl ::core::cmp::Eq for IMMDevice {}
+impl ::core::cmp::PartialEq for IMMDevice {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IMMDevice {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IMMDevice {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IMMDevice").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IMMDevice {
+    type Vtable = IMMDevice_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IMMDevice {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xd666063f_1587_4e43_81f1_b948e807363f);
+}
+
+::windows::core::interface_hierarchy!(IMMDevice, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IMMDevice_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
+    pub Activate: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, iid: *const ::windows::core::GUID, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: *const ::core::mem::ManuallyDrop<super::super::System::Com::StructuredStorage::PROPVARIANT>, ppinterface: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage")))]
+    Activate: usize,
+    #[cfg(all(feature = "Win32_System_Com", feature = "Win32_UI_Shell_PropertiesSystem"))]
+    pub OpenPropertyStore: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, stgmaccess: super::super::System::Com::STGM, ppproperties: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    #[cfg(not(all(feature = "Win32_System_Com", feature = "Win32_UI_Shell_PropertiesSystem")))]
+    OpenPropertyStore: usize,
+    pub GetId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppstrid: *mut ::windows::core::PWSTR) -> ::windows::core::HRESULT,
+    pub GetState: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pdwstate: *mut u32) -> ::windows::core::HRESULT,
+}
+
+pub trait IMMDevice_Impl: Sized {
+    fn Activate(&self, iid: *const ::windows::core::GUID, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: *const super::super::System::Com::StructuredStorage::PROPVARIANT, ppinterface: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
+    fn OpenPropertyStore(&self, stgmaccess: super::super::System::Com::STGM) -> ::windows::core::Result<super::super::UI::Shell::PropertiesSystem::IPropertyStore>;
+    fn GetId(&self) -> ::windows::core::Result<::windows::core::PWSTR>;
+    fn GetState(&self) -> ::windows::core::Result<u32>;
+}
+
+impl IMMDevice_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>() -> IMMDevice_Vtbl {
+        unsafe extern "system" fn Activate<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, iid: *const ::windows::core::GUID, dwclsctx: super::super::System::Com::CLSCTX, pactivationparams: *const ::core::mem::ManuallyDrop<super::super::System::Com::StructuredStorage::PROPVARIANT>, ppinterface: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Activate(::core::mem::transmute_copy(&iid), ::core::mem::transmute_copy(&dwclsctx), ::core::mem::transmute_copy(&pactivationparams), ::core::mem::transmute_copy(&ppinterface)).into()
+        }
+        unsafe extern "system" fn OpenPropertyStore<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, stgmaccess: super::super::System::Com::STGM, ppproperties: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.OpenPropertyStore(::core::mem::transmute_copy(&stgmaccess)) {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppproperties, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetId<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppstrid: *mut ::windows::core::PWSTR) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetId() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(ppstrid, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetState<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdwstate: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetState() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pdwstate, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Activate: Activate::<Identity, Impl, OFFSET>,
+            OpenPropertyStore: OpenPropertyStore::<Identity, Impl, OFFSET>,
+            GetId: GetId::<Identity, Impl, OFFSET>,
+            GetState: GetState::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IMMDevice as ::windows::core::Interface>::IID
+    }
+}
+
 #[repr(transparent)]pub struct IMMNotificationClient(::windows::core::IUnknown);
 impl IMMNotificationClient {
     pub unsafe fn OnDeviceStateChanged<'a, P0>(&self, pwstrdeviceid: P0, dwnewstate: u32) -> ::windows::core::Result<()>
@@ -17964,12 +18047,6 @@ impl IMMNotificationClient_Vtbl {
         iid == &<IMMNotificationClient as ::windows::core::Interface>::IID
     }
 }
-
-}
-}
-pub mod Devices{
-pub mod FunctionDiscovery{
-pub const PKEY_Device_FriendlyName: super::super::UI::Shell::PropertiesSystem::PROPERTYKEY = super::super::UI::Shell::PropertiesSystem::PROPERTYKEY { fmtid: ::windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 14u32 };
 
 }
 }
