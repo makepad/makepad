@@ -45,6 +45,7 @@ use {
                 IDI_WINLOGO,
             },
             Win32::Graphics::Gdi::{
+                CreateSolidBrush,
                 HMONITOR,
                 GetDC,
                 MonitorFromWindow,
@@ -52,10 +53,13 @@ use {
                 MONITOR_DEFAULTTONEAREST,
                 LOGPIXELSX
             },
-            Win32::Foundation::S_OK,
-            Win32::Foundation::HWND,
-            Win32::Foundation::BOOL,
-            Win32::Foundation::FARPROC,
+            Win32::Foundation::{
+                COLORREF,
+                S_OK,
+                HWND,
+                BOOL,
+                FARPROC,
+            },
             Win32::UI::HiDpi::{
                 PROCESS_DPI_AWARENESS,
                 DPI_AWARENESS_CONTEXT,
@@ -65,11 +69,15 @@ use {
                 PROCESS_PER_MONITOR_DPI_AWARE,
                 MDT_EFFECTIVE_DPI
             },
-            Win32::System::LibraryLoader::GetModuleHandleW,
-            Win32::System::LibraryLoader::LoadLibraryA,
-            Win32::System::LibraryLoader::GetProcAddress,
-            Win32::System::Performance::QueryPerformanceCounter,
-            Win32::System::Performance::QueryPerformanceFrequency,
+            Win32::System::LibraryLoader::{
+                GetModuleHandleW,
+                LoadLibraryA,
+                GetProcAddress,
+            },
+            Win32::System::Performance::{
+                QueryPerformanceCounter,
+                QueryPerformanceFrequency,
+            }
         },
         event::{TimerEvent, Signal, SignalEvent},
         cursor::MouseCursor,
@@ -130,6 +138,7 @@ impl Win32App {
             hInstance: unsafe {GetModuleHandleW(None).unwrap()},
             hIcon: unsafe {LoadIconW(None, IDI_WINLOGO).unwrap()}, //h_icon,
             lpszClassName: PCWSTR(window_class_name.as_ptr()),
+            hbrBackground: unsafe{CreateSolidBrush(COLORREF(0x3f3f3f3f))},
             ..Default::default()
 /*            
             cbClsExtra: 0,

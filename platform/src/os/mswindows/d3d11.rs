@@ -91,6 +91,7 @@ use {
                 DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 DXGI_SCALING_NONE,
                 DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                DXGI_RGBA,
                 Common::{
                     DXGI_FORMAT,
                     DXGI_ALPHA_MODE_IGNORE,
@@ -391,6 +392,10 @@ impl Cx {
             d3d11_cx
         );
         d3d11_window.present(vsync);
+        if d3d11_window.first_draw{
+            d3d11_window.win32_window.show();
+            d3d11_window.first_draw = false;
+        }
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
     }
     
@@ -492,7 +497,12 @@ impl D3d11Window {
             
             let swap_texture = swap_chain.GetBuffer(0).unwrap();
             let render_target_view = d3d11_cx.device.CreateRenderTargetView(&swap_texture, None).unwrap();
-            
+            swap_chain.SetBackgroundColor(&mut DXGI_RGBA{
+                r:0.3,
+                g:0.3, 
+                b:0.3,
+                a:1.0
+            }).unwrap();
             D3d11Window {
                 first_draw: true,
                 is_in_resize: false,
@@ -909,7 +919,7 @@ impl CxOsPass {
             d3d11_cx.context.RSSetState(self.raster_state.as_ref().unwrap());
             let blend_factor = [0., 0., 0., 0.];
             d3d11_cx.context.OMSetBlendState(self.blend_state.as_ref().unwrap(), Some(blend_factor.as_ptr()), 0xffffffff);
-            //d3d11_cx.context.OMSetDepthStencilState(self.depth_stencil_state.as_ref().unwrap(), 0);
+            d3d11_cx.context.OMSetDepthStencilState(self.depth_stencil_state.as_ref().unwrap(), 0);
         }
     }
 }

@@ -314,14 +314,12 @@ impl Win32Window {
                 GetModuleHandleW(None).unwrap(),
                 None,
             );
-
+            
             self.hwnd = Some(hwnd);
             
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, self as *const _ as isize);
             
             self.set_outer_size(size);
-            
-            ShowWindow(hwnd, SW_SHOW);
             
             get_win32_app_global().dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap());
             get_win32_app_global().all_windows.push(hwnd);
@@ -536,7 +534,7 @@ impl Win32Window {
                 window.do_callback(vec![
                     Win32Event::KeyDown(KeyEvent {
                         key_code: key_code,
-                        is_repeat: lparam.0 & 0x7fff>0,
+                        is_repeat: (lparam.0 & 0x7000_0000)>0,
                         modifiers: modifiers,
                         time: window.time_now()
                     })
@@ -577,7 +575,7 @@ impl Win32Window {
             },
             WM_SIZE | WM_DPICHANGED => {
                 window.send_change_event();
-            }, 
+            },
             /*WM_USER => { 
                 let signals = if let Ok(mut sigs) = get_win32_app_global().race_signals.lock() {
                     let mut signals = HashSet::new();
@@ -661,6 +659,12 @@ impl Win32Window {
     pub fn close_window(&self) {
         unsafe {
             DestroyWindow(self.hwnd.unwrap());
+        }
+    }
+    
+    pub fn show(&self) {
+        unsafe {
+            ShowWindow(self.hwnd.unwrap(), SW_SHOW);
         }
     }
     
