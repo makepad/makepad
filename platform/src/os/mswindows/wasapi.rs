@@ -2,7 +2,7 @@
 use {
     crate::{
         os::mswindows::win32_app::{FALSE},
-        audio::{AudioOutputBuffer, AudioBuffer},
+        audio::{AudioBuffer},
         windows_crate::{
             Win32::Foundation::{
                 WAIT_OBJECT_0,
@@ -12,8 +12,8 @@ use {
                 CoInitialize,
                 CoCreateInstance,
                 CLSCTX_ALL,
-                STGM_READ,
-                VT_LPWSTR
+                //STGM_READ,
+                //VT_LPWSTR
             },
             Win32::Media::KernelStreaming::{
                 WAVE_FORMAT_EXTENSIBLE,
@@ -23,34 +23,39 @@ use {
                 //WAVE_FORMAT_IEEE_FLOAT
             },
             Win32::Media::Audio::{
+                EDataFlow,
                 WAVEFORMATEX,
                 WAVEFORMATEXTENSIBLE,
                 WAVEFORMATEXTENSIBLE_0,
                 //WAVEFORMATEX,
                 MMDeviceEnumerator,
                 IMMDeviceEnumerator,
-                DEVICE_STATE_ACTIVE,
+                //DEVICE_STATE_ACTIVE,
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                 AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 eRender,
+                eCapture,
                 eConsole,
                 IAudioClient,
-                IMMDevice,
+                //IMMDevice,
+                IAudioCaptureClient,
                 IAudioRenderClient,
             },
             Win32::System::Threading::{
                 WaitForSingleObject,
                 CreateEventA,
             },
-            Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
+            //Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
             
         }
     }
 };
 
-fn new_float_waveformatextensible(storebits: usize, validbits: usize, samplerate: usize, channels: usize) -> WAVEFORMATEXTENSIBLE {
+fn new_float_waveformatextensible(samplerate: usize, channels: usize) -> WAVEFORMATEXTENSIBLE {
+    let storebits = 32;
+    let validbits = 32;
     let blockalign = channels * storebits / 8;
     let byterate = samplerate * blockalign;
     let wave_format = WAVEFORMATEX {
@@ -82,85 +87,52 @@ fn new_float_waveformatextensible(storebits: usize, validbits: usize, samplerate
     }
 }
 
-pub struct Wasapi {
+struct WasapiBase{
     event: HANDLE,
-    _device: IMMDevice,
     client: IAudioClient,
-    render_client: IAudioRenderClient,
+    audio_buffer: Option<AudioBuffer>
 }
 
-pub struct WasapiAudioOutputBuffer {
-    frame_count: usize,
-    channel_count: usize,
-    buffer: *mut f32
-}
 
-impl WasapiAudioOutputBuffer {
-    pub fn get_buffer_mut<'a>(&'a self) -> &mut [f32] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.buffer, self.frame_count * self.channel_count)
-        }
+/*
+    // add audio device enumeration for input and output
+    let col = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).unwrap();
+    let count = col.GetCount().unwrap();
+    for i in 0..count {
+        let endpoint = col.Item(i).unwrap();
+        let dev_id = endpoint.GetId().unwrap();
+        let props = endpoint.OpenPropertyStore(STGM_READ).unwrap();
+        let value = props.GetValue(&PKEY_Device_FriendlyName).unwrap();
+        assert!(value.Anonymous.Anonymous.vt == VT_LPWSTR);
+        let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
+        println!("{}, {}", dev_id.to_string().unwrap(), dev_name.to_string().unwrap());
+        
     }
-}
+*/
 
-impl AudioOutputBuffer for WasapiAudioOutputBuffer {
-    fn frame_count(&self) -> usize {self.frame_count}
-    fn channel_count(&self) -> usize {self.channel_count}
-    
-    fn zero(&mut self) {
-        let buffer = self.get_buffer_mut();
-        for i in 0..buffer.len() {
-            buffer[i] = 0.0;
-        }
+impl WasapiBase {
+    pub fn new_default_output() -> Self {
+        Self::new_default(eRender)
     }
     
-    fn copy_from_buffer(&mut self, input_buffer: &AudioBuffer) {
-        if self.channel_count() != input_buffer.channel_count {
-            panic!("Output buffer channel_count != buffer channel_count {} {}", self.channel_count(), input_buffer.channel_count);
-        }
-        if self.frame_count() != input_buffer.frame_count {
-            panic!("Output buffer frame_count != buffer frame_count ");
-        }
-        let output_buffer = self.get_buffer_mut();
-        for i in 0..self.channel_count() {
-            let input_channel = input_buffer.channel(i);
-            for j in 0..self.frame_count() {
-                output_buffer[j * self.channel_count() + i] = input_channel[j];
-            }
-        }
+    pub fn new_default_input() -> Self {
+        Self::new_default(eCapture)
     }
-}
-
-
-impl Wasapi {
-    pub fn new() -> Self {
+    
+    pub fn new_default(flow:EDataFlow) -> Self {
         unsafe {
             CoInitialize(None).unwrap();
             
-            let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             
-            let col = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).unwrap();
-            let count = col.GetCount().unwrap();
-            for i in 0..count {
-                let endpoint = col.Item(i).unwrap();
-                let dev_id = endpoint.GetId().unwrap();
-                let props = endpoint.OpenPropertyStore(STGM_READ).unwrap();
-                let value = props.GetValue(&PKEY_Device_FriendlyName).unwrap();
-                assert!(value.Anonymous.Anonymous.vt == VT_LPWSTR);
-                let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
-                println!("{}, {}", dev_id.to_string().unwrap(), dev_name.to_string().unwrap());
-                
-            }
-            
-            let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).unwrap();
+            let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole).unwrap();
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).unwrap();
             
             let mut def_period = 0i64;
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
 
-            let wave_format = new_float_waveformatextensible(32, 32, 44100, 2);
+            let wave_format = new_float_waveformatextensible(44100, 2);
 
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -172,29 +144,109 @@ impl Wasapi {
             ).unwrap();
             
             let event = CreateEventA(None, FALSE, FALSE, None).unwrap();
-            
             client.SetEventHandle(event).unwrap();
-            
-            let render_client = client.GetService().unwrap();
-            
             client.Start().unwrap();
             
             Self {
-                render_client,
+                audio_buffer: Some(Default::default()),
                 event,
                 client,
-                _device: device
             }
+        }
+    }
+}
+
+pub struct WasapiOutput {
+    base: WasapiBase,
+    render_client: IAudioRenderClient,
+}
+
+pub struct WasapiAudioOutputBuffer {
+    frame_count: usize,
+    channel_count: usize,
+    device_buffer: *mut f32,
+    pub audio_buffer: AudioBuffer
+}
+
+impl WasapiOutput{
+    pub fn new() -> Self {
+        let base = WasapiBase::new_default_output();
+        let render_client = unsafe{base.client.GetService().unwrap()};
+        Self{
+            render_client,
+            base
         }
     }
     
     pub fn wait_for_buffer(&mut self) -> Result<WasapiAudioOutputBuffer, ()> {
         unsafe {
             loop {
-                if WaitForSingleObject(self.event, 2000) != WAIT_OBJECT_0 {
+                if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
                     return Err(())
                 };
-                let padding = self.client.GetCurrentPadding().unwrap();
+                let padding = self.base.client.GetCurrentPadding().unwrap();
+                let buffer_size = self.base.client.GetBufferSize().unwrap();
+                let req_size = buffer_size - padding;
+                if req_size > 0 {
+                    let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
+                    let mut audio_buffer =  self.base.audio_buffer.take().unwrap();
+                    let frame_count = (req_size / 2) as usize;
+                    let channel_count = 2;
+                    audio_buffer.resize(frame_count, channel_count);
+                    return Ok(WasapiAudioOutputBuffer {
+                        frame_count,
+                        channel_count, 
+                        device_buffer: device_buffer as *mut f32,
+                        audio_buffer
+                    })
+                }
+            }
+        }
+    }
+    
+    pub fn release_buffer(&mut self, output: WasapiAudioOutputBuffer) {
+        unsafe { 
+            let audio_buffer = output.audio_buffer;
+            let device_buffer = std::slice::from_raw_parts_mut(output.device_buffer, output.frame_count * output.channel_count);
+            for i in 0..audio_buffer.channel_count() {
+                let input_channel = audio_buffer.channel(i);
+                for j in 0..audio_buffer.frame_count() {
+                    device_buffer[j * audio_buffer.channel_count() + i] = input_channel[j];
+                }
+            } 
+            self.render_client.ReleaseBuffer(output.frame_count as u32, 0).unwrap();
+            self.base.audio_buffer = Some(audio_buffer);
+        }
+    }   
+}
+
+pub struct WasapiInput {
+    base: WasapiBase,
+    capture_client: IAudioCaptureClient,
+}
+
+pub struct WasapiAudioInputBuffer {
+    pub audio_buffer: AudioBuffer
+}
+
+impl WasapiInput {
+     pub fn new() -> Self {
+        let base = WasapiBase::new_default_input();
+        let capture_client = unsafe{base.client.GetService().unwrap()};
+        Self{
+            capture_client,
+            base
+        }
+    }
+    
+    
+    pub fn wait_for_buffer(&mut self) -> Result<AudioBuffer, ()> {
+        unsafe {
+            loop {
+                if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
+                    return Err(())
+                };
+                /*let padding = self.client.GetCurrentPadding().unwrap();
                 let buffer_size = self.client.GetBufferSize().unwrap();
                 let req_size = buffer_size - padding;
                 if req_size > 0 {
@@ -204,14 +256,12 @@ impl Wasapi {
                         channel_count: 2, 
                         buffer: buffer as *mut _   
                     })
-                }
+                }*/
             }
         }
     }
     
-    pub fn release_buffer(&mut self, output_buffer: WasapiAudioOutputBuffer) {
-        unsafe { 
-            self.render_client.ReleaseBuffer(output_buffer.frame_count as u32, 0).unwrap();
-        }
+    pub fn release_buffer(&mut self, buffer: AudioBuffer) {
+        self.base.audio_buffer = Some(buffer);
     }
 }
