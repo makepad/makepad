@@ -57,10 +57,10 @@ impl CxMediaApi for Cx {
         });
     }
     
-    fn start_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static {
+    fn start_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static {
         let closure_ptr = Box::into_raw(Box::new(WebAudioOutputClosure {
             callback: Box::new(f),
-            output_buffer: WebAudioOutputBuffer::default()
+            output_buffer: AudioBuffer::default()
         }));
         self.os.from_wasm(FromWasmSpawnAudioOutput {closure_ptr: closure_ptr as u32});
     }

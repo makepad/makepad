@@ -6,12 +6,6 @@ pub struct AudioTime {
     pub rate_scalar: f64,
 }
 
-pub trait AudioOutputBuffer{
-    fn frame_count(&self)->usize;
-    fn channel_count(&self)->usize;
-    fn zero(&mut self);
-    fn copy_from_buffer(&mut self, buffer:&AudioBuffer);
-}
 
 #[derive(Clone, Default)]
 pub struct AudioBuffer {
@@ -37,11 +31,6 @@ impl AudioBuffer {
     }
     
     pub fn resize_like(&mut self, like:&AudioBuffer)->&mut Self{
-        self.resize(like.frame_count(), like.channel_count());
-        self
-    }
-
-    pub fn resize_like_output(&mut self, like:&mut dyn AudioOutputBuffer)->&mut Self{
         self.resize(like.frame_count(), like.channel_count());
         self
     }
