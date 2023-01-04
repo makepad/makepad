@@ -6,7 +6,7 @@ use {
         audio::*,
         midi::*,
         media_api::CxMediaApi,
-        os::mswindows::wasapi::Wasapi
+        os::mswindows::wasapi::{WasapiOutput, WasapiInput}
     }
 };
 
@@ -64,25 +64,45 @@ impl CxMediaApi for Cx {
         Cx::post_signal(live_id!(CoreMidiInputsChanged).into());*/
     }
     
-    fn start_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static {
+    fn start_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static {
         
         let fbox = std::sync::Arc::new(std::sync::Mutex::new(Box::new(f)));
         std::thread::spawn(move || {
-            let mut wasapi = Wasapi::new();
+            let mut wasapi = WasapiOutput::new();
             let sample_time = 0f64;
             let host_time = 0u64;
             let rate_scalar = 44100f64;
             loop {
-                if let Ok(mut buffer) = wasapi.wait_for_buffer() {
-                    if let Ok(mut fbox) = fbox.lock() {
-                        fbox(AudioTime {
-                            sample_time,
-                            host_time,
-                            rate_scalar
-                        }, &mut buffer);
-                    }
-                    wasapi.release_buffer(buffer);
-                };
+                let mut buffer = wasapi.wait_for_buffer().unwrap();
+                if let Ok(mut fbox) = fbox.lock() {
+                    fbox(AudioTime {
+                        sample_time,
+                        host_time,
+                        rate_scalar
+                    }, &mut buffer.audio_buffer);
+                }
+                wasapi.release_buffer(buffer);
+            }
+        });
+    }
+    
+    fn start_audio_input<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static {
+        let fbox = std::sync::Arc::new(std::sync::Mutex::new(Box::new(f)));
+        std::thread::spawn(move || {
+            let mut wasapi = WasapiInput::new();
+            let sample_time = 0f64;
+            let host_time = 0u64;
+            let rate_scalar = 44100f64;
+            loop {
+                let mut buffer = wasapi.wait_for_buffer().unwrap();
+                if let Ok(mut fbox) = fbox.lock() {
+                    fbox(AudioTime {
+                        sample_time,
+                        host_time,
+                        rate_scalar
+                    }, &mut buffer);
+                }
+                wasapi.release_buffer(buffer);
             }
         });
     }

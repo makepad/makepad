@@ -50,7 +50,7 @@ pub struct AudioUnitClone {
     render_block: Option<ObjcId>,
     unit_type: AudioUnitType
 }
-
+/*
 pub struct AudioUnitOutputBuffer {
     data: [*mut f32; MAX_AUDIO_BUFFERS],
     frame_count: usize,
@@ -67,7 +67,6 @@ impl AudioUnitOutputBuffer{
         }
     }    
 }
-
 impl AudioOutputBuffer for AudioUnitOutputBuffer {
     fn frame_count(&self)->usize{self.frame_count}
     fn channel_count(&self)->usize{self.channel_count}
@@ -94,7 +93,7 @@ impl AudioOutputBuffer for AudioUnitOutputBuffer {
             output.copy_from_slice(input);
         }
     }
-}
+}*/
 
 
 impl AudioTime {
@@ -388,13 +387,14 @@ impl AudioUnit {
         }
     }
     
-    pub fn set_input_callback<F: Fn(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static>(&self, audio_callback: F) {
+    pub fn set_input_callback<F: Fn(AudioTime, &mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
         match self.unit_type {
             AudioUnitType::DefaultOutput => (),
             AudioUnitType::Effect => (),
             _ => panic!("set_input_callback on this device")
         }
         unsafe {
+            let buffer = Arc::new(Mutex::new(AudioBuffer::default()));
             let output_provider = objc_block!(
                 move | _flags: *mut u32,
                 timestamp: *const CAudioTimeStamp,
@@ -402,23 +402,25 @@ impl AudioUnit {
                 _input_bus_number: u64,
                 buffers: *mut CAudioBufferList |: i32 {
                     let buffers_ref = &*buffers;
-                   // println!("IN OUTPUT {} {:?}", frame_count, *timestamp);
-                    let mut output = AudioUnitOutputBuffer {
-                        data: [0 as *mut f32; MAX_AUDIO_BUFFERS],
-                        frame_count: frame_count as usize,
-                        channel_count: buffers_ref.mNumberBuffers as usize
-                    };
-                    for i in 0..output.channel_count {
-                        output.data[i] = buffers_ref.mBuffers[i].mData as *mut f32;
-                    }
+                    
+                    let channel_count = buffers_ref.mNumberBuffers as usize;
+                    let frame_count = frame_count as usize;
+                    
+                    let mut buffer = buffer.lock().unwrap();
+                    buffer.resize(frame_count, channel_count);
                     audio_callback(
                         AudioTime {
                             sample_time: (*timestamp).mSampleTime,
                             host_time: (*timestamp).mHostTime,
                             rate_scalar: (*timestamp).mRateScalar
                         },
-                        &mut output
+                        &mut buffer
                     );
+                    for i in 0..channel_count {
+                        let out = std::slice::from_raw_parts_mut(buffers_ref.mBuffers[i].mData as *mut f32, frame_count);
+                        out.copy_from_slice(buffer.channel(i));
+                    }
+                    
                     0
                 }
             );

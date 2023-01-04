@@ -15,6 +15,7 @@ workspace.members = [
     "examples/ironfish",
     "examples/simple",
     "examples/touch",
+    "examples/teamtalk",
     "libs/wasm_bridge/test",
     "studio",
     "tools/windows_strip",
