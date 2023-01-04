@@ -1,596 +1,8 @@
 #![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]
 pub mod Win32{
-pub mod Foundation{
-#[derive(PartialEq, Eq)]#[repr(transparent)] 
-pub struct WPARAM(pub usize);
-impl ::core::marker::Copy for WPARAM {} 
-impl ::core::clone::Clone for WPARAM {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for WPARAM {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for WPARAM {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for WPARAM {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("WPARAM").field(&self.0).finish()
-    }
-}
-impl ::core::convert::From<::core::option::Option<WPARAM>> for WPARAM {
-    fn from(optional: ::core::option::Option<WPARAM>) -> WPARAM {
-        optional.unwrap_or_default()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct LPARAM(pub isize);
-impl ::core::marker::Copy for LPARAM {}
-impl ::core::clone::Clone for LPARAM {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for LPARAM {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for LPARAM {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for LPARAM {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("LPARAM").field(&self.0).finish()
-    }
-}
-impl ::core::convert::From<::core::option::Option<LPARAM>> for LPARAM {
-    fn from(optional: ::core::option::Option<LPARAM>) -> LPARAM {
-        optional.unwrap_or_default()
-    }
-}
-
-pub const S_OK: ::windows::core::HRESULT = ::windows::core::HRESULT(0i32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HWND(pub isize);
-impl ::core::marker::Copy for HWND {}
-impl ::core::clone::Clone for HWND {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for HWND {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for HWND {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for HWND {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("HWND").field(&self.0).finish()
-    }
-}
-impl ::core::convert::From<::core::option::Option<HWND>> for HWND {
-    fn from(optional: ::core::option::Option<HWND>) -> HWND {
-        optional.unwrap_or_default()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct BOOL(pub i32);
-impl BOOL {
-    #[inline]
-    pub fn as_bool(self) -> bool {
-        self.0 != 0
-    }
-    #[inline]
-    pub fn ok(self) -> ::windows::core::Result<()> {
-        if self.as_bool() {
-            Ok(())
-        } else {
-            Err(::windows::core::Error::from_win32())
-        }
-    }
-    #[inline]
-    #[track_caller]
-    pub fn unwrap(self) {
-        self.ok().unwrap();
-    }
-    #[inline]
-    #[track_caller]
-    pub fn expect(self, msg: &str) {
-        self.ok().expect(msg);
-    }
-}
-impl ::core::marker::Copy for BOOL {}
-impl ::core::clone::Clone for BOOL {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for BOOL {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for BOOL {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for BOOL {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("BOOL").field(&self.0).finish()
-    }
-}
-impl ::core::ops::Not for BOOL {
-    type Output = Self;
-    fn not(self) -> Self::Output {
-        if self.as_bool() {
-            Self(0)
-        } else {
-            Self(1)
-        }
-    }
-}
-impl ::core::convert::From<::core::option::Option<BOOL>> for BOOL {
-    fn from(optional: ::core::option::Option<BOOL>) -> BOOL {
-        optional.unwrap_or_default()
-    }
-}
-
-pub type FARPROC = ::core::option::Option<unsafe extern "system" fn() -> isize>;
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HANDLE(pub isize);
-impl HANDLE {
-    pub fn is_invalid(&self) -> bool {
-        self.0 == -1 || self.0 == 0
-    }
-}
-impl ::core::marker::Copy for HANDLE {}
-impl ::core::clone::Clone for HANDLE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for HANDLE {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for HANDLE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for HANDLE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("HANDLE").field(&self.0).finish()
-    }
-}
-impl ::core::convert::From<::core::option::Option<HANDLE>> for HANDLE {
-    fn from(optional: ::core::option::Option<HANDLE>) -> HANDLE {
-        optional.unwrap_or_default()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct LRESULT(pub isize);
-impl ::core::marker::Copy for LRESULT {}
-impl ::core::clone::Clone for LRESULT {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for LRESULT {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for LRESULT {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for LRESULT {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("LRESULT").field(&self.0).finish()
-    }
-}
-impl ::core::convert::From<::core::option::Option<LRESULT>> for LRESULT {
-    fn from(optional: ::core::option::Option<LRESULT>) -> LRESULT {
-        optional.unwrap_or_default()
-    }
-}
-
-#[repr(C)]
-pub struct RECT {
-    pub left: i32,
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
-}
-impl ::core::marker::Copy for RECT {}
-impl ::core::cmp::Eq for RECT {}
-impl ::core::cmp::PartialEq for RECT {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<RECT>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for RECT {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for RECT {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for RECT {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for RECT {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("RECT").field("left", &self.left).field("top", &self.top).field("right", &self.right).field("bottom", &self.bottom).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HINSTANCE(pub isize);
-impl HINSTANCE {
-    pub fn is_invalid(&self) -> bool {
-        self.0 == 0
-    }
-}
-impl ::core::marker::Copy for HINSTANCE {}
-impl ::core::clone::Clone for HINSTANCE {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for HINSTANCE {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for HINSTANCE {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for HINSTANCE {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("HINSTANCE").field(&self.0).finish()
-    }
-}
-impl ::core::convert::From<::core::option::Option<HINSTANCE>> for HINSTANCE {
-    fn from(optional: ::core::option::Option<HINSTANCE>) -> HINSTANCE {
-        optional.unwrap_or_default()
-    }
-}
-
-pub const WAIT_OBJECT_0: WIN32_ERROR = WIN32_ERROR(0u32);
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WIN32_ERROR(pub u32);
-impl WIN32_ERROR {
-    #[inline]
-    pub const fn is_ok(self) -> bool {
-        self.0 == 0
-    }
-    #[inline]
-    pub const fn is_err(self) -> bool {
-        !self.is_ok()
-    }
-    #[inline]
-    pub const fn to_hresult(self) -> ::windows::core::HRESULT {
-        ::windows::core::HRESULT(if self.0 == 0 { self.0 } else { (self.0 & 0x0000_FFFF) | (7 << 16) | 0x8000_0000 } as _)
-    }
-    #[inline]
-    pub fn from_error(error: &::windows::core::Error) -> ::core::option::Option<Self> {
-        let hresult = error.code().0 as u32;
-        if ((hresult >> 16) & 0x7FF) == 7 {
-            Some(Self(hresult & 0xFFFF))
-        } else {
-            None
-        }
-    }
-    #[inline]
-    pub const fn ok(self) -> ::windows::core::Result<()> {
-        if self.is_ok() {
-            Ok(())
-        } else {
-            Err(::windows::core::Error { code: self.to_hresult(), info: None })
-        }
-    }
-}
-impl ::core::marker::Copy for WIN32_ERROR {}
-impl ::core::clone::Clone for WIN32_ERROR {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for WIN32_ERROR {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for WIN32_ERROR {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for WIN32_ERROR {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("WIN32_ERROR").field(&self.0).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct CHAR(pub u8);
-impl ::core::marker::Copy for CHAR {}
-impl ::core::clone::Clone for CHAR {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for CHAR {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for CHAR {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for CHAR {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("CHAR").field(&self.0).finish()
-    }
-}
-impl ::core::convert::From<::core::option::Option<CHAR>> for CHAR {
-    fn from(optional: ::core::option::Option<CHAR>) -> CHAR {
-        optional.unwrap_or_default()
-    }
-}
-
-#[repr(C)]
-pub struct FILETIME {
-    pub dwLowDateTime: u32,
-    pub dwHighDateTime: u32,
-}
-impl ::core::marker::Copy for FILETIME {}
-impl ::core::cmp::Eq for FILETIME {}
-impl ::core::cmp::PartialEq for FILETIME {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<FILETIME>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for FILETIME {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for FILETIME {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for FILETIME {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for FILETIME {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("FILETIME").field("dwLowDateTime", &self.dwLowDateTime).field("dwHighDateTime", &self.dwHighDateTime).finish()
-    }
-}
-
-#[repr(C)]
-pub struct LUID {
-    pub LowPart: u32,
-    pub HighPart: i32,
-}
-impl ::core::marker::Copy for LUID {}
-impl ::core::cmp::Eq for LUID {}
-impl ::core::cmp::PartialEq for LUID {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<LUID>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for LUID {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for LUID {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for LUID {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for LUID {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("LUID").field("LowPart", &self.LowPart).field("HighPart", &self.HighPart).finish()
-    }
-}
-
-#[repr(C)]
-pub struct POINT {
-    pub x: i32,
-    pub y: i32,
-}
-impl ::core::marker::Copy for POINT {}
-impl ::core::cmp::Eq for POINT {}
-impl ::core::cmp::PartialEq for POINT {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<POINT>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for POINT {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for POINT {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for POINT {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for POINT {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("POINT").field("x", &self.x).field("y", &self.y).finish()
-    }
-}
-
-#[repr(C)]
-pub struct DECIMAL {
-    pub wReserved: u16,
-    pub Anonymous1: DECIMAL_0,
-    pub Hi32: u32,
-    pub Anonymous2: DECIMAL_1,
-}
-impl ::core::marker::Copy for DECIMAL {}
-impl ::core::cmp::Eq for DECIMAL {}
-impl ::core::cmp::PartialEq for DECIMAL {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for DECIMAL {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DECIMAL {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for DECIMAL {
-    type Abi = Self;
-}
-
-#[repr(C)]pub union DECIMAL_0 {
-    pub Anonymous: DECIMAL_0_0,
-    pub signscale: u16,
-}
-impl ::core::marker::Copy for DECIMAL_0 {}
-impl ::core::cmp::Eq for DECIMAL_0 {}
-impl ::core::cmp::PartialEq for DECIMAL_0 {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_0>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for DECIMAL_0 {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DECIMAL_0 {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for DECIMAL_0 {
-    type Abi = Self;
-}
-
-#[repr(C)]pub union DECIMAL_1 {
-    pub Anonymous: DECIMAL_1_0,
-    pub Lo64: u64,
-}
-impl ::core::marker::Copy for DECIMAL_1 {}
-impl ::core::cmp::Eq for DECIMAL_1 {}
-impl ::core::cmp::PartialEq for DECIMAL_1 {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_1>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for DECIMAL_1 {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DECIMAL_1 {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for DECIMAL_1 {
-    type Abi = Self;
-}
-
-#[repr(C)]
-pub struct DECIMAL_0_0 {
-    pub scale: u8,
-    pub sign: u8,
-}
-impl ::core::marker::Copy for DECIMAL_0_0 {}
-impl ::core::cmp::Eq for DECIMAL_0_0 {}
-impl ::core::cmp::PartialEq for DECIMAL_0_0 {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_0_0>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for DECIMAL_0_0 {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DECIMAL_0_0 {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for DECIMAL_0_0 {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for DECIMAL_0_0 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("DECIMAL_0_0").field("scale", &self.scale).field("sign", &self.sign).finish()
-    }
-}
-
-#[repr(C)]
-pub struct DECIMAL_1_0 {
-    pub Lo32: u32,
-    pub Mid32: u32,
-}
-impl ::core::marker::Copy for DECIMAL_1_0 {}
-impl ::core::cmp::Eq for DECIMAL_1_0 {}
-impl ::core::cmp::PartialEq for DECIMAL_1_0 {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_1_0>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for DECIMAL_1_0 {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for DECIMAL_1_0 {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for DECIMAL_1_0 {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for DECIMAL_1_0 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("DECIMAL_1_0").field("Lo32", &self.Lo32).field("Mid32", &self.Mid32).finish()
-    }
-}
-
-}
 pub mod UI{
 pub mod WindowsAndMessaging{
-#[repr(C)]
-pub struct WNDCLASSEXW {
+#[repr(C)]pub struct WNDCLASSEXW {
     pub cbSize: u32,
     pub style: WNDCLASS_STYLES,
     pub lpfnWndProc: WNDPROC,
@@ -602,7 +14,7 @@ pub struct WNDCLASSEXW {
     pub hbrBackground: super::super::Graphics::Gdi::HBRUSH,
     pub lpszMenuName: ::windows::core::PCWSTR,
     pub lpszClassName: ::windows::core::PCWSTR,
-    pub hIconSm: HICON,
+    pub hIconSm: HICON, 
 }
 impl ::core::marker::Copy for WNDCLASSEXW {}
 impl ::core::cmp::Eq for WNDCLASSEXW {}
@@ -737,19 +149,6 @@ where
     KillTimer(hwnd.into(), uidevent)
 }
 
-pub unsafe fn PostMessageW<'a, P0, P1, P2>(hwnd: P0, msg: u32, wparam: P1, lparam: P2) -> super::super::Foundation::BOOL
-where
-    P0: ::std::convert::Into<super::super::Foundation::HWND>,
-    P1: ::std::convert::Into<super::super::Foundation::WPARAM>,
-    P2: ::std::convert::Into<super::super::Foundation::LPARAM>,
-{
-    #[cfg_attr(windows, link(name = "windows"))]
-    extern "system" {
-        fn PostMessageW(hwnd: super::super::Foundation::HWND, msg: u32, wparam: super::super::Foundation::WPARAM, lparam: super::super::Foundation::LPARAM) -> super::super::Foundation::BOOL;
-    }
-    PostMessageW(hwnd.into(), msg, wparam.into(), lparam.into())
-}
-
 pub unsafe fn ShowCursor<'a, P0>(bshow: P0) -> i32
 where
     P0: ::std::convert::Into<super::super::Foundation::BOOL>,
@@ -825,8 +224,6 @@ pub const CS_OWNDC: WNDCLASS_STYLES = WNDCLASS_STYLES(32u32);
 
 pub const IDI_WINLOGO: ::windows::core::PCWSTR = ::windows::core::PCWSTR(32517u32 as _);
 
-pub const WM_USER: u32 = 1024u32;
-
 pub unsafe fn CreateWindowExW<'a, P0, P1, P2, P3, P4>(dwexstyle: WINDOW_EX_STYLE, lpclassname: P0, lpwindowname: P1, dwstyle: WINDOW_STYLE, x: i32, y: i32, nwidth: i32, nheight: i32, hwndparent: P2, hmenu: P3, hinstance: P4, lpparam: ::core::option::Option<*const ::core::ffi::c_void>) -> super::super::Foundation::HWND
 where
     P0: ::std::convert::Into<::windows::core::PCWSTR>,
@@ -888,6 +285,19 @@ where
     ShowWindow(hwnd.into(), ncmdshow)
 }
 
+pub unsafe fn PostMessageW<'a, P0, P1, P2>(hwnd: P0, msg: u32, wparam: P1, lparam: P2) -> super::super::Foundation::BOOL
+where
+    P0: ::std::convert::Into<super::super::Foundation::HWND>,
+    P1: ::std::convert::Into<super::super::Foundation::WPARAM>,
+    P2: ::std::convert::Into<super::super::Foundation::LPARAM>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn PostMessageW(hwnd: super::super::Foundation::HWND, msg: u32, wparam: super::super::Foundation::WPARAM, lparam: super::super::Foundation::LPARAM) -> super::super::Foundation::BOOL;
+    }
+    PostMessageW(hwnd.into(), msg, wparam.into(), lparam.into())
+}
+
 pub unsafe fn GetWindowRect<'a, P0>(hwnd: P0, lprect: *mut super::super::Foundation::RECT) -> super::super::Foundation::BOOL
 where
     P0: ::std::convert::Into<super::super::Foundation::HWND>,
@@ -933,8 +343,7 @@ where
     GetWindowPlacement(hwnd.into(), ::core::mem::transmute(lpwndpl))
 }
 
-#[repr(C)]
-pub struct WINDOWPLACEMENT {
+#[repr(C)]pub struct WINDOWPLACEMENT {
     pub length: u32,
     pub flags: WINDOWPLACEMENT_FLAGS,
     pub showCmd: SHOW_WINDOW_CMD,
@@ -1105,8 +514,7 @@ pub const HTCAPTION: u32 = 2u32;
 
 pub const HTSYSMENU: u32 = 3u32;
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WINDOWPLACEMENT_FLAGS(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WINDOWPLACEMENT_FLAGS(pub u32);
 impl ::core::marker::Copy for WINDOWPLACEMENT_FLAGS {}
 impl ::core::clone::Clone for WINDOWPLACEMENT_FLAGS {
     fn clone(&self) -> Self {
@@ -1155,8 +563,7 @@ impl ::core::ops::Not for WINDOWPLACEMENT_FLAGS {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WNDCLASS_STYLES(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WNDCLASS_STYLES(pub u32);
 impl ::core::marker::Copy for WNDCLASS_STYLES {}
 impl ::core::clone::Clone for WNDCLASS_STYLES {
     fn clone(&self) -> Self {
@@ -1205,8 +612,7 @@ impl ::core::ops::Not for WNDCLASS_STYLES {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct PEEK_MESSAGE_REMOVE_TYPE(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct PEEK_MESSAGE_REMOVE_TYPE(pub u32);
 impl ::core::marker::Copy for PEEK_MESSAGE_REMOVE_TYPE {}
 impl ::core::clone::Clone for PEEK_MESSAGE_REMOVE_TYPE {
     fn clone(&self) -> Self {
@@ -1255,8 +661,7 @@ impl ::core::ops::Not for PEEK_MESSAGE_REMOVE_TYPE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WINDOW_EX_STYLE(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WINDOW_EX_STYLE(pub u32);
 impl ::core::marker::Copy for WINDOW_EX_STYLE {}
 impl ::core::clone::Clone for WINDOW_EX_STYLE {
     fn clone(&self) -> Self {
@@ -1305,8 +710,7 @@ impl ::core::ops::Not for WINDOW_EX_STYLE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WINDOW_STYLE(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WINDOW_STYLE(pub u32);
 impl ::core::marker::Copy for WINDOW_STYLE {}
 impl ::core::clone::Clone for WINDOW_STYLE {
     fn clone(&self) -> Self {
@@ -1355,8 +759,7 @@ impl ::core::ops::Not for WINDOW_STYLE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct WINDOW_LONG_PTR_INDEX(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WINDOW_LONG_PTR_INDEX(pub i32);
 impl ::core::marker::Copy for WINDOW_LONG_PTR_INDEX {}
 impl ::core::clone::Clone for WINDOW_LONG_PTR_INDEX {
     fn clone(&self) -> Self {
@@ -1377,8 +780,7 @@ impl ::core::fmt::Debug for WINDOW_LONG_PTR_INDEX {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct SHOW_WINDOW_CMD(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct SHOW_WINDOW_CMD(pub u32);
 impl ::core::marker::Copy for SHOW_WINDOW_CMD {}
 impl ::core::clone::Clone for SHOW_WINDOW_CMD {
     fn clone(&self) -> Self {
@@ -1427,8 +829,7 @@ impl ::core::ops::Not for SHOW_WINDOW_CMD {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct SET_WINDOW_POS_FLAGS(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct SET_WINDOW_POS_FLAGS(pub u32);
 impl ::core::marker::Copy for SET_WINDOW_POS_FLAGS {}
 impl ::core::clone::Clone for SET_WINDOW_POS_FLAGS {
     fn clone(&self) -> Self {
@@ -1479,8 +880,7 @@ impl ::core::ops::Not for SET_WINDOW_POS_FLAGS {
 
 pub type TIMERPROC = ::core::option::Option<unsafe extern "system" fn(param0: super::super::Foundation::HWND, param1: u32, param2: usize, param3: u32)>;
 
-#[repr(C)]
-pub struct MSG {
+#[repr(C)]pub struct MSG {
     pub hwnd: super::super::Foundation::HWND,
     pub message: u32,
     pub wParam: super::super::Foundation::WPARAM,
@@ -1514,8 +914,7 @@ impl ::core::fmt::Debug for MSG {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HMENU(pub isize);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HMENU(pub isize);
 impl HMENU {
     pub fn is_invalid(&self) -> bool {
         self.0 == -1 || self.0 == 0
@@ -1548,8 +947,7 @@ impl ::core::convert::From<::core::option::Option<HMENU>> for HMENU {
 
 pub type WNDPROC = ::core::option::Option<unsafe extern "system" fn(param0: super::super::Foundation::HWND, param1: u32, param2: super::super::Foundation::WPARAM, param3: super::super::Foundation::LPARAM) -> super::super::Foundation::LRESULT>;
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HCURSOR(pub isize);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HCURSOR(pub isize);
 impl HCURSOR {
     pub fn is_invalid(&self) -> bool {
         self.0 == -1 || self.0 == 0
@@ -1580,8 +978,7 @@ impl ::core::convert::From<::core::option::Option<HCURSOR>> for HCURSOR {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HICON(pub isize);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HICON(pub isize);
 impl HICON {
     pub fn is_invalid(&self) -> bool {
         self.0 == -1 || self.0 == 0
@@ -1614,8 +1011,7 @@ impl ::core::convert::From<::core::option::Option<HICON>> for HICON {
 
 }
 pub mod HiDpi{
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct PROCESS_DPI_AWARENESS(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct PROCESS_DPI_AWARENESS(pub i32);
 impl ::core::marker::Copy for PROCESS_DPI_AWARENESS {}
 impl ::core::clone::Clone for PROCESS_DPI_AWARENESS {
     fn clone(&self) -> Self {
@@ -1636,8 +1032,7 @@ impl ::core::fmt::Debug for PROCESS_DPI_AWARENESS {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DPI_AWARENESS_CONTEXT(pub isize);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DPI_AWARENESS_CONTEXT(pub isize);
 impl DPI_AWARENESS_CONTEXT {
     pub fn is_invalid(&self) -> bool {
         self.0 == -1 || self.0 == 0
@@ -1668,8 +1063,7 @@ impl ::core::convert::From<::core::option::Option<DPI_AWARENESS_CONTEXT>> for DP
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct MONITOR_DPI_TYPE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct MONITOR_DPI_TYPE(pub i32);
 impl ::core::marker::Copy for MONITOR_DPI_TYPE {}
 impl ::core::clone::Clone for MONITOR_DPI_TYPE {
     fn clone(&self) -> Self {
@@ -1700,8 +1094,7 @@ pub const MDT_EFFECTIVE_DPI: MONITOR_DPI_TYPE = MONITOR_DPI_TYPE(0i32);
 
 }
 pub mod Controls{
-#[repr(C)]
-pub struct MARGINS {
+#[repr(C)]pub struct MARGINS {
     pub cxLeftWidth: i32,
     pub cxRightWidth: i32,
     pub cyTopHeight: i32,
@@ -1738,8 +1131,7 @@ pub const WM_MOUSELEAVE: u32 = 675u32;
 }
 pub mod Input{
 pub mod KeyboardAndMouse{
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct VIRTUAL_KEY(pub u16);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct VIRTUAL_KEY(pub u16);
 impl ::core::marker::Copy for VIRTUAL_KEY {}
 impl ::core::clone::Clone for VIRTUAL_KEY {
     fn clone(&self) -> Self {
@@ -1795,8 +1187,7 @@ pub unsafe fn GetKeyState(nvirtkey: i32) -> i16 {
     GetKeyState(nvirtkey)
 }
 
-#[repr(C)]
-pub struct TRACKMOUSEEVENT {
+#[repr(C)]pub struct TRACKMOUSEEVENT {
     pub cbSize: u32,
     pub dwFlags: TRACKMOUSEEVENT_FLAGS,
     pub hwndTrack: super::super::super::Foundation::HWND,
@@ -2040,8 +1431,7 @@ pub const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(37u16);
 
 pub const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(39u16);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct TRACKMOUSEEVENT_FLAGS(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct TRACKMOUSEEVENT_FLAGS(pub u32);
 impl ::core::marker::Copy for TRACKMOUSEEVENT_FLAGS {}
 impl ::core::clone::Clone for TRACKMOUSEEVENT_FLAGS {
     fn clone(&self) -> Self {
@@ -2094,8 +1484,7 @@ impl ::core::ops::Not for TRACKMOUSEEVENT_FLAGS {
 }
 pub mod Shell{
 pub mod PropertiesSystem{
-#[repr(transparent)]
-pub struct IPropertyStore(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IPropertyStore(::windows::core::IUnknown);
 impl IPropertyStore {
     pub unsafe fn GetCount(&self) -> ::windows::core::Result<u32> {
         let mut result__ = ::core::mem::MaybeUninit::zeroed();
@@ -2228,8 +1617,7 @@ impl IPropertyStore_Vtbl {
     }
 }
 
-#[repr(C)]
-pub struct PROPERTYKEY {
+#[repr(C)]pub struct PROPERTYKEY {
     pub fmtid: ::windows::core::GUID,
     pub pid: u32,
 }
@@ -2264,8 +1652,7 @@ impl ::core::fmt::Debug for PROPERTYKEY {
 }
 pub mod Graphics{
 pub mod Gdi{
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HMONITOR(pub isize);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HMONITOR(pub isize);
 impl HMONITOR {
     pub fn is_invalid(&self) -> bool {
         self.0 == -1 || self.0 == 0
@@ -2333,8 +1720,7 @@ pub const MONITOR_DEFAULTTONEAREST: MONITOR_FROM_FLAGS = MONITOR_FROM_FLAGS(2u32
 
 pub const LOGPIXELSX: GET_DEVICE_CAPS_INDEX = GET_DEVICE_CAPS_INDEX(88u32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HDC(pub isize);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HDC(pub isize);
 impl HDC {
     pub fn is_invalid(&self) -> bool {
         self.0 == -1 || self.0 == 0
@@ -2365,8 +1751,7 @@ impl ::core::convert::From<::core::option::Option<HDC>> for HDC {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct HBRUSH(pub isize);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HBRUSH(pub isize);
 impl HBRUSH {
     pub fn is_invalid(&self) -> bool {
         self.0 == -1 || self.0 == 0
@@ -2397,8 +1782,7 @@ impl ::core::convert::From<::core::option::Option<HBRUSH>> for HBRUSH {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct MONITOR_FROM_FLAGS(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct MONITOR_FROM_FLAGS(pub u32);
 impl ::core::marker::Copy for MONITOR_FROM_FLAGS {}
 impl ::core::clone::Clone for MONITOR_FROM_FLAGS {
     fn clone(&self) -> Self {
@@ -2419,8 +1803,7 @@ impl ::core::fmt::Debug for MONITOR_FROM_FLAGS {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct GET_DEVICE_CAPS_INDEX(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct GET_DEVICE_CAPS_INDEX(pub u32);
 impl ::core::marker::Copy for GET_DEVICE_CAPS_INDEX {}
 impl ::core::clone::Clone for GET_DEVICE_CAPS_INDEX {
     fn clone(&self) -> Self {
@@ -2460,8 +1843,7 @@ pub const D3D11_BIND_INDEX_BUFFER: D3D11_BIND_FLAG = D3D11_BIND_FLAG(2u32);
 
 pub const D3D11_BIND_VERTEX_BUFFER: D3D11_BIND_FLAG = D3D11_BIND_FLAG(1u32);
 
-#[repr(C)]
-pub struct D3D11_VIEWPORT {
+#[repr(C)]pub struct D3D11_VIEWPORT {
     pub TopLeftX: f32,
     pub TopLeftY: f32,
     pub Width: f32,
@@ -2495,8 +1877,7 @@ impl ::core::fmt::Debug for D3D11_VIEWPORT {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_BUFFER_DESC {
+#[repr(C)]pub struct D3D11_BUFFER_DESC {
     pub ByteWidth: u32,
     pub Usage: D3D11_USAGE,
     pub BindFlags: D3D11_BIND_FLAG,
@@ -2534,8 +1915,7 @@ pub const D3D11_USAGE_DEFAULT: D3D11_USAGE = D3D11_USAGE(0i32);
 
 pub const D3D11_BIND_CONSTANT_BUFFER: D3D11_BIND_FLAG = D3D11_BIND_FLAG(4u32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_CPU_ACCESS_FLAG(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_CPU_ACCESS_FLAG(pub u32);
 impl ::core::marker::Copy for D3D11_CPU_ACCESS_FLAG {}
 impl ::core::clone::Clone for D3D11_CPU_ACCESS_FLAG {
     fn clone(&self) -> Self {
@@ -2584,8 +1964,7 @@ impl ::core::ops::Not for D3D11_CPU_ACCESS_FLAG {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_RESOURCE_MISC_FLAG(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_RESOURCE_MISC_FLAG(pub u32);
 impl ::core::marker::Copy for D3D11_RESOURCE_MISC_FLAG {}
 impl ::core::clone::Clone for D3D11_RESOURCE_MISC_FLAG {
     fn clone(&self) -> Self {
@@ -2634,8 +2013,7 @@ impl ::core::ops::Not for D3D11_RESOURCE_MISC_FLAG {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_SUBRESOURCE_DATA {
+#[repr(C)]pub struct D3D11_SUBRESOURCE_DATA {
     pub pSysMem: *const ::core::ffi::c_void,
     pub SysMemPitch: u32,
     pub SysMemSlicePitch: u32,
@@ -2666,8 +2044,7 @@ impl ::core::fmt::Debug for D3D11_SUBRESOURCE_DATA {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_CREATE_DEVICE_FLAG(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_CREATE_DEVICE_FLAG(pub u32);
 impl ::core::marker::Copy for D3D11_CREATE_DEVICE_FLAG {}
 impl ::core::clone::Clone for D3D11_CREATE_DEVICE_FLAG {
     fn clone(&self) -> Self {
@@ -2718,8 +2095,7 @@ impl ::core::ops::Not for D3D11_CREATE_DEVICE_FLAG {
 
 pub const D3D11_SDK_VERSION: u32 = 7u32;
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_BIND_FLAG(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_BIND_FLAG(pub u32);
 impl ::core::marker::Copy for D3D11_BIND_FLAG {}
 impl ::core::clone::Clone for D3D11_BIND_FLAG {
     fn clone(&self) -> Self {
@@ -2770,8 +2146,7 @@ impl ::core::ops::Not for D3D11_BIND_FLAG {
 
 pub const D3D11_BIND_SHADER_RESOURCE: D3D11_BIND_FLAG = D3D11_BIND_FLAG(8u32);
 
-#[repr(C)]
-pub struct D3D11_TEXTURE2D_DESC {
+#[repr(C)]pub struct D3D11_TEXTURE2D_DESC {
     pub Width: u32,
     pub Height: u32,
     pub MipLevels: u32,
@@ -2813,8 +2188,7 @@ pub const D3D11_BIND_RENDER_TARGET: D3D11_BIND_FLAG = D3D11_BIND_FLAG(32u32);
 
 pub const D3D11_BIND_DEPTH_STENCIL: D3D11_BIND_FLAG = D3D11_BIND_FLAG(64u32);
 
-#[repr(C)]
-pub struct D3D11_DEPTH_STENCIL_DESC {
+#[repr(C)]pub struct D3D11_DEPTH_STENCIL_DESC {
     pub DepthEnable: super::super::Foundation::BOOL,
     pub DepthWriteMask: D3D11_DEPTH_WRITE_MASK,
     pub DepthFunc: D3D11_COMPARISON_FUNC,
@@ -2854,8 +2228,7 @@ pub const D3D11_DEPTH_WRITE_MASK_ALL: D3D11_DEPTH_WRITE_MASK = D3D11_DEPTH_WRITE
 
 pub const D3D11_COMPARISON_LESS_EQUAL: D3D11_COMPARISON_FUNC = D3D11_COMPARISON_FUNC(4i32);
 
-#[repr(C)]
-pub struct D3D11_DEPTH_STENCILOP_DESC {
+#[repr(C)]pub struct D3D11_DEPTH_STENCILOP_DESC {
     pub StencilFailOp: D3D11_STENCIL_OP,
     pub StencilDepthFailOp: D3D11_STENCIL_OP,
     pub StencilPassOp: D3D11_STENCIL_OP,
@@ -2891,8 +2264,7 @@ pub const D3D11_STENCIL_OP_REPLACE: D3D11_STENCIL_OP = D3D11_STENCIL_OP(3i32);
 
 pub const D3D11_COMPARISON_ALWAYS: D3D11_COMPARISON_FUNC = D3D11_COMPARISON_FUNC(8i32);
 
-#[repr(C)]
-pub struct D3D11_DEPTH_STENCIL_VIEW_DESC {
+#[repr(C)]pub struct D3D11_DEPTH_STENCIL_VIEW_DESC {
     pub Format: super::Dxgi::Common::DXGI_FORMAT,
     pub ViewDimension: D3D11_DSV_DIMENSION,
     pub Flags: u32,
@@ -2925,8 +2297,7 @@ pub const D3D11_CLEAR_DEPTH: D3D11_CLEAR_FLAG = D3D11_CLEAR_FLAG(1i32);
 
 pub const D3D11_CLEAR_STENCIL: D3D11_CLEAR_FLAG = D3D11_CLEAR_FLAG(2i32);
 
-#[repr(C)]
-pub struct D3D11_BLEND_DESC {
+#[repr(C)]pub struct D3D11_BLEND_DESC {
     pub AlphaToCoverageEnable: super::super::Foundation::BOOL,
     pub IndependentBlendEnable: super::super::Foundation::BOOL,
     pub RenderTarget: [D3D11_RENDER_TARGET_BLEND_DESC; 8],
@@ -2957,8 +2328,7 @@ impl ::core::fmt::Debug for D3D11_BLEND_DESC {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_RENDER_TARGET_BLEND_DESC {
+#[repr(C)]pub struct D3D11_RENDER_TARGET_BLEND_DESC {
     pub BlendEnable: super::super::Foundation::BOOL,
     pub SrcBlend: D3D11_BLEND,
     pub DestBlend: D3D11_BLEND,
@@ -3002,8 +2372,7 @@ pub const D3D11_BLEND_OP_ADD: D3D11_BLEND_OP = D3D11_BLEND_OP(1i32);
 
 pub const D3D11_COLOR_WRITE_ENABLE_ALL: D3D11_COLOR_WRITE_ENABLE = D3D11_COLOR_WRITE_ENABLE(15i32);
 
-#[repr(C)]
-pub struct D3D11_RASTERIZER_DESC {
+#[repr(C)]pub struct D3D11_RASTERIZER_DESC {
     pub FillMode: D3D11_FILL_MODE,
     pub CullMode: D3D11_CULL_MODE,
     pub FrontCounterClockwise: super::super::Foundation::BOOL,
@@ -3056,8 +2425,7 @@ pub const D3D11_CULL_NONE: D3D11_CULL_MODE = D3D11_CULL_MODE(1i32);
 
 pub const D3D11_FILL_SOLID: D3D11_FILL_MODE = D3D11_FILL_MODE(3i32);
 
-#[repr(C)]
-pub struct D3D11_INPUT_ELEMENT_DESC {
+#[repr(C)]pub struct D3D11_INPUT_ELEMENT_DESC {
     pub SemanticName: ::windows::core::PCSTR,
     pub SemanticIndex: u32,
     pub Format: super::Dxgi::Common::DXGI_FORMAT,
@@ -3096,8 +2464,7 @@ pub const D3D11_INPUT_PER_VERTEX_DATA: D3D11_INPUT_CLASSIFICATION = D3D11_INPUT_
 
 pub const D3D11_INPUT_PER_INSTANCE_DATA: D3D11_INPUT_CLASSIFICATION = D3D11_INPUT_CLASSIFICATION(1i32);
 
-#[repr(transparent)]
-pub struct ID3D11Device(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Device(::windows::core::IUnknown);
 impl ID3D11Device {
     pub unsafe fn CreateBuffer(&self, pdesc: *const D3D11_BUFFER_DESC, pinitialdata: ::core::option::Option<*const D3D11_SUBRESOURCE_DATA>) -> ::windows::core::Result<ID3D11Buffer> {
         let mut result__ = ::core::mem::MaybeUninit::zeroed();
@@ -3902,8 +3269,7 @@ impl ID3D11Device_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11DeviceContext(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11DeviceContext(::windows::core::IUnknown);
 impl ID3D11DeviceContext {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -5346,8 +4712,7 @@ impl ID3D11DeviceContext_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11RenderTargetView(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11RenderTargetView(::windows::core::IUnknown);
 impl ID3D11RenderTargetView {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -5427,8 +4792,7 @@ impl ID3D11RenderTargetView_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11Texture2D(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Texture2D(::windows::core::IUnknown);
 impl ID3D11Texture2D {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -5514,8 +4878,7 @@ impl ID3D11Texture2D_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11ShaderResourceView(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11ShaderResourceView(::windows::core::IUnknown);
 impl ID3D11ShaderResourceView {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -5595,8 +4958,7 @@ impl ID3D11ShaderResourceView_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11DepthStencilView(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11DepthStencilView(::windows::core::IUnknown);
 impl ID3D11DepthStencilView {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -5676,8 +5038,7 @@ impl ID3D11DepthStencilView_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11BlendState(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11BlendState(::windows::core::IUnknown);
 impl ID3D11BlendState {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -5754,8 +5115,7 @@ impl ID3D11BlendState_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11RasterizerState(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11RasterizerState(::windows::core::IUnknown);
 impl ID3D11RasterizerState {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -5832,8 +5192,7 @@ impl ID3D11RasterizerState_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11DepthStencilState(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11DepthStencilState(::windows::core::IUnknown);
 impl ID3D11DepthStencilState {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -5910,8 +5269,7 @@ impl ID3D11DepthStencilState_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11PixelShader(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11PixelShader(::windows::core::IUnknown);
 impl ID3D11PixelShader {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -5972,8 +5330,7 @@ impl ID3D11PixelShader_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11VertexShader(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11VertexShader(::windows::core::IUnknown);
 impl ID3D11VertexShader {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6034,8 +5391,7 @@ impl ID3D11VertexShader_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11InputLayout(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11InputLayout(::windows::core::IUnknown);
 impl ID3D11InputLayout {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6096,8 +5452,7 @@ impl ID3D11InputLayout_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11Buffer(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Buffer(::windows::core::IUnknown);
 impl ID3D11Buffer {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6190,8 +5545,7 @@ where
     D3D11CreateDevice(padapter.into().abi(), drivertype, software.into(), flags, ::core::mem::transmute(pfeaturelevels.as_deref().map_or(::core::ptr::null(), |slice| slice.as_ptr())), pfeaturelevels.as_deref().map_or(0, |slice| slice.len() as _), sdkversion, ::core::mem::transmute(ppdevice.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(pfeaturelevel.unwrap_or(::std::ptr::null_mut())), ::core::mem::transmute(ppimmediatecontext.unwrap_or(::std::ptr::null_mut()))).ok()
 }
 
-#[repr(transparent)]
-pub struct ID3D11Asynchronous(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Asynchronous(::windows::core::IUnknown);
 impl ID3D11Asynchronous {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6263,8 +5617,7 @@ impl ID3D11Asynchronous_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11ClassInstance(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11ClassInstance(::windows::core::IUnknown);
 impl ID3D11ClassInstance {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6377,8 +5730,7 @@ impl ID3D11ClassInstance_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11Texture3D(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Texture3D(::windows::core::IUnknown);
 impl ID3D11Texture3D {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6464,8 +5816,7 @@ impl ID3D11Texture3D_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11Texture1D(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Texture1D(::windows::core::IUnknown);
 impl ID3D11Texture1D {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6551,8 +5902,7 @@ impl ID3D11Texture1D_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11Resource(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Resource(::windows::core::IUnknown);
 impl ID3D11Resource {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6649,8 +5999,7 @@ impl ID3D11Resource_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11UnorderedAccessView(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11UnorderedAccessView(::windows::core::IUnknown);
 impl ID3D11UnorderedAccessView {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6730,8 +6079,7 @@ impl ID3D11UnorderedAccessView_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11ClassLinkage(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11ClassLinkage(::windows::core::IUnknown);
 impl ID3D11ClassLinkage {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6837,8 +6185,7 @@ impl ID3D11ClassLinkage_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11GeometryShader(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11GeometryShader(::windows::core::IUnknown);
 impl ID3D11GeometryShader {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6899,8 +6246,7 @@ impl ID3D11GeometryShader_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11HullShader(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11HullShader(::windows::core::IUnknown);
 impl ID3D11HullShader {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -6961,8 +6307,7 @@ impl ID3D11HullShader_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11DomainShader(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11DomainShader(::windows::core::IUnknown);
 impl ID3D11DomainShader {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -7023,8 +6368,7 @@ impl ID3D11DomainShader_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11ComputeShader(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11ComputeShader(::windows::core::IUnknown);
 impl ID3D11ComputeShader {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -7085,8 +6429,7 @@ impl ID3D11ComputeShader_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11SamplerState(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11SamplerState(::windows::core::IUnknown);
 impl ID3D11SamplerState {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -7158,8 +6501,7 @@ impl ID3D11SamplerState_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11DeviceChild(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11DeviceChild(::windows::core::IUnknown);
 impl ID3D11DeviceChild {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -7255,8 +6597,7 @@ impl ID3D11DeviceChild_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11View(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11View(::windows::core::IUnknown);
 impl ID3D11View {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -7328,8 +6669,7 @@ impl ID3D11View_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11Query(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Query(::windows::core::IUnknown);
 impl ID3D11Query {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -7404,8 +6744,7 @@ impl ID3D11Query_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11Predicate(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Predicate(::windows::core::IUnknown);
 impl ID3D11Predicate {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -7472,8 +6811,7 @@ impl ID3D11Predicate_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11Counter(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11Counter(::windows::core::IUnknown);
 impl ID3D11Counter {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -7548,8 +6886,7 @@ impl ID3D11Counter_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ID3D11CommandList(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3D11CommandList(::windows::core::IUnknown);
 impl ID3D11CommandList {
     pub unsafe fn GetDevice(&self, ppdevice: *mut ::core::option::Option<ID3D11Device>) {
         (::windows::core::Vtable::vtable(self).base__.GetDevice)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(ppdevice))
@@ -7621,8 +6958,7 @@ impl ID3D11CommandList_Vtbl {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_USAGE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_USAGE(pub i32);
 impl ::core::marker::Copy for D3D11_USAGE {}
 impl ::core::clone::Clone for D3D11_USAGE {
     fn clone(&self) -> Self {
@@ -7643,8 +6979,7 @@ impl ::core::fmt::Debug for D3D11_USAGE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_DEPTH_WRITE_MASK(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_DEPTH_WRITE_MASK(pub i32);
 impl ::core::marker::Copy for D3D11_DEPTH_WRITE_MASK {}
 impl ::core::clone::Clone for D3D11_DEPTH_WRITE_MASK {
     fn clone(&self) -> Self {
@@ -7665,8 +7000,7 @@ impl ::core::fmt::Debug for D3D11_DEPTH_WRITE_MASK {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_COMPARISON_FUNC(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_COMPARISON_FUNC(pub i32);
 impl ::core::marker::Copy for D3D11_COMPARISON_FUNC {}
 impl ::core::clone::Clone for D3D11_COMPARISON_FUNC {
     fn clone(&self) -> Self {
@@ -7687,8 +7021,7 @@ impl ::core::fmt::Debug for D3D11_COMPARISON_FUNC {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_STENCIL_OP(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_STENCIL_OP(pub i32);
 impl ::core::marker::Copy for D3D11_STENCIL_OP {}
 impl ::core::clone::Clone for D3D11_STENCIL_OP {
     fn clone(&self) -> Self {
@@ -7709,8 +7042,7 @@ impl ::core::fmt::Debug for D3D11_STENCIL_OP {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_DSV_DIMENSION(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_DSV_DIMENSION(pub i32);
 impl ::core::marker::Copy for D3D11_DSV_DIMENSION {}
 impl ::core::clone::Clone for D3D11_DSV_DIMENSION {
     fn clone(&self) -> Self {
@@ -7731,8 +7063,7 @@ impl ::core::fmt::Debug for D3D11_DSV_DIMENSION {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_BLEND(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_BLEND(pub i32);
 impl ::core::marker::Copy for D3D11_BLEND {}
 impl ::core::clone::Clone for D3D11_BLEND {
     fn clone(&self) -> Self {
@@ -7753,8 +7084,7 @@ impl ::core::fmt::Debug for D3D11_BLEND {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_BLEND_OP(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_BLEND_OP(pub i32);
 impl ::core::marker::Copy for D3D11_BLEND_OP {}
 impl ::core::clone::Clone for D3D11_BLEND_OP {
     fn clone(&self) -> Self {
@@ -7775,8 +7105,7 @@ impl ::core::fmt::Debug for D3D11_BLEND_OP {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_CLEAR_FLAG(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_CLEAR_FLAG(pub i32);
 impl ::core::marker::Copy for D3D11_CLEAR_FLAG {}
 impl ::core::clone::Clone for D3D11_CLEAR_FLAG {
     fn clone(&self) -> Self {
@@ -7797,8 +7126,7 @@ impl ::core::fmt::Debug for D3D11_CLEAR_FLAG {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_COLOR_WRITE_ENABLE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_COLOR_WRITE_ENABLE(pub i32);
 impl ::core::marker::Copy for D3D11_COLOR_WRITE_ENABLE {}
 impl ::core::clone::Clone for D3D11_COLOR_WRITE_ENABLE {
     fn clone(&self) -> Self {
@@ -7819,8 +7147,7 @@ impl ::core::fmt::Debug for D3D11_COLOR_WRITE_ENABLE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_FILL_MODE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_FILL_MODE(pub i32);
 impl ::core::marker::Copy for D3D11_FILL_MODE {}
 impl ::core::clone::Clone for D3D11_FILL_MODE {
     fn clone(&self) -> Self {
@@ -7841,8 +7168,7 @@ impl ::core::fmt::Debug for D3D11_FILL_MODE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_CULL_MODE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_CULL_MODE(pub i32);
 impl ::core::marker::Copy for D3D11_CULL_MODE {}
 impl ::core::clone::Clone for D3D11_CULL_MODE {
     fn clone(&self) -> Self {
@@ -7863,8 +7189,7 @@ impl ::core::fmt::Debug for D3D11_CULL_MODE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_INPUT_CLASSIFICATION(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_INPUT_CLASSIFICATION(pub i32);
 impl ::core::marker::Copy for D3D11_INPUT_CLASSIFICATION {}
 impl ::core::clone::Clone for D3D11_INPUT_CLASSIFICATION {
     fn clone(&self) -> Self {
@@ -7885,8 +7210,7 @@ impl ::core::fmt::Debug for D3D11_INPUT_CLASSIFICATION {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_DEVICE_CONTEXT_TYPE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_DEVICE_CONTEXT_TYPE(pub i32);
 impl ::core::marker::Copy for D3D11_DEVICE_CONTEXT_TYPE {}
 impl ::core::clone::Clone for D3D11_DEVICE_CONTEXT_TYPE {
     fn clone(&self) -> Self {
@@ -7907,8 +7231,7 @@ impl ::core::fmt::Debug for D3D11_DEVICE_CONTEXT_TYPE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_FEATURE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_FEATURE(pub i32);
 impl ::core::marker::Copy for D3D11_FEATURE {}
 impl ::core::clone::Clone for D3D11_FEATURE {
     fn clone(&self) -> Self {
@@ -7929,8 +7252,7 @@ impl ::core::fmt::Debug for D3D11_FEATURE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_COUNTER(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_COUNTER(pub i32);
 impl ::core::marker::Copy for D3D11_COUNTER {}
 impl ::core::clone::Clone for D3D11_COUNTER {
     fn clone(&self) -> Self {
@@ -7951,8 +7273,7 @@ impl ::core::fmt::Debug for D3D11_COUNTER {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_COUNTER_INFO {
+#[repr(C)]pub struct D3D11_COUNTER_INFO {
     pub LastDeviceDependentCounter: D3D11_COUNTER,
     pub NumSimultaneousCounters: u32,
     pub NumDetectableParallelUnits: u8,
@@ -7983,8 +7304,7 @@ impl ::core::fmt::Debug for D3D11_COUNTER_INFO {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_COUNTER_TYPE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_COUNTER_TYPE(pub i32);
 impl ::core::marker::Copy for D3D11_COUNTER_TYPE {}
 impl ::core::clone::Clone for D3D11_COUNTER_TYPE {
     fn clone(&self) -> Self {
@@ -8005,8 +7325,7 @@ impl ::core::fmt::Debug for D3D11_COUNTER_TYPE {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_COUNTER_DESC {
+#[repr(C)]pub struct D3D11_COUNTER_DESC {
     pub Counter: D3D11_COUNTER,
     pub MiscFlags: u32,
 }
@@ -8036,8 +7355,7 @@ impl ::core::fmt::Debug for D3D11_COUNTER_DESC {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_RTV_DIMENSION(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_RTV_DIMENSION(pub i32);
 impl ::core::marker::Copy for D3D11_RTV_DIMENSION {}
 impl ::core::clone::Clone for D3D11_RTV_DIMENSION {
     fn clone(&self) -> Self {
@@ -8108,8 +7426,7 @@ unsafe impl ::windows::core::Abi for D3D11_BUFFER_RTV_1 {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct D3D11_BUFFER_RTV {
+#[repr(C)]pub struct D3D11_BUFFER_RTV {
     pub Anonymous1: D3D11_BUFFER_RTV_0,
     pub Anonymous2: D3D11_BUFFER_RTV_1,
 }
@@ -8134,8 +7451,7 @@ unsafe impl ::windows::core::Abi for D3D11_BUFFER_RTV {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct D3D11_TEX1D_RTV {
+#[repr(C)]pub struct D3D11_TEX1D_RTV {
     pub MipSlice: u32,
 }
 impl ::core::marker::Copy for D3D11_TEX1D_RTV {}
@@ -8164,8 +7480,7 @@ impl ::core::fmt::Debug for D3D11_TEX1D_RTV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX1D_ARRAY_RTV {
+#[repr(C)]pub struct D3D11_TEX1D_ARRAY_RTV {
     pub MipSlice: u32,
     pub FirstArraySlice: u32,
     pub ArraySize: u32,
@@ -8196,8 +7511,7 @@ impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_RTV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2D_RTV {
+#[repr(C)]pub struct D3D11_TEX2D_RTV {
     pub MipSlice: u32,
 }
 impl ::core::marker::Copy for D3D11_TEX2D_RTV {}
@@ -8226,8 +7540,7 @@ impl ::core::fmt::Debug for D3D11_TEX2D_RTV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2D_ARRAY_RTV {
+#[repr(C)]pub struct D3D11_TEX2D_ARRAY_RTV {
     pub MipSlice: u32,
     pub FirstArraySlice: u32,
     pub ArraySize: u32,
@@ -8258,8 +7571,7 @@ impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_RTV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2DMS_RTV {
+#[repr(C)]pub struct D3D11_TEX2DMS_RTV {
     pub UnusedField_NothingToDefine: u32,
 }
 impl ::core::marker::Copy for D3D11_TEX2DMS_RTV {}
@@ -8288,8 +7600,7 @@ impl ::core::fmt::Debug for D3D11_TEX2DMS_RTV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2DMS_ARRAY_RTV {
+#[repr(C)]pub struct D3D11_TEX2DMS_ARRAY_RTV {
     pub FirstArraySlice: u32,
     pub ArraySize: u32,
 }
@@ -8319,8 +7630,7 @@ impl ::core::fmt::Debug for D3D11_TEX2DMS_ARRAY_RTV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX3D_RTV {
+#[repr(C)]pub struct D3D11_TEX3D_RTV {
     pub MipSlice: u32,
     pub FirstWSlice: u32,
     pub WSize: u32,
@@ -8351,8 +7661,7 @@ impl ::core::fmt::Debug for D3D11_TEX3D_RTV {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_MAP(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_MAP(pub i32);
 impl ::core::marker::Copy for D3D11_MAP {}
 impl ::core::clone::Clone for D3D11_MAP {
     fn clone(&self) -> Self {
@@ -8373,8 +7682,7 @@ impl ::core::fmt::Debug for D3D11_MAP {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_MAPPED_SUBRESOURCE {
+#[repr(C)]pub struct D3D11_MAPPED_SUBRESOURCE {
     pub pData: *mut ::core::ffi::c_void,
     pub RowPitch: u32,
     pub DepthPitch: u32,
@@ -8405,8 +7713,7 @@ impl ::core::fmt::Debug for D3D11_MAPPED_SUBRESOURCE {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_BOX {
+#[repr(C)]pub struct D3D11_BOX {
     pub left: u32,
     pub top: u32,
     pub front: u32,
@@ -8471,8 +7778,7 @@ unsafe impl ::windows::core::Abi for D3D11_RENDER_TARGET_VIEW_DESC_0 {
     type Abi = Self;
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_QUERY(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_QUERY(pub i32);
 impl ::core::marker::Copy for D3D11_QUERY {}
 impl ::core::clone::Clone for D3D11_QUERY {
     fn clone(&self) -> Self {
@@ -8493,8 +7799,7 @@ impl ::core::fmt::Debug for D3D11_QUERY {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_CLASS_INSTANCE_DESC {
+#[repr(C)]pub struct D3D11_CLASS_INSTANCE_DESC {
     pub InstanceId: u32,
     pub InstanceIndex: u32,
     pub TypeId: u32,
@@ -8530,8 +7835,7 @@ impl ::core::fmt::Debug for D3D11_CLASS_INSTANCE_DESC {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_UAV_DIMENSION(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_UAV_DIMENSION(pub i32);
 impl ::core::marker::Copy for D3D11_UAV_DIMENSION {}
 impl ::core::clone::Clone for D3D11_UAV_DIMENSION {
     fn clone(&self) -> Self {
@@ -8552,8 +7856,7 @@ impl ::core::fmt::Debug for D3D11_UAV_DIMENSION {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_BUFFER_UAV {
+#[repr(C)]pub struct D3D11_BUFFER_UAV {
     pub FirstElement: u32,
     pub NumElements: u32,
     pub Flags: u32,
@@ -8584,8 +7887,7 @@ impl ::core::fmt::Debug for D3D11_BUFFER_UAV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX1D_UAV {
+#[repr(C)]pub struct D3D11_TEX1D_UAV {
     pub MipSlice: u32,
 }
 impl ::core::marker::Copy for D3D11_TEX1D_UAV {}
@@ -8614,8 +7916,7 @@ impl ::core::fmt::Debug for D3D11_TEX1D_UAV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX1D_ARRAY_UAV {
+#[repr(C)]pub struct D3D11_TEX1D_ARRAY_UAV {
     pub MipSlice: u32,
     pub FirstArraySlice: u32,
     pub ArraySize: u32,
@@ -8646,8 +7947,7 @@ impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_UAV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2D_UAV {
+#[repr(C)]pub struct D3D11_TEX2D_UAV {
     pub MipSlice: u32,
 }
 impl ::core::marker::Copy for D3D11_TEX2D_UAV {}
@@ -8676,8 +7976,7 @@ impl ::core::fmt::Debug for D3D11_TEX2D_UAV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2D_ARRAY_UAV {
+#[repr(C)]pub struct D3D11_TEX2D_ARRAY_UAV {
     pub MipSlice: u32,
     pub FirstArraySlice: u32,
     pub ArraySize: u32,
@@ -8708,8 +8007,7 @@ impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_UAV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX3D_UAV {
+#[repr(C)]pub struct D3D11_TEX3D_UAV {
     pub MipSlice: u32,
     pub FirstWSlice: u32,
     pub WSize: u32,
@@ -8740,8 +8038,7 @@ impl ::core::fmt::Debug for D3D11_TEX3D_UAV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_BUFFER_SRV {
+#[repr(C)]pub struct D3D11_BUFFER_SRV {
     pub Anonymous1: D3D11_BUFFER_SRV_0,
     pub Anonymous2: D3D11_BUFFER_SRV_1,
 }
@@ -8766,8 +8063,7 @@ unsafe impl ::windows::core::Abi for D3D11_BUFFER_SRV {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct D3D11_TEX1D_SRV {
+#[repr(C)]pub struct D3D11_TEX1D_SRV {
     pub MostDetailedMip: u32,
     pub MipLevels: u32,
 }
@@ -8797,8 +8093,7 @@ impl ::core::fmt::Debug for D3D11_TEX1D_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX1D_ARRAY_SRV {
+#[repr(C)]pub struct D3D11_TEX1D_ARRAY_SRV {
     pub MostDetailedMip: u32,
     pub MipLevels: u32,
     pub FirstArraySlice: u32,
@@ -8830,8 +8125,7 @@ impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2D_SRV {
+#[repr(C)]pub struct D3D11_TEX2D_SRV {
     pub MostDetailedMip: u32,
     pub MipLevels: u32,
 }
@@ -8861,8 +8155,7 @@ impl ::core::fmt::Debug for D3D11_TEX2D_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2D_ARRAY_SRV {
+#[repr(C)]pub struct D3D11_TEX2D_ARRAY_SRV {
     pub MostDetailedMip: u32,
     pub MipLevels: u32,
     pub FirstArraySlice: u32,
@@ -8894,8 +8187,7 @@ impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2DMS_SRV {
+#[repr(C)]pub struct D3D11_TEX2DMS_SRV {
     pub UnusedField_NothingToDefine: u32,
 }
 impl ::core::marker::Copy for D3D11_TEX2DMS_SRV {}
@@ -8924,8 +8216,7 @@ impl ::core::fmt::Debug for D3D11_TEX2DMS_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2DMS_ARRAY_SRV {
+#[repr(C)]pub struct D3D11_TEX2DMS_ARRAY_SRV {
     pub FirstArraySlice: u32,
     pub ArraySize: u32,
 }
@@ -8955,8 +8246,7 @@ impl ::core::fmt::Debug for D3D11_TEX2DMS_ARRAY_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX3D_SRV {
+#[repr(C)]pub struct D3D11_TEX3D_SRV {
     pub MostDetailedMip: u32,
     pub MipLevels: u32,
 }
@@ -8986,8 +8276,7 @@ impl ::core::fmt::Debug for D3D11_TEX3D_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEXCUBE_SRV {
+#[repr(C)]pub struct D3D11_TEXCUBE_SRV {
     pub MostDetailedMip: u32,
     pub MipLevels: u32,
 }
@@ -9017,8 +8306,7 @@ impl ::core::fmt::Debug for D3D11_TEXCUBE_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEXCUBE_ARRAY_SRV {
+#[repr(C)]pub struct D3D11_TEXCUBE_ARRAY_SRV {
     pub MostDetailedMip: u32,
     pub MipLevels: u32,
     pub First2DArrayFace: u32,
@@ -9050,8 +8338,7 @@ impl ::core::fmt::Debug for D3D11_TEXCUBE_ARRAY_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_BUFFEREX_SRV {
+#[repr(C)]pub struct D3D11_BUFFEREX_SRV {
     pub FirstElement: u32,
     pub NumElements: u32,
     pub Flags: u32,
@@ -9082,8 +8369,7 @@ impl ::core::fmt::Debug for D3D11_BUFFEREX_SRV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX1D_DSV {
+#[repr(C)]pub struct D3D11_TEX1D_DSV {
     pub MipSlice: u32,
 }
 impl ::core::marker::Copy for D3D11_TEX1D_DSV {}
@@ -9112,8 +8398,7 @@ impl ::core::fmt::Debug for D3D11_TEX1D_DSV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2D_DSV {
+#[repr(C)]pub struct D3D11_TEX2D_DSV {
     pub MipSlice: u32,
 }
 impl ::core::marker::Copy for D3D11_TEX2D_DSV {}
@@ -9192,8 +8477,7 @@ unsafe impl ::windows::core::Abi for D3D11_BUFFER_SRV_1 {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct D3D11_TEX1D_ARRAY_DSV {
+#[repr(C)]pub struct D3D11_TEX1D_ARRAY_DSV {
     pub MipSlice: u32,
     pub FirstArraySlice: u32,
     pub ArraySize: u32,
@@ -9224,8 +8508,7 @@ impl ::core::fmt::Debug for D3D11_TEX1D_ARRAY_DSV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2D_ARRAY_DSV {
+#[repr(C)]pub struct D3D11_TEX2D_ARRAY_DSV {
     pub MipSlice: u32,
     pub FirstArraySlice: u32,
     pub ArraySize: u32,
@@ -9256,8 +8539,7 @@ impl ::core::fmt::Debug for D3D11_TEX2D_ARRAY_DSV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2DMS_DSV {
+#[repr(C)]pub struct D3D11_TEX2DMS_DSV {
     pub UnusedField_NothingToDefine: u32,
 }
 impl ::core::marker::Copy for D3D11_TEX2DMS_DSV {}
@@ -9286,8 +8568,7 @@ impl ::core::fmt::Debug for D3D11_TEX2DMS_DSV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEX2DMS_ARRAY_DSV {
+#[repr(C)]pub struct D3D11_TEX2DMS_ARRAY_DSV {
     pub FirstArraySlice: u32,
     pub ArraySize: u32,
 }
@@ -9317,8 +8598,7 @@ impl ::core::fmt::Debug for D3D11_TEX2DMS_ARRAY_DSV {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_RENDER_TARGET_VIEW_DESC {
+#[repr(C)]pub struct D3D11_RENDER_TARGET_VIEW_DESC {
     pub Format: super::Dxgi::Common::DXGI_FORMAT,
     pub ViewDimension: D3D11_RTV_DIMENSION,
     pub Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0,
@@ -9344,8 +8624,7 @@ unsafe impl ::windows::core::Abi for D3D11_RENDER_TARGET_VIEW_DESC {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct D3D11_QUERY_DESC {
+#[repr(C)]pub struct D3D11_QUERY_DESC {
     pub Query: D3D11_QUERY,
     pub MiscFlags: u32,
 }
@@ -9375,8 +8654,7 @@ impl ::core::fmt::Debug for D3D11_QUERY_DESC {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_UNORDERED_ACCESS_VIEW_DESC {
+#[repr(C)]pub struct D3D11_UNORDERED_ACCESS_VIEW_DESC {
     pub Format: super::Dxgi::Common::DXGI_FORMAT,
     pub ViewDimension: D3D11_UAV_DIMENSION,
     pub Anonymous: D3D11_UNORDERED_ACCESS_VIEW_DESC_0,
@@ -9494,8 +8772,7 @@ unsafe impl ::windows::core::Abi for D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
     type Abi = Self;
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_FILTER(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_FILTER(pub i32);
 impl ::core::marker::Copy for D3D11_FILTER {}
 impl ::core::clone::Clone for D3D11_FILTER {
     fn clone(&self) -> Self {
@@ -9516,8 +8793,7 @@ impl ::core::fmt::Debug for D3D11_FILTER {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_TEXTURE_ADDRESS_MODE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_TEXTURE_ADDRESS_MODE(pub i32);
 impl ::core::marker::Copy for D3D11_TEXTURE_ADDRESS_MODE {}
 impl ::core::clone::Clone for D3D11_TEXTURE_ADDRESS_MODE {
     fn clone(&self) -> Self {
@@ -9538,8 +8814,7 @@ impl ::core::fmt::Debug for D3D11_TEXTURE_ADDRESS_MODE {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEXTURE1D_DESC {
+#[repr(C)]pub struct D3D11_TEXTURE1D_DESC {
     pub Width: u32,
     pub MipLevels: u32,
     pub ArraySize: u32,
@@ -9575,8 +8850,7 @@ impl ::core::fmt::Debug for D3D11_TEXTURE1D_DESC {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_TEXTURE3D_DESC {
+#[repr(C)]pub struct D3D11_TEXTURE3D_DESC {
     pub Width: u32,
     pub Height: u32,
     pub Depth: u32,
@@ -9613,8 +8887,7 @@ impl ::core::fmt::Debug for D3D11_TEXTURE3D_DESC {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_SHADER_RESOURCE_VIEW_DESC {
+#[repr(C)]pub struct D3D11_SHADER_RESOURCE_VIEW_DESC {
     pub Format: super::Dxgi::Common::DXGI_FORMAT,
     pub ViewDimension: super::Direct3D::D3D_SRV_DIMENSION,
     pub Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0,
@@ -9640,8 +8913,7 @@ unsafe impl ::windows::core::Abi for D3D11_SHADER_RESOURCE_VIEW_DESC {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct D3D11_SO_DECLARATION_ENTRY {
+#[repr(C)]pub struct D3D11_SO_DECLARATION_ENTRY {
     pub Stream: u32,
     pub SemanticName: ::windows::core::PCSTR,
     pub SemanticIndex: u32,
@@ -9675,8 +8947,7 @@ impl ::core::fmt::Debug for D3D11_SO_DECLARATION_ENTRY {
     }
 }
 
-#[repr(C)]
-pub struct D3D11_SAMPLER_DESC {
+#[repr(C)]pub struct D3D11_SAMPLER_DESC {
     pub Filter: D3D11_FILTER,
     pub AddressU: D3D11_TEXTURE_ADDRESS_MODE,
     pub AddressV: D3D11_TEXTURE_ADDRESS_MODE,
@@ -9714,8 +8985,7 @@ impl ::core::fmt::Debug for D3D11_SAMPLER_DESC {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D11_RESOURCE_DIMENSION(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D11_RESOURCE_DIMENSION(pub i32);
 impl ::core::marker::Copy for D3D11_RESOURCE_DIMENSION {}
 impl ::core::clone::Clone for D3D11_RESOURCE_DIMENSION {
     fn clone(&self) -> Self {
@@ -9754,8 +9024,7 @@ where
 }
 
 }
-#[repr(transparent)]
-pub struct ID3DBlob(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ID3DBlob(::windows::core::IUnknown);
 impl ID3DBlob {
     pub unsafe fn GetBufferPointer(&self) -> *mut ::core::ffi::c_void {
         (::windows::core::Vtable::vtable(self).GetBufferPointer)(::windows::core::Vtable::as_raw(self))
@@ -9832,8 +9101,7 @@ pub const D3D_DRIVER_TYPE_UNKNOWN: D3D_DRIVER_TYPE = D3D_DRIVER_TYPE(0i32);
 
 pub const D3D_FEATURE_LEVEL_11_0: D3D_FEATURE_LEVEL = D3D_FEATURE_LEVEL(45056i32);
 
-#[repr(transparent)]
-pub struct ID3DInclude(::std::ptr::NonNull<::std::ffi::c_void>);
+#[repr(transparent)]pub struct ID3DInclude(::std::ptr::NonNull<::std::ffi::c_void>);
 impl ID3DInclude {
     pub unsafe fn Open<'a, P0>(&self, includetype: D3D_INCLUDE_TYPE, pfilename: P0, pparentdata: *const ::core::ffi::c_void, ppdata: *mut *mut ::core::ffi::c_void, pbytes: *mut u32) -> ::windows::core::Result<()>
     where
@@ -9894,8 +9162,7 @@ impl ID3DInclude_Vtbl {
     }
 }
 
-#[repr(C)]
-pub struct D3D_SHADER_MACRO {
+#[repr(C)]pub struct D3D_SHADER_MACRO {
     pub Name: ::windows::core::PCSTR,
     pub Definition: ::windows::core::PCSTR,
 }
@@ -9925,8 +9192,7 @@ impl ::core::fmt::Debug for D3D_SHADER_MACRO {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_SRV_DIMENSION(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D_SRV_DIMENSION(pub i32);
 impl ::core::marker::Copy for D3D_SRV_DIMENSION {}
 impl ::core::clone::Clone for D3D_SRV_DIMENSION {
     fn clone(&self) -> Self {
@@ -9947,8 +9213,7 @@ impl ::core::fmt::Debug for D3D_SRV_DIMENSION {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_INCLUDE_TYPE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D_INCLUDE_TYPE(pub i32);
 impl ::core::marker::Copy for D3D_INCLUDE_TYPE {}
 impl ::core::clone::Clone for D3D_INCLUDE_TYPE {
     fn clone(&self) -> Self {
@@ -9969,8 +9234,7 @@ impl ::core::fmt::Debug for D3D_INCLUDE_TYPE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_FEATURE_LEVEL(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D_FEATURE_LEVEL(pub i32);
 impl ::core::marker::Copy for D3D_FEATURE_LEVEL {}
 impl ::core::clone::Clone for D3D_FEATURE_LEVEL {
     fn clone(&self) -> Self {
@@ -9991,8 +9255,7 @@ impl ::core::fmt::Debug for D3D_FEATURE_LEVEL {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_PRIMITIVE_TOPOLOGY(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D_PRIMITIVE_TOPOLOGY(pub i32);
 impl ::core::marker::Copy for D3D_PRIMITIVE_TOPOLOGY {}
 impl ::core::clone::Clone for D3D_PRIMITIVE_TOPOLOGY {
     fn clone(&self) -> Self {
@@ -10013,8 +9276,7 @@ impl ::core::fmt::Debug for D3D_PRIMITIVE_TOPOLOGY {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct D3D_DRIVER_TYPE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct D3D_DRIVER_TYPE(pub i32);
 impl ::core::marker::Copy for D3D_DRIVER_TYPE {}
 impl ::core::clone::Clone for D3D_DRIVER_TYPE {
     fn clone(&self) -> Self {
@@ -10037,8 +9299,7 @@ impl ::core::fmt::Debug for D3D_DRIVER_TYPE {
 
 }
 pub mod Dxgi{
-#[repr(transparent)]
-pub struct IDXGIFactory2(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGIFactory2(::windows::core::IUnknown);
 impl IDXGIFactory2 {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -10399,8 +9660,7 @@ impl IDXGIFactory2_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGISwapChain1(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGISwapChain1(::windows::core::IUnknown);
 impl IDXGISwapChain1 {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -10739,8 +9999,7 @@ where
     CreateDXGIFactory2(flags, &<T as ::windows::core::Interface>::IID, &mut result__ as *mut _ as *mut _).and_some(result__)
 }
 
-#[repr(C)]
-pub struct DXGI_SWAP_CHAIN_DESC1 {
+#[repr(C)]pub struct DXGI_SWAP_CHAIN_DESC1 {
     pub Width: u32,
     pub Height: u32,
     pub Format: Common::DXGI_FORMAT,
@@ -10786,8 +10045,7 @@ pub const DXGI_SCALING_NONE: DXGI_SCALING = DXGI_SCALING(1i32);
 pub const DXGI_SWAP_EFFECT_FLIP_DISCARD: DXGI_SWAP_EFFECT = DXGI_SWAP_EFFECT(4i32);
 
 pub mod Common{
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_FORMAT(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DXGI_FORMAT(pub u32);
 impl ::core::marker::Copy for DXGI_FORMAT {}
 impl ::core::clone::Clone for DXGI_FORMAT {
     fn clone(&self) -> Self {
@@ -10814,8 +10072,7 @@ pub const DXGI_FORMAT_R8G8B8A8_UNORM: DXGI_FORMAT = DXGI_FORMAT(28u32);
 
 pub const DXGI_FORMAT_B8G8R8A8_UNORM: DXGI_FORMAT = DXGI_FORMAT(87u32);
 
-#[repr(C)]
-pub struct DXGI_SAMPLE_DESC {
+#[repr(C)]pub struct DXGI_SAMPLE_DESC {
     pub Count: u32,
     pub Quality: u32,
 }
@@ -10857,8 +10114,7 @@ pub const DXGI_FORMAT_R32G32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(16u32);
 
 pub const DXGI_FORMAT_R32G32B32_FLOAT: DXGI_FORMAT = DXGI_FORMAT(6u32);
 
-#[repr(C)]
-pub struct DXGI_MODE_DESC {
+#[repr(C)]pub struct DXGI_MODE_DESC {
     pub Width: u32,
     pub Height: u32,
     pub RefreshRate: DXGI_RATIONAL,
@@ -10892,8 +10148,7 @@ impl ::core::fmt::Debug for DXGI_MODE_DESC {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_RATIONAL {
+#[repr(C)]pub struct DXGI_RATIONAL {
     pub Numerator: u32,
     pub Denominator: u32,
 }
@@ -10923,8 +10178,7 @@ impl ::core::fmt::Debug for DXGI_RATIONAL {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_MODE_SCANLINE_ORDER(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DXGI_MODE_SCANLINE_ORDER(pub i32);
 impl ::core::marker::Copy for DXGI_MODE_SCANLINE_ORDER {}
 impl ::core::clone::Clone for DXGI_MODE_SCANLINE_ORDER {
     fn clone(&self) -> Self {
@@ -10945,8 +10199,7 @@ impl ::core::fmt::Debug for DXGI_MODE_SCANLINE_ORDER {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_MODE_SCALING(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DXGI_MODE_SCALING(pub i32);
 impl ::core::marker::Copy for DXGI_MODE_SCALING {}
 impl ::core::clone::Clone for DXGI_MODE_SCALING {
     fn clone(&self) -> Self {
@@ -10967,8 +10220,7 @@ impl ::core::fmt::Debug for DXGI_MODE_SCALING {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_MODE_ROTATION(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DXGI_MODE_ROTATION(pub i32);
 impl ::core::marker::Copy for DXGI_MODE_ROTATION {}
 impl ::core::clone::Clone for DXGI_MODE_ROTATION {
     fn clone(&self) -> Self {
@@ -10989,8 +10241,7 @@ impl ::core::fmt::Debug for DXGI_MODE_ROTATION {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_GAMMA_CONTROL_CAPABILITIES {
+#[repr(C)]pub struct DXGI_GAMMA_CONTROL_CAPABILITIES {
     pub ScaleAndOffsetSupported: super::super::super::Foundation::BOOL,
     pub MaxConvertedValue: f32,
     pub MinConvertedValue: f32,
@@ -11023,8 +10274,7 @@ impl ::core::fmt::Debug for DXGI_GAMMA_CONTROL_CAPABILITIES {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_GAMMA_CONTROL {
+#[repr(C)]pub struct DXGI_GAMMA_CONTROL {
     pub Scale: DXGI_RGB,
     pub Offset: DXGI_RGB,
     pub GammaCurve: [DXGI_RGB; 1025],
@@ -11055,8 +10305,7 @@ impl ::core::fmt::Debug for DXGI_GAMMA_CONTROL {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_RGB {
+#[repr(C)]pub struct DXGI_RGB {
     pub Red: f32,
     pub Green: f32,
     pub Blue: f32,
@@ -11087,8 +10336,7 @@ impl ::core::fmt::Debug for DXGI_RGB {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_ALPHA_MODE(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DXGI_ALPHA_MODE(pub u32);
 impl ::core::marker::Copy for DXGI_ALPHA_MODE {}
 impl ::core::clone::Clone for DXGI_ALPHA_MODE {
     fn clone(&self) -> Self {
@@ -11110,8 +10358,7 @@ impl ::core::fmt::Debug for DXGI_ALPHA_MODE {
 }
 
 }
-#[repr(C)]
-pub struct DXGI_RGBA {
+#[repr(C)]pub struct DXGI_RGBA {
     pub r: f32,
     pub g: f32,
     pub b: f32,
@@ -11143,8 +10390,7 @@ impl ::core::fmt::Debug for DXGI_RGBA {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_PRESENT_PARAMETERS {
+#[repr(C)]pub struct DXGI_PRESENT_PARAMETERS {
     pub DirtyRectsCount: u32,
     pub pDirtyRects: *mut super::super::Foundation::RECT,
     pub pScrollRect: *mut super::super::Foundation::RECT,
@@ -11176,8 +10422,7 @@ impl ::core::fmt::Debug for DXGI_PRESENT_PARAMETERS {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_OUTPUT_DESC {
+#[repr(C)]pub struct DXGI_OUTPUT_DESC {
     pub DeviceName: [u16; 32],
     pub DesktopCoordinates: super::super::Foundation::RECT,
     pub AttachedToDesktop: super::super::Foundation::BOOL,
@@ -11210,8 +10455,7 @@ impl ::core::fmt::Debug for DXGI_OUTPUT_DESC {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_ADAPTER_DESC {
+#[repr(C)]pub struct DXGI_ADAPTER_DESC {
     pub Description: [u16; 128],
     pub VendorId: u32,
     pub DeviceId: u32,
@@ -11248,8 +10492,7 @@ impl ::core::fmt::Debug for DXGI_ADAPTER_DESC {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_SURFACE_DESC {
+#[repr(C)]pub struct DXGI_SURFACE_DESC {
     pub Width: u32,
     pub Height: u32,
     pub Format: Common::DXGI_FORMAT,
@@ -11281,8 +10524,7 @@ impl ::core::fmt::Debug for DXGI_SURFACE_DESC {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_MAPPED_RECT {
+#[repr(C)]pub struct DXGI_MAPPED_RECT {
     pub Pitch: i32,
     pub pBits: *mut u8,
 }
@@ -11312,8 +10554,7 @@ impl ::core::fmt::Debug for DXGI_MAPPED_RECT {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_ADAPTER_DESC1 {
+#[repr(C)]pub struct DXGI_ADAPTER_DESC1 {
     pub Description: [u16; 128],
     pub VendorId: u32,
     pub DeviceId: u32,
@@ -11351,8 +10592,7 @@ impl ::core::fmt::Debug for DXGI_ADAPTER_DESC1 {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_SWAP_CHAIN_DESC {
+#[repr(C)]pub struct DXGI_SWAP_CHAIN_DESC {
     pub BufferDesc: Common::DXGI_MODE_DESC,
     pub SampleDesc: Common::DXGI_SAMPLE_DESC,
     pub BufferUsage: u32,
@@ -11388,8 +10628,7 @@ impl ::core::fmt::Debug for DXGI_SWAP_CHAIN_DESC {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_FRAME_STATISTICS {
+#[repr(C)]pub struct DXGI_FRAME_STATISTICS {
     pub PresentCount: u32,
     pub PresentRefreshCount: u32,
     pub SyncRefreshCount: u32,
@@ -11422,8 +10661,7 @@ impl ::core::fmt::Debug for DXGI_FRAME_STATISTICS {
     }
 }
 
-#[repr(C)]
-pub struct DXGI_SWAP_CHAIN_FULLSCREEN_DESC {
+#[repr(C)]pub struct DXGI_SWAP_CHAIN_FULLSCREEN_DESC {
     pub RefreshRate: Common::DXGI_RATIONAL,
     pub ScanlineOrdering: Common::DXGI_MODE_SCANLINE_ORDER,
     pub Scaling: Common::DXGI_MODE_SCALING,
@@ -11455,8 +10693,7 @@ impl ::core::fmt::Debug for DXGI_SWAP_CHAIN_FULLSCREEN_DESC {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_SCALING(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DXGI_SCALING(pub i32);
 impl ::core::marker::Copy for DXGI_SCALING {}
 impl ::core::clone::Clone for DXGI_SCALING {
     fn clone(&self) -> Self {
@@ -11477,8 +10714,7 @@ impl ::core::fmt::Debug for DXGI_SCALING {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DXGI_SWAP_EFFECT(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DXGI_SWAP_EFFECT(pub i32);
 impl ::core::marker::Copy for DXGI_SWAP_EFFECT {}
 impl ::core::clone::Clone for DXGI_SWAP_EFFECT {
     fn clone(&self) -> Self {
@@ -11499,8 +10735,7 @@ impl ::core::fmt::Debug for DXGI_SWAP_EFFECT {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGIAdapter1(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGIAdapter1(::windows::core::IUnknown);
 impl IDXGIAdapter1 {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -11600,8 +10835,7 @@ impl IDXGIAdapter1_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGISurface(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGISurface(::windows::core::IUnknown);
 impl IDXGISurface {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -11719,8 +10953,7 @@ impl IDXGISurface_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGIOutput(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGIOutput(::windows::core::IUnknown);
 impl IDXGIOutput {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -11994,8 +11227,7 @@ impl IDXGIOutput_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGIAdapter(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGIAdapter(::windows::core::IUnknown);
 impl IDXGIAdapter {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -12120,8 +11352,7 @@ impl IDXGIAdapter_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGIObject(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGIObject(::windows::core::IUnknown);
 impl IDXGIObject {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -12219,8 +11450,7 @@ impl IDXGIObject_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGIFactory(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGIFactory(::windows::core::IUnknown);
 impl IDXGIFactory {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -12391,8 +11621,7 @@ impl IDXGIFactory_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGIDeviceSubObject(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGIDeviceSubObject(::windows::core::IUnknown);
 impl IDXGIDeviceSubObject {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -12470,8 +11699,7 @@ impl IDXGIDeviceSubObject_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGIFactory1(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGIFactory1(::windows::core::IUnknown);
 impl IDXGIFactory1 {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -12606,8 +11834,7 @@ impl IDXGIFactory1_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IDXGISwapChain(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDXGISwapChain(::windows::core::IUnknown);
 impl IDXGISwapChain {
     pub unsafe fn SetPrivateData(&self, name: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).base__.base__.SetPrivateData)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(name), datasize, ::core::mem::transmute(pdata)).ok()
@@ -12853,6 +12080,577 @@ impl IDXGISwapChain_Vtbl {
 
 }
 }
+pub mod Foundation{
+pub const S_OK: ::windows::core::HRESULT = ::windows::core::HRESULT(0i32);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HWND(pub isize);
+impl ::core::marker::Copy for HWND {}
+impl ::core::clone::Clone for HWND {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for HWND {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for HWND {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for HWND {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("HWND").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<HWND>> for HWND {
+    fn from(optional: ::core::option::Option<HWND>) -> HWND {
+        optional.unwrap_or_default()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct BOOL(pub i32);
+impl BOOL {
+    #[inline]
+    pub fn as_bool(self) -> bool {
+        self.0 != 0
+    }
+    #[inline]
+    pub fn ok(self) -> ::windows::core::Result<()> {
+        if self.as_bool() {
+            Ok(())
+        } else {
+            Err(::windows::core::Error::from_win32())
+        }
+    }
+    #[inline]
+    #[track_caller]
+    pub fn unwrap(self) {
+        self.ok().unwrap();
+    }
+    #[inline]
+    #[track_caller]
+    pub fn expect(self, msg: &str) {
+        self.ok().expect(msg);
+    }
+}
+impl ::core::marker::Copy for BOOL {}
+impl ::core::clone::Clone for BOOL {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for BOOL {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for BOOL {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for BOOL {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("BOOL").field(&self.0).finish()
+    }
+}
+impl ::core::ops::Not for BOOL {
+    type Output = Self;
+    fn not(self) -> Self::Output {
+        if self.as_bool() {
+            Self(0)
+        } else {
+            Self(1)
+        }
+    }
+}
+impl ::core::convert::From<::core::option::Option<BOOL>> for BOOL {
+    fn from(optional: ::core::option::Option<BOOL>) -> BOOL {
+        optional.unwrap_or_default()
+    }
+}
+
+pub type FARPROC = ::core::option::Option<unsafe extern "system" fn() -> isize>;
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HANDLE(pub isize);
+impl HANDLE {
+    pub fn is_invalid(&self) -> bool {
+        self.0 == -1 || self.0 == 0
+    }
+}
+impl ::core::marker::Copy for HANDLE {}
+impl ::core::clone::Clone for HANDLE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for HANDLE {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for HANDLE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for HANDLE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("HANDLE").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<HANDLE>> for HANDLE {
+    fn from(optional: ::core::option::Option<HANDLE>) -> HANDLE {
+        optional.unwrap_or_default()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WPARAM(pub usize);
+impl ::core::marker::Copy for WPARAM {}
+impl ::core::clone::Clone for WPARAM {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WPARAM {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for WPARAM {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for WPARAM {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("WPARAM").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<WPARAM>> for WPARAM {
+    fn from(optional: ::core::option::Option<WPARAM>) -> WPARAM {
+        optional.unwrap_or_default()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct LPARAM(pub isize);
+impl ::core::marker::Copy for LPARAM {}
+impl ::core::clone::Clone for LPARAM {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for LPARAM {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for LPARAM {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for LPARAM {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("LPARAM").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<LPARAM>> for LPARAM {
+    fn from(optional: ::core::option::Option<LPARAM>) -> LPARAM {
+        optional.unwrap_or_default()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct LRESULT(pub isize);
+impl ::core::marker::Copy for LRESULT {}
+impl ::core::clone::Clone for LRESULT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for LRESULT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for LRESULT {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for LRESULT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("LRESULT").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<LRESULT>> for LRESULT {
+    fn from(optional: ::core::option::Option<LRESULT>) -> LRESULT {
+        optional.unwrap_or_default()
+    }
+}
+
+#[repr(C)]pub struct RECT {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+impl ::core::marker::Copy for RECT {}
+impl ::core::cmp::Eq for RECT {}
+impl ::core::cmp::PartialEq for RECT {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<RECT>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for RECT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for RECT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for RECT {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for RECT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("RECT").field("left", &self.left).field("top", &self.top).field("right", &self.right).field("bottom", &self.bottom).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HINSTANCE(pub isize);
+impl HINSTANCE {
+    pub fn is_invalid(&self) -> bool {
+        self.0 == 0
+    }
+}
+impl ::core::marker::Copy for HINSTANCE {}
+impl ::core::clone::Clone for HINSTANCE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for HINSTANCE {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for HINSTANCE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for HINSTANCE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("HINSTANCE").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<HINSTANCE>> for HINSTANCE {
+    fn from(optional: ::core::option::Option<HINSTANCE>) -> HINSTANCE {
+        optional.unwrap_or_default()
+    }
+}
+
+pub const WAIT_OBJECT_0: WIN32_ERROR = WIN32_ERROR(0u32);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WIN32_ERROR(pub u32);
+impl WIN32_ERROR {
+    #[inline]
+    pub const fn is_ok(self) -> bool {
+        self.0 == 0
+    }
+    #[inline]
+    pub const fn is_err(self) -> bool {
+        !self.is_ok()
+    }
+    #[inline]
+    pub const fn to_hresult(self) -> ::windows::core::HRESULT {
+        ::windows::core::HRESULT(if self.0 == 0 { self.0 } else { (self.0 & 0x0000_FFFF) | (7 << 16) | 0x8000_0000 } as _)
+    }
+    #[inline]
+    pub fn from_error(error: &::windows::core::Error) -> ::core::option::Option<Self> {
+        let hresult = error.code().0 as u32;
+        if ((hresult >> 16) & 0x7FF) == 7 {
+            Some(Self(hresult & 0xFFFF))
+        } else {
+            None
+        }
+    }
+    #[inline]
+    pub const fn ok(self) -> ::windows::core::Result<()> {
+        if self.is_ok() {
+            Ok(())
+        } else {
+            Err(::windows::core::Error { code: self.to_hresult(), info: None })
+        }
+    }
+}
+impl ::core::marker::Copy for WIN32_ERROR {}
+impl ::core::clone::Clone for WIN32_ERROR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WIN32_ERROR {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for WIN32_ERROR {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for WIN32_ERROR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("WIN32_ERROR").field(&self.0).finish()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct CHAR(pub u8);
+impl ::core::marker::Copy for CHAR {}
+impl ::core::clone::Clone for CHAR {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for CHAR {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for CHAR {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for CHAR {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("CHAR").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<CHAR>> for CHAR {
+    fn from(optional: ::core::option::Option<CHAR>) -> CHAR {
+        optional.unwrap_or_default()
+    }
+}
+
+#[repr(C)]pub struct FILETIME {
+    pub dwLowDateTime: u32,
+    pub dwHighDateTime: u32,
+}
+impl ::core::marker::Copy for FILETIME {}
+impl ::core::cmp::Eq for FILETIME {}
+impl ::core::cmp::PartialEq for FILETIME {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<FILETIME>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for FILETIME {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for FILETIME {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for FILETIME {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for FILETIME {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("FILETIME").field("dwLowDateTime", &self.dwLowDateTime).field("dwHighDateTime", &self.dwHighDateTime).finish()
+    }
+}
+
+#[repr(C)]pub struct LUID {
+    pub LowPart: u32,
+    pub HighPart: i32,
+}
+impl ::core::marker::Copy for LUID {}
+impl ::core::cmp::Eq for LUID {}
+impl ::core::cmp::PartialEq for LUID {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<LUID>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for LUID {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for LUID {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for LUID {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for LUID {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("LUID").field("LowPart", &self.LowPart).field("HighPart", &self.HighPart).finish()
+    }
+}
+
+#[repr(C)]pub struct POINT {
+    pub x: i32,
+    pub y: i32,
+}
+impl ::core::marker::Copy for POINT {}
+impl ::core::cmp::Eq for POINT {}
+impl ::core::cmp::PartialEq for POINT {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<POINT>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for POINT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for POINT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for POINT {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for POINT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("POINT").field("x", &self.x).field("y", &self.y).finish()
+    }
+}
+
+#[repr(C)]pub struct DECIMAL {
+    pub wReserved: u16,
+    pub Anonymous1: DECIMAL_0,
+    pub Hi32: u32,
+    pub Anonymous2: DECIMAL_1,
+}
+impl ::core::marker::Copy for DECIMAL {}
+impl ::core::cmp::Eq for DECIMAL {}
+impl ::core::cmp::PartialEq for DECIMAL {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DECIMAL {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DECIMAL {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DECIMAL {
+    type Abi = Self;
+}
+
+#[repr(C)]pub union DECIMAL_0 {
+    pub Anonymous: DECIMAL_0_0,
+    pub signscale: u16,
+}
+impl ::core::marker::Copy for DECIMAL_0 {}
+impl ::core::cmp::Eq for DECIMAL_0 {}
+impl ::core::cmp::PartialEq for DECIMAL_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DECIMAL_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DECIMAL_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DECIMAL_0 {
+    type Abi = Self;
+}
+
+#[repr(C)]pub union DECIMAL_1 {
+    pub Anonymous: DECIMAL_1_0,
+    pub Lo64: u64,
+}
+impl ::core::marker::Copy for DECIMAL_1 {}
+impl ::core::cmp::Eq for DECIMAL_1 {}
+impl ::core::cmp::PartialEq for DECIMAL_1 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_1>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DECIMAL_1 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DECIMAL_1 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DECIMAL_1 {
+    type Abi = Self;
+}
+
+#[repr(C)]pub struct DECIMAL_0_0 {
+    pub scale: u8,
+    pub sign: u8,
+}
+impl ::core::marker::Copy for DECIMAL_0_0 {}
+impl ::core::cmp::Eq for DECIMAL_0_0 {}
+impl ::core::cmp::PartialEq for DECIMAL_0_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_0_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DECIMAL_0_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DECIMAL_0_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DECIMAL_0_0 {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DECIMAL_0_0 {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DECIMAL_0_0").field("scale", &self.scale).field("sign", &self.sign).finish()
+    }
+}
+
+#[repr(C)]pub struct DECIMAL_1_0 {
+    pub Lo32: u32,
+    pub Mid32: u32,
+}
+impl ::core::marker::Copy for DECIMAL_1_0 {}
+impl ::core::cmp::Eq for DECIMAL_1_0 {}
+impl ::core::cmp::PartialEq for DECIMAL_1_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<DECIMAL_1_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for DECIMAL_1_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for DECIMAL_1_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for DECIMAL_1_0 {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for DECIMAL_1_0 {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DECIMAL_1_0").field("Lo32", &self.Lo32).field("Mid32", &self.Mid32).finish()
+    }
+}
+
+}
 pub mod System{
 pub mod LibraryLoader{
 pub unsafe fn GetModuleHandleW<'a, P0>(lpmodulename: P0) -> ::windows::core::Result<super::super::Foundation::HINSTANCE>
@@ -12943,8 +12741,7 @@ pub unsafe fn GlobalUnlock(hmem: isize) -> super::super::Foundation::BOOL {
     GlobalUnlock(hmem)
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct GLOBAL_ALLOC_FLAGS(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct GLOBAL_ALLOC_FLAGS(pub u32);
 impl ::core::marker::Copy for GLOBAL_ALLOC_FLAGS {}
 impl ::core::clone::Clone for GLOBAL_ALLOC_FLAGS {
     fn clone(&self) -> Self {
@@ -12997,8 +12794,7 @@ impl ::core::ops::Not for GLOBAL_ALLOC_FLAGS {
 pub mod SystemServices{
 pub const CF_UNICODETEXT: CLIPBOARD_FORMATS = CLIPBOARD_FORMATS(13u32);
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct CLIPBOARD_FORMATS(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct CLIPBOARD_FORMATS(pub u32);
 impl ::core::marker::Copy for CLIPBOARD_FORMATS {}
 impl ::core::clone::Clone for CLIPBOARD_FORMATS {
     fn clone(&self) -> Self {
@@ -13102,8 +12898,7 @@ pub const STGM_READ: STGM = STGM(0u32);
 
 pub const VT_LPWSTR: VARENUM = VARENUM(31u16);
 
-#[repr(transparent)]
-pub struct ITypeComp(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ITypeComp(::windows::core::IUnknown);
 impl ITypeComp {
     #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Ole\"`*"]
     #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Ole"))]
@@ -13183,8 +12978,7 @@ impl ITypeComp_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ITypeLib(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ITypeLib(::windows::core::IUnknown);
 impl ITypeLib {
     pub unsafe fn GetTypeInfoCount(&self) -> u32 {
         (::windows::core::Vtable::vtable(self).GetTypeInfoCount)(::windows::core::Vtable::as_raw(self))
@@ -13381,8 +13175,7 @@ impl ITypeLib_Vtbl {
     }
 }
 
-#[repr(C)]
-pub struct TYPEATTR {
+#[repr(C)]pub struct TYPEATTR {
     pub guid: ::windows::core::GUID,
     pub lcid: u32,
     pub dwReserved: u32,
@@ -13423,8 +13216,7 @@ unsafe impl ::windows::core::Abi for TYPEATTR {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct FUNCDESC {
+#[repr(C)]pub struct FUNCDESC {
     pub memid: i32,
     pub lprgscode: *mut i32,
     pub lprgelemdescParam: *mut ELEMDESC,
@@ -13459,8 +13251,7 @@ unsafe impl ::windows::core::Abi for FUNCDESC {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct VARDESC {
+#[repr(C)]pub struct VARDESC {
     pub memid: i32,
     pub lpstrSchema: ::windows::core::PWSTR,
     pub Anonymous: VARDESC_0,
@@ -13489,8 +13280,7 @@ unsafe impl ::windows::core::Abi for VARDESC {
     type Abi = Self;
 }
 
-#[repr(transparent)]
-pub struct IDispatch(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IDispatch(::windows::core::IUnknown);
 impl IDispatch {
     pub unsafe fn GetTypeInfoCount(&self) -> ::windows::core::Result<u32> {
         let mut result__ = ::core::mem::MaybeUninit::zeroed();
@@ -13607,8 +13397,7 @@ impl IDispatch_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IStream(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IStream(::windows::core::IUnknown);
 impl IStream {
     pub unsafe fn Read(&self, pv: *mut ::core::ffi::c_void, cb: u32, pcbread: ::core::option::Option<*mut u32>) -> ::windows::core::HRESULT {
         (::windows::core::Vtable::vtable(self).base__.Read)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pv), cb, ::core::mem::transmute(pcbread.unwrap_or(::std::ptr::null_mut())))
@@ -13782,8 +13571,7 @@ impl IStream_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ITypeInfo(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ITypeInfo(::windows::core::IUnknown);
 impl ITypeInfo {
     #[doc = "*Required features: `\"Win32_System_Ole\"`*"]
     #[cfg(feature = "Win32_System_Ole")]
@@ -14142,8 +13930,7 @@ impl ITypeInfo_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct ISequentialStream(::windows::core::IUnknown);
+#[repr(transparent)]pub struct ISequentialStream(::windows::core::IUnknown);
 impl ISequentialStream {
     pub unsafe fn Read(&self, pv: *mut ::core::ffi::c_void, cb: u32, pcbread: ::core::option::Option<*mut u32>) -> ::windows::core::HRESULT {
         (::windows::core::Vtable::vtable(self).Read)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pv), cb, ::core::mem::transmute(pcbread.unwrap_or(::std::ptr::null_mut())))
@@ -14208,8 +13995,7 @@ impl ISequentialStream_Vtbl {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct CLSCTX(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct CLSCTX(pub u32);
 impl ::core::marker::Copy for CLSCTX {}
 impl ::core::clone::Clone for CLSCTX {
     fn clone(&self) -> Self {
@@ -14258,8 +14044,7 @@ impl ::core::ops::Not for CLSCTX {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct STGM(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct STGM(pub u32);
 impl ::core::marker::Copy for STGM {}
 impl ::core::clone::Clone for STGM {
     fn clone(&self) -> Self {
@@ -14308,8 +14093,7 @@ impl ::core::ops::Not for STGM {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DESCKIND(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DESCKIND(pub i32);
 impl ::core::marker::Copy for DESCKIND {}
 impl ::core::clone::Clone for DESCKIND {
     fn clone(&self) -> Self {
@@ -14355,8 +14139,7 @@ unsafe impl ::windows::core::Abi for BINDPTR {
     type Abi = ::core::mem::ManuallyDrop<Self>;
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct TYPEKIND(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct TYPEKIND(pub i32);
 impl ::core::marker::Copy for TYPEKIND {}
 impl ::core::clone::Clone for TYPEKIND {
     fn clone(&self) -> Self {
@@ -14377,8 +14160,7 @@ impl ::core::fmt::Debug for TYPEKIND {
     }
 }
 
-#[repr(C)]
-pub struct TYPEDESC {
+#[repr(C)]pub struct TYPEDESC {
     pub Anonymous: TYPEDESC_0,
     pub vt: VARENUM,
 }
@@ -14403,8 +14185,7 @@ unsafe impl ::windows::core::Abi for TYPEDESC {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct IDLDESC {
+#[repr(C)]pub struct IDLDESC {
     pub dwReserved: usize,
     pub wIDLFlags: IDLFLAGS,
 }
@@ -14434,8 +14215,7 @@ impl ::core::fmt::Debug for IDLDESC {
     }
 }
 
-#[repr(C)]
-pub struct ELEMDESC {
+#[repr(C)]pub struct ELEMDESC {
     pub tdesc: TYPEDESC,
     pub Anonymous: ELEMDESC_0,
 }
@@ -14460,8 +14240,7 @@ unsafe impl ::windows::core::Abi for ELEMDESC {
     type Abi = Self;
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct FUNCKIND(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct FUNCKIND(pub i32);
 impl ::core::marker::Copy for FUNCKIND {}
 impl ::core::clone::Clone for FUNCKIND {
     fn clone(&self) -> Self {
@@ -14482,8 +14261,7 @@ impl ::core::fmt::Debug for FUNCKIND {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct INVOKEKIND(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct INVOKEKIND(pub i32);
 impl ::core::marker::Copy for INVOKEKIND {}
 impl ::core::clone::Clone for INVOKEKIND {
     fn clone(&self) -> Self {
@@ -14504,8 +14282,7 @@ impl ::core::fmt::Debug for INVOKEKIND {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct CALLCONV(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct CALLCONV(pub i32);
 impl ::core::marker::Copy for CALLCONV {}
 impl ::core::clone::Clone for CALLCONV {
     fn clone(&self) -> Self {
@@ -14526,8 +14303,7 @@ impl ::core::fmt::Debug for CALLCONV {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct FUNCFLAGS(pub u16);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct FUNCFLAGS(pub u16);
 impl ::core::marker::Copy for FUNCFLAGS {}
 impl ::core::clone::Clone for FUNCFLAGS {
     fn clone(&self) -> Self {
@@ -14573,8 +14349,7 @@ unsafe impl ::windows::core::Abi for VARDESC_0 {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct TLIBATTR {
+#[repr(C)]pub struct TLIBATTR {
     pub guid: ::windows::core::GUID,
     pub lcid: u32,
     pub syskind: SYSKIND,
@@ -14608,8 +14383,7 @@ impl ::core::fmt::Debug for TLIBATTR {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct DISPATCH_FLAGS(pub u16);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct DISPATCH_FLAGS(pub u16);
 impl ::core::marker::Copy for DISPATCH_FLAGS {}
 impl ::core::clone::Clone for DISPATCH_FLAGS {
     fn clone(&self) -> Self {
@@ -14658,8 +14432,7 @@ impl ::core::ops::Not for DISPATCH_FLAGS {
     }
 }
 
-#[repr(C)]
-pub struct DISPPARAMS {
+#[repr(C)]pub struct DISPPARAMS {
     pub rgvarg: *mut VARIANT,
     pub rgdispidNamedArgs: *mut i32,
     pub cArgs: u32,
@@ -14691,8 +14464,7 @@ impl ::core::fmt::Debug for DISPPARAMS {
     }
 }
 
-#[repr(C)]
-pub struct VARIANT {
+#[repr(C)]pub struct VARIANT {
     pub Anonymous: VARIANT_0,
 }
 impl ::core::cmp::Eq for VARIANT {}
@@ -14715,8 +14487,7 @@ unsafe impl ::windows::core::Abi for VARIANT {
     type Abi = ::core::mem::ManuallyDrop<Self>;
 }
 
-#[repr(C)]
-pub struct EXCEPINFO {
+#[repr(C)]pub struct EXCEPINFO {
     pub wCode: u16,
     pub wReserved: u16,
     pub bstrSource: ::windows::core::BSTR,
@@ -14762,8 +14533,7 @@ impl ::core::fmt::Debug for EXCEPINFO {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct STREAM_SEEK(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct STREAM_SEEK(pub u32);
 impl ::core::marker::Copy for STREAM_SEEK {}
 impl ::core::clone::Clone for STREAM_SEEK {
     fn clone(&self) -> Self {
@@ -14784,8 +14554,7 @@ impl ::core::fmt::Debug for STREAM_SEEK {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct STGC(pub u32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct STGC(pub u32);
 impl ::core::marker::Copy for STGC {}
 impl ::core::clone::Clone for STGC {
     fn clone(&self) -> Self {
@@ -14834,8 +14603,7 @@ impl ::core::ops::Not for STGC {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct LOCKTYPE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct LOCKTYPE(pub i32);
 impl ::core::marker::Copy for LOCKTYPE {}
 impl ::core::clone::Clone for LOCKTYPE {
     fn clone(&self) -> Self {
@@ -14856,8 +14624,7 @@ impl ::core::fmt::Debug for LOCKTYPE {
     }
 }
 
-#[repr(C)]
-pub struct STATSTG {
+#[repr(C)]pub struct STATSTG {
     pub pwcsName: ::windows::core::PWSTR,
     pub r#type: u32,
     pub cbSize: u64,
@@ -14896,8 +14663,7 @@ impl ::core::fmt::Debug for STATSTG {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct STATFLAG(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct STATFLAG(pub i32);
 impl ::core::marker::Copy for STATFLAG {}
 impl ::core::clone::Clone for STATFLAG {
     fn clone(&self) -> Self {
@@ -14918,8 +14684,7 @@ impl ::core::fmt::Debug for STATFLAG {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct VARFLAGS(pub u16);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct VARFLAGS(pub u16);
 impl ::core::marker::Copy for VARFLAGS {}
 impl ::core::clone::Clone for VARFLAGS {
     fn clone(&self) -> Self {
@@ -14940,8 +14705,7 @@ impl ::core::fmt::Debug for VARFLAGS {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct VARKIND(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct VARKIND(pub i32);
 impl ::core::marker::Copy for VARKIND {}
 impl ::core::clone::Clone for VARKIND {
     fn clone(&self) -> Self {
@@ -15013,8 +14777,7 @@ unsafe impl ::windows::core::Abi for ELEMDESC_0 {
     type Abi = Self;
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct SYSKIND(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct SYSKIND(pub i32);
 impl ::core::marker::Copy for SYSKIND {}
 impl ::core::clone::Clone for SYSKIND {
     fn clone(&self) -> Self {
@@ -15061,8 +14824,7 @@ unsafe impl ::windows::core::Abi for VARIANT_0 {
 
 pub type LPEXCEPFINO_DEFERRED_FILLIN = ::core::option::Option<unsafe extern "system" fn(pexcepinfo: *mut EXCEPINFO) -> ::windows::core::HRESULT>;
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct VARENUM(pub u16);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct VARENUM(pub u16);
 impl ::core::marker::Copy for VARENUM {}
 impl ::core::clone::Clone for VARENUM {
     fn clone(&self) -> Self {
@@ -15083,8 +14845,7 @@ impl ::core::fmt::Debug for VARENUM {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct IDLFLAGS(pub u16);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct IDLFLAGS(pub u16);
 impl ::core::marker::Copy for IDLFLAGS {}
 impl ::core::clone::Clone for IDLFLAGS {
     fn clone(&self) -> Self {
@@ -15133,8 +14894,7 @@ impl ::core::ops::Not for IDLFLAGS {
     }
 }
 
-#[repr(C)]
-pub struct VARIANT_0_0 {
+#[repr(C)]pub struct VARIANT_0_0 {
     pub vt: VARENUM,
     pub wReserved1: u16,
     pub wReserved2: u16,
@@ -15229,8 +14989,7 @@ unsafe impl ::windows::core::Abi for VARIANT_0_0_0 {
     type Abi = ::core::mem::ManuallyDrop<Self>;
 }
 
-#[repr(C)]
-pub struct VARIANT_0_0_0_0 {
+#[repr(C)]pub struct VARIANT_0_0_0_0 {
     pub pvRecord: *mut ::core::ffi::c_void,
     pub pRecInfo: ::core::option::Option<super::Ole::IRecordInfo>,
 }
@@ -15259,8 +15018,7 @@ impl ::core::fmt::Debug for VARIANT_0_0_0_0 {
     }
 }
 
-#[repr(C)]
-pub struct SAFEARRAY {
+#[repr(C)]pub struct SAFEARRAY {
     pub cDims: u16,
     pub fFeatures: ADVANCED_FEATURE_FLAGS,
     pub cbElements: u32,
@@ -15294,8 +15052,7 @@ impl ::core::fmt::Debug for SAFEARRAY {
     }
 }
 
-#[repr(C)]
-pub struct BLOB {
+#[repr(C)]pub struct BLOB {
     pub cbSize: u32,
     pub pBlobData: *mut u8,
 }
@@ -15350,8 +15107,7 @@ unsafe impl ::windows::core::Abi for CY {
     type Abi = Self;
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct ADVANCED_FEATURE_FLAGS(pub u16);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct ADVANCED_FEATURE_FLAGS(pub u16);
 impl ::core::marker::Copy for ADVANCED_FEATURE_FLAGS {}
 impl ::core::clone::Clone for ADVANCED_FEATURE_FLAGS {
     fn clone(&self) -> Self {
@@ -15400,8 +15156,7 @@ impl ::core::ops::Not for ADVANCED_FEATURE_FLAGS {
     }
 }
 
-#[repr(C)]
-pub struct SAFEARRAYBOUND {
+#[repr(C)]pub struct SAFEARRAYBOUND {
     pub cElements: u32,
     pub lLbound: i32,
 }
@@ -15431,8 +15186,7 @@ impl ::core::fmt::Debug for SAFEARRAYBOUND {
     }
 }
 
-#[repr(C)]
-pub struct CY_0 {
+#[repr(C)]pub struct CY_0 {
     pub Lo: u32,
     pub Hi: i32,
 }
@@ -15463,8 +15217,7 @@ impl ::core::fmt::Debug for CY_0 {
 }
 
 pub mod StructuredStorage{
-#[repr(transparent)]
-pub struct IEnumSTATSTG(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IEnumSTATSTG(::windows::core::IUnknown);
 impl IEnumSTATSTG {
     #[doc = "*Required features: `\"Win32_Foundation\"`*"]
     #[cfg(feature = "Win32_Foundation")]
@@ -15567,8 +15320,7 @@ impl IEnumSTATSTG_Vtbl {
     }
 }
 
-#[repr(C)]
-pub struct CAC {
+#[repr(C)]pub struct CAC {
     pub cElems: u32,
     pub pElems: ::windows::core::PSTR,
 }
@@ -15598,8 +15350,7 @@ impl ::core::fmt::Debug for CAC {
     }
 }
 
-#[repr(C)]
-pub struct CAPROPVARIANT {
+#[repr(C)]pub struct CAPROPVARIANT {
     pub cElems: u32,
     pub pElems: *mut PROPVARIANT,
 }
@@ -15629,8 +15380,7 @@ impl ::core::fmt::Debug for CAPROPVARIANT {
     }
 }
 
-#[repr(C)]
-pub struct CAUB {
+#[repr(C)]pub struct CAUB {
     pub cElems: u32,
     pub pElems: *mut u8,
 }
@@ -15660,8 +15410,7 @@ impl ::core::fmt::Debug for CAUB {
     }
 }
 
-#[repr(C)]
-pub struct CAUI {
+#[repr(C)]pub struct CAUI {
     pub cElems: u32,
     pub pElems: *mut u16,
 }
@@ -15691,8 +15440,7 @@ impl ::core::fmt::Debug for CAUI {
     }
 }
 
-#[repr(C)]
-pub struct CASCODE {
+#[repr(C)]pub struct CASCODE {
     pub cElems: u32,
     pub pElems: *mut i32,
 }
@@ -15722,8 +15470,7 @@ impl ::core::fmt::Debug for CASCODE {
     }
 }
 
-#[repr(C)]
-pub struct CACY {
+#[repr(C)]pub struct CACY {
     pub cElems: u32,
     pub pElems: *mut super::CY,
 }
@@ -15753,8 +15500,7 @@ impl ::core::fmt::Debug for CACY {
     }
 }
 
-#[repr(C)]
-pub struct CACLIPDATA {
+#[repr(C)]pub struct CACLIPDATA {
     pub cElems: u32,
     pub pElems: *mut CLIPDATA,
 }
@@ -15784,8 +15530,7 @@ impl ::core::fmt::Debug for CACLIPDATA {
     }
 }
 
-#[repr(C)]
-pub struct CABSTR {
+#[repr(C)]pub struct CABSTR {
     pub cElems: u32,
     pub pElems: *mut ::windows::core::BSTR,
 }
@@ -15815,8 +15560,7 @@ impl ::core::fmt::Debug for CABSTR {
     }
 }
 
-#[repr(C)]
-pub struct CABSTRBLOB {
+#[repr(C)]pub struct CABSTRBLOB {
     pub cElems: u32,
     pub pElems: *mut BSTRBLOB,
 }
@@ -15846,8 +15590,7 @@ impl ::core::fmt::Debug for CABSTRBLOB {
     }
 }
 
-#[repr(C)]
-pub struct CALPSTR {
+#[repr(C)]pub struct CALPSTR {
     pub cElems: u32,
     pub pElems: *mut ::windows::core::PSTR,
 }
@@ -15877,8 +15620,7 @@ impl ::core::fmt::Debug for CALPSTR {
     }
 }
 
-#[repr(C)]
-pub struct CALPWSTR {
+#[repr(C)]pub struct CALPWSTR {
     pub cElems: u32,
     pub pElems: *mut ::windows::core::PWSTR,
 }
@@ -15908,8 +15650,7 @@ impl ::core::fmt::Debug for CALPWSTR {
     }
 }
 
-#[repr(C)]
-pub struct CAI {
+#[repr(C)]pub struct CAI {
     pub cElems: u32,
     pub pElems: *mut i16,
 }
@@ -15939,8 +15680,7 @@ impl ::core::fmt::Debug for CAI {
     }
 }
 
-#[repr(C)]
-pub struct CAL {
+#[repr(C)]pub struct CAL {
     pub cElems: u32,
     pub pElems: *mut i32,
 }
@@ -15970,8 +15710,7 @@ impl ::core::fmt::Debug for CAL {
     }
 }
 
-#[repr(C)]
-pub struct CAUL {
+#[repr(C)]pub struct CAUL {
     pub cElems: u32,
     pub pElems: *mut u32,
 }
@@ -16001,8 +15740,7 @@ impl ::core::fmt::Debug for CAUL {
     }
 }
 
-#[repr(C)]
-pub struct CAH {
+#[repr(C)]pub struct CAH {
     pub cElems: u32,
     pub pElems: *mut i64,
 }
@@ -16032,8 +15770,7 @@ impl ::core::fmt::Debug for CAH {
     }
 }
 
-#[repr(C)]
-pub struct CAUH {
+#[repr(C)]pub struct CAUH {
     pub cElems: u32,
     pub pElems: *mut u64,
 }
@@ -16063,8 +15800,7 @@ impl ::core::fmt::Debug for CAUH {
     }
 }
 
-#[repr(C)]
-pub struct CAFLT {
+#[repr(C)]pub struct CAFLT {
     pub cElems: u32,
     pub pElems: *mut f32,
 }
@@ -16094,8 +15830,7 @@ impl ::core::fmt::Debug for CAFLT {
     }
 }
 
-#[repr(C)]
-pub struct CADBL {
+#[repr(C)]pub struct CADBL {
     pub cElems: u32,
     pub pElems: *mut f64,
 }
@@ -16125,8 +15860,7 @@ impl ::core::fmt::Debug for CADBL {
     }
 }
 
-#[repr(C)]
-pub struct CABOOL {
+#[repr(C)]pub struct CABOOL {
     pub cElems: u32,
     pub pElems: *mut i16,
 }
@@ -16156,8 +15890,7 @@ impl ::core::fmt::Debug for CABOOL {
     }
 }
 
-#[repr(C)]
-pub struct CADATE {
+#[repr(C)]pub struct CADATE {
     pub cElems: u32,
     pub pElems: *mut f64,
 }
@@ -16187,8 +15920,7 @@ impl ::core::fmt::Debug for CADATE {
     }
 }
 
-#[repr(C)]
-pub struct CAFILETIME {
+#[repr(C)]pub struct CAFILETIME {
     pub cElems: u32,
     pub pElems: *mut super::super::super::Foundation::FILETIME,
 }
@@ -16218,8 +15950,7 @@ impl ::core::fmt::Debug for CAFILETIME {
     }
 }
 
-#[repr(C)]
-pub struct CACLSID {
+#[repr(C)]pub struct CACLSID {
     pub cElems: u32,
     pub pElems: *mut ::windows::core::GUID,
 }
@@ -16249,8 +15980,7 @@ impl ::core::fmt::Debug for CACLSID {
     }
 }
 
-#[repr(C)]
-pub struct VERSIONEDSTREAM {
+#[repr(C)]pub struct VERSIONEDSTREAM {
     pub guidVersion: ::windows::core::GUID,
     pub pStream: ::core::option::Option<super::IStream>,
 }
@@ -16279,8 +16009,7 @@ impl ::core::fmt::Debug for VERSIONEDSTREAM {
     }
 }
 
-#[repr(transparent)]
-pub struct IStorage(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IStorage(::windows::core::IUnknown);
 impl IStorage {
     pub unsafe fn CreateStream<'a, P0>(&self, pwcsname: P0, grfmode: super::STGM, reserved1: u32, reserved2: u32) -> ::windows::core::Result<super::IStream>
     where
@@ -16554,8 +16283,7 @@ impl IStorage_Vtbl {
     }
 }
 
-#[repr(C)]
-pub struct CLIPDATA {
+#[repr(C)]pub struct CLIPDATA {
     pub cbSize: u32,
     pub ulClipFmt: i32,
     pub pClipData: *mut u8,
@@ -16586,8 +16314,7 @@ impl ::core::fmt::Debug for CLIPDATA {
     }
 }
 
-#[repr(C)]
-pub struct BSTRBLOB {
+#[repr(C)]pub struct BSTRBLOB {
     pub cbSize: u32,
     pub pData: *mut u8,
 }
@@ -16617,8 +16344,7 @@ impl ::core::fmt::Debug for BSTRBLOB {
     }
 }
 
-#[repr(C)]
-pub struct PROPVARIANT {
+#[repr(C)]pub struct PROPVARIANT {
     pub Anonymous: PROPVARIANT_0,
 }
 impl ::core::cmp::Eq for PROPVARIANT {}
@@ -16665,8 +16391,7 @@ unsafe impl ::windows::core::Abi for PROPVARIANT_0 {
     type Abi = ::core::mem::ManuallyDrop<Self>;
 }
 
-#[repr(C)]
-pub struct PROPVARIANT_0_0 {
+#[repr(C)]pub struct PROPVARIANT_0_0 {
     pub vt: super::VARENUM,
     pub wReserved1: u16,
     pub wReserved2: u16,
@@ -16788,8 +16513,7 @@ unsafe impl ::windows::core::Abi for PROPVARIANT_0_0_0 {
     type Abi = ::core::mem::ManuallyDrop<Self>;
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct STGMOVE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct STGMOVE(pub i32);
 impl ::core::marker::Copy for STGMOVE {}
 impl ::core::clone::Clone for STGMOVE {
     fn clone(&self) -> Self {
@@ -16840,8 +16564,7 @@ where
 
 }
 pub mod Ole{
-#[repr(transparent)]
-pub struct IRecordInfo(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IRecordInfo(::windows::core::IUnknown);
 impl IRecordInfo {
     pub unsafe fn RecordInit(&self, pvnew: *mut ::core::ffi::c_void) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).RecordInit)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pvnew)).ok()
@@ -17144,8 +16867,7 @@ impl IRecordInfo_Vtbl {
     }
 }
 
-#[repr(C)]
-pub struct PARAMDESCEX {
+#[repr(C)]pub struct PARAMDESCEX {
     pub cBytes: u32,
     pub varDefaultValue: super::Com::VARIANT,
 }
@@ -17169,8 +16891,7 @@ unsafe impl ::windows::core::Abi for PARAMDESCEX {
     type Abi = ::core::mem::ManuallyDrop<Self>;
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct PARAMFLAGS(pub u16);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct PARAMFLAGS(pub u16);
 impl ::core::marker::Copy for PARAMFLAGS {}
 impl ::core::clone::Clone for PARAMFLAGS {
     fn clone(&self) -> Self {
@@ -17219,8 +16940,7 @@ impl ::core::ops::Not for PARAMFLAGS {
     }
 }
 
-#[repr(C)]
-pub struct ARRAYDESC {
+#[repr(C)]pub struct ARRAYDESC {
     pub tdescElem: super::Com::TYPEDESC,
     pub cDims: u16,
     pub rgbounds: [super::Com::SAFEARRAYBOUND; 1],
@@ -17246,8 +16966,7 @@ unsafe impl ::windows::core::Abi for ARRAYDESC {
     type Abi = Self;
 }
 
-#[repr(C)]
-pub struct PARAMDESC {
+#[repr(C)]pub struct PARAMDESC {
     pub pparamdescex: *mut PARAMDESCEX,
     pub wParamFlags: PARAMFLAGS,
 }
@@ -17280,11 +16999,101 @@ impl ::core::fmt::Debug for PARAMDESC {
 }
 }
 pub mod Media{
+pub mod KernelStreaming{
+pub const WAVE_FORMAT_EXTENSIBLE: u32 = 65534u32;
+
+}
+pub mod Multimedia{
+pub const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
+
+}
 pub mod Audio{
+#[repr(C, packed(1))]pub struct WAVEFORMATEX {
+    pub wFormatTag: u16,
+    pub nChannels: u16,
+    pub nSamplesPerSec: u32,
+    pub nAvgBytesPerSec: u32,
+    pub nBlockAlign: u16,
+    pub wBitsPerSample: u16,
+    pub cbSize: u16,
+}
+impl ::core::marker::Copy for WAVEFORMATEX {}
+impl ::core::cmp::Eq for WAVEFORMATEX {}
+impl ::core::cmp::PartialEq for WAVEFORMATEX {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<WAVEFORMATEX>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for WAVEFORMATEX {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WAVEFORMATEX {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for WAVEFORMATEX {
+    type Abi = Self;
+}
+
+#[repr(C, packed(1))]pub struct WAVEFORMATEXTENSIBLE {
+    pub Format: WAVEFORMATEX,
+    pub Samples: WAVEFORMATEXTENSIBLE_0,
+    pub dwChannelMask: u32,
+    pub SubFormat: ::windows::core::GUID,
+}
+impl ::core::marker::Copy for WAVEFORMATEXTENSIBLE {}
+impl ::core::cmp::Eq for WAVEFORMATEXTENSIBLE {}
+impl ::core::cmp::PartialEq for WAVEFORMATEXTENSIBLE {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<WAVEFORMATEXTENSIBLE>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for WAVEFORMATEXTENSIBLE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WAVEFORMATEXTENSIBLE {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for WAVEFORMATEXTENSIBLE {
+    type Abi = Self;
+}
+
+#[repr(C, packed(1))]pub union WAVEFORMATEXTENSIBLE_0 {
+    pub wValidBitsPerSample: u16,
+    pub wSamplesPerBlock: u16,
+    pub wReserved: u16,
+}
+impl ::core::marker::Copy for WAVEFORMATEXTENSIBLE_0 {}
+impl ::core::cmp::Eq for WAVEFORMATEXTENSIBLE_0 {}
+impl ::core::cmp::PartialEq for WAVEFORMATEXTENSIBLE_0 {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<WAVEFORMATEXTENSIBLE_0>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for WAVEFORMATEXTENSIBLE_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for WAVEFORMATEXTENSIBLE_0 {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for WAVEFORMATEXTENSIBLE_0 {
+    type Abi = Self;
+}
+
 pub const MMDeviceEnumerator: ::windows::core::GUID = ::windows::core::GUID::from_u128(0xbcde0395_e52f_467c_8e3d_c4579291692e);
 
-#[repr(transparent)]
-pub struct IMMDeviceEnumerator(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IMMDeviceEnumerator(::windows::core::IUnknown);
 impl IMMDeviceEnumerator {
     pub unsafe fn EnumAudioEndpoints(&self, dataflow: EDataFlow, dwstatemask: u32) -> ::windows::core::Result<IMMDeviceCollection> {
         let mut result__ = ::core::mem::MaybeUninit::zeroed();
@@ -17422,12 +17231,15 @@ pub const AUDCLNT_SHAREMODE_SHARED: AUDCLNT_SHAREMODE = AUDCLNT_SHAREMODE(0i32);
 
 pub const AUDCLNT_STREAMFLAGS_EVENTCALLBACK: u32 = 262144u32;
 
+pub const AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM: u32 = 2147483648u32;
+
+pub const AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY: u32 = 134217728u32;
+
 pub const eRender: EDataFlow = EDataFlow(0i32);
 
 pub const eConsole: ERole = ERole(0i32);
 
-#[repr(transparent)]
-pub struct IAudioClient(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IAudioClient(::windows::core::IUnknown);
 impl IAudioClient {
     pub unsafe fn Initialize(&self, sharemode: AUDCLNT_SHAREMODE, streamflags: u32, hnsbufferduration: i64, hnsperiodicity: i64, pformat: *const WAVEFORMATEX, audiosessionguid: ::core::option::Option<*const ::windows::core::GUID>) -> ::windows::core::Result<()> {
         (::windows::core::Vtable::vtable(self).Initialize)(::windows::core::Vtable::as_raw(self), sharemode, streamflags, hnsbufferduration, hnsperiodicity, ::core::mem::transmute(pformat), ::core::mem::transmute(audiosessionguid.unwrap_or(::std::ptr::null()))).ok()
@@ -17646,8 +17458,7 @@ impl IAudioClient_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IMMDevice(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IMMDevice(::windows::core::IUnknown);
 impl IMMDevice {
     #[doc = "*Required features: `\"Win32_Foundation\"`, `\"Win32_System_Com_StructuredStorage\"`*"]
     #[cfg(all(feature = "Win32_Foundation", feature = "Win32_System_Com_StructuredStorage"))]
@@ -17773,8 +17584,7 @@ impl IMMDevice_Vtbl {
     }
 }
 
-#[repr(transparent)]
-pub struct IAudioRenderClient(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IAudioRenderClient(::windows::core::IUnknown);
 impl IAudioRenderClient {
     pub unsafe fn GetBuffer(&self, numframesrequested: u32) -> ::windows::core::Result<*mut u8> {
         let mut result__ = ::core::mem::MaybeUninit::zeroed();
@@ -17850,39 +17660,7 @@ impl IAudioRenderClient_Vtbl {
     }
 }
 
-#[repr(C)]
-pub struct WAVEFORMATEX {
-    pub wFormatTag: u16,
-    pub nChannels: u16,
-    pub nSamplesPerSec: u32,
-    pub nAvgBytesPerSec: u32,
-    pub nBlockAlign: u16,
-    pub wBitsPerSample: u16,
-    pub cbSize: u16,
-}
-impl ::core::marker::Copy for WAVEFORMATEX {}
-impl ::core::cmp::Eq for WAVEFORMATEX {}
-impl ::core::cmp::PartialEq for WAVEFORMATEX {
-    fn eq(&self, other: &Self) -> bool {
-        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<WAVEFORMATEX>()) == 0 }
-    }
-}
-impl ::core::clone::Clone for WAVEFORMATEX {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for WAVEFORMATEX {
-    fn default() -> Self {
-        unsafe { ::core::mem::zeroed() }
-    }
-}
-unsafe impl ::windows::core::Abi for WAVEFORMATEX {
-    type Abi = Self;
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct AUDCLNT_SHAREMODE(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct AUDCLNT_SHAREMODE(pub i32);
 impl ::core::marker::Copy for AUDCLNT_SHAREMODE {}
 impl ::core::clone::Clone for AUDCLNT_SHAREMODE {
     fn clone(&self) -> Self {
@@ -17903,8 +17681,7 @@ impl ::core::fmt::Debug for AUDCLNT_SHAREMODE {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct EDataFlow(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct EDataFlow(pub i32);
 impl ::core::marker::Copy for EDataFlow {}
 impl ::core::clone::Clone for EDataFlow {
     fn clone(&self) -> Self {
@@ -17925,8 +17702,7 @@ impl ::core::fmt::Debug for EDataFlow {
     }
 }
 
-#[repr(transparent)]
-pub struct IMMDeviceCollection(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IMMDeviceCollection(::windows::core::IUnknown);
 impl IMMDeviceCollection {
     pub unsafe fn GetCount(&self) -> ::windows::core::Result<u32> {
         let mut result__ = ::core::mem::MaybeUninit::zeroed();
@@ -18009,8 +17785,7 @@ impl IMMDeviceCollection_Vtbl {
     }
 }
 
-#[derive(PartialEq, Eq)]#[repr(transparent)]
-pub struct ERole(pub i32);
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct ERole(pub i32);
 impl ::core::marker::Copy for ERole {}
 impl ::core::clone::Clone for ERole {
     fn clone(&self) -> Self {
@@ -18031,8 +17806,7 @@ impl ::core::fmt::Debug for ERole {
     }
 }
 
-#[repr(transparent)]
-pub struct IMMNotificationClient(::windows::core::IUnknown);
+#[repr(transparent)]pub struct IMMNotificationClient(::windows::core::IUnknown);
 impl IMMNotificationClient {
     pub unsafe fn OnDeviceStateChanged<'a, P0>(&self, pwstrdeviceid: P0, dwnewstate: u32) -> ::windows::core::Result<()>
     where
@@ -18163,8 +17937,7 @@ pub const PKEY_Device_FriendlyName: super::super::UI::Shell::PropertiesSystem::P
 }
 }
 pub mod Security{
-#[repr(C)]
-pub struct SECURITY_ATTRIBUTES {
+#[repr(C)]pub struct SECURITY_ATTRIBUTES {
     pub nLength: u32,
     pub lpSecurityDescriptor: *mut ::core::ffi::c_void,
     pub bInheritHandle: super::Foundation::BOOL,
