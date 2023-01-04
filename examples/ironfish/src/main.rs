@@ -642,6 +642,16 @@ live_design!{
             checkbox = { label: "Arp" }
             walk: { width: Fit, height: Fit }
         }
+
+        arpoctaves = <InstrumentSlider> {
+            walk: { width: 200 }
+            slider = {
+                draw_slider: {line_color: (COLOR_MUSIC)}
+                min: -4.0
+                max: 4.0
+                label: "Octaves"
+            }
+        }
     } 
 
     SequencerPanel = <GradientY> {
@@ -1256,6 +1266,7 @@ impl App {
         data_to_widget!(db, sequencer.rootnote => rootnote.dropdown);
         data_to_widget!(db, sequencer.scale => scaletype.dropdown);
         data_to_widget!(db, arp.enabled => arp.checkbox);
+        data_to_widget!(db, arp.octaves => arpoctaves.slider);
         
         // Mixer panel
         data_to_widget!(db, osc_balance => balance.slider);
