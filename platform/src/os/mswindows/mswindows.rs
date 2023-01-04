@@ -29,6 +29,7 @@ impl Cx {
         let d3d11_windows = Rc::new(RefCell::new(Vec::new()));
         
         init_win32_app_global(Box::new({
+            
             let cx = cx.clone();
             move | win32_app,events | {
                 let mut cx = cx.borrow_mut();
@@ -39,6 +40,7 @@ impl Cx {
         }));
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
+        get_win32_app_global().start_signal_poll();
         get_win32_app_global().event_loop();
     }
     
