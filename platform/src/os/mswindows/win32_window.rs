@@ -5,7 +5,6 @@ use {
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
         mem,
-        collections::{HashSet}
     },
     
     crate::{
@@ -98,7 +97,6 @@ use {
                 WM_EXITSIZEMOVE,
                 WM_SIZE,
                 WM_DPICHANGED,
-                WM_USER,
                 WM_DESTROY,
                 HTTOPLEFT,
                 HTBOTTOMLEFT,
@@ -236,9 +234,8 @@ use {
         
         event::*,
         area::Area,
-        makepad_live_id::*,
         os::mswindows::win32_app::encode_wide,
-        os::mswindows::win32_app::{TRUE, FALSE, post_signal_to_hwnd},
+        os::mswindows::win32_app::{TRUE, FALSE},
         os::mswindows::win32_event::*,
         os::mswindows::win32_app::get_win32_app_global,
         window::{WindowId},
@@ -327,15 +324,7 @@ impl Win32Window {
             ShowWindow(hwnd, SW_SHOW);
             
             get_win32_app_global().dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap());
-            
-            if let Ok(mut sigs) = get_win32_app_global().race_signals.lock() {
-                get_win32_app_global().all_windows.push(hwnd);
-                for signal in sigs.iter() {
-                    post_signal_to_hwnd(hwnd, *signal);
-                }
-                sigs.clear();
-            }
-            
+            get_win32_app_global().all_windows.push(hwnd);
         }
     }
     
@@ -588,14 +577,20 @@ impl Win32Window {
             },
             WM_SIZE | WM_DPICHANGED => {
                 window.send_change_event();
-            },
-            WM_USER => {
-                let mut signals = HashSet::new();
-                signals.insert(Signal(LiveId(((wparam.0 as u64) << 32) | (lparam.0 as u64))));
+            }, 
+            /*WM_USER => { 
+                let signals = if let Ok(mut sigs) = get_win32_app_global().race_signals.lock() {
+                    let mut signals = HashSet::new();
+                    std::mem::swap(&mut *sigs, &mut signals);
+                    signals
+                }
+                else{
+                    panic!()
+                };
                 window.do_callback(vec![
                     Win32Event::Signal(SignalEvent {signals})
                 ]);
-            },
+            }, */
             WM_CLOSE => { // close requested
                 let accept_close = Rc::new(Cell::new(true));
                 window.do_callback(vec![Win32Event::WindowCloseRequested(WindowCloseRequestedEvent {

@@ -1,5 +1,6 @@
 use {
     std::{
+        collections::{HashSet},
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
         mem,
@@ -10,10 +11,6 @@ use {
             core::HRESULT,
             core::PCWSTR,
             core::PCSTR,
-            Win32::Foundation::{
-                WPARAM,
-                LPARAM
-            },
             Win32::UI::WindowsAndMessaging::{
                 WNDCLASSEXW,
                 PM_REMOVE,
@@ -26,7 +23,6 @@ use {
                 PeekMessageW,
                 SetTimer,
                 KillTimer,
-                PostMessageW,
                 ShowCursor,
                 SetCursor,
                 LoadCursorW,
@@ -47,7 +43,6 @@ use {
                 CS_VREDRAW,
                 CS_OWNDC,
                 IDI_WINLOGO,
-                WM_USER
             },
             Win32::Graphics::Gdi::{
                 HMONITOR,
@@ -76,7 +71,7 @@ use {
             Win32::System::Performance::QueryPerformanceCounter,
             Win32::System::Performance::QueryPerformanceFrequency,
         },
-        event::{TimerEvent, Signal},
+        event::{TimerEvent, Signal, SignalEvent},
         cursor::MouseCursor,
         os::cx_desktop::EventFlow,
         os::mswindows::win32_event::Win32Event,
@@ -107,8 +102,8 @@ pub struct Win32App {
     pub window_class_name: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
-    pub race_signals: Mutex<Vec<Signal>>,
-    
+    pub race_signals: Mutex<HashSet<Signal>>,
+    pub was_signal_poll: bool,
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
     pub current_cursor: MouseCursor,
@@ -119,6 +114,7 @@ pub enum Win32Timer {
     Free,
     Timer {win32_id: usize, timer_id: u64, interval: f64, repeats: bool},
     Resize {win32_id: usize},
+    SignalPoll {win32_id: usize},
 }
 
 impl Win32App {
@@ -157,9 +153,10 @@ impl Win32App {
 
         let win32_app = Win32App {
             window_class_name,
+            was_signal_poll: false,
             time_start,
             time_freq,
-            race_signals: Mutex::new(Vec::new()),
+            race_signals: Mutex::new(HashSet::new()),
             event_callback: Some(event_callback),
             event_flow: EventFlow::Poll,
             all_windows: Vec::new(),
@@ -167,7 +164,6 @@ impl Win32App {
             dpi_functions: DpiFunctions::new(),
             current_cursor: MouseCursor::Default,
         };
-        
         win32_app.dpi_functions.become_dpi_aware();
         
         win32_app
@@ -189,10 +185,12 @@ impl Win32App {
                         else {
                             TranslateMessage(&msg);
                             DispatchMessageW(&msg);
-                            self.do_callback(vec![Win32Event::Paint]);
+                            if !self.was_signal_poll(){
+                                self.do_callback(vec![Win32Event::Paint]);
+                            }
                         }
                     }
-                    EventFlow::Poll => {
+                    EventFlow::Poll => { 
                         let mut msg = std::mem::MaybeUninit::uninit();
                         let ret = PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE);
                         let msg = msg.assume_init();
@@ -237,6 +235,10 @@ impl Win32App {
                         hit_timer = Some(win32_app.timers[slot].clone());
                         break;
                     },
+                    Win32Timer::SignalPoll{win32_id,..}=>if win32_id == in_win32_id {
+                        hit_timer = Some(win32_app.timers[slot].clone());
+                        break;
+                    }
                     _ => ()
                 }
             };
@@ -251,8 +253,34 @@ impl Win32App {
                 Win32Timer::Resize {..} => {
                     win32_app.do_callback(vec![Win32Event::Paint]);
                 },
+                Win32Timer::SignalPoll{..}=>{
+                    let signals = if let Ok(mut sigs) = get_win32_app_global().race_signals.lock() {
+                        let mut signals = HashSet::new();
+                        std::mem::swap(&mut *sigs, &mut signals);
+                        signals
+                    }
+                    else{
+                        panic!()
+                    };
+                    if signals.len()>0{
+                        get_win32_app_global().do_callback(vec![
+                            Win32Event::Signal(SignalEvent {signals})
+                        ]);
+                    }
+                    get_win32_app_global().was_signal_poll = true;
+                }
                 _ => ()
             }
+        }
+    }
+    
+    pub fn was_signal_poll(&mut self)->bool{
+        if self.was_signal_poll{
+            self.was_signal_poll = false;
+            true
+        }
+        else{
+            false
         }
     }
     
@@ -296,6 +324,12 @@ impl Win32App {
         self.timers[slot] = Win32Timer::Resize {win32_id: win32_id};
     }
     
+    pub fn start_signal_poll(&mut self) {
+        let slot = self.get_free_timer_slot();
+        let win32_id = unsafe {SetTimer(None, 0, 8 as u32, Some(Self::timer_proc))};
+        self.timers[slot] = Win32Timer::SignalPoll {win32_id: win32_id};
+    }
+    
     pub fn stop_resize(&mut self) {
         for slot in 0..self.timers.len() {
             if let Win32Timer::Resize {win32_id} = self.timers[slot] {
@@ -309,23 +343,9 @@ impl Win32App {
     pub fn post_signal(signal: Signal) {
         let win32_app = get_win32_app_global();
         if let Ok(mut sigs) = win32_app.race_signals.lock() {
-            if win32_app.all_windows.len()>0 {
-                post_signal_to_hwnd(win32_app.all_windows[0], signal)
-            }
-            else { // we have no windows
-                sigs.push(signal);
-            }
+            sigs.insert(signal);
         }
     }
-    /*
-    pub fn terminate_event_loop(&mut self) {
-        unsafe {
-            if self.all_windows.len()>0 {
-                PostMessageW(self.all_windows[0], win32_sys::WM_QUIT, 0, 0);
-            }
-        }
-        self.event_loop_running = false;
-    }*/
     
     pub fn time_now(&self) -> f64 {
         unsafe {
@@ -422,7 +442,7 @@ pub fn encode_wide(string: impl AsRef<OsStr>) -> Vec<u16> {
     string.as_ref().encode_wide().chain(std::iter::once(0)).collect()
 }
 
-
+/*
 pub fn post_signal_to_hwnd(hwnd:HWND, signal:Signal){
     unsafe{PostMessageW(
         hwnd,
@@ -431,7 +451,7 @@ pub fn post_signal_to_hwnd(hwnd:HWND, signal:Signal){
         LPARAM(((signal.0.0>>32)&0xffff_ffff) as isize),
     )};
 }
-
+*/
 pub struct DpiFunctions {
     get_dpi_for_window: Option<GetDpiForWindow>,
     get_dpi_for_monitor: Option<GetDpiForMonitor>,

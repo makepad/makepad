@@ -7,21 +7,33 @@ use {
             Win32::Foundation::{
                 WAIT_OBJECT_0,
                 HANDLE,
-            }, 
+            },
             Win32::System::Com::{
                 CoInitialize,
                 CoCreateInstance,
                 CLSCTX_ALL,
                 STGM_READ,
                 VT_LPWSTR
-            }, 
+            },
+            Win32::Media::KernelStreaming::{
+                WAVE_FORMAT_EXTENSIBLE,
+            },
+            Win32::Media::Multimedia::{
+                KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+                //WAVE_FORMAT_IEEE_FLOAT
+            },
             Win32::Media::Audio::{
-                //WAVEFORMATEX,  
-                MMDeviceEnumerator, 
+                WAVEFORMATEX,
+                WAVEFORMATEXTENSIBLE,
+                WAVEFORMATEXTENSIBLE_0,
+                //WAVEFORMATEX,
+                MMDeviceEnumerator,
                 IMMDeviceEnumerator,
                 DEVICE_STATE_ACTIVE,
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 eRender,
                 eConsole,
                 IAudioClient,
@@ -37,10 +49,10 @@ use {
         }
     }
 };
-
+/*
 #[repr(C)]
 #[allow(non_snake_case)]
-struct WAVEFORMATEX{
+struct WAVEFORMATEX {
     wFormatTag: u16,
     nChannels: u16,
     nSamplesPerSec: u32,
@@ -48,6 +60,77 @@ struct WAVEFORMATEX{
     nBlockAlign: u16,
     wBitsPerSample: u16,
     cbSize: u16,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+union WAVEFORMATEXTENSIBLE_0 {
+    wValidBitsPerSample: u16,
+    wSamplesPerBlock: u16,
+    wReserved: u16,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+struct WAVEFORMATEXTENSIBLE {
+    Format: WAVEFORMATEX,
+    Samples: WAVEFORMATEXTENSIBLE_0,
+    dwChannelMask: u32,
+    SubFormat: GUID
+}*/
+/*
+impl fmt::Debug for WaveFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WaveFormat")
+            .field("nAvgBytesPerSec", &{ self.wave_fmt.Format.nAvgBytesPerSec })
+            .field("cbSize", &{ self.wave_fmt.Format.cbSize })
+            .field("nBlockAlign", &{ self.wave_fmt.Format.nBlockAlign })
+            .field("wBitsPerSample", &{ self.wave_fmt.Format.wBitsPerSample })
+            .field("nSamplesPerSec", &{ self.wave_fmt.Format.nSamplesPerSec })
+            .field("wFormatTag", &{ self.wave_fmt.Format.wFormatTag })
+            .field("wValidBitsPerSample", &unsafe {
+                self.wave_fmt.Samples.wValidBitsPerSample
+            })
+            .field("SubFormat", &{ self.wave_fmt.SubFormat })
+            .field("nChannel", &{ self.wave_fmt.Format.nChannels })
+            .field("dwChannelMask", &{ self.wave_fmt.dwChannelMask })
+            .finish()
+    }
+}*/
+
+fn new_float_waveformatextensible(storebits: usize, validbits: usize, samplerate: usize, channels: usize) -> WAVEFORMATEXTENSIBLE {
+    let blockalign = channels * storebits / 8;
+    let byterate = samplerate * blockalign;
+    let wave_format = WAVEFORMATEX {
+        cbSize: 22,
+        nAvgBytesPerSec: byterate as u32,
+        nBlockAlign: blockalign as u16,
+        nChannels: channels as u16,
+        nSamplesPerSec: samplerate as u32,
+        wBitsPerSample: storebits as u16,
+        wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
+    };
+    let sample = WAVEFORMATEXTENSIBLE_0 {
+        wValidBitsPerSample: validbits as u16,
+    };
+    let subformat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT; //
+    /*match sample_type {
+        SampleType::Float => KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+        SampleType::Int => KSDATAFORMAT_SUBTYPE_PCM,
+    };*/
+    let mask = match channels {
+        ch if ch <= 18 => {
+            // setting bit for each channel
+            (1 << ch) - 1
+        }
+        _ => 0,
+    };
+    WAVEFORMATEXTENSIBLE {
+        Format: wave_format,
+        Samples: sample,
+        SubFormat: subformat,
+        dwChannelMask: mask,
+    }
 }
 
 pub struct Wasapi {
@@ -128,20 +211,25 @@ impl Wasapi {
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
             
-            let wave_format = client.GetMixFormat().unwrap();
-            let wave_format_api = wave_format as *mut WAVEFORMATEX;
+            //let wave_format = client.GetMixFormat().unwrap();
+            //let wave_format = WAVEFORMATEXTENSIBLE {
+            //};
+            let wave_format = new_float_waveformatextensible(32, 32, 44100, 2);
+            
+            //let wave_format_api = wave_format as *mut WAVEFORMATEXTENSIBLE;
             //let wave_format_api = WAVEFORMATEXAPI(std::slice::from_raw_parts(wave_format as *const u8, std::mem::size_of::<WAVEFORMATEX>()));
-            println!("Channels: {}", (*wave_format_api).wFormatTag);
+            //println!("wFormatTag: {:?}", (*wave_format_api).SubFormat);
+            //println!("wFormatTag: {:?}", (*wave_format_api).samples.wValidBitsPerSample);
             //(*wave_format_api).wFormatTag = 3;
             //(*wave_format_api).cbSize = std::mem::size_of::<WAVEFORMATEX>() as u16;
             
             //println!("SSEC: {}", wave_format_api.nSamplesPerSec());
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                0, // buffer duration
-                0, // periodicity
-                wave_format,
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                def_period,
+                def_period,
+                &wave_format as *const _ as *const crate::windows_crate::Win32::Media::Audio::WAVEFORMATEX,
                 None
             ).unwrap();
             
@@ -149,27 +237,28 @@ impl Wasapi {
             
             client.SetEventHandle(event).unwrap();
             
+            let render_client = client.GetService().unwrap();
+            
             client.Start().unwrap();
             
-            let render_client = client.GetService().unwrap();
             Self {
                 render_client,
                 event,
                 client,
-                _device:device
+                _device: device
             }
         }
     }
     
     pub fn wait_for_buffer(&mut self) -> Result<WasapiAudioOutputBuffer, ()> {
         unsafe {
-            loop{
+            loop {
                 if WaitForSingleObject(self.event, 2000) != WAIT_OBJECT_0 {
                     return Err(())
                 };
-                let buffer_size = self.client.GetBufferSize().unwrap();
                 let padding = self.client.GetCurrentPadding().unwrap();
-                let req_size =  buffer_size - padding;
+                let buffer_size = self.client.GetBufferSize().unwrap();
+                let req_size = buffer_size - padding;
                 if req_size > 0 {
                     let buffer = self.render_client.GetBuffer(req_size).unwrap();
                     return Ok(WasapiAudioOutputBuffer {
@@ -183,8 +272,8 @@ impl Wasapi {
     }
     
     pub fn release_buffer(&mut self, output_buffer: WasapiAudioOutputBuffer) {
-        unsafe {
-            self.render_client.ReleaseBuffer((output_buffer.frame_count * output_buffer.channel_count) as u32, 0).unwrap();
+        unsafe { 
+            self.render_client.ReleaseBuffer(output_buffer.frame_count as u32, 0).unwrap();
         }
     }
 }
