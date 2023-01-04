@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]
 pub mod Win32{
-pub mod UI{
+pub mod UI{ 
 pub mod WindowsAndMessaging{
 #[repr(C)]pub struct WNDCLASSEXW {
     pub cbSize: u32,
@@ -14,7 +14,7 @@ pub mod WindowsAndMessaging{
     pub hbrBackground: super::super::Graphics::Gdi::HBRUSH,
     pub lpszMenuName: ::windows::core::PCWSTR,
     pub lpszClassName: ::windows::core::PCWSTR,
-    pub hIconSm: HICON, 
+    pub hIconSm: HICON,
 }
 impl ::core::marker::Copy for WNDCLASSEXW {}
 impl ::core::cmp::Eq for WNDCLASSEXW {}
@@ -1652,6 +1652,17 @@ impl ::core::fmt::Debug for PROPERTYKEY {
 }
 pub mod Graphics{
 pub mod Gdi{
+pub unsafe fn CreateSolidBrush<'a, P0>(color: P0) -> HBRUSH
+where
+    P0: ::std::convert::Into<super::super::Foundation::COLORREF>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn CreateSolidBrush(color: super::super::Foundation::COLORREF) -> HBRUSH;
+    }
+    CreateSolidBrush(color.into())
+}
+
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HMONITOR(pub isize);
 impl HMONITOR {
     pub fn is_invalid(&self) -> bool {
@@ -12344,6 +12355,32 @@ impl ::core::convert::From<::core::option::Option<HINSTANCE>> for HINSTANCE {
 }
 
 pub const WAIT_OBJECT_0: WIN32_ERROR = WIN32_ERROR(0u32);
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct COLORREF(pub u32);
+impl ::core::marker::Copy for COLORREF {}
+impl ::core::clone::Clone for COLORREF {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for COLORREF {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for COLORREF {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for COLORREF {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("COLORREF").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<COLORREF>> for COLORREF {
+    fn from(optional: ::core::option::Option<COLORREF>) -> COLORREF {
+        optional.unwrap_or_default()
+    }
+}
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct WIN32_ERROR(pub u32);
 impl WIN32_ERROR {

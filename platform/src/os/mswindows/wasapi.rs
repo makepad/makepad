@@ -49,54 +49,6 @@ use {
         }
     }
 };
-/*
-#[repr(C)]
-#[allow(non_snake_case)]
-struct WAVEFORMATEX {
-    wFormatTag: u16,
-    nChannels: u16,
-    nSamplesPerSec: u32,
-    nAvgBytesPerSec: u32,
-    nBlockAlign: u16,
-    wBitsPerSample: u16,
-    cbSize: u16,
-}
-
-#[allow(non_snake_case)]
-#[repr(C)]
-union WAVEFORMATEXTENSIBLE_0 {
-    wValidBitsPerSample: u16,
-    wSamplesPerBlock: u16,
-    wReserved: u16,
-}
-
-#[allow(non_snake_case)]
-#[repr(C)]
-struct WAVEFORMATEXTENSIBLE {
-    Format: WAVEFORMATEX,
-    Samples: WAVEFORMATEXTENSIBLE_0,
-    dwChannelMask: u32,
-    SubFormat: GUID
-}*/
-/*
-impl fmt::Debug for WaveFormat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WaveFormat")
-            .field("nAvgBytesPerSec", &{ self.wave_fmt.Format.nAvgBytesPerSec })
-            .field("cbSize", &{ self.wave_fmt.Format.cbSize })
-            .field("nBlockAlign", &{ self.wave_fmt.Format.nBlockAlign })
-            .field("wBitsPerSample", &{ self.wave_fmt.Format.wBitsPerSample })
-            .field("nSamplesPerSec", &{ self.wave_fmt.Format.nSamplesPerSec })
-            .field("wFormatTag", &{ self.wave_fmt.Format.wFormatTag })
-            .field("wValidBitsPerSample", &unsafe {
-                self.wave_fmt.Samples.wValidBitsPerSample
-            })
-            .field("SubFormat", &{ self.wave_fmt.SubFormat })
-            .field("nChannel", &{ self.wave_fmt.Format.nChannels })
-            .field("dwChannelMask", &{ self.wave_fmt.dwChannelMask })
-            .finish()
-    }
-}*/
 
 fn new_float_waveformatextensible(storebits: usize, validbits: usize, samplerate: usize, channels: usize) -> WAVEFORMATEXTENSIBLE {
     let blockalign = channels * storebits / 8;
@@ -113,11 +65,8 @@ fn new_float_waveformatextensible(storebits: usize, validbits: usize, samplerate
     let sample = WAVEFORMATEXTENSIBLE_0 {
         wValidBitsPerSample: validbits as u16,
     };
-    let subformat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT; //
-    /*match sample_type {
-        SampleType::Float => KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
-        SampleType::Int => KSDATAFORMAT_SUBTYPE_PCM,
-    };*/
+    let subformat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT; 
+
     let mask = match channels {
         ch if ch <= 18 => {
             // setting bit for each channel
@@ -210,20 +159,9 @@ impl Wasapi {
             let mut def_period = 0i64;
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
-            
-            //let wave_format = client.GetMixFormat().unwrap();
-            //let wave_format = WAVEFORMATEXTENSIBLE {
-            //};
+
             let wave_format = new_float_waveformatextensible(32, 32, 44100, 2);
-            
-            //let wave_format_api = wave_format as *mut WAVEFORMATEXTENSIBLE;
-            //let wave_format_api = WAVEFORMATEXAPI(std::slice::from_raw_parts(wave_format as *const u8, std::mem::size_of::<WAVEFORMATEX>()));
-            //println!("wFormatTag: {:?}", (*wave_format_api).SubFormat);
-            //println!("wFormatTag: {:?}", (*wave_format_api).samples.wValidBitsPerSample);
-            //(*wave_format_api).wFormatTag = 3;
-            //(*wave_format_api).cbSize = std::mem::size_of::<WAVEFORMATEX>() as u16;
-            
-            //println!("SSEC: {}", wave_format_api.nSamplesPerSec());
+
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
