@@ -51,7 +51,6 @@ impl CxMediaApi for Cx {
         Vec::new()
     }
     
-    
     fn start_midi_input(&mut self) {
         self.os.from_wasm(FromWasmStartMidiInput {
         });
@@ -62,6 +61,7 @@ impl CxMediaApi for Cx {
             callback: Box::new(f),
             output_buffer: AudioBuffer::default()
         }));
+        
         self.os.from_wasm(FromWasmSpawnAudioOutput {closure_ptr: closure_ptr as u32});
     }
 }

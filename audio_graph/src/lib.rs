@@ -9,6 +9,7 @@ pub mod mixer;
 pub mod instrument;
 pub mod piano;
 pub mod display_audio;
+pub mod audio_stream;
 
 use makepad_platform::Cx;
 pub use makepad_widgets;

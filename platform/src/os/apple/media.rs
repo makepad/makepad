@@ -92,7 +92,7 @@ impl CxMediaApi for Cx {
         });
     }
     
-    fn start_audio_input<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static {
+    fn start_audio_input<F>(&mut self, f: F) where F: FnMut(AudioTime, AudioBuffer)->AudioBuffer + Send + 'static {
     }
     
 }

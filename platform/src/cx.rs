@@ -128,7 +128,7 @@ pub struct CxDependency {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum OsType {
     Unknown,
     MsWindows,
