@@ -10,5 +10,5 @@ pub trait CxMediaApi {
     fn handle_midi_inputs(&mut self, event:&Event)->Vec<MidiInputInfo>;
     fn start_midi_input(&mut self);
     fn start_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static;
-    fn start_audio_input<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static;
+    fn start_audio_input<F>(&mut self, f: F) where F: FnMut(AudioTime, AudioBuffer)->AudioBuffer + Send + 'static;
 }

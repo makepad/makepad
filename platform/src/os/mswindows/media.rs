@@ -74,19 +74,18 @@ impl CxMediaApi for Cx {
             let rate_scalar = 44100f64;
             loop {
                 let mut buffer = wasapi.wait_for_buffer().unwrap();
-                if let Ok(mut fbox) = fbox.lock() {
-                    fbox(AudioTime {
-                        sample_time,
-                        host_time,
-                        rate_scalar
-                    }, &mut buffer.audio_buffer);
-                }
+                let mut fbox = fbox.lock().unwrap();
+                fbox(AudioTime {
+                    sample_time,
+                    host_time,
+                    rate_scalar
+                }, &mut buffer.audio_buffer);
                 wasapi.release_buffer(buffer);
             }
         });
     }
     
-    fn start_audio_input<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static {
+    fn start_audio_input<F>(&mut self, f: F) where F: FnMut(AudioTime, AudioBuffer)->AudioBuffer + Send + 'static {
         let fbox = std::sync::Arc::new(std::sync::Mutex::new(Box::new(f)));
         std::thread::spawn(move || {
             let mut wasapi = WasapiInput::new();
@@ -94,15 +93,16 @@ impl CxMediaApi for Cx {
             let host_time = 0u64;
             let rate_scalar = 44100f64;
             loop {
-                let mut buffer = wasapi.wait_for_buffer().unwrap();
-                if let Ok(mut fbox) = fbox.lock() {
-                    fbox(AudioTime {
-                        sample_time,
-                        host_time,
-                        rate_scalar
-                    }, &mut buffer);
-                }
-                wasapi.release_buffer(buffer);
+                let buffer = wasapi.wait_for_buffer().unwrap();
+                
+                let mut fbox = fbox.lock().unwrap();
+                let ret_buffer = fbox(AudioTime {
+                    sample_time,
+                    host_time,
+                    rate_scalar
+                }, buffer);
+                
+                wasapi.release_buffer(ret_buffer);
             }
         });
     }

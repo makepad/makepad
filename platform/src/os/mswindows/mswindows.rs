@@ -1,4 +1,3 @@
-// makepad is win10 only because of dx12 + terminal API
 use {
     std::{ 
         rc::Rc,
