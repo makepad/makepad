@@ -10,58 +10,93 @@ pub struct AudioTime {
 #[derive(Clone, Default)]
 pub struct AudioBuffer {
     pub data: Vec<f32>,
+    pub final_size: bool,
     pub frame_count: usize,
     pub channel_count: usize
 }
 
 impl AudioBuffer {
-    pub fn new_with_size(frame_count: usize, channel_count: usize)->Self{
+    pub fn from_data(data:Vec<f32>, channel_count:usize)->Self{
+        let frame_count = data.len() / channel_count;
+        Self{
+            data,
+            final_size:false,
+            frame_count,
+            channel_count
+        }
+    }
+    
+    pub fn into_data(self)->Vec<f32>{
+        self.data
+    }
+
+    pub fn new_with_size(frame_count: usize, channel_count: usize) -> Self {
         let mut ret = Self::default();
         ret.resize(frame_count, channel_count);
         ret
     }
     
-    pub fn frame_count(&self)->usize{self.frame_count}
-    pub fn channel_count(&self)->usize{self.channel_count}
+    pub fn new_like(like: &AudioBuffer) -> Self {
+        let mut ret = Self::default();
+        ret.resize_like(like);
+        ret
+    }
     
-    pub fn copy_from(&mut self, like:&AudioBuffer)->&mut Self{
+    pub fn frame_count(&self) -> usize {self.frame_count}
+    pub fn channel_count(&self) -> usize {self.channel_count}
+    
+    pub fn copy_from(&mut self, like: &AudioBuffer) -> &mut Self {
         self.resize(like.frame_count(), like.channel_count());
         self.data.copy_from_slice(&like.data);
         self
     }
     
-    pub fn resize_like(&mut self, like:&AudioBuffer)->&mut Self{
+    pub fn resize_like(&mut self, like: &AudioBuffer) -> &mut Self {
         self.resize(like.frame_count(), like.channel_count());
         self
     }
     
     pub fn resize(&mut self, frame_count: usize, channel_count: usize) {
-        self.frame_count = frame_count;
-        self.channel_count = channel_count;
-        self.data.resize(frame_count * channel_count as usize, 0.0);
+        if self.frame_count != frame_count || self.channel_count != channel_count {
+            if self.final_size {
+                panic!("Audiobuffer is set to 'final size' and resize is different");
+            }
+            self.frame_count = frame_count;
+            self.channel_count = channel_count;
+            self.data.resize(frame_count * channel_count as usize, 0.0);
+        }
     }
-
-    pub fn stereo_mut(&mut self) -> (&mut [f32],&mut [f32]) {
-        if self.channel_count != 2{panic!()}
+    
+    pub fn clear_final_size(&mut self) {
+        self.final_size = false;
+    }
+    
+    pub fn set_final_size(&mut self) {
+        self.final_size = true;
+    }
+    
+    pub fn stereo_mut(&mut self) -> (&mut [f32], &mut [f32]) {
+        if self.channel_count != 2 {panic!()}
         self.data.split_at_mut(self.frame_count)
     }
-
-    pub fn stereo(&self) -> (&[f32],&[f32]) {
-        if self.channel_count != 2{panic!()}
+    
+    pub fn stereo(&self) -> (&[f32], &[f32]) {
+        if self.channel_count != 2 {panic!()}
         self.data.split_at(self.frame_count)
     }
-
+    
     pub fn channel_mut(&mut self, channel: usize) -> &mut [f32] {
-        &mut self.data[channel * self.frame_count..(channel+1) * self.frame_count]
+        &mut self.data[channel * self.frame_count..(channel + 1) * self.frame_count]
     }
-
+    
     pub fn channel(&self, channel: usize) -> &[f32] {
-        &self.data[channel * self.frame_count..(channel+1) * self.frame_count]
+        &self.data[channel * self.frame_count..(channel + 1) * self.frame_count]
     }
-
+    
     pub fn zero(&mut self) {
         for i in 0..self.data.len() {
             self.data[i] = 0.0;
         }
     }
 }
+
