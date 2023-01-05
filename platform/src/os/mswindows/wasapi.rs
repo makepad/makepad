@@ -53,16 +53,16 @@ use {
     }
 };
 
-fn new_float_waveformatextensible(samplerate: usize, channels: usize) -> WAVEFORMATEXTENSIBLE {
+fn new_float_waveformatextensible(samplerate: usize, channel_count: usize) -> WAVEFORMATEXTENSIBLE {
     let storebits = 32;
     let validbits = 32;
-    let blockalign = channels * storebits / 8;
+    let blockalign = channel_count * storebits / 8;
     let byterate = samplerate * blockalign;
     let wave_format = WAVEFORMATEX {
         cbSize: 22,
         nAvgBytesPerSec: byterate as u32,
         nBlockAlign: blockalign as u16,
-        nChannels: channels as u16,
+        nChannels: channel_count as u16,
         nSamplesPerSec: samplerate as u32,
         wBitsPerSample: storebits as u16,
         wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
@@ -72,7 +72,7 @@ fn new_float_waveformatextensible(samplerate: usize, channels: usize) -> WAVEFOR
     };
     let subformat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT; 
 
-    let mask = match channels {
+    let mask = match channel_count {
         ch if ch <= 18 => {
             // setting bit for each channel
             (1 << ch) - 1
@@ -90,6 +90,7 @@ fn new_float_waveformatextensible(samplerate: usize, channels: usize) -> WAVEFOR
 struct WasapiBase{
     event: HANDLE,
     client: IAudioClient,
+    channel_count: usize,
     audio_buffer: Option<AudioBuffer>
 }
 
@@ -112,15 +113,16 @@ struct WasapiBase{
 
 impl WasapiBase {
     pub fn new_default_output() -> Self {
-        Self::new_default(eRender)
+        Self::new_default(eRender , 2)
     }
     
     pub fn new_default_input() -> Self {
-        Self::new_default(eCapture)
+        Self::new_default(eCapture, 1)
     }
     
-    pub fn new_default(flow:EDataFlow) -> Self {
+    pub fn new_default(flow:EDataFlow, channel_count:usize) -> Self {
         unsafe {
+            
             CoInitialize(None).unwrap();
             
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
@@ -132,7 +134,7 @@ impl WasapiBase {
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
 
-            let wave_format = new_float_waveformatextensible(44100, 2);
+            let wave_format = new_float_waveformatextensible(44100, channel_count);
 
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -148,6 +150,7 @@ impl WasapiBase {
             client.Start().unwrap();
             
             Self {
+                channel_count,
                 audio_buffer: Some(Default::default()),
                 event,
                 client,
@@ -188,11 +191,13 @@ impl WasapiOutput{
                 let buffer_size = self.base.client.GetBufferSize().unwrap();
                 let req_size = buffer_size - padding;
                 if req_size > 0 {
-                    let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
+                let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
                     let mut audio_buffer =  self.base.audio_buffer.take().unwrap();
-                    let frame_count = (req_size / 2) as usize;
-                    let channel_count = 2;
+                    let channel_count = self.base.channel_count;
+                    let frame_count = (req_size / channel_count as u32) as usize;
+                    audio_buffer.clear_final_size();
                     audio_buffer.resize(frame_count, channel_count);
+                    audio_buffer.set_final_size();
                     return Ok(WasapiAudioOutputBuffer {
                         frame_count,
                         channel_count, 
@@ -204,18 +209,17 @@ impl WasapiOutput{
         }
     }
     
-    pub fn release_buffer(&mut self, output: WasapiAudioOutputBuffer) {
+    pub fn release_buffer(&mut self, mut output: WasapiAudioOutputBuffer) {
         unsafe { 
-            let audio_buffer = output.audio_buffer;
             let device_buffer = std::slice::from_raw_parts_mut(output.device_buffer, output.frame_count * output.channel_count);
-            for i in 0..audio_buffer.channel_count() {
-                let input_channel = audio_buffer.channel(i);
-                for j in 0..audio_buffer.frame_count() {
-                    device_buffer[j * audio_buffer.channel_count() + i] = input_channel[j];
+            for i in 0..output.channel_count {
+                let input_channel = output.audio_buffer.channel(i);
+                for j in 0..output.frame_count {
+                    device_buffer[j * output.channel_count + i] = input_channel[j];
                 }
             } 
             self.render_client.ReleaseBuffer(output.frame_count as u32, 0).unwrap();
-            self.base.audio_buffer = Some(audio_buffer);
+            self.base.audio_buffer = Some(output.audio_buffer);
         }
     }   
 }
@@ -246,17 +250,31 @@ impl WasapiInput {
                 if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
                     return Err(())
                 };
-                /*let padding = self.client.GetCurrentPadding().unwrap();
-                let buffer_size = self.client.GetBufferSize().unwrap();
-                let req_size = buffer_size - padding;
-                if req_size > 0 {
-                    let buffer = self.render_client.GetBuffer(req_size).unwrap();
-                    return Ok(WasapiAudioOutputBuffer {
-                        frame_count: (req_size / 2) as usize,
-                        channel_count: 2, 
-                        buffer: buffer as *mut _   
-                    })
-                }*/
+                let mut pdata: *mut u8 = 0 as *mut _;
+                let mut frame_count = 0u32;
+                let mut dwflags = 0u32;
+                self.capture_client.GetBuffer(&mut pdata, &mut frame_count, &mut dwflags, None, None).unwrap();
+                
+                if frame_count == 0{
+                    continue;
+                }
+                
+                let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count  as usize * self.base.channel_count);
+                
+                let mut audio_buffer = self.base.audio_buffer.take().unwrap();
+                
+                audio_buffer.resize(frame_count as usize, self.base.channel_count);
+                
+                for i in 0..self.base.channel_count {
+                    let output_channel = audio_buffer.channel_mut(i);
+                    for j in 0..frame_count as usize {
+                        output_channel[j] = device_buffer[j * self.base.channel_count + i]
+                    }
+                }
+
+                self.capture_client.ReleaseBuffer(frame_count).unwrap();
+                
+                return Ok(audio_buffer);
             }
         }
     }

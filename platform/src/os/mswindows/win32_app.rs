@@ -348,7 +348,6 @@ impl Win32App {
         }
     }
     
-    
     pub fn post_signal(signal: Signal) {
         let win32_app = get_win32_app_global();
         if let Ok(mut sigs) = win32_app.race_signals.lock() {
