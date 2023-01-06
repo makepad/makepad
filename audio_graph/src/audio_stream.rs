@@ -27,6 +27,7 @@ unsafe impl Send for AudioStreamReceiver {}
 
 pub struct AudioRoute {
     id: u64,
+    last_order: u64,
     start_offset: usize,
     buffers: Vec<AudioBuffer>
 }
@@ -55,6 +56,8 @@ impl AudioStreamReceiver {
     pub fn route_id(&self, route_num: usize) -> u64 {
         self.routes[route_num].id
     }
+
+
     
     pub fn try_recv_stream(&mut self) {
         while let Ok((route_id, buf)) = self.stream_recv.try_recv() {
@@ -63,6 +66,7 @@ impl AudioStreamReceiver {
             }
             else {
                 self.routes.push(AudioRoute {
+                    last_order: 0,
                     id: route_id,
                     buffers: vec![buf],
                     start_offset: 0
@@ -78,6 +82,7 @@ impl AudioStreamReceiver {
             }
             else {
                 self.routes.push(AudioRoute {
+                    last_order: 0,
                     id: route_id,
                     buffers: vec![buf],
                     start_offset: 0
@@ -87,7 +92,7 @@ impl AudioStreamReceiver {
         self.try_recv_stream();
     }
     
-    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_multiple: usize, max_multiple: usize) -> usize {
+    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_multiple: usize, mid_multiple:usize, max_multiple: usize) -> usize {
         
         let route = if let Some(route) = self.routes.get_mut(route_num) {
             route
@@ -101,16 +106,19 @@ impl AudioStreamReceiver {
         for buf in route.buffers.iter() {
             total += buf.frame_count();
         }
-        
+
         // check if we have enough buffer
         if total - route.start_offset < output.frame_count() * min_multiple {
             return 0
         }
         
         // if we have too much buffer throw it out
-        while total > output.frame_count() * max_multiple {
-            let input = route.buffers.remove(0);
-            total -= input.frame_count();
+        if total > output.frame_count() * max_multiple{
+            while total > output.frame_count() * mid_multiple {
+                println!("Too much buffer, cutting down");
+                let input = route.buffers.remove(0);
+                total -= input.frame_count();
+            }
         }
         
         // ok so we need to eat from the start of the buffer vec until output is filled
@@ -119,7 +127,7 @@ impl AudioStreamReceiver {
         let out_frame_count = output.frame_count();
         while let Some(input) = route.buffers.first() {
             // ok so. we can copy buffer from start_offset
-            let mut start_offset = route.start_offset;
+            let mut start_offset = None;
             let start_frames_read = frames_read;
             for chan in 0..out_channel_count {
                 frames_read = start_frames_read;
@@ -128,7 +136,7 @@ impl AudioStreamReceiver {
                 // alright so we write into the output buffer
                 for i in route.start_offset..inp.len() {
                     if frames_read >= out_frame_count {
-                        start_offset = i;
+                        start_offset = Some(i);
                         break;
                     }
                     out[frames_read] = inp[i];
@@ -136,7 +144,7 @@ impl AudioStreamReceiver {
                 }
             }
             // only consumed a part of the buffer
-            if start_offset != route.start_offset {
+            if let Some(start_offset) = start_offset {
                 route.start_offset = start_offset;
                 break
             }

@@ -26,10 +26,40 @@ impl AudioBuffer {
         }
     }
     
+    pub fn from_i16(inp: &[i16], channel_count:usize)->Self{
+        let mut data = Vec::new();
+        data.resize(inp.len(), 0.0);
+        let frame_count = data.len() / channel_count;
+        for i in 0..data.len(){
+            data[i] = (inp[i] as f32) / 32767.0;
+        }
+        Self{
+            data,
+            final_size:false,
+            frame_count,
+            channel_count
+        } 
+    }
+    
+    pub fn make_single_channel(&mut self){
+        self.data.resize(self.frame_count, 0.0);
+        self.channel_count = 1;
+    }
+    
     pub fn into_data(self)->Vec<f32>{
         self.data
     }
-
+    
+    pub fn to_i16(&self)->Vec<i16>{
+        let mut out = Vec::new();
+        out.resize(self.data.len(),0);
+        for i in 0..self.data.len(){
+            let f = (self.data[i] * 32767.0).max(std::i16::MIN as f32).min(std::i16::MAX as f32);
+            out[i] = f as i16;
+        }
+        out
+    }
+    
     pub fn new_with_size(frame_count: usize, channel_count: usize) -> Self {
         let mut ret = Self::default();
         ret.resize(frame_count, channel_count);
@@ -44,6 +74,7 @@ impl AudioBuffer {
     
     pub fn frame_count(&self) -> usize {self.frame_count}
     pub fn channel_count(&self) -> usize {self.channel_count}
+    
     
     pub fn copy_from(&mut self, like: &AudioBuffer) -> &mut Self {
         self.resize(like.frame_count(), like.channel_count());
