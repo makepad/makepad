@@ -21,6 +21,8 @@ use {
     std::time,
     std::net::UdpSocket,
     std::time::{Duration,Instant},
+    std::fs::OpenOptions,
+    std::io::prelude::*
 };
 
 // We dont have a UI yet
@@ -63,7 +65,7 @@ impl App {
     
     pub fn start_audio_io(&mut self, cx: &mut Cx) {
         // the number of audio frames (samples) in a UDP packet
-        const WIRE_FRAMES: usize = 100;
+        const WIRE_FRAMES: usize = 125;
         
         // Audiostream is an mpsc channel that buffers at the recv side
         // and allows arbitrary chunksized reads. Little utility struct
@@ -91,6 +93,7 @@ impl App {
         let read_audio = write_audio.try_clone().unwrap();
         
         // our microphone broadcast network thread
+        
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
             let mut peer_addrs = HashMap::new();
@@ -113,7 +116,8 @@ impl App {
                 // fill the mic stream recv side buffers, and block if nothing 
                 mic_recv.recv_stream();
                 
-                // read as many WIRE_FRAMES size buffers from our micstream and send to all peers
+                // read as many WIRE_FRAMES size buffers from our micstream as available
+                // and send to all peers
                 loop {
                     let mut output_buffer = AudioBuffer::new_with_size(WIRE_FRAMES, 2);
                     if mic_recv.read_buffer(0, &mut output_buffer, 1, 10) == 0 {
@@ -129,7 +133,7 @@ impl App {
                     let peak = sum / buf.len() as f32;
                     let data = output_buffer.into_data();
                     
-                    let wire_packet = if peak>0.001 {
+                    let wire_packet = if peak>0.00001 {
                         TeamTalkWire::Chunk(data)
                     }
                     else {
@@ -148,7 +152,7 @@ impl App {
         
         // the network audio receiving thread
         std::thread::spawn(move || {
-            let mut read_buf = [0u8; 2048];
+            let mut read_buf = [0u8; 4096];
             while let Ok((len, addr)) = read_audio.recv_from(&mut read_buf) {
                 let read_buf = &read_buf[0..len];
 
@@ -171,19 +175,17 @@ impl App {
                 }else {1};
                 mix_send.write_buffer(id, buffer).unwrap();
             }
-        });
-        
+        }); 
+         
         // the audio output thread
         cx.start_audio_output(move | _time, output_buffer | {
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
             mix_recv.try_recv_stream();
             let mut chan = AudioBuffer::new_like(output_buffer);
+            
             for i in 0..mix_recv.num_routes() {
-                // every route is a 'peer's audios tream, pull them into a buffer
-                // and then just add it (mix) in the output buffer
-                if mix_recv.read_buffer(i, &mut chan, 0, 10) != 0 {
-                    // lets mix it in
+                if mix_recv.read_buffer(i, &mut chan, 1, 10) != 0 { 
                     for i in 0..chan.data.len() {
                         output_buffer.data[i] += chan.data[i];
                     }
@@ -191,8 +193,18 @@ impl App {
             }
         });
         
+         
         // the microphone input thread, just pushes the input data into an audiostream
         cx.start_audio_input(move | _time, input_buffer | {
+            /*let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("./my-file.raw")
+                .unwrap();
+            let chan8 = input_buffer.channel(0);
+            let su8 = unsafe{std::slice::from_raw_parts(chan8.as_ptr() as *mut u8, chan8.len() * 4)};
+            file.write_all(su8).unwrap();
+            */
             mic_send.write_buffer(0, input_buffer).unwrap();
             AudioBuffer::default()
         });

@@ -51,51 +51,6 @@ pub struct AudioUnitClone {
     render_block: Option<ObjcId>,
     unit_type: AudioUnitType
 }
-/*
-pub struct AudioUnitOutputBuffer {
-    data: [*mut f32; MAX_AUDIO_BUFFERS],
-    frame_count: usize,
-    channel_count: usize
-}
-
-impl AudioUnitOutputBuffer{
-    fn channel_mut(&mut self, channel: usize) -> &mut [f32] {
-        unsafe {
-            std::slice::from_raw_parts_mut(
-                self.data[channel] as *mut f32,
-                self.frame_count as usize
-            )
-        }
-    }    
-}
-impl AudioOutputBuffer for AudioUnitOutputBuffer {
-    fn frame_count(&self)->usize{self.frame_count}
-    fn channel_count(&self)->usize{self.channel_count}
-    
-    fn zero(&mut self) {
-        for i in 0..self.channel_count {
-            let data = self.channel_mut(i);
-            for j in 0..data.len() {
-                data[j] = 0.0;
-            }
-        }
-    }
-    
-    fn copy_from_buffer(&mut self, buffer:&AudioBuffer){
-        if self.channel_count != buffer.channel_count{
-            panic!("Output buffer channel_count != buffer channel_count {} {}",self.channel_count, buffer.channel_count );
-        }
-        if self.frame_count != buffer.frame_count{
-            panic!("Output buffer frame_count != buffer frame_count ");
-        }
-        for i in 0..self.channel_count{
-            let output = self.channel_mut(i);
-            let input = buffer.channel(i);
-            output.copy_from_slice(input);
-        }
-    }
-}*/
-
 
 impl AudioTime {
     fn to_audio_time_stamp(&self) -> CAudioTimeStamp {
@@ -398,22 +353,20 @@ impl AudioUnit {
             let buffer = Arc::new(Mutex::new(AudioBuffer::default()));
             let output_provider = objc_block!(
                 move | _flags: *mut u32,
-                timestamp: *const CAudioTimeStamp,
+                time_stamp: *const CAudioTimeStamp,
                 frame_count: u32,
                 _input_bus_number: u64,
                 buffers: *mut CAudioBufferList |: i32 {
                     let buffers_ref = &*buffers;
-                    
                     let channel_count = buffers_ref.mNumberBuffers as usize;
                     let frame_count = frame_count as usize;
-                    
                     let mut buffer = buffer.lock().unwrap();
                     buffer.resize(frame_count, channel_count);
                     audio_callback(
                         AudioTime {
-                            sample_time: (*timestamp).mSampleTime,
-                            host_time: (*timestamp).mHostTime,
-                            rate_scalar: (*timestamp).mRateScalar
+                            sample_time: (*time_stamp).mSampleTime,
+                            host_time: (*time_stamp).mHostTime,
+                            rate_scalar: (*time_stamp).mRateScalar
                         },
                         &mut buffer
                     );
@@ -429,43 +382,112 @@ impl AudioUnit {
         }
     }
     
-    pub fn set_output_callback<F: Fn(AudioTime, AudioBuffer)->AudioBuffer + Send + 'static>(&self, audio_callback: F) {
+    pub fn set_output_callback<F: Fn(AudioTime, AudioBuffer) -> AudioBuffer + Send + 'static>(&self, audio_callback: F) {
         match self.unit_type {
             AudioUnitType::DefaultInput => (),
             _ => panic!("set_input_callback on this device")
         }
-        unsafe {
-            let buffer = Arc::new(Mutex::new(AudioBuffer::default()));
-            let output_provider = objc_block!(
-                move | _flags: *mut u32,
-                timestamp: *const CAudioTimeStamp,
-                frame_count: u32,
-                _input_bus_number: u64,
-                buffers: *mut CAudioBufferList |: i32 {
-                    let buffers_ref = &*buffers;
-                    let channel_count = buffers_ref.mNumberBuffers as usize;
-                    let frame_count = frame_count as usize;
-                    println!("GOT AUDIO INPUT");
-                    /*
-                    let mut buffer = buffer.lock().unwrap();
-                    buffer.resize(frame_count, channel_count);
-                    audio_callback(
-                        AudioTime {
-                            sample_time: (*timestamp).mSampleTime,
-                            host_time: (*timestamp).mHostTime,
-                            rate_scalar: (*timestamp).mRateScalar
-                        },
-                        &mut buffer
-                    );
-                    for i in 0..channel_count {
-                        let out = std::slice::from_raw_parts_mut(buffers_ref.mBuffers[i].mData as *mut f32, frame_count);
-                        out.copy_from_slice(buffer.channel(i));
-                    }*/
-                    
-                    0
-                }
-            );
-            let () = msg_send![self.au_audio_unit, setOutputProvider: &output_provider];
+        if let Some(render_block) = self.render_block {
+            unsafe {
+                let input_handler = objc_block!(
+                    move | _flags: *mut u32,
+                    time_stamp: *const CAudioTimeStamp,
+                    frame_count: u32,
+                    _input_bus_number: u64| {
+                        let mut buffer = AudioBuffer::new_with_size(frame_count as usize,2);
+                        let mut flags = 0u32;
+                        let mut buffer_list = buffer.to_audio_buffer_list();
+                      
+                        objc_block_invoke!(render_block, invoke(
+                            (&mut flags as *mut u32): *mut u32,
+                            (time_stamp): *const CAudioTimeStamp,
+                            (frame_count): u32,
+                            (1): u64,
+                            (&mut buffer_list as *mut CAudioBufferList): *mut CAudioBufferList,
+                            (nil): ObjcId
+                        ) -> i32);
+                        // lets sleep
+                         audio_callback(AudioTime {
+                            sample_time: (*time_stamp).mSampleTime,
+                            host_time: (*time_stamp).mHostTime,
+                            rate_scalar: (*time_stamp).mRateScalar
+                        },buffer);
+                    }
+                );
+                let () = msg_send![self.au_audio_unit, setInputHandler: &input_handler];
+                /*
+                loop {
+                    let mut buffer = AudioBuffer::new_with_size(470,2);
+                    let frame_count  = buffer.frame_count();
+                    let mut flags = 0u32;
+                    let audio_time = AudioTime {sample_time: 0.0, host_time: 0, rate_scalar: 0.0};
+                    let time_stamp = audio_time .to_audio_time_stamp();
+                    let mut buffer_list = buffer.to_audio_buffer_list();
+                  
+                    let ret = objc_block_invoke!(render_block, invoke(
+                        (&mut flags as *mut u32): *mut u32,
+                        (&time_stamp as *const CAudioTimeStamp): *const CAudioTimeStamp,
+                        (frame_count as u32): u32,
+                        (1): u64,
+                        (&mut buffer_list as *mut CAudioBufferList): *mut CAudioBufferList,
+                        (nil): ObjcId
+                    ) -> i32);
+                    // lets sleep
+                     audio_callback(audio_time,buffer);
+                    println!("{:?}", buffer_list);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }*/
+                /*
+                let buffer = Arc::new(Mutex::new(Some(AudioBuffer::default())));
+                let output_provider = objc_block!(
+                    move | flags: *mut u32,
+                    timestamp: *const CAudioTimeStamp,
+                    frame_count: u32,
+                    _input_bus_number: u64,
+                    buffers: *mut CAudioBufferList |: i32 {
+                        // call renderblock?
+                        objc_block_invoke!(render_block, invoke(
+                            (flags): *mut u32,
+                            (timestamp): *const CAudioTimeStamp,
+                            (frame_count as u32): u32,
+                            (1): u64,
+                            (buffers): *mut CAudioBufferList,
+                            (nil): ObjcId
+                            //(nil): ObjcId
+                        ) -> i32);
+                        
+                        let buffers_ref = &*buffers;
+                        let channel_count = buffers_ref.mNumberBuffers as usize;
+                        let frame_count = frame_count as usize;
+                        let mut buffer_opt = buffer.lock().unwrap();
+                        let mut buffer = buffer_opt.take().unwrap();
+                        
+                        // alright so. lets get this buffer to the callback.
+                        buffer.resize(frame_count, channel_count);
+                        for i in 0..channel_count {
+                            let input = std::slice::from_raw_parts(buffers_ref.mBuffers[i].mData as *mut f32, frame_count);
+                            buffer.channel_mut(i).copy_from_slice(input);
+                        }
+                        *buffer_opt = Some(audio_callback(
+                            AudioTime {
+                                sample_time: (*timestamp).mSampleTime,
+                                host_time: (*timestamp).mHostTime,
+                                rate_scalar: (*timestamp).mRateScalar
+                            },
+                            buffer
+                        ));
+                        for i in 0..channel_count {
+                            let input = std::slice::from_raw_parts_mut(buffers_ref.mBuffers[i].mData as *mut f32, frame_count);
+                            for inp in input{
+                                *inp = 0.0;
+                            } 
+                        }
+                        0
+                    }
+                );
+                let () = msg_send![self.au_audio_unit, setOutputProvider: &output_provider];
+                */
+            }
         }
     }
     
@@ -604,7 +626,7 @@ impl AudioUnitFactory {
                     CAudioComponentDescription::new_all_manufacturers(
                         CAudioUnitType::Effect,
                         CAudioUnitSubType::Undefined,
-                    ) 
+                    )
                 }
             };
             
@@ -618,7 +640,6 @@ impl AudioUnitFactory {
                 let desc: CAudioComponentDescription = msg_send!(component, audioComponentDescription);
                 out.push(AudioUnitInfo {unit_type, name, desc});
             }
-            println!("{:?} {:#?}", unit_type, out);
             out
             
         }
@@ -640,20 +661,102 @@ impl AudioUnitFactory {
                     let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
                     OSError::from_nserror(err) ?;
                     let mut render_block = None;
+                    
+                    let stream_desc = CAudioStreamBasicDescription {
+                        mSampleRate: 48000.0,
+                        mFormatID: AudioFormatId::LinearPCM,
+                        mFormatFlags: LinearPcmFlags::IS_FLOAT as u32
+                            | LinearPcmFlags::IS_NON_INTERLEAVED as u32
+                            | LinearPcmFlags::IS_PACKED as u32,
+                        mBytesPerPacket: 4,
+                        mFramesPerPacket: 1,
+                        mBytesPerFrame: 4,
+                        mChannelsPerFrame: 2,
+                        mBitsPerChannel: 32,
+                        mReserved: 0
+                    };
+                    /*
+                    let channel_layout = AudioChannelLayout {
+                        mChannelLayoutTag: AudioLayoutChannelTag::Stereo,
+                        mChannelBitmap: 0,
+                        mNumberChannelDescriptions: 2,
+                        mChannelDescriptions: [
+                            AudioChannelDescription {
+                                mChannelLabel: AudioChannelLabel::Left,
+                                mChannelFlags: 0,
+                                mCoordinates: [0f32; 3]
+                            },
+                            AudioChannelDescription {
+                                mChannelLabel: AudioChannelLabel::Right,
+                                mChannelFlags: 0,
+                                mCoordinates: [0f32; 3]
+                            },
+                        ]
+                    };
+                    let av_channel_layout: ObjcId = msg_send![class!(AVAudioChannelLayout), alloc];
+                    let () = msg_send![av_channel_layout, initWithLayout: &channel_layout];
+                    */
+                    // lets construct a standard 44100, stereo, float descriptor
+                    let av_audio_format: ObjcId = msg_send![class!(AVAudioFormat), alloc];
+                    let () = msg_send![av_audio_format, initWithStreamDescription: &stream_desc];
+                    
                     match unit_type {
                         AudioUnitType::DefaultOutput => {
+                            let busses: ObjcId = msg_send![au_audio_unit, inputBusses];
+                            let count: usize = msg_send![busses, count];
+                            if count > 0 {
+                                let bus: ObjcId = msg_send![busses, objectAtIndexedSubscript: 0];
+                                let mut err: ObjcId = nil;
+                                let () = msg_send![bus, setFormat: av_audio_format error: &mut err];
+                                OSError::from_nserror(err) ?;
+                            }
+                            
                             let () = msg_send![au_audio_unit, setOutputEnabled: true];
-                            // lets hardcode the format to 44100 float 
+                            // lets hardcode the format to 44100 float
                             let mut err: ObjcId = nil;
                             let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                             OSError::from_nserror(err) ?;
                         }
                         AudioUnitType::DefaultInput => {
-                            // lets hardcode the format to 44100 float 
+                            
+                            let audio_session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
+                            
+                            let mut err: ObjcId = nil;
+                            let sample_rate = 44100.0f64;
+                            let () = msg_send![audio_session, setPreferredSampleRate: sample_rate error: &mut err];
+                            OSError::from_nserror(err) ?;
+                            /*
+                            let mut err: ObjcId = nil;
+                            let buffer_duration = 296.0/44100.0;//0.0053*1.0;//0.0053*1.0;
+                            let () = msg_send![audio_session, setPreferredIOBufferDuration: buffer_duration error: &mut err];
+                            OSError::from_nserror(err) ?;
+                            */
+                            let mut err: ObjcId = nil;
+                            let () = msg_send![audio_session, setActive: true error: &mut err];
+                            OSError::from_nserror(err) ?;
+                            
+                            // lets hardcode the format to 44100 float
+                            let busses: ObjcId = msg_send![au_audio_unit, outputBusses];
+                            let count: usize = msg_send![busses, count];
+                            if count > 1 {
+                                let bus: ObjcId = msg_send![busses, objectAtIndexedSubscript: 1];
+                                //let format: ObjcId = msg_send![bus, format];
+                                //let format: *const CAudioStreamBasicDescription = msg_send![format, streamDescription];
+                                let mut err: ObjcId = nil;
+                                let () = msg_send![bus, setFormat: av_audio_format error: &mut err];
+                                OSError::from_nserror(err) ?;
+                                let () = msg_send![bus, setEnabled: true];
+                            }
+                            let () = msg_send![au_audio_unit, setOutputEnabled: false];
                             let () = msg_send![au_audio_unit, setInputEnabled: true];
                             let mut err: ObjcId = nil;
                             let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                             OSError::from_nserror(err) ?;
+                            
+                            let block_ptr: ObjcId = msg_send![au_audio_unit, renderBlock];
+                            let () = msg_send![block_ptr, retain];
+                            render_block = Some(block_ptr);
+                            
                         }
                         AudioUnitType::MusicDevice => {
                             let block_ptr: ObjcId = msg_send![au_audio_unit, renderBlock];
