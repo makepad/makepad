@@ -87,7 +87,7 @@ impl AudioStreamReceiver {
         self.try_recv_stream();
     }
     
-    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_multiple: usize, mid_multiple:usize, max_multiple: usize) -> usize {
+    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_multiple: usize, mid_multiple:usize) -> usize {
         
         let route = if let Some(route) = self.routes.get_mut(route_num) {
             route
@@ -108,11 +108,16 @@ impl AudioStreamReceiver {
         }
         
         // if we have too much buffer throw it out
-        if total > output.frame_count() * max_multiple{
-            while total > output.frame_count() * mid_multiple {
-                println!("Too much buffer, cutting down");
-                let input = route.buffers.remove(0);
-                total -= input.frame_count();
+        if total > output.frame_count() * mid_multiple{
+            while let Some(buf) = route.buffers.first(){
+                if total - route.start_offset - buf.frame_count() > output.frame_count() * min_multiple{
+                    route.buffers.remove(0);
+                    route.start_offset = 0;
+                    println!("CLEARING {}", mid_multiple);
+                }
+                else{
+                    break;
+                }
             }
         }
         
