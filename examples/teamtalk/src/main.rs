@@ -23,6 +23,7 @@ use {
     std::time::{Duration,Instant},
 };
 
+// We dont have a UI yet
 
 live_design!{
     import makepad_widgets::frame::*;
@@ -108,7 +109,7 @@ impl App {
                 // flush peers we havent heard from more than 5 seconds ago
                 peer_addrs.retain(|_,time| *time > time_now - Duration::from_secs(5) );
                 
-                // fill the mic stream recv side buffers
+                // fill the mic stream recv side buffers, and block if nothing 
                 mic_recv.recv_stream();
                 
                 // read as many WIRE_FRAMES size buffers from our micstream and send to all peers
