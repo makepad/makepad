@@ -20,7 +20,7 @@ use {
     std::thread,
     std::time,
     std::net::UdpSocket,
-    std::time::{Duration,Instant},
+    std::time::{Duration, Instant},
     std::fs::OpenOptions,
     std::io::prelude::*
 };
@@ -54,8 +54,8 @@ pub struct App {
 // this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.
 #[derive(SerBin, DeBin)]
 enum TeamTalkWire {
-    Silence,
-    Chunk(Vec<f32>),
+    Silence {order: u64, frame_count: u32},
+    Audio {order: u64, channel_count: u32, data: Vec<i16>},
 }
 
 impl App {
@@ -64,8 +64,6 @@ impl App {
     }
     
     pub fn start_audio_io(&mut self, cx: &mut Cx) {
-        // the number of audio frames (samples) in a UDP packet
-        const WIRE_FRAMES: usize = 125;
         
         // Audiostream is an mpsc channel that buffers at the recv side
         // and allows arbitrary chunksized reads. Little utility struct
@@ -93,58 +91,58 @@ impl App {
         let read_audio = write_audio.try_clone().unwrap();
         
         // our microphone broadcast network thread
-        
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
             let mut peer_addrs = HashMap::new();
-            loop { 
+            let mut order = 0u64;
+            let mut output_buffer = AudioBuffer::new_with_size(640, 1);
+            loop {
                 let mut dummy = [0u8];
                 let time_now = Instant::now();
                 // nonblockingly (timeout=1ns) check our discovery socket for peers
                 while let Ok((_, mut addr)) = read_discovery.recv_from(&mut dummy) {
                     addr.set_port(41532);
-                    if let Some(time) = peer_addrs.get_mut(&addr){
+                    if let Some(time) = peer_addrs.get_mut(&addr) {
                         *time = time_now;
                     }
-                    else{
+                    else {
                         peer_addrs.insert(addr, time_now);
                     }
                 }
                 // flush peers we havent heard from more than 5 seconds ago
-                peer_addrs.retain(|_,time| *time > time_now - Duration::from_secs(5) );
+                peer_addrs.retain( | _, time | *time > time_now - Duration::from_secs(5));
                 
-                // fill the mic stream recv side buffers, and block if nothing 
+                // fill the mic stream recv side buffers, and block if nothing
                 mic_recv.recv_stream();
-                
-                // read as many WIRE_FRAMES size buffers from our micstream as available
-                // and send to all peers
                 loop {
-                    let mut output_buffer = AudioBuffer::new_with_size(WIRE_FRAMES, 2);
-                    if mic_recv.read_buffer(0, &mut output_buffer, 1, 10) == 0 {
+                    if mic_recv.read_buffer(0, &mut output_buffer, 1, 3, 5) == 0 {
                         break;
                     }
-                    let buf = output_buffer.channel(0);
                     
+                    let buf = output_buffer.channel(0);
                     // do a quick volume check so we can send 1 byte packets if silent
                     let mut sum = 0.0;
                     for v in buf {
                         sum += v.abs();
                     }
                     let peak = sum / buf.len() as f32;
-                    let data = output_buffer.into_data();
-                    
-                    let wire_packet = if peak>0.00001 {
-                        TeamTalkWire::Chunk(data)
+                    order += 1;
+                    let wire_packet = if peak>0.01 {
+                        TeamTalkWire::Audio {order, channel_count: 1, data: output_buffer.to_i16()}
                     }
                     else {
-                        TeamTalkWire::Silence
+                        TeamTalkWire::Silence {order, frame_count: output_buffer.frame_count() as u32}
                     };
                     // serialise the packet enum for sending over the wire
                     wire_data.clear();
                     wire_packet.ser_bin(&mut wire_data);
                     // send to all peers
-                    for addr in peer_addrs.keys(){
-                        write_audio.send_to(&wire_data, addr).unwrap();
+                    for addr in peer_addrs.keys() {
+                        if let Ok(len) = write_audio.send_to(&wire_data, addr) {
+                            if len != wire_data.len() {
+                                println!("{} {}", len, wire_data.len())
+                            }
+                        }
                     }
                 };
             }
@@ -153,30 +151,42 @@ impl App {
         // the network audio receiving thread
         std::thread::spawn(move || {
             let mut read_buf = [0u8; 4096];
+            let mut last_orders:Vec<(u64,u64)> = Vec::new();
+            
             while let Ok((len, addr)) = read_audio.recv_from(&mut read_buf) {
+                let route_id = if let std::net::IpAddr::V4(v4) = addr.ip() {
+                    v4.octets()[3] as u64
+                }else {1};
+                
                 let read_buf = &read_buf[0..len];
 
-                // deserialize the packet from the buffer
                 let packet = TeamTalkWire::deserialize_bin(&read_buf).unwrap();
                 
                 // create an audiobuffer from the data
-                let buffer = match packet {
-                    TeamTalkWire::Chunk(data) => {
-                        AudioBuffer::from_data(data, 2)
+                let (order,buffer) = match packet {
+                    TeamTalkWire::Audio {order, channel_count, data} => {
+                        (order,AudioBuffer::from_i16(&data, channel_count as usize))
                     }
-                    TeamTalkWire::Silence => {
-                        AudioBuffer::new_with_size(WIRE_FRAMES, 2)
+                    TeamTalkWire::Silence {order, frame_count} => {
+                        (order, AudioBuffer::new_with_size(frame_count as usize, 1))
                     }
-                };
-                // use the last digit of our ipv4 address as our 'route' id
-                // the audio stream supports multiple id'ed paths so you can mix at output
-                let id = if let std::net::IpAddr::V4(v4) = addr.ip() {
-                    v4.octets()[3] as u64
-                }else {1};
-                mix_send.write_buffer(id, buffer).unwrap();
+                }; 
+                 
+                if let Some((_,order_store)) = last_orders.iter_mut().find( | v | v.0 == route_id) {
+                    let last_order = *order_store;
+                    *order_store = order; 
+                    if last_order != order - 1{
+                        println!("Lost packet detected!")
+                    }
+                }
+                else{
+                    last_orders.push((route_id, order));
+                }
+                
+                mix_send.write_buffer(route_id, buffer).unwrap();
             }
-        }); 
-         
+        });
+        
         // the audio output thread
         cx.start_audio_output(move | _time, output_buffer | {
             output_buffer.zero();
@@ -184,27 +194,19 @@ impl App {
             mix_recv.try_recv_stream();
             let mut chan = AudioBuffer::new_like(output_buffer);
             
-            for i in 0..mix_recv.num_routes() {
-                if mix_recv.read_buffer(i, &mut chan, 1, 10) != 0 { 
+            for i in 0..mix_recv.num_routes() {  
+                if mix_recv.read_buffer(i, &mut chan, 1, 3, 5) != 0 { 
                     for i in 0..chan.data.len() {
                         output_buffer.data[i] += chan.data[i];
                     }
                 }
             }
-        });
+        }); 
         
-         
+        
         // the microphone input thread, just pushes the input data into an audiostream
-        cx.start_audio_input(move | _time, input_buffer | {
-            /*let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("./my-file.raw")
-                .unwrap();
-            let chan8 = input_buffer.channel(0);
-            let su8 = unsafe{std::slice::from_raw_parts(chan8.as_ptr() as *mut u8, chan8.len() * 4)};
-            file.write_all(su8).unwrap();
-            */
+        cx.start_audio_input(move | _time, mut input_buffer | {
+            input_buffer.make_single_channel();
             mic_send.write_buffer(0, input_buffer).unwrap();
             AudioBuffer::default()
         });
