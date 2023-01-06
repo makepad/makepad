@@ -62,7 +62,8 @@ impl App {
     }
     
     pub fn start_audio_io(&mut self, cx: &mut Cx) {
-        
+        // not a very good uid, but it'l do.
+        let client_uid = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).unwrap().0;
         // Audiostream is an mpsc channel that buffers at the recv side
         // and allows arbitrary chunksized reads. Little utility struct
         let (mic_send, mut mic_recv) = AudioStreamSender::create_pair();
@@ -76,7 +77,7 @@ impl App {
         
         // this thread does udp broadcast every second to announce our existence
         std::thread::spawn(move || {
-            let dummy = [0u8];
+            let dummy = client_uid.to_be_bytes();
             loop {
                 write_discovery.send_to(&dummy, "255.255.255.255:41531").unwrap();
                 thread::sleep(time::Duration::from_secs(1));
@@ -95,10 +96,13 @@ impl App {
             let mut order = 0u64;
             let mut output_buffer = AudioBuffer::new_with_size(640, 1);
             loop {
-                let mut dummy = [0u8];
+                let mut other_uid = [0u8;8];
                 let time_now = Instant::now();
                 // nonblockingly (timeout=1ns) check our discovery socket for peers
-                while let Ok((_, mut addr)) = read_discovery.recv_from(&mut dummy) {
+                while let Ok((_, mut addr)) = read_discovery.recv_from(&mut other_uid) {
+                    if client_uid == u64::from_be_bytes(other_uid){
+                        continue;
+                    }
                     addr.set_port(41532);
                     if let Some(time) = peer_addrs.get_mut(&addr) {
                         *time = time_now;
@@ -113,7 +117,7 @@ impl App {
                 // fill the mic stream recv side buffers, and block if nothing
                 mic_recv.recv_stream();
                 loop {
-                    if mic_recv.read_buffer(0, &mut output_buffer, 1, 3, 5) == 0 {
+                    if mic_recv.read_buffer(0, &mut output_buffer, 1, 3) == 0 {
                         break;
                     }
                     
@@ -125,7 +129,7 @@ impl App {
                     }
                     let peak = sum / buf.len() as f32;
                     order += 1;
-                    let wire_packet = if peak>0.01 {
+                    let wire_packet = if peak>0.005 {
                         TeamTalkWire::Audio {order, channel_count: 1, data: output_buffer.to_i16()}
                     }
                     else {
@@ -189,7 +193,7 @@ impl App {
             let mut chan = AudioBuffer::new_like(output_buffer);
             
             for i in 0..mix_recv.num_routes() {  
-                if mix_recv.read_buffer(i, &mut chan, 1, 3, 5) != 0 { 
+                if mix_recv.read_buffer(i, &mut chan, 2, 8) != 0 { 
                     for i in 0..chan.data.len() {
                         output_buffer.data[i] += chan.data[i];
                     }
