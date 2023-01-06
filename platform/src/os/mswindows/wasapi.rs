@@ -118,7 +118,7 @@ impl WasapiBase {
     
     pub fn new_default_input() -> Self {
         Self::new_default(eCapture, 1)
-    }
+    } 
     
     pub fn new_default(flow:EDataFlow, channel_count:usize) -> Self {
         unsafe {
@@ -126,7 +126,7 @@ impl WasapiBase {
             CoInitialize(None).unwrap();
             
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
-            
+              
             let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole).unwrap();
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).unwrap();
             
@@ -134,8 +134,8 @@ impl WasapiBase {
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
 
-            let wave_format = new_float_waveformatextensible(44100, channel_count);
-
+            let wave_format = new_float_waveformatextensible(48000, channel_count);
+ 
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,

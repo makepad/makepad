@@ -150,6 +150,10 @@ extern "C" {
 extern {
     pub static AVAudioUnitComponentManager: ObjcId;
     pub static AVAudioUnit: ObjcId;
+    pub static AVAudioFormat: ObjcId;
+    pub static AVAudioChannelLayout: ObjcId;
+    pub static AVAudioSession: ObjcId;
+    pub static AVAudioSessionCategoryRecord: ObjcId;
 }
 
 

@@ -192,7 +192,8 @@ impl CxWindow {
     
     pub fn get_inner_size(&mut self) -> DVec2 {
         if !self.is_created {
-            panic!();
+            Default::default()
+            //panic!();
         }
         else {
             self.window_geom.inner_size

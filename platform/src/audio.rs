@@ -1,5 +1,5 @@
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct AudioTime {
     pub sample_time: f64,
     pub host_time: u64,
