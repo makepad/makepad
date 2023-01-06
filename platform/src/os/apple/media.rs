@@ -78,9 +78,8 @@ impl CxMediaApi for Cx {
                     Ok(audio_unit) => {
                         let fbox = fbox.clone();
                         audio_unit.set_input_callback(move | time, output | {
-                            if let Ok(mut fbox) = fbox.lock() {
-                                fbox(time, output);
-                            }
+                            let mut fbox = fbox.lock().unwrap();
+                            fbox(time, output);
                         });
                         loop {
                             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -99,13 +98,11 @@ impl CxMediaApi for Cx {
             let fbox = fbox.clone();
             AudioUnitFactory::new_audio_unit(out, move | result | {
                 match result {
-                    Ok(audio_unit) => {
+                    Ok(audio_unit) => { 
                         let fbox = fbox.clone();
                         audio_unit.set_output_callback(move | time, buffer | {
-                            if let Ok(mut fbox) = fbox.lock() {
-                                //fbox(time, output);
-                            }
-                            buffer
+                            let mut fbox = fbox.lock().unwrap();
+                            fbox(time, buffer)
                         });
                         loop {
                             std::thread::sleep(std::time::Duration::from_millis(100));

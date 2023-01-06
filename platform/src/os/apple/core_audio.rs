@@ -42,6 +42,7 @@ pub type CAudioUnit = CAudioComponentInstance;
 pub type OSStatus = i32;
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct CAudioStreamBasicDescription {
     pub mSampleRate: f64,
     pub mFormatID: AudioFormatId,
@@ -54,6 +55,34 @@ pub struct CAudioStreamBasicDescription {
     pub mReserved: u32,
 }
 
+
+#[repr(C)]
+pub struct AudioChannelLayout {
+    pub mChannelLayoutTag: AudioLayoutChannelTag,
+    pub mChannelBitmap: u32,
+    pub mNumberChannelDescriptions: u32,
+    pub mChannelDescriptions: [AudioChannelDescription;2]
+}
+
+#[repr(u32)]
+pub enum AudioLayoutChannelTag{
+    Stereo = (101<<16) | 2,   
+}
+
+#[repr(C)]
+pub struct AudioChannelDescription{
+    pub mChannelLabel: AudioChannelLabel,
+    pub mChannelFlags: u32,
+    pub mCoordinates: [f32;3],
+}
+
+#[repr(u32)]
+pub enum AudioChannelLabel{
+    Left = 1,
+    Right = 2,
+}
+
+#[derive(Debug)]
 #[repr(u32)]
 pub enum AudioFormatId {
     LinearPCM = 1819304813,
@@ -105,20 +134,20 @@ impl F60958AC3Flags {
     const IS_NON_MIXABLE: u32 = 64;
 }
 */
-/*
-pub struct LinearPcmFlags;
-impl LinearPcmFlags {
-    const IS_FLOAT: u32 = 1;
-    const IS_BIG_ENDIAN: u32 = 2;
-    const IS_SIGNED_INTEGER: u32 = 4;
-    const IS_PACKED: u32 = 8;
-    const IS_ALIGNED_HIGH: u32 = 16;
-    const IS_NON_INTERLEAVED: u32 = 32;
-    const IS_NON_MIXABLE: u32 = 64;
-    const FLAGS_SAMPLE_FRACTION_SHIFT: u32 = 7;
-    const FLAGS_SAMPLE_FRACTION_MASK: u32 = 8064;
-}
 
+#[repr(u32)]
+pub enum LinearPcmFlags {
+    IS_FLOAT = 1,
+    IS_BIG_ENDIAN = 2,
+    IS_SIGNED_INTEGER = 4,
+    IS_PACKED = 8,
+    IS_ALIGNED_HIGH = 16,
+    IS_NON_INTERLEAVED = 32,
+    IS_NON_MIXABLE = 64,
+    FLAGS_SAMPLE_FRACTION_SHIFT = 7,
+    FLAGS_SAMPLE_FRACTION_MASK = 8064,
+}
+/*
 pub struct AppleLosslessFlags;
 impl AppleLosslessFlags {
     const BIT_16_SOURCE_DATA: u32 = 1;
@@ -195,7 +224,7 @@ pub struct SMPTETime {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct _AudioBuffer {
     pub mNumberChannels: u32,
     pub mDataByteSize: u32,
@@ -204,6 +233,8 @@ pub struct _AudioBuffer {
 
 pub const MAX_AUDIO_BUFFERS: usize = 8;
 #[repr(C)]
+
+#[derive(Debug)]
 pub struct CAudioBufferList {
     pub mNumberBuffers: u32,
     pub mBuffers: [_AudioBuffer; MAX_AUDIO_BUFFERS],
