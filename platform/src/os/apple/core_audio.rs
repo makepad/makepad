@@ -224,6 +224,8 @@ pub struct CAudioTimeStamp {
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(u32)]
 pub enum CAudioUnitType {
+    Undefined = 0,
+    
     IO = 1635086197,
     MusicDevice = 1635085685,
     MusicEffect = 1635085670,

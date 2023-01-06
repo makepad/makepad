@@ -10,11 +10,11 @@ use {
         makepad_platform::audio::AudioBuffer,
         makepad_draw::*,
     },
-    std::sync::mpsc,
+    std::collections::HashMap,
     std::thread,
     std::time,
     std::net::UdpSocket,
-    std::time::Duration
+    std::time::{Duration,Instant},
 };
 
 
@@ -53,9 +53,8 @@ impl App {
         makepad_audio_graph::live_design(cx);
     }
     
-    pub fn start_audio_output(&mut self, cx: &mut Cx) {
-        const WIRE_CHUNK: usize = 100;
-        
+    pub fn start_audio_io(&mut self, cx: &mut Cx) {
+        const WIRE_FRAMES: usize = 100;
         let (mic_send, mut mic_recv) = AudioStreamSender::create_pair();
         let (mix_send, mut mix_recv) = AudioStreamSender::create_pair();
         
@@ -78,19 +77,24 @@ impl App {
         
         std::thread::spawn(move || {
             let mut wire_data = Vec::new();
-            let mut addrs = Vec::new();
-            loop {
+            let mut addrs = HashMap::new();
+            loop { 
                 let mut announce_data = [0u8];
+                let time_now = Instant::now();
                 while let Ok((_, mut addr)) = read_announce.recv_from(&mut announce_data) {
                     addr.set_port(41532);
-                    if !addrs.contains(&addr){
-                        addrs.push(addr);
+                    if let Some(time) = addrs.get_mut(&addr){
+                        *time = time_now;
+                    }
+                    else{
+                        addrs.insert(addr, time_now);
                     }
                 }
+                addrs.retain(|_,time| *time > time_now - Duration::from_secs(5) );
                 mic_recv.recv_stream();
                 // broadcast the micstream to our addr list
                 loop {
-                    let mut output_buffer = AudioBuffer::new_with_size(WIRE_CHUNK, 2);
+                    let mut output_buffer = AudioBuffer::new_with_size(WIRE_FRAMES, 2);
                     if mic_recv.read_buffer(0, &mut output_buffer, 1, 10) == 0 {
                         break;
                     }
@@ -101,7 +105,7 @@ impl App {
                     }
                     let peak = sum / buf.len() as f32;
                     let data = output_buffer.into_data();
-                    let packet = if peak>0.00001 {
+                    let packet = if peak>0.001 {
                         TeamTalkWire::Chunk(data)
                     }
                     else {
@@ -109,7 +113,7 @@ impl App {
                     };
                     wire_data.clear();
                     packet.ser_bin(&mut wire_data);
-                    for addr in &addrs{
+                    for addr in addrs.keys(){
                         write_audio.send_to(&wire_data, addr).unwrap();
                     }
                 };
@@ -127,7 +131,7 @@ impl App {
                         AudioBuffer::from_data(data, 2)
                     }
                     TeamTalkWire::Silence => {
-                        AudioBuffer::new_with_size(WIRE_CHUNK, 2)
+                        AudioBuffer::new_with_size(WIRE_FRAMES, 2)
                     }
                 };
                 let id = if let std::net::IpAddr::V4(v4) = addr.ip() {
@@ -163,7 +167,7 @@ impl App {
         }
         if let Event::Construct = event {
             println!("{:?}", cx.platform_type());
-            self.start_audio_output(cx);
+            self.start_audio_io(cx);
         }
         self.ui.handle_event(cx, event);
         self.window.handle_event(cx, event);

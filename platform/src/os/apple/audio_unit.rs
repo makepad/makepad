@@ -15,16 +15,17 @@ use {
 };
 
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum AudioUnitType {
     DefaultOutput,
+    DefaultInput,
     MusicDevice,
     Effect
 }
 
 pub struct AudioUnitFactory {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AudioUnitInfo {
     pub name: String,
     pub unit_type: AudioUnitType,
@@ -428,6 +429,46 @@ impl AudioUnit {
         }
     }
     
+    pub fn set_output_callback<F: Fn(AudioTime, AudioBuffer)->AudioBuffer + Send + 'static>(&self, audio_callback: F) {
+        match self.unit_type {
+            AudioUnitType::DefaultInput => (),
+            _ => panic!("set_input_callback on this device")
+        }
+        unsafe {
+            let buffer = Arc::new(Mutex::new(AudioBuffer::default()));
+            let output_provider = objc_block!(
+                move | _flags: *mut u32,
+                timestamp: *const CAudioTimeStamp,
+                frame_count: u32,
+                _input_bus_number: u64,
+                buffers: *mut CAudioBufferList |: i32 {
+                    let buffers_ref = &*buffers;
+                    let channel_count = buffers_ref.mNumberBuffers as usize;
+                    let frame_count = frame_count as usize;
+                    println!("GOT AUDIO INPUT");
+                    /*
+                    let mut buffer = buffer.lock().unwrap();
+                    buffer.resize(frame_count, channel_count);
+                    audio_callback(
+                        AudioTime {
+                            sample_time: (*timestamp).mSampleTime,
+                            host_time: (*timestamp).mHostTime,
+                            rate_scalar: (*timestamp).mRateScalar
+                        },
+                        &mut buffer
+                    );
+                    for i in 0..channel_count {
+                        let out = std::slice::from_raw_parts_mut(buffers_ref.mBuffers[i].mData as *mut f32, frame_count);
+                        out.copy_from_slice(buffer.channel(i));
+                    }*/
+                    
+                    0
+                }
+            );
+            let () = msg_send![self.au_audio_unit, setOutputProvider: &output_provider];
+        }
+    }
+    
     pub fn request_ui<F: Fn() + Send + 'static>(&self, view_loaded: F) {
         match self.unit_type {
             AudioUnitType::MusicDevice => (),
@@ -553,11 +594,17 @@ impl AudioUnitFactory {
                         CAudioUnitSubType::DefaultOutput,
                     )
                 }
+                AudioUnitType::DefaultInput => {
+                    CAudioComponentDescription::new_all_manufacturers(
+                        CAudioUnitType::IO,
+                        CAudioUnitSubType::RemoteIO,
+                    )
+                }
                 AudioUnitType::Effect => {
                     CAudioComponentDescription::new_all_manufacturers(
                         CAudioUnitType::Effect,
                         CAudioUnitSubType::Undefined,
-                    )
+                    ) 
                 }
             };
             
@@ -571,7 +618,9 @@ impl AudioUnitFactory {
                 let desc: CAudioComponentDescription = msg_send!(component, audioComponentDescription);
                 out.push(AudioUnitInfo {unit_type, name, desc});
             }
+            println!("{:?} {:#?}", unit_type, out);
             out
+            
         }
     }
     
@@ -594,6 +643,14 @@ impl AudioUnitFactory {
                     match unit_type {
                         AudioUnitType::DefaultOutput => {
                             let () = msg_send![au_audio_unit, setOutputEnabled: true];
+                            // lets hardcode the format to 44100 float 
+                            let mut err: ObjcId = nil;
+                            let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
+                            OSError::from_nserror(err) ?;
+                        }
+                        AudioUnitType::DefaultInput => {
+                            // lets hardcode the format to 44100 float 
+                            let () = msg_send![au_audio_unit, setInputEnabled: true];
                             let mut err: ObjcId = nil;
                             let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                             OSError::from_nserror(err) ?;
