@@ -21,8 +21,6 @@ use {
     std::time,
     std::net::UdpSocket,
     std::time::{Duration, Instant},
-    std::fs::OpenOptions,
-    std::io::prelude::*
 };
 
 // We dont have a UI yet
@@ -138,11 +136,7 @@ impl App {
                     wire_packet.ser_bin(&mut wire_data);
                     // send to all peers
                     for addr in peer_addrs.keys() {
-                        if let Ok(len) = write_audio.send_to(&wire_data, addr) {
-                            if len != wire_data.len() {
-                                println!("{} {}", len, wire_data.len())
-                            }
-                        }
+                        write_audio.send_to(&wire_data, addr).unwrap();
                     }
                 };
             }

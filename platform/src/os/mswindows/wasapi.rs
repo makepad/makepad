@@ -209,7 +209,7 @@ impl WasapiOutput{
         }
     }
     
-    pub fn release_buffer(&mut self, mut output: WasapiAudioOutputBuffer) {
+    pub fn release_buffer(&mut self, output: WasapiAudioOutputBuffer) {
         unsafe { 
             let device_buffer = std::slice::from_raw_parts_mut(output.device_buffer, output.frame_count * output.channel_count);
             for i in 0..output.channel_count {
