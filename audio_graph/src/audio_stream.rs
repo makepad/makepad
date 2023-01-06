@@ -111,9 +111,10 @@ impl AudioStreamReceiver {
         if total > output.frame_count() * mid_multiple{
             while let Some(buf) = route.buffers.first(){
                 if total - route.start_offset - buf.frame_count() > output.frame_count() * min_multiple{
+                    total -= buf.frame_count();
                     route.buffers.remove(0);
                     route.start_offset = 0;
-                    println!("CLEARING {}", mid_multiple);
+                    println!("Removing buffer");
                 }
                 else{
                     break;
