@@ -49,6 +49,7 @@ pub struct App {
     ui: FrameRef,
 }
 
+// this is the protocol enum with 'micro-serde' binary serialise/deserialise macro on it.
 #[derive(SerBin, DeBin)]
 enum TeamTalkWire {
     Silence,
