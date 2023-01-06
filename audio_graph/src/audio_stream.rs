@@ -27,7 +27,6 @@ unsafe impl Send for AudioStreamReceiver {}
 
 pub struct AudioRoute {
     id: u64,
-    last_order: u64,
     start_offset: usize,
     buffers: Vec<AudioBuffer>
 }
@@ -57,8 +56,6 @@ impl AudioStreamReceiver {
         self.routes[route_num].id
     }
 
-
-    
     pub fn try_recv_stream(&mut self) {
         while let Ok((route_id, buf)) = self.stream_recv.try_recv() {
             if let Some(route) = self.routes.iter_mut().find( | v | v.id == route_id) {
@@ -66,7 +63,6 @@ impl AudioStreamReceiver {
             }
             else {
                 self.routes.push(AudioRoute {
-                    last_order: 0,
                     id: route_id,
                     buffers: vec![buf],
                     start_offset: 0
@@ -82,7 +78,6 @@ impl AudioStreamReceiver {
             }
             else {
                 self.routes.push(AudioRoute {
-                    last_order: 0,
                     id: route_id,
                     buffers: vec![buf],
                     start_offset: 0
