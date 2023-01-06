@@ -93,6 +93,28 @@ impl CxMediaApi for Cx {
     }
     
     fn start_audio_input<F>(&mut self, f: F) where F: FnMut(AudioTime, AudioBuffer)->AudioBuffer + Send + 'static {
+        let fbox = std::sync::Arc::new(std::sync::Mutex::new(Box::new(f)));
+        std::thread::spawn(move || {
+            let out = &AudioUnitFactory::query_audio_units(AudioUnitType::DefaultInput)[0];
+            let fbox = fbox.clone();
+            AudioUnitFactory::new_audio_unit(out, move | result | {
+                match result {
+                    Ok(audio_unit) => {
+                        let fbox = fbox.clone();
+                        audio_unit.set_output_callback(move | time, buffer | {
+                            if let Ok(mut fbox) = fbox.lock() {
+                                //fbox(time, output);
+                            }
+                            buffer
+                        });
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                    Err(err) => error!("spawn_audio_output Error {:?}", err)
+                }
+            });
+        });
     }
     
 }
