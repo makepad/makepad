@@ -1,3 +1,17 @@
+use crate::{
+    os::{OsAudioDevice},
+};
+
+pub struct AudioDevice{
+    pub ty: AudioDeviceType,
+    pub name: String,
+    os: OsAudioDevice
+}
+
+pub enum AudioDeviceType{
+    Input,
+    Output,
+}
 
 #[derive(Copy, Clone, Debug)]
 pub struct AudioTime {
