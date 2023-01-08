@@ -8,7 +8,7 @@ use {
         audio::*,
         midi::*,
         media_api::CxMediaApi,
-        os::mswindows::win32_midi::{Win32MidiAccess,OsMidiInput,OsMidiOutput},
+        os::mswindows::win32_midi::*,
         os::mswindows::wasapi::{WasapiOutput, WasapiInput}
     }
 };

@@ -22,6 +22,9 @@ pub mod mswindows;
 #[cfg(target_os = "windows")]
 pub use crate::os::mswindows::*;
 
+#[cfg(target_os = "windows")]
+pub use crate::os::mswindows::win32_media::*;
+
 #[cfg(target_arch = "wasm32")]
 pub mod web_browser;
 
