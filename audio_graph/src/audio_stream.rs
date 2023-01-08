@@ -26,6 +26,8 @@ pub struct AudioStreamReceiver {
 unsafe impl Send for AudioStreamReceiver {}
 
 pub struct AudioRoute {
+    min_buf: usize,
+    max_buf: usize,
     id: u64,
     start_offset: usize,
     buffers: Vec<AudioBuffer>
@@ -56,13 +58,15 @@ impl AudioStreamReceiver {
         self.routes[route_num].id
     }
 
-    pub fn try_recv_stream(&mut self) {
+    pub fn try_recv_stream(&mut self, min_buf: usize, max_buf:usize) {
         while let Ok((route_id, buf)) = self.stream_recv.try_recv() {
             if let Some(route) = self.routes.iter_mut().find( | v | v.id == route_id) {
                 route.buffers.push(buf);
             }
             else {
                 self.routes.push(AudioRoute {
+                    min_buf,
+                    max_buf,
                     id: route_id,
                     buffers: vec![buf],
                     start_offset: 0
@@ -71,23 +75,25 @@ impl AudioStreamReceiver {
         }
     }
     
-    pub fn recv_stream(&mut self) {
+    pub fn recv_stream(&mut self, min_buf: usize, max_buf:usize) {
         if let Ok((route_id, buf)) = self.stream_recv.recv() {
             if let Some(route) = self.routes.iter_mut().find( | v | v.id == route_id) {
                 route.buffers.push(buf);
             }
             else {
                 self.routes.push(AudioRoute {
+                    min_buf,
+                    max_buf,
                     id: route_id,
                     buffers: vec![buf],
                     start_offset: 0
                 });
             }
         }
-        self.try_recv_stream();
+        self.try_recv_stream(min_buf, max_buf);
     }
     
-    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_multiple: usize, mid_multiple:usize) -> usize {
+    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_buf: usize, max_buf:usize) -> usize {
         
         let route = if let Some(route) = self.routes.get_mut(route_num) {
             route
@@ -103,22 +109,29 @@ impl AudioStreamReceiver {
         }
 
         // check if we have enough buffer
-        if total - route.start_offset < output.frame_count() * min_multiple {
+        if total - route.start_offset < output.frame_count() * route.min_buf {
             return 0
         }
         
         // if we have too much buffer throw it out
-        if total > output.frame_count() * mid_multiple{
+        if total > output.frame_count() * route.max_buf {
+            let mut bump = false;
+            
             while let Some(buf) = route.buffers.first(){
-                if total - route.start_offset - buf.frame_count() > output.frame_count() * min_multiple{
+                if total - route.start_offset - buf.frame_count() > output.frame_count() * route.min_buf{
                     total -= buf.frame_count();
                     route.buffers.remove(0);
                     route.start_offset = 0;
-                    println!("Removing buffer");
+                    bump = true;
                 }
-                else{
+                else{ 
                     break;
                 }
+            }
+            if bump{
+                route.min_buf += min_buf;
+                route.max_buf += max_buf;                
+                println!("Bumping buffer {} {}", route.min_buf, route.max_buf);   
             }
         }
         

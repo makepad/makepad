@@ -133,7 +133,7 @@ impl AudioGraph {
         }));
         
         let to_ui = Arc::new(Mutex::new(to_ui));
-        cx.start_audio_output(move | time, output_buffer | {
+        cx.start_audio_output(None, move | time, output_buffer | {
             let mut state = state.lock().unwrap();
             let to_ui = to_ui.lock().unwrap();
             Self::render_to_output_buffer(&mut state, &to_ui, time, output_buffer);
