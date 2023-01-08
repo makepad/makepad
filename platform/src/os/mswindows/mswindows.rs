@@ -1,6 +1,7 @@
 use {
     std::{ 
         rc::Rc,
+        sync::{Arc, Mutex},
         cell::{RefCell},
     },
     crate::{
@@ -8,6 +9,7 @@ use {
         cx::*,
         event::*,
         os::{
+            mswindows::win32_midi::Win32MidiAccess,
             mswindows::win32_event::*,
             mswindows::d3d11::{D3d11Window, D3d11Cx},
             mswindows::win32_app::*,
@@ -320,5 +322,6 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
+    pub (crate) win32_midi: Option<Arc<Mutex<Win32MidiAccess>>>,
 }
 

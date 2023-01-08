@@ -35,7 +35,6 @@ use {
             Signal,
             Event,
         },
-        midi::*,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx, OsType},
     }
@@ -402,8 +401,7 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) keep_alive_counter: usize,
-    pub (crate) midi_access: Option<CoreMidiAccess>,
-    pub (crate) midi_input_data: Arc<Mutex<RefCell<Vec<MidiInputData >> >>,
+    pub (crate) core_midi: Option<Arc<Mutex<CoreMidiAccess>>>,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
 }

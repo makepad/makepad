@@ -186,7 +186,7 @@ impl Cx {
             match self.passes[pass_id_walk].parent {
                 CxPassParent::Window(window_id) => {
                     if !self.windows[window_id].is_created {
-                        panic!();
+                        return 1.0
                     }
                     return self.windows[window_id].window_geom.dpi_factor;
                 },

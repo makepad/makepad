@@ -1224,7 +1224,7 @@ pub struct App {
     ui: FrameRef,
     audio_graph: AudioGraph,
     window: BareWindow,
-    
+    #[rust] midi_receiver: MidiReceiver
 }
 
 impl LiveHook for App {
@@ -1369,16 +1369,22 @@ impl App {
         let ui = self.ui.clone();
         let mut db = DataBinding::new();
         
-        cx.handle_midi_inputs(event);
-        
         let actions = ui.handle_event(cx, event);
         
         if let Event::Construct = event {
-            cx.start_midi_input();
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             db.to_widgets(ironfish.settings.live_read());
             ui.get_piano(id!(piano)).set_key_focus(cx);
+            self.midi_receiver = cx.midi_input().create_receiver();
         }
+        
+        // always connect midi inputs
+        let ports = cx.handle_midi_port_list(event);
+        for port in &ports{
+            let desc = cx.midi_port_desc(*port).unwrap();
+            println!("Midi port: {} - {} - {:?}", desc.name, desc.manufacturer, desc.port_type);
+        }
+        cx.midi_input().set_ports(&ports);
         
         ui.get_radio_group(&[
             id!(envelopes.tab1),
@@ -1423,9 +1429,9 @@ impl App {
         
         let piano = ui.get_piano(id!(piano));
         
-        for inp in cx.handle_midi_received(event) {
-            self.audio_graph.send_midi_data(inp.data);
-            if let Some(note) = inp.data.decode().on_note() {
+        while let Ok((_, data)) = self.midi_receiver.try_recv(){
+            self.audio_graph.send_midi_data(data);
+            if let Some(note) = data.decode().on_note() {
                 piano.set_note(cx, note.is_on, note.note_number)
             }
         }
