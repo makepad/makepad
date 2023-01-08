@@ -1,5 +1,5 @@
 #![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]
-pub mod Win32{ 
+pub mod Win32{
 pub mod UI{
 pub mod WindowsAndMessaging{
 #[repr(C)]pub struct WNDCLASSEXW {
@@ -17041,6 +17041,27 @@ pub const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: ::windows::core::GUID = ::windows::co
 
 }
 pub mod Audio{
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct EDataFlow(pub i32);
+impl ::core::marker::Copy for EDataFlow {}
+impl ::core::clone::Clone for EDataFlow {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for EDataFlow {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for EDataFlow {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for EDataFlow {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("EDataFlow").field(&self.0).finish()
+    }
+}
+
 #[repr(C, packed(1))]pub struct WAVEFORMATEX {
     pub wFormatTag: u16,
     pub nChannels: u16,
@@ -17652,6 +17673,273 @@ impl IAudioRenderClient_Vtbl {
     pub fn matches(iid: &windows::core::GUID) -> bool {
         iid == &<IAudioRenderClient as ::windows::core::Interface>::IID
     }
+} 
+ 
+pub const CALLBACK_FUNCTION: MIDI_WAVE_OPEN_TYPE = MIDI_WAVE_OPEN_TYPE(196608u32);
+
+pub const CALLBACK_NULL: MIDI_WAVE_OPEN_TYPE = MIDI_WAVE_OPEN_TYPE(0u32);
+
+#[repr(C, packed(1))]pub struct MIDIINCAPSW {
+    pub wMid: u16,
+    pub wPid: u16,
+    pub vDriverVersion: u32,
+    pub szPname: [u16; 32],
+    pub dwSupport: u32,
+}
+impl ::core::marker::Copy for MIDIINCAPSW {}
+impl ::core::cmp::Eq for MIDIINCAPSW {}
+impl ::core::cmp::PartialEq for MIDIINCAPSW {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<MIDIINCAPSW>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for MIDIINCAPSW {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for MIDIINCAPSW {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for MIDIINCAPSW {
+    type Abi = Self;
+}
+
+#[repr(C, packed(1))]pub struct MIDIOUTCAPSW {
+    pub wMid: u16,
+    pub wPid: u16,
+    pub vDriverVersion: u32,
+    pub szPname: [u16; 32],
+    pub wTechnology: u16,
+    pub wVoices: u16,
+    pub wNotes: u16,
+    pub wChannelMask: u16,
+    pub dwSupport: u32,
+}
+impl ::core::marker::Copy for MIDIOUTCAPSW {}
+impl ::core::cmp::Eq for MIDIOUTCAPSW {}
+impl ::core::cmp::PartialEq for MIDIOUTCAPSW {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { ::windows::core::memcmp(self as *const _ as _, other as *const _ as _, core::mem::size_of::<MIDIOUTCAPSW>()) == 0 }
+    }
+}
+impl ::core::clone::Clone for MIDIOUTCAPSW {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for MIDIOUTCAPSW {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for MIDIOUTCAPSW {
+    type Abi = Self;
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HMIDIIN(pub isize);
+impl HMIDIIN {
+    pub fn is_invalid(&self) -> bool {
+        self.0 == -1 || self.0 == 0
+    }
+}
+impl ::core::marker::Copy for HMIDIIN {}
+impl ::core::clone::Clone for HMIDIIN {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for HMIDIIN {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for HMIDIIN {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for HMIDIIN {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("HMIDIIN").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<HMIDIIN>> for HMIDIIN {
+    fn from(optional: ::core::option::Option<HMIDIIN>) -> HMIDIIN {
+        optional.unwrap_or_default()
+    }
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct HMIDIOUT(pub isize);
+impl HMIDIOUT {
+    pub fn is_invalid(&self) -> bool {
+        self.0 == -1 || self.0 == 0
+    }
+}
+impl ::core::marker::Copy for HMIDIOUT {}
+impl ::core::clone::Clone for HMIDIOUT {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for HMIDIOUT {
+    fn default() -> Self {
+        unsafe { ::core::mem::zeroed() }
+    }
+}
+unsafe impl ::windows::core::Abi for HMIDIOUT {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for HMIDIOUT {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("HMIDIOUT").field(&self.0).finish()
+    }
+}
+impl ::core::convert::From<::core::option::Option<HMIDIOUT>> for HMIDIOUT {
+    fn from(optional: ::core::option::Option<HMIDIOUT>) -> HMIDIOUT {
+        optional.unwrap_or_default()
+    }
+}
+
+pub unsafe fn midiOutShortMsg<'a, P0>(hmo: P0, dwmsg: u32) -> u32
+where
+    P0: ::std::convert::Into<HMIDIOUT>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiOutShortMsg(hmo: HMIDIOUT, dwmsg: u32) -> u32;
+    }
+    midiOutShortMsg(hmo.into(), dwmsg)
+}
+
+pub unsafe fn midiInOpen(phmi: *mut HMIDIIN, udeviceid: u32, dwcallback: usize, dwinstance: usize, fdwopen: MIDI_WAVE_OPEN_TYPE) -> u32 {
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiInOpen(phmi: *mut HMIDIIN, udeviceid: u32, dwcallback: usize, dwinstance: usize, fdwopen: MIDI_WAVE_OPEN_TYPE) -> u32;
+    }
+    midiInOpen(::core::mem::transmute(phmi), udeviceid, dwcallback, dwinstance, fdwopen)
+}
+
+pub unsafe fn midiInStart<'a, P0>(hmi: P0) -> u32
+where
+    P0: ::std::convert::Into<HMIDIIN>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiInStart(hmi: HMIDIIN) -> u32;
+    }
+    midiInStart(hmi.into())
+}
+
+pub unsafe fn midiInClose<'a, P0>(hmi: P0) -> u32
+where
+    P0: ::std::convert::Into<HMIDIIN>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiInClose(hmi: HMIDIIN) -> u32;
+    }
+    midiInClose(hmi.into())
+}
+
+pub unsafe fn midiOutOpen(phmo: *mut HMIDIOUT, udeviceid: u32, dwcallback: usize, dwinstance: usize, fdwopen: MIDI_WAVE_OPEN_TYPE) -> u32 {
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiOutOpen(phmo: *mut HMIDIOUT, udeviceid: u32, dwcallback: usize, dwinstance: usize, fdwopen: MIDI_WAVE_OPEN_TYPE) -> u32;
+    }
+    midiOutOpen(::core::mem::transmute(phmo), udeviceid, dwcallback, dwinstance, fdwopen)
+}
+
+pub unsafe fn midiOutClose<'a, P0>(hmo: P0) -> u32
+where
+    P0: ::std::convert::Into<HMIDIOUT>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiOutClose(hmo: HMIDIOUT) -> u32;
+    }
+    midiOutClose(hmo.into())
+}
+
+pub unsafe fn midiOutGetDevCapsW(udeviceid: usize, pmoc: *mut MIDIOUTCAPSW, cbmoc: u32) -> u32 {
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiOutGetDevCapsW(udeviceid: usize, pmoc: *mut MIDIOUTCAPSW, cbmoc: u32) -> u32;
+    }
+    midiOutGetDevCapsW(udeviceid, ::core::mem::transmute(pmoc), cbmoc)
+}
+
+pub unsafe fn midiOutGetNumDevs() -> u32 {
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiOutGetNumDevs() -> u32;
+    }
+    midiOutGetNumDevs()
+}
+
+pub unsafe fn midiInGetDevCapsW(udeviceid: usize, pmic: *mut MIDIINCAPSW, cbmic: u32) -> u32 {
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiInGetDevCapsW(udeviceid: usize, pmic: *mut MIDIINCAPSW, cbmic: u32) -> u32;
+    }
+    midiInGetDevCapsW(udeviceid, ::core::mem::transmute(pmic), cbmic)
+}
+
+pub unsafe fn midiInGetNumDevs() -> u32 {
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn midiInGetNumDevs() -> u32;
+    }
+    midiInGetNumDevs()
+}
+
+#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct MIDI_WAVE_OPEN_TYPE(pub u32);
+impl ::core::marker::Copy for MIDI_WAVE_OPEN_TYPE {}
+impl ::core::clone::Clone for MIDI_WAVE_OPEN_TYPE {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl ::core::default::Default for MIDI_WAVE_OPEN_TYPE {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+unsafe impl ::windows::core::Abi for MIDI_WAVE_OPEN_TYPE {
+    type Abi = Self;
+}
+impl ::core::fmt::Debug for MIDI_WAVE_OPEN_TYPE {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("MIDI_WAVE_OPEN_TYPE").field(&self.0).finish()
+    }
+}
+impl ::core::ops::BitOr for MIDI_WAVE_OPEN_TYPE {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl ::core::ops::BitAnd for MIDI_WAVE_OPEN_TYPE {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl ::core::ops::BitOrAssign for MIDI_WAVE_OPEN_TYPE {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0)
+    }
+}
+impl ::core::ops::BitAndAssign for MIDI_WAVE_OPEN_TYPE {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0)
+    }
+}
+impl ::core::ops::Not for MIDI_WAVE_OPEN_TYPE {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
 }
 
 #[derive(PartialEq, Eq)]#[repr(transparent)]pub struct AUDCLNT_SHAREMODE(pub i32);
@@ -17672,27 +17960,6 @@ unsafe impl ::windows::core::Abi for AUDCLNT_SHAREMODE {
 impl ::core::fmt::Debug for AUDCLNT_SHAREMODE {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_tuple("AUDCLNT_SHAREMODE").field(&self.0).finish()
-    }
-}
-
-#[derive(PartialEq, Eq)]#[repr(transparent)]pub struct EDataFlow(pub i32);
-impl ::core::marker::Copy for EDataFlow {}
-impl ::core::clone::Clone for EDataFlow {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl ::core::default::Default for EDataFlow {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-unsafe impl ::windows::core::Abi for EDataFlow {
-    type Abi = Self;
-}
-impl ::core::fmt::Debug for EDataFlow {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_tuple("EDataFlow").field(&self.0).finish()
     }
 }
 
@@ -18049,6 +18316,20 @@ impl IMMNotificationClient_Vtbl {
 }
 
 }
+pub const MM_MIM_OPEN: u32 = 961u32;
+
+pub const MM_MIM_CLOSE: u32 = 962u32;
+
+pub const MM_MIM_DATA: u32 = 963u32;
+
+pub const MM_MIM_LONGDATA: u32 = 964u32;
+
+pub const MM_MIM_ERROR: u32 = 965u32;
+
+pub const MM_MIM_LONGERROR: u32 = 966u32;
+
+pub const MM_MIM_MOREDATA: u32 = 972u32;
+
 }
 pub mod Security{
 #[repr(C)]pub struct SECURITY_ATTRIBUTES {

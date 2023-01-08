@@ -1,5 +1,5 @@
 use {
-    std::{ 
+    std::{
         rc::Rc,
         sync::{Arc, Mutex},
         cell::{RefCell},
@@ -9,10 +9,12 @@ use {
         cx::*,
         event::*,
         os::{
-            mswindows::win32_midi::Win32MidiAccess,
-            mswindows::win32_event::*,
-            mswindows::d3d11::{D3d11Window, D3d11Cx},
-            mswindows::win32_app::*,
+            mswindows::{
+                win32_midi::*,
+                win32_event::*,
+                d3d11::{D3d11Window, D3d11Cx},
+                win32_app::*,
+            },
             cx_desktop::EventFlow,
         },
         pass::{CxPassParent},
@@ -32,7 +34,8 @@ impl Cx {
         init_win32_app_global(Box::new({
             
             let cx = cx.clone();
-            move | win32_app,events | {
+            move | win32_app,
+            events | {
                 let mut cx = cx.borrow_mut();
                 let mut d3d11_cx = d3d11_cx.borrow_mut();
                 let mut d3d11_windows = d3d11_windows.borrow_mut();
@@ -190,7 +193,7 @@ impl Cx {
         }
         
     }
-
+    
     pub (crate) fn handle_repaint(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &mut D3d11Cx) {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
@@ -227,7 +230,7 @@ impl Cx {
                         window.create_position,
                         &window.create_title
                     );
-
+                    
                     window.window_geom = d3d11_window.window_geom.clone();
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;
@@ -322,6 +325,6 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    pub (crate) win32_midi: Option<Arc<Mutex<Win32MidiAccess>>>,
+    pub (crate) win32_midi: Option<Arc<Mutex<Win32MidiAccess >> >,
 }
 

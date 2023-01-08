@@ -1373,7 +1373,7 @@ impl App {
         
         if let Event::Construct = event {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            db.to_widgets(ironfish.settings.live_read());
+            db.to_widgets(ironfish.settings.live_read()); 
             ui.get_piano(id!(piano)).set_key_focus(cx);
             self.midi_receiver = cx.midi_input().create_receiver();
         }
@@ -1382,7 +1382,7 @@ impl App {
         let ports = cx.handle_midi_port_list(event);
         for port in &ports{
             let desc = cx.midi_port_desc(*port).unwrap();
-            println!("Midi port: {} - {} - {:?}", desc.name, desc.manufacturer, desc.port_type);
+            println!("Midi port: {} - {:?}", desc.name, desc.port_type);
         }
         cx.midi_input().set_ports(&ports);
         
