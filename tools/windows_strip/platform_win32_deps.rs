@@ -300,6 +300,7 @@ use {
                 STGMOVE,
             },
             Win32::Media::Audio::{
+                MIDI_WAVE_OPEN_TYPE,
                 WAVEFORMATEX,
                 AUDCLNT_SHAREMODE,
                 Identity,

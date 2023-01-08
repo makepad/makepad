@@ -6,7 +6,7 @@ use {
         os::{OsMidiInput, OsMidiOutput}
     }
 }; 
-
+ 
 pub trait MidiOutputApi{
     fn port_desc(&self, port:MidiPortId)->Option<MidiPortDesc>;
     fn set_ports(&self, ports:&[MidiPortId]);
@@ -71,7 +71,6 @@ pub struct MidiPortId(pub LiveId);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidiPortDesc {
-    pub manufacturer: String,
     pub name: String,
     pub port_id: MidiPortId,
     pub port_type: MidiPortType,
