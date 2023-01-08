@@ -422,6 +422,7 @@ fn main() {
     generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_window.rs",&mut output, &mut cache);
     generate_win32_outputs_from_file("./platform/src/os/mswindows/d3d11.rs",&mut output, &mut cache);
     generate_win32_outputs_from_file("./platform/src/os/mswindows/wasapi.rs",&mut output, &mut cache);
+    generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_midi.rs",&mut output, &mut cache);
     generate_win32_outputs_from_file("./tools/windows_strip/platform_win32_deps.rs",&mut output, &mut cache);
     
     fn generate_string_from_outputs(node:&Node, output:&mut String){
