@@ -23,6 +23,9 @@ pub enum AudioUnitType {
     Effect
 }
 
+pub struct OsAudioDevice{
+}
+
 pub struct AudioUnitFactory {}
 
 #[derive(Clone, Debug)]

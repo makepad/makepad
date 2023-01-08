@@ -1,5 +1,10 @@
 use {
+    std::sync::{Arc, Mutex},
+    std::sync::mpsc,
     crate::{
+        cx::{Cx},
+        cx_api::CxOsApi,
+        makepad_live_id::{live_id, LiveId},
         midi::*,
         os::apple::apple_sys::*,
         os::apple::core_audio::*,
@@ -7,21 +12,87 @@ use {
         objc_block,
     },
 };
-/*
-pub struct MidiEndpoint {
-    pub id: i32,
-    pub name: String,
-    pub manufacturer: String,
-    endpoint: MIDIEndpointRef
-}*/
-/*
-pub struct Midi {
-    pub sources: Vec<MidiEndpoint>,
-    pub destinations: Vec<MidiEndpoint>
-}*/
 
-impl MidiInputInfo {
-    unsafe fn from_endpoint(endpoint: MIDIEndpointRef) -> Result<Self,
+#[derive(Clone)]
+pub struct OsMidiInput(pub(crate) Arc<Mutex<CoreMidiAccess >>);
+
+#[derive(Clone)]
+pub struct OsMidiOutput(pub(crate) Arc<Mutex<CoreMidiAccess >>);
+
+impl MidiOutputApi for MidiOutput {
+    fn port_desc(&self, port: MidiPortId) -> Option<MidiPortDesc> {
+        self.0.0.lock().unwrap().port_desc(port)
+    }
+    
+    fn set_ports(&self, _ports: &[MidiPortId]) {
+        // no need to do this on macos
+    }
+    
+    fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
+        let mut words = [0u32; 64];
+        words[0] = (0x20000000) | ((d.data0 as u32) << 16) | ((d.data1 as u32) << 8) | d.data2 as u32;
+        let event_list = MIDIEventList {
+            protocol: kMIDIProtocol_1_0,
+            numPackets: 1,
+            packet: [MIDIEventPacket {
+                timeStamp: 0,
+                wordCount: 1,
+                words
+            }]
+        };
+        let core_midi = self.0.0.lock().unwrap();
+        for port in &core_midi.ports {
+            if port.desc.port_type.is_output() 
+                && (port_id.is_none() ||  port.desc.port_id == port_id.unwrap()){
+                unsafe {
+                    MIDISendEventList(core_midi.midi_out_port, port.endpoint, &event_list);
+                }
+            }
+        }
+    }
+}
+
+impl MidiInputApi for MidiInput {
+    fn port_desc(&self, port: MidiPortId) -> Option<MidiPortDesc> {
+        self.0.0.lock().unwrap().port_desc(port)
+    }
+
+    
+    fn set_ports(&self, ports: &[MidiPortId]) {
+        //return;
+        if ports.len() == 0{
+            return
+        }
+        let core_midi = self.0.0.lock().unwrap();
+        // find all ports we want enabled
+        for port_id in ports{
+            if let Some(port) = core_midi.ports.iter().find(|p| p.desc.port_id == *port_id && p.desc.port_type.is_input()){
+                unsafe{
+                    MIDIPortConnectSource(core_midi.midi_in_port, port.endpoint, port.desc.port_id.0.0 as *mut _);
+                }
+            }
+        }
+        // and the ones disabled
+        for port in &core_midi.ports{
+            if ports.iter().find(|p| **p == port.desc.port_id).is_none(){
+                if port.desc.port_type.is_input(){
+                    unsafe{
+                        MIDIPortDisconnectSource(core_midi.midi_in_port, port.endpoint);
+                    }
+                }
+            }
+        }
+    }
+    fn create_receiver(&self)->MidiReceiver{
+        let senders = self.0.0.lock().unwrap().input_senders.clone();
+        let (send, recv) = mpsc::channel();
+        senders.lock().unwrap().push(send);
+        MidiReceiver(Some(recv))
+    }
+}
+
+impl CoreMidiPort {
+    unsafe fn new(port_type:MidiPortType, endpoint: MIDIEndpointRef) -> Result<Self,
     OSError> {
         let mut manufacturer = 0 as CFStringRef;
         let mut name = 0 as CFStringRef;
@@ -29,35 +100,54 @@ impl MidiInputInfo {
         OSError::from(MIDIObjectGetStringProperty(endpoint, kMIDIPropertyManufacturer, &mut manufacturer)) ?;
         OSError::from(MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &mut name)) ?;
         OSError::from(MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &mut uid)) ?;
+        let name = cfstring_ref_to_string(name);
+        let manufacturer = cfstring_ref_to_string(manufacturer);
+        let port_id = LiveId::from_str_unchecked(&format!("{}{}{}", name, uid, manufacturer));
         Ok(Self {
-            uid: format!("{}", uid),
-            name: cfstring_ref_to_string(name),
-            manufacturer: cfstring_ref_to_string(manufacturer),
+            endpoint,
+            desc: MidiPortDesc{
+                port_type,
+                name,
+                manufacturer,
+                port_id:port_id.into()
+            }
         })
     }
 }
 
+type InputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData)>>>>;
+
+pub struct CoreMidiPort{
+    endpoint: MIDIEndpointRef,
+    desc: MidiPortDesc
+}
+
 pub struct CoreMidiAccess {
-    //_midi_client : MIDIClientRef,
+    input_senders: InputSenders,
     midi_in_port: MIDIPortRef,
     midi_out_port: MIDIPortRef,
-    destinations: Vec<MIDIEndpointRef>
+    ports: Vec<CoreMidiPort>,
 }
 
 impl CoreMidiAccess {
+    pub fn port_desc(&self, port: MidiPortId) -> Option<MidiPortDesc> {
+        if let Some(port) = self.ports.iter().find(|p| p.desc.port_id == port){
+            return Some(port.desc.clone())
+        }
+        None
+    }
     
-    pub fn new_midi_input<F, G>(data_callback: F, notify_callback: G) -> Result<Self,
-    OSError> where
-    F: Fn(Vec<MidiInputData>) + Send + 'static,
-    G: Fn() + Send + 'static
-    {
+    pub fn new() -> Result<Self,
+    OSError> {
         let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
-            println!("NOTIFY!");
-            notify_callback();
+            Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
         });
         
+        let input_senders = InputSenders::default();
+        let senders = input_senders.clone();
         let mut midi_receive = objc_block!(move | event_list: &MIDIEventList, user_data: u64 | {
-            let mut datas = Vec::new();
+            let midi_port_id = MidiPortId(LiveId(user_data));
+            let mut senders = senders.lock().unwrap();
             let packets = unsafe {std::slice::from_raw_parts(event_list.packet.as_ptr(), event_list.numPackets as usize)};
             for packet in packets {
                 for i in 0 .. packet.wordCount.min(64) {
@@ -68,20 +158,15 @@ impl CoreMidiAccess {
                     let data1 = ((ump >> 8) & 0xff) as u8;
                     let data2 = (ump & 0xff) as u8;
                     if ty == 0x02 { // midi 1.0 channel voice
-                        datas.push(MidiInputData {
-                            input_id: user_data as usize,
-                            data: MidiData {
+                        senders.retain(|s|{
+                            s.send((midi_port_id, MidiData {
                                 data0,
                                 data1,
                                 data2
-                            }
+                            })).is_ok()
                         });
-                        
                     }
                 }
-            }
-            if datas.len()>0 {
-                data_callback(datas)
             }
         });
         
@@ -102,69 +187,41 @@ impl CoreMidiAccess {
                 &mut midi_in_port,
                 &mut midi_receive as *mut _ as ObjcId
             )) ?;
-            
             OSError::from(MIDIOutputPortCreate(
                 midi_client,
                 ccfstr_from_str("MIDI Output"),
                 &mut midi_out_port
             )) ?;
         }
+        Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
         Ok(Self {
+            input_senders,
             midi_in_port,
             midi_out_port,
-            destinations: Vec::new()
+            ports: Vec::new(),
         })
     }
-    
-    pub fn send_midi_1_data(&self, d:MidiData){
-        let mut words = [0u32;64];
-        words[0] = (0x20000000)|((d.data0 as u32)<<16)|((d.data1 as u32)<<8)|d.data2 as u32;
-        let event_list = MIDIEventList{
-            protocol: kMIDIProtocol_1_0,
-            numPackets:1,
-            packet:[MIDIEventPacket{
-                timeStamp:0,
-                wordCount: 1,
-                words
-            }]
-        };
-        for dest in &self.destinations{
-            println!("SENDING {:?}", d);
-            unsafe{
-                MIDISendEventList(self.midi_out_port, *dest, &event_list);
-            }
-        }
-    }
-    
-    pub fn update_destinations(&mut self)  {
-        let mut destinations = Vec::new();
-        unsafe {
-            for i in 0..MIDIGetNumberOfDestinations() {
-                let dest =  MIDIGetDestination(i);
-                destinations.push(dest);
-            }
-        }
-        self.destinations = destinations;
-    }
-    
-    pub fn connect_all_inputs(&self) -> Vec<MidiInputInfo> {
-        /*
-        for i in 0..MIDIGetNumberOfDestinations() {
-            if let Ok(ep) = MidiEndpoint::new(MIDIGetDestination(i)) {
-                destinations.push(ep);
-            }
-        }
-        */
-        let mut input_infos = Vec::new();
-        unsafe {
+
+    pub fn update_port_list(&mut self){
+        self.ports.clear();
+        unsafe { 
             for i in 0..MIDIGetNumberOfSources() {
                 let ep = MIDIGetSource(i);
-                if let Ok(info) = MidiInputInfo::from_endpoint(ep) {
-                    MIDIPortConnectSource(self.midi_in_port, ep, i as *mut _);
-                    input_infos.push(info);
-                }
+                self.ports.push(CoreMidiPort::new(MidiPortType::Input, ep).unwrap());
+            }
+            for i in 0..MIDIGetNumberOfDestinations() {
+                let ep = MIDIGetDestination(i);
+                self.ports.push(CoreMidiPort::new(MidiPortType::Output, ep).unwrap());
             }
         }
-        input_infos
     }
+    
+    pub fn get_ports(&self)->Vec<MidiPortId>{
+        let mut out = Vec::new();
+        for port in &self.ports{
+            out.push(port.desc.port_id)
+        }
+        out
+    }
+
 }

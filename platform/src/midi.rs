@@ -1,8 +1,42 @@
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MidiInputData {
-    pub input_id: usize,
-    pub data: MidiData,
+use {
+    std::sync::mpsc,
+    std::sync::mpsc::TryRecvError,
+    crate::{
+        makepad_live_id::{LiveId,FromLiveId},
+        os::{OsMidiInput, OsMidiOutput}
+    }
+}; 
+
+pub trait MidiOutputApi{
+    fn port_desc(&self, port:MidiPortId)->Option<MidiPortDesc>;
+    fn set_ports(&self, ports:&[MidiPortId]);
+    fn send(&self, port:Option<MidiPortId>, data:MidiData);
 }
+
+pub trait MidiInputApi{
+    fn port_desc(&self, port:MidiPortId)->Option<MidiPortDesc>;
+    fn set_ports(&self, port:&[MidiPortId]);
+    fn create_receiver(&self)->MidiReceiver;
+}
+
+#[derive(Default)]
+pub struct MidiReceiver(pub(crate) Option<mpsc::Receiver<(MidiPortId, MidiData)>>);
+unsafe impl Send for MidiReceiver {}
+
+impl MidiReceiver{
+     pub fn try_recv(&mut self) -> Result<(MidiPortId, MidiData), TryRecvError> {
+         if let Some(recv) = &mut self.0{
+             return recv.try_recv()
+        }
+        Err(TryRecvError::Empty)
+    }
+}
+
+#[derive(Clone)]
+pub struct MidiOutput(pub(crate) OsMidiOutput);
+
+#[derive(Clone)]
+pub struct MidiInput(pub(crate) OsMidiInput);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MidiData {
@@ -11,11 +45,36 @@ pub struct MidiData {
     pub data2: u8
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MidiPortType{
+    Input,
+    Output,
+}
+
+impl MidiPortType{
+    pub fn is_input(&self)->bool{
+        match self{
+            Self::Input=>true,
+            _=>false
+        }
+    }    
+    pub fn is_output(&self)->bool{
+        match self{
+            Self::Output=>true,
+            _=>false
+        }
+    }    
+}
+
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct MidiPortId(pub LiveId);
+
 #[derive(Clone, Debug, PartialEq)]
-pub struct MidiInputInfo {
+pub struct MidiPortDesc {
     pub manufacturer: String,
     pub name: String,
-    pub uid: String,
+    pub port_id: MidiPortId,
+    pub port_type: MidiPortType,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -25,7 +84,6 @@ pub struct MidiNote {
     pub note_number: u8,
     pub velocity: u8,
 }
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum MidiEvent {

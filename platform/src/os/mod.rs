@@ -14,7 +14,7 @@ pub mod apple;
 pub use crate::os::apple::*;
 
 #[cfg(target_os = "macos")]
-pub use crate::os::apple::media::*;
+pub use crate::os::apple::apple_media::*;
 
 #[cfg(target_os = "windows")]
 pub mod mswindows;

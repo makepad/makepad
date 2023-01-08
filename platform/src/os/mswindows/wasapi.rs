@@ -53,6 +53,9 @@ use {
     }
 };
 
+pub struct OsAudioDevice{
+}
+
 fn new_float_waveformatextensible(samplerate: usize, channel_count: usize) -> WAVEFORMATEXTENSIBLE {
     let storebits = 32;
     let validbits = 32;

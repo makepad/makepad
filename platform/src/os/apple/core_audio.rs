@@ -524,4 +524,9 @@ extern "C" {
         source: MIDIEndpointRef,
         connRefCon: *mut ::std::os::raw::c_void,
     ) -> OSStatus;
+    
+    pub fn MIDIPortDisconnectSource(
+        port: MIDIPortRef,
+        source: MIDIEndpointRef,
+    ) -> OSStatus;
 }

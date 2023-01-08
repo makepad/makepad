@@ -1,6 +1,6 @@
 /*
 TeamTalk is a LAN (only) p2p audiochat supporting as many clients as you have bandwidth.
-For 6 clients it should pull about 100 megabits. You can use it to have a super low latency
+For 6 clients it should pull about 25 megabits. You can use it to have a super low latency
 helicopter-headset experience, silent disco, and so on.
 */
 
@@ -115,9 +115,9 @@ impl App {
                 peer_addrs.retain( | _, time | *time > time_now - Duration::from_secs(5));
                 
                 // fill the mic stream recv side buffers, and block if nothing
-                mic_recv.recv_stream();
+                mic_recv.recv_stream(1,3);
                 loop {
-                    if mic_recv.read_buffer(0, &mut output_buffer, 1, 3) == 0 {
+                    if mic_recv.read_buffer(0, &mut output_buffer,0,0) == 0 {
                         break;
                     }
                     
@@ -180,20 +180,19 @@ impl App {
                 else{
                     last_orders.push((route_id, order));
                 }
-                
+                 
                 mix_send.write_buffer(route_id, buffer).unwrap();
             }
         });
         
-        // the audio output thread
-        cx.start_audio_output(move | _time, output_buffer | {
+        // the audio output thread 
+        cx.start_audio_output(None, move | _time, output_buffer | {
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
-            mix_recv.try_recv_stream();
+            mix_recv.try_recv_stream(1,8);
             let mut chan = AudioBuffer::new_like(output_buffer);
-            
             for i in 0..mix_recv.num_routes() {  
-                if mix_recv.read_buffer(i, &mut chan, 2, 8) != 0 { 
+                if mix_recv.read_buffer(i, &mut chan, 0, 1) != 0 { 
                     for i in 0..chan.data.len() {
                         output_buffer.data[i] += chan.data[i];
                     }
@@ -203,7 +202,7 @@ impl App {
         
         
         // the microphone input thread, just pushes the input data into an audiostream
-        cx.start_audio_input(move | _time, mut input_buffer | {
+        cx.start_audio_input(None, move | _time, mut input_buffer | {
             input_buffer.make_single_channel();
             mic_send.write_buffer(0, input_buffer).unwrap();
             AudioBuffer::default()
@@ -229,8 +228,8 @@ impl App {
         }
         
         while self.ui.draw(cx).is_not_done() {};
-        
-        self.ui.redraw(cx);
+         
+        //self.ui.redraw(cx);
         self.window.end(cx);
     }
 }
