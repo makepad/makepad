@@ -11,7 +11,7 @@ use makepad_platform::midi::*;
 mod sequencer;
 mod ironfish;
 mod waveguide;
-
+ 
 use crate::ironfish::*;
 use crate::piano::*;
 use crate::sequencer::*;
@@ -1224,7 +1224,7 @@ pub struct App {
     ui: FrameRef,
     audio_graph: AudioGraph,
     window: BareWindow,
-    #[rust] midi_receiver: MidiReceiver
+    #[rust] midi_input: MidiInput,
 }
 
 impl LiveHook for App {
@@ -1375,16 +1375,17 @@ impl App {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             db.to_widgets(ironfish.settings.live_read()); 
             ui.get_piano(id!(piano)).set_key_focus(cx);
-            self.midi_receiver = cx.midi_input().create_receiver();
+            self.midi_input = cx.midi_input();
+            //self.midi_data = cx.midi_output_create_sender();
         }
         
-        // always connect midi inputs
-        let ports = cx.handle_midi_port_list(event);
-        for port in &ports{
-            let desc = cx.midi_port_desc(*port).unwrap();
-            println!("Midi port: {} - {:?}", desc.name, desc.port_type);
+        if let Event::MidiPorts(ports) = event{
+            cx.use_midi_inputs(&ports.all_inputs());
         }
-        cx.midi_input().set_ports(&ports);
+        
+        if let Event::AudioDevices(devices) = event{
+            cx.use_audio_outputs(&devices.default_output());
+        }
         
         ui.get_radio_group(&[
             id!(envelopes.tab1),
@@ -1429,7 +1430,7 @@ impl App {
         
         let piano = ui.get_piano(id!(piano));
         
-        while let Ok((_, data)) = self.midi_receiver.try_recv(){
+        while let Some((_, data)) = self.midi_input.receive(){
             self.audio_graph.send_midi_data(data);
             if let Some(note) = data.decode().on_note() {
                 piano.set_note(cx, note.is_on, note.note_number)

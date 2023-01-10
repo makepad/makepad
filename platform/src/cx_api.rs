@@ -47,6 +47,8 @@ pub trait CxOsApi {
     
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);
+
+
 }
 
 #[derive(PartialEq)]

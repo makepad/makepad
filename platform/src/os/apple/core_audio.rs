@@ -61,23 +61,45 @@ pub struct AudioChannelLayout {
     pub mChannelLayoutTag: AudioLayoutChannelTag,
     pub mChannelBitmap: u32,
     pub mNumberChannelDescriptions: u32,
-    pub mChannelDescriptions: [AudioChannelDescription;2]
+    pub mChannelDescriptions: [AudioChannelDescription; 2]
 }
 
+/*
+let channel_layout = AudioChannelLayout {
+    mChannelLayoutTag: AudioLayoutChannelTag::Stereo,
+    mChannelBitmap: 0,
+    mNumberChannelDescriptions: 2,
+    mChannelDescriptions: [
+        AudioChannelDescription {
+            mChannelLabel: AudioChannelLabel::Left,
+            mChannelFlags: 0,
+            mCoordinates: [0f32; 3]
+        },
+        AudioChannelDescription {
+            mChannelLabel: AudioChannelLabel::Right,
+            mChannelFlags: 0,
+            mCoordinates: [0f32; 3]
+        },
+    ]
+};
+let av_channel_layout: ObjcId = msg_send![class!(AVAudioChannelLayout), alloc];
+let () = msg_send![av_channel_layout, initWithLayout: &channel_layout];
+*/
+
 #[repr(u32)]
-pub enum AudioLayoutChannelTag{
-    Stereo = (101<<16) | 2,   
+pub enum AudioLayoutChannelTag {
+    Stereo = (101 << 16) | 2,
 }
 
 #[repr(C)]
-pub struct AudioChannelDescription{
+pub struct AudioChannelDescription {
     pub mChannelLabel: AudioChannelLabel,
     pub mChannelFlags: u32,
-    pub mCoordinates: [f32;3],
+    pub mCoordinates: [f32; 3],
 }
 
 #[repr(u32)]
-pub enum AudioChannelLabel{
+pub enum AudioChannelLabel {
     Left = 1,
     Right = 2,
 }
@@ -180,16 +202,16 @@ impl AudioTimeStampFlags {
 */
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(C)]
-pub struct CAudioComponentDescription {
-    pub componentType: CAudioUnitType,
-    pub componentSubType: CAudioUnitSubType,
+pub struct AudioComponentDescription {
+    pub componentType: AudioUnitType,
+    pub componentSubType: AudioUnitSubType,
     pub componentManufacturer: u32,
     pub componentFlags: u32,
     pub componentFlagsMask: u32,
 }
 
-impl CAudioComponentDescription {
-    pub fn new_apple(ty: CAudioUnitType, sub: CAudioUnitSubType) -> Self {
+impl AudioComponentDescription {
+    pub fn new_apple(ty: AudioUnitType, sub: AudioUnitSubType) -> Self {
         Self {
             componentType: ty,
             componentSubType: sub,
@@ -198,7 +220,7 @@ impl CAudioComponentDescription {
             componentFlagsMask: 0,
         }
     }
-    pub fn new_all_manufacturers(ty: CAudioUnitType, sub: CAudioUnitSubType) -> Self {
+    pub fn new_all_manufacturers(ty: AudioUnitType, sub: AudioUnitSubType) -> Self {
         Self {
             componentType: ty,
             componentSubType: sub,
@@ -235,14 +257,14 @@ pub const MAX_AUDIO_BUFFERS: usize = 8;
 #[repr(C)]
 
 #[derive(Debug)]
-pub struct CAudioBufferList {
+pub struct AudioBufferList {
     pub mNumberBuffers: u32,
     pub mBuffers: [_AudioBuffer; MAX_AUDIO_BUFFERS],
 }
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct CAudioTimeStamp {
+pub struct AudioTimeStamp {
     pub mSampleTime: f64,
     pub mHostTime: u64,
     pub mRateScalar: f64,
@@ -254,7 +276,7 @@ pub struct CAudioTimeStamp {
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(u32)]
-pub enum CAudioUnitType {
+pub enum AudioUnitType {
     Undefined = 0,
     
     IO = 1635086197,
@@ -270,7 +292,7 @@ pub enum CAudioUnitType {
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(u32)]
-pub enum CAudioUnitSubType {
+pub enum AudioUnitSubType {
     Undefined = 0,
     
     PeakLimiter = 1819112562,
@@ -469,6 +491,46 @@ pub struct MIDIEventPacket {
     pub words: [u32; 64usize],
 }
 
+const fn four_char_as_u32(s: &str) -> u32 {
+    let b = s.as_bytes();
+    ((b[0] as u32) << 24)
+        | ((b[1] as u32) << 16)
+        | ((b[2] as u32) << 8)
+        | ((b[3] as u32))
+}
+
+#[repr(u32)]
+pub enum AudioObjectPropertySelector {
+    Devices = four_char_as_u32("dev#"),
+    DeviceNameCFString = four_char_as_u32("lnam"),
+    StreamConfiguration = four_char_as_u32("slay"),
+    DefaultInputDevice = four_char_as_u32("dIn "),
+    DefaultOutputDevice = four_char_as_u32("dOut"),
+    DeviceIsAlive = four_char_as_u32("livn"),
+}
+
+#[repr(u32)]
+pub enum AudioObjectPropertyScope {
+    Global = four_char_as_u32("glob"),
+    Output = four_char_as_u32("outp"),
+    Input = four_char_as_u32("inpt")}
+
+#[repr(u32)]
+pub enum AudioObjectPropertyElement {
+    Master = 0
+}
+
+#[repr(C)]
+pub struct AudioObjectPropertyAddress {
+    pub mSelector: AudioObjectPropertySelector,
+    pub mScope: AudioObjectPropertyScope,
+    pub mElement: AudioObjectPropertyElement
+}
+
+pub const kAudioObjectSystemObject: AudioDeviceID = 1;
+pub type AudioObjectID = u32;
+pub type AudioDeviceID = u32;
+
 #[link(name = "CoreMidi", kind = "framework")]
 extern "C" {
     pub static kMIDIPropertyManufacturer: CFStringRef;
@@ -529,4 +591,41 @@ extern "C" {
         port: MIDIPortRef,
         source: MIDIEndpointRef,
     ) -> OSStatus;
+    
+}
+
+pub type AudioObjectPropertyListenerProc = Option<
+unsafe extern "system" fn(
+    inObjectID: AudioObjectID,
+    inNumberAddresses: u32,
+    inAddresses: *const AudioObjectPropertyAddress,
+    inClientData: *mut ()
+) -> OSStatus>;
+
+#[link(name = "CoreAudio", kind = "framework")]
+extern "C" {
+    pub fn AudioObjectGetPropertyDataSize(
+        inObjectId: AudioObjectID,
+        inAddress: *const AudioObjectPropertyAddress,
+        inQualifierDataSize: u32,
+        inQualifierData: *const (),
+        outDataSize: *mut u32
+    ) -> OSStatus;
+    
+    pub fn AudioObjectGetPropertyData(
+        inObjectId: AudioObjectID,
+        inAddress: *const AudioObjectPropertyAddress,
+        inQualifierDataSize: u32,
+        inQualifierData: *const (),
+        ioDataSize: *mut u32,
+        outData: *mut ()
+    ) -> OSStatus;
+    
+    pub fn AudioObjectAddPropertyListener(
+        inObjectId: AudioObjectID,
+        inAddress: *const AudioObjectPropertyAddress,
+        inListener: AudioObjectPropertyListenerProc,
+        inClientData: *mut ()
+    ) -> OSStatus;
+    
 }

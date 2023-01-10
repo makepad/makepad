@@ -1,16 +1,64 @@
-use crate::{
-    os::{OsAudioDevice},
+use {
+    crate::{
+        makepad_live_id::{LiveId, FromLiveId},
+    }
 };
 
-pub struct AudioDevice{
-    pub ty: AudioDeviceType,
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct AudioDeviceId(pub LiveId);
+
+#[derive(Clone, Debug)]
+pub struct AudioDeviceDesc {
+    pub device_id: AudioDeviceId,
+    pub device_type: AudioDeviceType,
+    pub is_default: bool,
+    pub channels: usize,
     pub name: String,
-    os: OsAudioDevice
 }
 
-pub enum AudioDeviceType{
+#[derive(Clone, Debug)]
+pub struct AudioDevicesEvent{
+    pub descs: Vec<AudioDeviceDesc>,
+}
+
+impl AudioDevicesEvent{
+    pub fn default_input(&self)->Vec<AudioDeviceId>{
+        for d in &self.descs{
+            if d.is_default && d.device_type.is_input(){
+                return vec![d.device_id]
+            }
+        }
+        Vec::new()
+    }
+    pub fn default_output(&self)->Vec<AudioDeviceId>{
+        for d in &self.descs{
+            if d.is_default && d.device_type.is_output(){
+                return vec![d.device_id]
+            }
+        }
+        Vec::new()
+    }
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub enum AudioDeviceType {
     Input,
     Output,
+}
+
+impl AudioDeviceType{
+    pub fn is_input(&self)->bool{
+        match self{
+            AudioDeviceType::Input=>true,
+            _=>false
+        }
+    }
+    pub fn is_output(&self)->bool{
+        match self{
+            AudioDeviceType::Output=>true,
+            _=>false
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -19,7 +67,6 @@ pub struct AudioTime {
     pub host_time: u64,
     pub rate_scalar: f64,
 }
-
 
 #[derive(Clone, Default)]
 pub struct AudioBuffer {
@@ -30,44 +77,44 @@ pub struct AudioBuffer {
 }
 
 impl AudioBuffer {
-    pub fn from_data(data:Vec<f32>, channel_count:usize)->Self{
+    pub fn from_data(data: Vec<f32>, channel_count: usize) -> Self {
         let frame_count = data.len() / channel_count;
-        Self{
+        Self {
             data,
-            final_size:false,
+            final_size: false,
             frame_count,
             channel_count
         }
     }
     
-    pub fn from_i16(inp: &[i16], channel_count:usize)->Self{
+    pub fn from_i16(inp: &[i16], channel_count: usize) -> Self {
         let mut data = Vec::new();
         data.resize(inp.len(), 0.0);
         let frame_count = data.len() / channel_count;
-        for i in 0..data.len(){
+        for i in 0..data.len() {
             data[i] = (inp[i] as f32) / 32767.0;
         }
-        Self{
+        Self {
             data,
-            final_size:false,
+            final_size: false,
             frame_count,
             channel_count
-        } 
+        }
     }
     
-    pub fn make_single_channel(&mut self){
+    pub fn make_single_channel(&mut self) {
         self.data.resize(self.frame_count, 0.0);
         self.channel_count = 1;
     }
     
-    pub fn into_data(self)->Vec<f32>{
+    pub fn into_data(self) -> Vec<f32> {
         self.data
     }
     
-    pub fn to_i16(&self)->Vec<i16>{
+    pub fn to_i16(&self) -> Vec<i16> {
         let mut out = Vec::new();
-        out.resize(self.data.len(),0);
-        for i in 0..self.data.len(){
+        out.resize(self.data.len(), 0);
+        for i in 0..self.data.len() {
             let f = (self.data[i] * 32767.0).max(std::i16::MIN as f32).min(std::i16::MAX as f32);
             out[i] = f as i16;
         }
