@@ -86,10 +86,10 @@ impl AudioUnitInstrument {
     fn load_audio_unit(&mut self) {
         // alright lets create an audio device
         
-        let list = AudioUnitFactory::query_audio_units(AudioUnitType::MusicDevice);
+        let list = AudioUnitAccess::query_audio_units(AudioUnitQuery::MusicDevice);
         let sender = self.to_ui.sender();
         if let Some(info) = list.iter().find( | item | item.name == self.plugin) {
-            AudioUnitFactory::new_audio_unit(info, move | result | {
+            AudioUnitAccess::new_audio_plugin(info, move | result | {
                 match result {
                     Ok(audio_unit) => {
                         let sender2 = sender.clone();

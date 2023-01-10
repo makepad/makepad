@@ -15,6 +15,8 @@ use {
             xr::*,
             drag_drop::*,
         },
+        audio::AudioDevicesEvent,
+        midi::MidiPortsEvent,
         draw_list::DrawListId,
         menu::MenuCommand,
     },
@@ -64,6 +66,9 @@ pub enum Event {
     WebSocketOpen(WebSocket),
     WebSocketError(WebSocketErrorEvent),
     WebSocketMessage(WebSocketMessageEvent),
+    
+    AudioDevices(AudioDevicesEvent),
+    MidiPorts(MidiPortsEvent),
     
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),

@@ -53,7 +53,7 @@ use {
     }
 };
 
-pub struct OsAudioDevice{
+pub struct OsAudioDevice {
 }
 
 fn new_float_waveformatextensible(samplerate: usize, channel_count: usize) -> WAVEFORMATEXTENSIBLE {
@@ -73,8 +73,8 @@ fn new_float_waveformatextensible(samplerate: usize, channel_count: usize) -> WA
     let sample = WAVEFORMATEXTENSIBLE_0 {
         wValidBitsPerSample: validbits as u16,
     };
-    let subformat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT; 
-
+    let subformat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    
     let mask = match channel_count {
         ch if ch <= 18 => {
             // setting bit for each channel
@@ -90,7 +90,7 @@ fn new_float_waveformatextensible(samplerate: usize, channel_count: usize) -> WA
     }
 }
 
-struct WasapiBase{
+struct WasapiBase {
     event: HANDLE,
     client: IAudioClient,
     channel_count: usize,
@@ -116,29 +116,29 @@ struct WasapiBase{
 
 impl WasapiBase {
     pub fn new_default_output() -> Self {
-        Self::new_default(eRender , 2)
+        Self::new_default(eRender, 2)
     }
     
     pub fn new_default_input() -> Self {
         Self::new_default(eCapture, 1)
-    } 
+    }
     
-    pub fn new_default(flow:EDataFlow, channel_count:usize) -> Self {
+    pub fn new_default(flow: EDataFlow, channel_count: usize) -> Self {
         unsafe {
             
             CoInitialize(None).unwrap();
             
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
-              
+            
             let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole).unwrap();
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).unwrap();
             
             let mut def_period = 0i64;
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
-
+            
             let wave_format = new_float_waveformatextensible(48000, channel_count);
- 
+            
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
@@ -174,11 +174,11 @@ pub struct WasapiAudioOutputBuffer {
     pub audio_buffer: AudioBuffer
 }
 
-impl WasapiOutput{
+impl WasapiOutput {
     pub fn new() -> Self {
         let base = WasapiBase::new_default_output();
-        let render_client = unsafe{base.client.GetService().unwrap()};
-        Self{
+        let render_client = unsafe {base.client.GetService().unwrap()};
+        Self {
             render_client,
             base
         }
@@ -194,8 +194,8 @@ impl WasapiOutput{
                 let buffer_size = self.base.client.GetBufferSize().unwrap();
                 let req_size = buffer_size - padding;
                 if req_size > 0 {
-                let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
-                    let mut audio_buffer =  self.base.audio_buffer.take().unwrap();
+                    let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
+                    let mut audio_buffer = self.base.audio_buffer.take().unwrap();
                     let channel_count = self.base.channel_count;
                     let frame_count = (req_size / channel_count as u32) as usize;
                     audio_buffer.clear_final_size();
@@ -203,7 +203,7 @@ impl WasapiOutput{
                     audio_buffer.set_final_size();
                     return Ok(WasapiAudioOutputBuffer {
                         frame_count,
-                        channel_count, 
+                        channel_count,
                         device_buffer: device_buffer as *mut f32,
                         audio_buffer
                     })
@@ -213,18 +213,18 @@ impl WasapiOutput{
     }
     
     pub fn release_buffer(&mut self, output: WasapiAudioOutputBuffer) {
-        unsafe { 
+        unsafe {
             let device_buffer = std::slice::from_raw_parts_mut(output.device_buffer, output.frame_count * output.channel_count);
             for i in 0..output.channel_count {
                 let input_channel = output.audio_buffer.channel(i);
                 for j in 0..output.frame_count {
                     device_buffer[j * output.channel_count + i] = input_channel[j];
                 }
-            } 
+            }
             self.render_client.ReleaseBuffer(output.frame_count as u32, 0).unwrap();
             self.base.audio_buffer = Some(output.audio_buffer);
         }
-    }   
+    }
 }
 
 pub struct WasapiInput {
@@ -237,10 +237,10 @@ pub struct WasapiAudioInputBuffer {
 }
 
 impl WasapiInput {
-     pub fn new() -> Self {
+    pub fn new() -> Self {
         let base = WasapiBase::new_default_input();
-        let capture_client = unsafe{base.client.GetService().unwrap()};
-        Self{
+        let capture_client = unsafe {base.client.GetService().unwrap()};
+        Self {
             capture_client,
             base
         }
@@ -258,11 +258,11 @@ impl WasapiInput {
                 let mut dwflags = 0u32;
                 self.capture_client.GetBuffer(&mut pdata, &mut frame_count, &mut dwflags, None, None).unwrap();
                 
-                if frame_count == 0{
+                if frame_count == 0 {
                     continue;
                 }
                 
-                let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count  as usize * self.base.channel_count);
+                let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.base.channel_count);
                 
                 let mut audio_buffer = self.base.audio_buffer.take().unwrap();
                 
@@ -274,7 +274,7 @@ impl WasapiInput {
                         output_channel[j] = device_buffer[j * self.base.channel_count + i]
                     }
                 }
-
+                
                 self.capture_client.ReleaseBuffer(frame_count).unwrap();
                 
                 return Ok(audio_buffer);

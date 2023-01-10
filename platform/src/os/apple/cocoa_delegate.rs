@@ -23,7 +23,6 @@ use {
                 get_cocoa_window
             },
             apple_util::{
-                str_to_nsstring,
                 nsstring_to_string,
                 get_event_key_modifier,
                 superclass,
@@ -47,6 +46,8 @@ pub struct KeyValueObserver {
     _callback: Box<Box<dyn Fn() >>,
     observer: RcObjcId
 }
+unsafe impl Send for KeyValueObserver {}
+unsafe impl Sync for KeyValueObserver {}
 
 impl Drop for KeyValueObserver {
     fn drop(&mut self) {
@@ -57,7 +58,7 @@ impl Drop for KeyValueObserver {
 }
 
 impl KeyValueObserver {
-    pub fn new(target: ObjcId, name: &str, callback: Box<dyn Fn()>) -> Self {
+    pub fn new(target: ObjcId, name: ObjcId, callback: Box<dyn Fn()>) -> Self {
         unsafe {
             let double_box = Box::new(callback);
             //let cocoa_app = get_cocoa_app_global();
@@ -68,7 +69,7 @@ impl KeyValueObserver {
             let () = msg_send![
                 target,
                 addObserver: observer.as_id()
-                forKeyPath: str_to_nsstring(name)
+                forKeyPath: name
                 options: 15u64 // if its not 1+2+4+8 it does nothing
                 context: nil
             ];
