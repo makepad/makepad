@@ -75,6 +75,7 @@ extern {
 
 #[link(name = "Foundation", kind = "framework")]
 extern {
+    pub static NSNotificationCenter: ObjcId;
     pub static NSRunLoopCommonModes: ObjcId;
     pub static NSDefaultRunLoopMode: ObjcId;
     pub static NSProcessInfo: ObjcId;
@@ -153,7 +154,8 @@ extern {
     pub static AVAudioFormat: ObjcId;
     pub static AVAudioChannelLayout: ObjcId;
     pub static AVAudioSession: ObjcId;
-    pub static AVAudioSessionCategoryRecord: ObjcId;
+    pub static AVAudioSessionCategoryMultiRoute: ObjcId;
+    pub static  AVAudioSessionRouteChangeNotification:ObjcId;
 }
 
 

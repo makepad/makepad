@@ -1,42 +1,61 @@
 use {
     std::sync::mpsc,
-    std::sync::mpsc::TryRecvError,
     crate::{
-        makepad_live_id::{LiveId,FromLiveId},
-        os::{OsMidiInput, OsMidiOutput}
+        os::{OsMidiOutput},
+        makepad_live_id::{LiveId, FromLiveId},
     }
-}; 
- 
-pub trait MidiOutputApi{
-    fn port_desc(&self, port:MidiPortId)->Option<MidiPortDesc>;
-    fn set_ports(&self, ports:&[MidiPortId]);
-    fn send(&self, port:Option<MidiPortId>, data:MidiData);
+};
+
+
+#[derive(Clone, Debug)]
+pub struct MidiPortsEvent{
+    pub descs: Vec<MidiPortDesc>,
 }
 
-pub trait MidiInputApi{
-    fn port_desc(&self, port:MidiPortId)->Option<MidiPortDesc>;
-    fn set_ports(&self, port:&[MidiPortId]);
-    fn create_receiver(&self)->MidiReceiver;
+impl MidiPortsEvent{
+    pub fn all_inputs(&self)->Vec<MidiPortId>{
+        let mut out = Vec::new();
+        for d in &self.descs{
+            if d.port_type.is_input(){
+                out.push(d.port_id);
+            }
+        }
+        out
+    }
+    pub fn all_outputs(&self)->Vec<MidiPortId>{
+        let mut out = Vec::new();
+        for d in &self.descs{
+            if d.port_type.is_output(){
+                out.push(d.port_id);
+            }
+        }
+        out
+    }
 }
+
 
 #[derive(Default)]
-pub struct MidiReceiver(pub(crate) Option<mpsc::Receiver<(MidiPortId, MidiData)>>);
-unsafe impl Send for MidiReceiver {}
+pub struct MidiInput(pub (crate) Option<mpsc::Receiver<(MidiPortId, MidiData) >>);
+unsafe impl Send for MidiInput {}
 
-impl MidiReceiver{
-     pub fn try_recv(&mut self) -> Result<(MidiPortId, MidiData), TryRecvError> {
-         if let Some(recv) = &mut self.0{
-             return recv.try_recv()
+impl MidiInput {
+    pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
+        if let Some(recv) = &mut self.0 {
+            return recv.try_recv().ok()
         }
-        Err(TryRecvError::Empty)
+        None
     }
 }
 
-#[derive(Clone)]
-pub struct MidiOutput(pub(crate) OsMidiOutput);
+pub struct MidiOutput(pub (crate) Option<OsMidiOutput>);
+unsafe impl Send for MidiOutput {}
 
-#[derive(Clone)]
-pub struct MidiInput(pub(crate) OsMidiInput);
+impl MidiOutput{
+    pub fn send(&self, port: Option<MidiPortId>, data: MidiData){
+        let output = self.0.as_ref().unwrap();
+        output.send(port, data);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MidiData {
@@ -46,24 +65,24 @@ pub struct MidiData {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum MidiPortType{
+pub enum MidiPortType {
     Input,
     Output,
 }
 
-impl MidiPortType{
-    pub fn is_input(&self)->bool{
-        match self{
-            Self::Input=>true,
-            _=>false
+impl MidiPortType {
+    pub fn is_input(&self) -> bool {
+        match self {
+            Self::Input => true,
+            _ => false
         }
-    }    
-    pub fn is_output(&self)->bool{
-        match self{
-            Self::Output=>true,
-            _=>false
+    }
+    pub fn is_output(&self) -> bool {
+        match self {
+            Self::Output => true,
+            _ => false
         }
-    }    
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]

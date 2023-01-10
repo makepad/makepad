@@ -25,11 +25,15 @@ use {
                 get_cocoa_app_global,
                 init_cocoa_app_global
             },
-            core_midi::*,
+            core_midi::CoreMidiAccess,
+            audio_unit::AudioUnitAccess,
             metal::{MetalCx, MetalWindow, DrawPassMode},
         },
+        audio::AudioDevicesEvent,
+        midi::MidiPortsEvent,
         pass::{CxPassParent},
         event::{
+            SignalEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Signal,
@@ -270,7 +274,7 @@ impl Cx {
                 }
                 CocoaEvent::Signal(se) => {
                     //println!("SIGNAL!");
-                    //self.handle_core_midi_signals(&se);
+                    self.handle_media_signals(&se);
                     self.call_event_handler(&Event::Signal(se));
                 }
                 CocoaEvent::MenuCommand(e) => {
@@ -398,10 +402,57 @@ impl CxOsApi for Cx {
     }
 }
 
+impl Cx{
+    pub(crate) fn handle_media_signals(&mut self, ev:&SignalEvent){
+        if ev.signals.contains(&live_id!(CoreMidiPortsChanged).into()){
+            let descs = {
+                let core_midi = self.os.core_midi();
+                let mut core_midi = core_midi.lock().unwrap();
+                core_midi.update_port_list();
+                core_midi.get_descs()
+            };
+            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent{
+                descs,
+            }));
+        }
+        if ev.signals.contains(&live_id!(CoreAudioDeviceChange).into()){
+            let descs = {
+                let audio_unit = self.os.audio_unit();
+                let mut audio_unit = audio_unit.lock().unwrap();
+                audio_unit.update_device_list().unwrap();
+                audio_unit.get_descs()
+            };
+            self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
+                descs
+            }));
+        }
+    }
+    
+}
+
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) keep_alive_counter: usize,
     pub (crate) core_midi: Option<Arc<Mutex<CoreMidiAccess>>>,
+    pub (crate) audio_unit: Option<Arc<Mutex<AudioUnitAccess>>>,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
+}
+
+impl CxOs{
+    pub fn audio_unit(&mut self)->Arc<Mutex<AudioUnitAccess>>{
+        if self.audio_unit.is_none(){
+            self.audio_unit = Some(Arc::new(Mutex::new(AudioUnitAccess::new())));
+            Cx::post_signal(live_id!(CoreAudioDeviceChange).into());
+        }
+        self.audio_unit.as_ref().unwrap().clone()
+    }
+    
+    pub fn core_midi(&mut self)->Arc<Mutex<CoreMidiAccess>>{
+        if self.core_midi.is_none(){
+            self.core_midi = Some(Arc::new(Mutex::new(CoreMidiAccess::new().unwrap())));
+            Cx::post_signal(live_id!(CoreMidiPortsChanged).into());
+        }
+        self.core_midi.as_ref().unwrap().clone()
+    }
 }

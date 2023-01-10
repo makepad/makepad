@@ -49,11 +49,11 @@ impl CxMediaApi for Cx {
         MidiOutput(OsMidiOutput(self.os.win32_midi.as_ref().unwrap().clone()))
     }
 
-    fn handle_audio_device_list(&mut self, _event:&Event)->Vec<AudioDevice>{
+    fn handle_audio_devices(&mut self, _event:&Event)->Vec<AudioDevice>{
         Vec::new()
     }
 
-    fn request_audio_device_list(&mut self){}
+    fn query_audio_devices(&mut self){}
 
     
     fn start_audio_output<F>(&mut self, _device:Option<&AudioDevice>, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static {

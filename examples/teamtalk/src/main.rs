@@ -11,9 +11,9 @@ pub use makepad_micro_serde;
 use {
     crate::{
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
-        makepad_audio_graph::audio_stream::AudioStreamSender,
+        makepad_audio_graph::audio_stream::{AudioStreamSender},
         makepad_widgets::*,
-        makepad_platform::audio::AudioBuffer,
+        makepad_platform::audio::*,
         makepad_draw::*,
     },
     std::collections::HashMap,
@@ -61,7 +61,7 @@ impl App {
         makepad_audio_graph::live_design(cx);
     }
     
-    pub fn start_audio_io(&mut self, cx: &mut Cx) {
+    pub fn start_network_stack(&mut self, cx: &mut Cx) {
         // not a very good uid, but it'l do.
         let client_uid = LiveId::from_str(&format!("{:?}", std::time::SystemTime::now())).unwrap().0;
         // Audiostream is an mpsc channel that buffers at the recv side
@@ -96,13 +96,13 @@ impl App {
             let mut order = 0u64;
             let mut output_buffer = AudioBuffer::new_with_size(640, 1);
             loop {
-                let mut other_uid = [0u8;8];
+                let mut other_uid = [0u8; 8];
                 let time_now = Instant::now();
                 // nonblockingly (timeout=1ns) check our discovery socket for peers
                 while let Ok((_, mut addr)) = read_discovery.recv_from(&mut other_uid) {
-                    if client_uid == u64::from_be_bytes(other_uid){
-                        continue;
-                    }
+                    //if client_uid == u64::from_be_bytes(other_uid) {
+                    //    continue;
+                    //}
                     addr.set_port(41532);
                     if let Some(time) = peer_addrs.get_mut(&addr) {
                         *time = time_now;
@@ -115,9 +115,9 @@ impl App {
                 peer_addrs.retain( | _, time | *time > time_now - Duration::from_secs(5));
                 
                 // fill the mic stream recv side buffers, and block if nothing
-                mic_recv.recv_stream(1,3);
+                mic_recv.recv_stream(1, 3);
                 loop {
-                    if mic_recv.read_buffer(0, &mut output_buffer,0,0) == 0 {
+                    if mic_recv.read_buffer(0, &mut output_buffer, 0, 0) == 0 {
                         break;
                     }
                     
@@ -149,7 +149,7 @@ impl App {
         // the network audio receiving thread
         std::thread::spawn(move || {
             let mut read_buf = [0u8; 4096];
-            let mut last_orders:Vec<(u64,u64)> = Vec::new();
+            let mut last_orders: Vec<(u64, u64)> = Vec::new();
             
             while let Ok((len, addr)) = read_audio.recv_from(&mut read_buf) {
                 let route_id = if let std::net::IpAddr::V4(v4) = addr.ip() {
@@ -157,67 +157,75 @@ impl App {
                 }else {1};
                 
                 let read_buf = &read_buf[0..len];
-
+                
                 let packet = TeamTalkWire::deserialize_bin(&read_buf).unwrap();
                 
                 // create an audiobuffer from the data
-                let (order,buffer) = match packet {
+                let (order, buffer) = match packet {
                     TeamTalkWire::Audio {order, channel_count, data} => {
-                        (order,AudioBuffer::from_i16(&data, channel_count as usize))
+                        (order, AudioBuffer::from_i16(&data, channel_count as usize))
                     }
                     TeamTalkWire::Silence {order, frame_count} => {
                         (order, AudioBuffer::new_with_size(frame_count as usize, 1))
                     }
-                }; 
-                 
-                if let Some((_,order_store)) = last_orders.iter_mut().find( | v | v.0 == route_id) {
+                };
+                
+                if let Some((_, order_store)) = last_orders.iter_mut().find( | v | v.0 == route_id) {
                     let last_order = *order_store;
-                    *order_store = order; 
-                    if last_order != order - 1{
+                    *order_store = order;
+                    if last_order != order - 1 {
                         println!("Lost packet detected!")
                     }
                 }
-                else{
+                else {
                     last_orders.push((route_id, order));
                 }
-                 
+                
                 mix_send.write_buffer(route_id, buffer).unwrap();
             }
         });
         
-        // the audio output thread 
-        cx.start_audio_output(None, move | _time, output_buffer | {
+        cx.audio_input(move | _id, _device, _time, mut input_buffer | {
+            input_buffer.make_single_channel();
+            mic_send.write_buffer(0, input_buffer).unwrap();
+            AudioBuffer::default()
+        });
+        
+        cx.audio_output(move | _id, _device, _time, output_buffer | {
+            //println!("buffer {:?}",_time);
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
-            mix_recv.try_recv_stream(1,8);
+            mix_recv.try_recv_stream(1, 8);
             let mut chan = AudioBuffer::new_like(output_buffer);
-            for i in 0..mix_recv.num_routes() {  
-                if mix_recv.read_buffer(i, &mut chan, 0, 1) != 0 { 
+            for i in 0..mix_recv.num_routes() {
+                if mix_recv.read_buffer(i, &mut chan, 0, 1) != 0 {
                     for i in 0..chan.data.len() {
                         output_buffer.data[i] += chan.data[i];
                     }
                 }
             }
-        }); 
-        
-        
-        // the microphone input thread, just pushes the input data into an audiostream
-        cx.start_audio_input(None, move | _time, mut input_buffer | {
-            input_buffer.make_single_channel();
-            mic_send.write_buffer(0, input_buffer).unwrap();
-            AudioBuffer::default()
         });
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         // no UI as of yet
-        if let Event::Draw(event) = event {
-            return self.draw(&mut Cx2d::new(cx, event));
+        match event {
+            Event::Draw(event) => {
+                return self.draw(&mut Cx2d::new(cx, event));
+            }
+            Event::Construct => {
+                self.start_network_stack(cx);
+            }
+            Event::MidiPorts(ports) => {
+                cx.use_midi_inputs(&ports.all_inputs());
+            }
+            Event::AudioDevices(devices) => {
+                cx.use_audio_inputs(&devices.default_input());
+                cx.use_audio_outputs(&devices.default_output());
+            }
+            _ => ()
         }
-        if let Event::Construct = event {
-            println!("{:?}", cx.platform_type());
-            self.start_audio_io(cx);
-        }
+        
         self.ui.handle_event(cx, event);
         self.window.handle_event(cx, event);
     }
@@ -228,7 +236,7 @@ impl App {
         }
         
         while self.ui.draw(cx).is_not_done() {};
-         
+        
         //self.ui.redraw(cx);
         self.window.end(cx);
     }
