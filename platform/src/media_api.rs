@@ -1,22 +1,18 @@
 use crate::{
-    audio::{AudioDevice, AudioTime, AudioBuffer},
+    audio::{AudioDeviceId, AudioTime, AudioBuffer},
     midi::*,
-    event::Event,
 };
 
 pub trait CxMediaApi {
-    // midi
-    fn handle_midi_port_list(&mut self, event:&Event)->Vec<MidiPortId>;
-    fn midi_port_desc(&self, port: MidiPortId) -> Option<MidiPortDesc>;
-    
-    fn midi_output(&mut self) -> MidiOutput;  
     fn midi_input(&mut self) -> MidiInput;
+    fn midi_output(&mut self) -> MidiOutput;
     
-    // audio in/out
-    fn handle_audio_device_list(&mut self, event:&Event)->Vec<AudioDevice>;
-    fn request_audio_device_list(&mut self);
-    fn start_audio_output<F>(&mut self, device:Option<&AudioDevice>, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static;
-    fn start_audio_input<F>(&mut self, device:Option<&AudioDevice>, f: F) where F: FnMut(AudioTime, AudioBuffer)->AudioBuffer + Send + 'static;
+    fn use_midi_inputs(&mut self, ports:&[MidiPortId]);
+    fn use_midi_outputs(&mut self, ports:&[MidiPortId]);
     
-    // video in
+    fn use_audio_inputs(&mut self, devices:&[AudioDeviceId]);
+    fn use_audio_outputs(&mut self, devices:&[AudioDeviceId]);
+    
+    fn audio_output<F>(&mut self, f: F) where F: FnMut(usize, AudioDeviceId, AudioTime, &mut AudioBuffer) + Send  + 'static;
+    fn audio_input<F>(&mut self, f: F) where F: FnMut(usize, AudioDeviceId, AudioTime, AudioBuffer)->AudioBuffer + Send  + 'static;
 } 

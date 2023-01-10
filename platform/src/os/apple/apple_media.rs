@@ -1,22 +1,17 @@
 
 use {
-    std::sync::{Arc, Mutex},    
     crate::{
-        makepad_live_id::*,
-        makepad_error_log::*,
         cx::Cx,
-        event::Event,
         audio::*,
         midi::*,
         media_api::CxMediaApi,
-        os::apple::audio_unit::*,
         os::apple::core_midi::*
     }
 };
 
 
 impl CxMediaApi for Cx {
-    fn handle_midi_port_list(&mut self, event: &Event) -> Vec<MidiPortId> {
+    /*fn handle_midi_port_list(&mut self, event: &Event) -> Vec<MidiPortId> {
         if let Event::Signal(se) = event {
             if se.signals.contains(&live_id!(CoreMidiInputsChanged).into()) {
                 let core_midi = self.os.core_midi.as_mut().unwrap();
@@ -26,82 +21,91 @@ impl CxMediaApi for Cx {
             }
         }
         Vec::new()
+    }*/
+    
+    fn midi_input(&mut self) -> MidiInput {
+        self.os.core_midi().lock().unwrap().create_midi_input()
     }
     
-    fn midi_port_desc(&self, port: MidiPortId) -> Option<MidiPortDesc> {
-        if let Some(core_midi) = &self.os.core_midi{
-            core_midi.lock().unwrap().port_desc(port)
-        }
-        else{
-            None
-        }
+    fn midi_output(&mut self) -> MidiOutput {
+        MidiOutput(Some(OsMidiOutput(self.os.core_midi())))
     }
     
-    fn midi_input(&mut self)->MidiInput{
-        if self.os.core_midi.is_none(){
-            self.os.core_midi = Some(Arc::new(Mutex::new(CoreMidiAccess::new().unwrap())));
-        }
-        MidiInput(OsMidiInput(self.os.core_midi.as_ref().unwrap().clone()))
+    fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
+        let core_midi = self.os.core_midi();
+        core_midi.clone().lock().unwrap().use_midi_inputs(ports);
     }
     
-    fn midi_output(&mut self)->MidiOutput{
-        if self.os.core_midi.is_none(){
-            self.os.core_midi = Some(Arc::new(Mutex::new(CoreMidiAccess::new().unwrap())));
-        }
-        MidiOutput(OsMidiOutput(self.os.core_midi.as_ref().unwrap().clone()))
+    fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
+        let core_midi = self.os.core_midi();
+        core_midi.clone().lock().unwrap().use_midi_outputs(ports);
     }
     
-    fn handle_audio_device_list(&mut self, _event:&Event)->Vec<AudioDevice>{
-        Vec::new()
+    fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
+        let audio_unit = self.os.audio_unit();
+        audio_unit.clone().lock().unwrap().use_audio_inputs(devices);
     }
     
-    fn request_audio_device_list(&mut self){
+    fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
+        let audio_unit = self.os.audio_unit();
+        audio_unit.clone().lock().unwrap().use_audio_outputs(devices);
     }
     
-    fn start_audio_output<F>(&mut self, _device:Option<&AudioDevice>, f: F) where F: FnMut(AudioTime, &mut AudioBuffer) + Send + 'static {
-        let fbox = std::sync::Arc::new(std::sync::Mutex::new(Box::new(f)));
-        std::thread::spawn(move || {
-            let out = &AudioUnitFactory::query_audio_units(AudioUnitType::DefaultOutput)[0];
-            let fbox = fbox.clone();
-            AudioUnitFactory::new_audio_unit(out, move | result | {
-                match result {
-                    Ok(audio_unit) => {
-                        let fbox = fbox.clone();
-                        audio_unit.set_input_callback(move | time, output | {
-                            let mut fbox = fbox.lock().unwrap();
-                            fbox(time, output);
-                        });
-                        loop {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                    }
-                    Err(err) => error!("spawn_audio_output Error {:?}", err)
+    fn audio_output<F>(&mut self, f: F) where F: FnMut(usize, AudioDeviceId, AudioTime, &mut AudioBuffer) + Send + 'static {
+        let audio_unit = self.os.audio_unit();
+        *audio_unit.lock().unwrap().audio_output_cb.lock().unwrap() = Some(Box::new(f));
+        /*
+        //std::thread::spawn(move || {
+        let out = &AudioUnitFactory::query_audio_units(AudioUnitSelect::DefaultOutput)[0];
+        let fbox = fbox.clone();
+        AudioUnitFactory::new_audio_unit(out, Some(device.clone()), move | result | {
+            match result {
+                Ok(mut audio_unit) => {
+                    // lets observe device 
+                    audio_device_change.lock().unwrap().observe_termination(device.os.0);
+                    let fbox = fbox.clone();
+                    audio_unit.set_input_callback(move | time, output | {
+                        let mut fbox = fbox.lock().unwrap();
+                        fbox(time, output);
+                    });
+                    // ok so we have to kinda terminate this loop here
+                    //loop {
+                        //println!("IN AUDIO UNIT LOOP");
+                        //std::thread::sleep(std::time::Duration::from_millis(100));
+                    //}
                 }
-            });
+                Err(err) => error!("spawn_audio_output Error {:?}", err)
+            }
         });
+        */
+        //});
     }
     
-    fn start_audio_input<F>(&mut self, _device:Option<&AudioDevice>, f: F) where F: FnMut(AudioTime, AudioBuffer)->AudioBuffer + Send + 'static {
-        let fbox = std::sync::Arc::new(std::sync::Mutex::new(Box::new(f)));
-        std::thread::spawn(move || {
-            let out = &AudioUnitFactory::query_audio_units(AudioUnitType::DefaultInput)[0];
-            let fbox = fbox.clone();
-            AudioUnitFactory::new_audio_unit(out, move | result | {
-                match result {
-                    Ok(audio_unit) => { 
-                        let fbox = fbox.clone();
-                        audio_unit.set_output_callback(move | time, buffer | {
-                            let mut fbox = fbox.lock().unwrap();
-                            fbox(time, buffer)
-                        });
-                        loop {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                    }
-                    Err(err) => error!("spawn_audio_output Error {:?}", err)
+    fn audio_input<F>(&mut self, f: F)
+    where F: FnMut(usize, AudioDeviceId, AudioTime, AudioBuffer) -> AudioBuffer + Send + 'static {
+        let audio_unit = self.os.audio_unit();
+        *audio_unit.lock().unwrap().audio_input_cb .lock().unwrap() = Some(Box::new(f));
+        /*
+        //std::thread::spawn(move || {
+        let out = &AudioUnitFactory::query_audio_units(AudioUnitSelect::DefaultInput)[0];
+        let fbox = fbox.clone();
+        AudioUnitFactory::new_audio_unit(out, Some(device), move | result | {
+            match result {
+                Ok(audio_unit) => { 
+                    let fbox = fbox.clone();
+                    audio_unit.set_output_callback(move | time, buffer | {
+                        let mut fbox = fbox.lock().unwrap();
+                        fbox(time, buffer)
+                    });
+                    //loop {
+                    //    std::thread::sleep(std::time::Duration::from_millis(100));
+                    //}
                 }
-            });
+                Err(err) => error!("spawn_audio_output Error {:?}", err)
+            }
         });
+        */
+        // });
     }
     
 }

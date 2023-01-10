@@ -16,6 +16,5 @@ pub mod apple_media;
 
 pub(crate) use crate::os::apple::metal::*;
 pub(crate) use crate::os::apple::macos::*;
-pub(crate) use crate::os::apple::audio_unit::OsAudioDevice;
-pub(crate) use crate::os::apple::core_midi::{OsMidiInput, OsMidiOutput};
+pub(crate) use crate::os::apple::core_midi::{OsMidiOutput};
 

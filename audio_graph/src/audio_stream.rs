@@ -4,6 +4,7 @@ use {
     crate::{
         makepad_platform::audio::*,
     },
+    std::sync::{Arc, Mutex},
     std::sync::mpsc::{
         channel,
         Sender,
@@ -18,7 +19,10 @@ pub struct AudioStreamSender {
 }
 unsafe impl Send for AudioStreamSender {}
 
-pub struct AudioStreamReceiver {
+#[derive(Clone)]
+pub struct AudioStreamReceiver(Arc<Mutex<ReceiverInner>>);
+
+pub struct ReceiverInner {
     pub routes: Vec<AudioRoute>,
     stream_recv: Receiver<(u64, AudioBuffer)>,
 }
@@ -38,10 +42,10 @@ impl AudioStreamSender {
         let (stream_send, stream_recv) = channel::<(u64, AudioBuffer)>();
         (AudioStreamSender {
             stream_send,
-        }, AudioStreamReceiver {
+        }, AudioStreamReceiver(Arc::new(Mutex::new(ReceiverInner {
             stream_recv,
             routes: Vec::new()
-        })
+        }))))
     }
     
     pub fn write_buffer(&self, route_id: u64, buffer: AudioBuffer) -> Result<(), SendError<(u64, AudioBuffer) >> {
@@ -51,20 +55,23 @@ impl AudioStreamSender {
 
 impl AudioStreamReceiver {
     pub fn num_routes(&self) -> usize {
-        self.routes.len()
+        let iself = self.0.lock().unwrap();
+        iself.routes.len()
     }
     
     pub fn route_id(&self, route_num: usize) -> u64 {
-        self.routes[route_num].id
+        let iself = self.0.lock().unwrap();
+        iself.routes[route_num].id
     }
 
     pub fn try_recv_stream(&mut self, min_buf: usize, max_buf:usize) {
-        while let Ok((route_id, buf)) = self.stream_recv.try_recv() {
-            if let Some(route) = self.routes.iter_mut().find( | v | v.id == route_id) {
+        let mut iself = self.0.lock().unwrap();
+        while let Ok((route_id, buf)) = iself.stream_recv.try_recv() {
+            if let Some(route) = iself.routes.iter_mut().find( | v | v.id == route_id) {
                 route.buffers.push(buf);
             }
             else {
-                self.routes.push(AudioRoute {
+                iself.routes.push(AudioRoute {
                     min_buf,
                     max_buf,
                     id: route_id,
@@ -76,26 +83,29 @@ impl AudioStreamReceiver {
     }
     
     pub fn recv_stream(&mut self, min_buf: usize, max_buf:usize) {
-        if let Ok((route_id, buf)) = self.stream_recv.recv() {
-            if let Some(route) = self.routes.iter_mut().find( | v | v.id == route_id) {
-                route.buffers.push(buf);
-            }
-            else {
-                self.routes.push(AudioRoute {
-                    min_buf,
-                    max_buf,
-                    id: route_id,
-                    buffers: vec![buf],
-                    start_offset: 0
-                });
+        {
+            let mut iself = self.0.lock().unwrap();
+            if let Ok((route_id, buf)) = iself.stream_recv.recv() {
+                if let Some(route) = iself.routes.iter_mut().find( | v | v.id == route_id) {
+                    route.buffers.push(buf);
+                }
+                else {
+                    iself.routes.push(AudioRoute {
+                        min_buf,
+                        max_buf,
+                        id: route_id,
+                        buffers: vec![buf],
+                        start_offset: 0
+                    });
+                }
             }
         }
         self.try_recv_stream(min_buf, max_buf);
     }
     
     pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_buf: usize, max_buf:usize) -> usize {
-        
-        let route = if let Some(route) = self.routes.get_mut(route_num) {
+        let mut iself = self.0.lock().unwrap();
+        let route = if let Some(route) = iself.routes.get_mut(route_num) {
             route
         }
         else {
