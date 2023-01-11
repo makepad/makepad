@@ -24,10 +24,10 @@ pub trait TokenSliceApi {
     fn find_tokens_index(&self, tokens: &[TokenWithString]) -> Option<usize>;
     fn find_str_index(&self, what: &str) -> Option<usize>;
     fn after(&self, what: &str) -> Option<&[TokenWithString]>;
-    fn at(&self, what: &str) -> Option<(&[TokenWithString],&[TokenWithString])>;
+    fn at(&self, what: &str) -> Option<(&[TokenWithString], &[TokenWithString])>;
     fn find_close(&self, delim: Delim) -> Option<&[TokenWithString]>;
     fn find_token(&self, token: FullToken) -> Option<&[TokenWithString]>;
-    fn find_strs_rev(&self, what:&[Vec<TokenWithString>]) -> Option<usize>;
+    fn find_strs_rev(&self, what: &[Vec<TokenWithString>]) -> Option<usize>;
     fn parse_use(&self) -> Vec<Vec<LiveId >>;
     fn to_string(&self) -> String;
 }
@@ -35,7 +35,7 @@ pub trait TokenSliceApi {
 impl<T> TokenSliceApi for T where T: AsRef<[TokenWithString]> {
     fn to_string(&self) -> String {
         let mut out = String::new();
-        for token in self.as_ref(){
+        for token in self.as_ref() {
             out.push_str(&token.value);
         }
         out
@@ -45,7 +45,7 @@ impl<T> TokenSliceApi for T where T: AsRef<[TokenWithString]> {
         let source = self.as_ref();
         for i in 0..source.len() {
             for j in 0..what.len() {
-                if source[i+j].token != what[j].token {
+                if source[i + j].token != what[j].token {
                     break;
                 }
                 if j == what.len() - 1 {
@@ -56,13 +56,13 @@ impl<T> TokenSliceApi for T where T: AsRef<[TokenWithString]> {
         None
     }
     
-    fn find_strs_rev(&self, what:&[Vec<TokenWithString>])->Option<usize>{
+    fn find_strs_rev(&self, what: &[Vec<TokenWithString>]) -> Option<usize> {
         let source = self.as_ref();
         for i in (0..source.len()).rev() {
-            for (index, what) in what.iter().enumerate(){
-                if what.len() <= source.len() - i{
+            for (index, what) in what.iter().enumerate() {
+                if what.len() <= source.len() - i {
                     for j in 0..what.len() {
-                        if source[i+j].token != what[j].token {
+                        if source[i + j].token != what[j].token {
                             break;
                         }
                         if j == what.len() - 1 {
@@ -74,7 +74,7 @@ impl<T> TokenSliceApi for T where T: AsRef<[TokenWithString]> {
         }
         None
     }
-
+    
     fn find_str_index(&self, what: &str) -> Option<usize> {
         self.find_tokens_index(&parse_to_tokens(what))
     }
@@ -88,7 +88,7 @@ impl<T> TokenSliceApi for T where T: AsRef<[TokenWithString]> {
         None
     }
     
-    fn at(&self, what: &str) -> Option<(&[TokenWithString],&[TokenWithString])> {
+    fn at(&self, what: &str) -> Option<(&[TokenWithString], &[TokenWithString])> {
         let source = self.as_ref();
         let what = &parse_to_tokens(what);
         if let Some(pos) = source.find_tokens_index(what) {
@@ -194,15 +194,15 @@ fn parse_to_tokens(source: &str) -> Vec<TokenWithString> {
             let (next_state, full_token) = state.next(&mut cursor);
             if let Some(full_token) = full_token {
                 let next_token_start = last_token_start + full_token.len;
-                let value:String = total_chars[last_token_start..next_token_start].into_iter().collect();
+                let value: String = total_chars[last_token_start..next_token_start].into_iter().collect();
                 if !full_token.is_ws_or_comment() {
-                    tokens.push(TokenWithString{
+                    tokens.push(TokenWithString {
                         token: full_token.token,
                         value
                     });
                 }
-                else{
-                    if let Some(last) = tokens.last_mut(){
+                else {
+                    if let Some(last) = tokens.last_mut() {
                         last.value.push_str(&value);
                     }
                 }
@@ -213,18 +213,19 @@ fn parse_to_tokens(source: &str) -> Vec<TokenWithString> {
             }
             state = next_state;
         }
-        if let Some(last) = tokens.last_mut(){
+        if let Some(last) = tokens.last_mut() {
             last.value.push_str("\n");
         }
     }
     tokens
 }
 
-fn parse_file<'a>(file: &str, cache:&'a mut Vec<(String,Vec<TokenWithString>)>) -> Result<&'a [TokenWithString], Box<dyn std::error::Error >> {
-    if let Some(index) = cache.iter().position(|v| v.0 == file){
+fn parse_file<'a>(file: &str, cache: &'a mut Vec<(String, Vec<TokenWithString>)>) -> Result<&'a [TokenWithString],
+Box<dyn std::error::Error >> {
+    if let Some(index) = cache.iter().position( | v | v.0 == file) {
         return Ok(&cache[index].1)
     }
-    else{
+    else {
         let source = fs::read_to_string(file) ?;
         let source = parse_to_tokens(&source);
         cache.push((file.to_string(), source));
@@ -247,54 +248,54 @@ fn filter_symbols(inp: Vec<Vec<LiveId >>, filter: &[LiveId]) -> Vec<Vec<LiveId >
     out
 }
 
-enum Node{
-    Sub(Vec<(LiveId,Node)>),
+enum Node {
+    Sub(Vec<(LiveId, Node)>),
     Value(String)
 }
-    
-fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<(String,Vec<TokenWithString>)>){
+
+fn generate_win32_outputs_from_file(file: &str, output: &mut Node, cache: &mut Vec<(String, Vec<TokenWithString>)>) {
     
     let source = parse_file(file, cache).unwrap();
     let symbols = source.parse_use();
     let symbols = filter_symbols(symbols, id!(crate.windows_crate.Win32));
-
-    fn push_unique(output:&mut Node, what:&[LiveId], value:String){
-        if what.len() == 1{
+    
+    fn push_unique(output: &mut Node, what: &[LiveId], value: String) {
+        if what.len() == 1 {
             // terminator node
-            if let Node::Sub(vec) = output{
-                if  vec.iter_mut().find(|v| v.0 == what[0]).is_none(){
+            if let Node::Sub(vec) = output {
+                if vec.iter_mut().find( | v | v.0 == what[0]).is_none() {
                     vec.push((what[0], Node::Value(value)));
                 }
             }
-            else{
+            else {
                 panic!();
             }
         }
-        else{
-            if let Node::Sub(vec) = output{
-                if let Some(child) = vec.iter_mut().find(|v| v.0 == what[0]){
+        else {
+            if let Node::Sub(vec) = output {
+                if let Some(child) = vec.iter_mut().find( | v | v.0 == what[0]) {
                     return push_unique(&mut child.1, &what[1..], value);
                 }
                 let mut child = Node::Sub(Vec::new());
                 push_unique(&mut child, &what[1..], value);
                 vec.push((what[0], child));
             }
-            else{
+            else {
                 panic!();
             }
         }
     }
-
-    fn add_impl(out:&mut String,input:&[TokenWithString], at:String,  )->bool{
-        if let Some((_,is_impl)) = input.at(&at){
+    
+    fn add_impl(out: &mut String, input: &[TokenWithString], at: String,) -> bool {
+        if let Some((_, is_impl)) = input.at(&at) {
             let is_impl = is_impl.find_close(Delim::Brace).unwrap();
             out.push_str(&is_impl.to_string());
             true
         }
-        else{
+        else {
             false
         }
-    }    
+    }
     let prefixes_str = ["#[repr(C)]", "#[repr(C, packed(1))]", "#[repr(transparent)]"];
     let prefixes_tok = [parse_to_tokens(prefixes_str[0]), parse_to_tokens(prefixes_str[1]), parse_to_tokens(prefixes_str[2])];
     
@@ -303,35 +304,35 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
         let mut path = format!("./tools/windows_strip/windows_source/src/Win32");
         // ok so everything is going to go into the module Win32
         // but how do we sort the substructure
-        for i in 0..sym.len() - 1 { 
+        for i in 0..sym.len() - 1 {
             path.push_str(&format!("/{}", sym[i]));
         }
-
+        
         let mod_tokens = parse_file(&format!("{}/mod.rs", path), cache).expect(&format!("{}", path));
-
-        let sym_id = sym[sym.len()-1];
-
-        if let Some((_,is_fn)) = mod_tokens.at(&format!("pub unsafe fn {}", sym_id)){
+        
+        let sym_id = sym[sym.len() - 1];
+        
+        if let Some((_, is_fn)) = mod_tokens.at(&format!("pub unsafe fn {}", sym_id)) {
             let is_fun = is_fn.find_close(Delim::Brace).unwrap();
             //  ok so how do we do this
             push_unique(output, &sym, is_fun.to_string());
         }
-        else if let Some((_,is_const)) = mod_tokens.at(&format!("pub const {}", sym_id)){
+        else if let Some((_, is_const)) = mod_tokens.at(&format!("pub const {}", sym_id)) {
             let is_const = is_const.find_token(FullToken::Punct(live_id!(;))).unwrap();
             push_unique(output, &sym, is_const.to_string());
         }
-        else if let Some((_,is_type)) = mod_tokens.at(&format!("pub type {}", sym_id)){
+        else if let Some((_, is_type)) = mod_tokens.at(&format!("pub type {}", sym_id)) {
             let is_type = is_type.find_token(FullToken::Punct(live_id!(;))).unwrap();
             push_unique(output, &sym, is_type.to_string());
         }
-        else if let Some((pre_union,is_union)) = mod_tokens.at(&format!("pub union {}", sym_id)){
+        else if let Some((pre_union, is_union)) = mod_tokens.at(&format!("pub union {}", sym_id)) {
             let is_union = is_union.find_close(Delim::Brace).unwrap();
-            let pre = if let Some(pre) = pre_union.find_strs_rev(&prefixes_tok){prefixes_str[pre]}else{""};
+            let pre = if let Some(pre) = pre_union.find_strs_rev(&prefixes_tok) {prefixes_str[pre]}else {""};
             
             let mut out = String::new();
             out.push_str(pre);
             out.push_str(&is_union.to_string());
-
+            
             add_impl(&mut out, mod_tokens, format!("impl ::core::marker::Copy for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::Eq for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::PartialEq for {}", sym_id));
@@ -340,17 +341,17 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
             add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows::core::Abi for {}", sym_id));
             push_unique(output, &sym, out);
         }
-        else if let Some((pre_struct,is_struct)) = mod_tokens.at(&format!("pub struct {}", sym_id)){
+        else if let Some((pre_struct, is_struct)) = mod_tokens.at(&format!("pub struct {}", sym_id)) {
             let mut out = String::new();
-            let is_struct = if let FullToken::Open(Delim::Paren) = is_struct[3].token{
+            let is_struct = if let FullToken::Open(Delim::Paren) = is_struct[3].token {
                 is_struct.find_token(FullToken::Punct(live_id!(;))).unwrap()
             }
-            else{
+            else {
                 is_struct.find_close(Delim::Brace).unwrap()
             };
             
-            let pre = if let Some(pre) = pre_struct.find_strs_rev(&prefixes_tok){prefixes_str[pre]}else{""};
-
+            let pre = if let Some(pre) = pre_struct.find_strs_rev(&prefixes_tok) {prefixes_str[pre]}else {""};
+            
             out.push_str(&pre);
             
             out.push_str(&is_struct.to_string());
@@ -359,15 +360,15 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
             
             add_impl(&mut out, mod_tokens, format!("impl ::core::marker::Copy for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::Eq for {}", sym_id));
-            if !add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::PartialEq for {}", sym_id)){
-                if let FullToken::Open(Delim::Paren) = is_struct[3].token{
+            if !add_impl(&mut out, mod_tokens, format!("impl ::core::cmp::PartialEq for {}", sym_id)) {
+                if let FullToken::Open(Delim::Paren) = is_struct[3].token {
                     out.insert_str(0, "#[derive(PartialEq, Eq)]")
                 }
             }
             add_impl(&mut out, mod_tokens, format!("impl ::core::clone::Clone for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("impl ::core::default::Default for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows::core::Abi for {}", sym_id));
-
+            
             add_impl(&mut out, mod_tokens, format!("impl ::core::fmt::Debug for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("impl ::core::ops::BitOr for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("impl ::core::ops::BitAnd for {}", sym_id));
@@ -379,38 +380,39 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
             add_impl(&mut out, mod_tokens, format!("unsafe impl ::core::marker::Sync for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows::core::Vtable for {}", sym_id));
             add_impl(&mut out, mod_tokens, format!("unsafe impl ::windows::core::Interface for {}", sym_id));
-
+            add_impl(&mut out, mod_tokens, format!("impl ::windows::core::RuntimeName for {}", sym_id));
+            
             push_unique(output, &sym, out);
         }
         
-        if let Some((_,is_com)) = mod_tokens.at(&format!("pub struct {}_Vtbl", sym_id)){
+        if let Some((_, is_com)) = mod_tokens.at(&format!("pub struct {}_Vtbl", sym_id)) {
             let mut sym = sym.clone();
-            let sym_end = sym.len() -1;
+            let sym_end = sym.len() - 1;
             
-            if let Some((_,is_hier)) = mod_tokens.at(&format!("::windows::core::interface_hierarchy!({}", sym_id)){
+            if let Some((_, is_hier)) = mod_tokens.at(&format!("::windows::core::interface_hierarchy!({}", sym_id)) {
                 let is_hier = is_hier.find_token(FullToken::Punct(live_id!(;))).unwrap();
-                sym[sym_end] = LiveId::from_str(&format!("{}_hierarchy",sym_id)).unwrap();
+                sym[sym_end] = LiveId::from_str(&format!("{}_hierarchy", sym_id)).unwrap();
                 push_unique(output, &sym, is_hier.to_string());
             }
-
+            
             let is_com = is_com.find_close(Delim::Brace).unwrap();
-            sym[sym_end] = LiveId::from_str(&format!("{}_Vtbl",sym_id)).unwrap();
-            push_unique(output, &sym, format!("#[repr(C)]\n{}",is_com.to_string()));
+            sym[sym_end] = LiveId::from_str(&format!("{}_Vtbl", sym_id)).unwrap();
+            push_unique(output, &sym, format!("#[repr(C)]\n{}", is_com.to_string()));
             
             // fetch impl tokens
             
             let impl_tokens = parse_file(&format!("{}/impl.rs", path), cache).unwrap();
             
-            let (_,is_trait) = impl_tokens.at(&format!("pub trait {}_Impl", sym_id)).unwrap();
+            let (_, is_trait) = impl_tokens.at(&format!("pub trait {}_Impl", sym_id)).unwrap();
             let is_trait = is_trait.find_close(Delim::Brace).unwrap();
-            sym[sym_end] = LiveId::from_str(&format!("{}_Impl",sym_id)).unwrap();
+            sym[sym_end] = LiveId::from_str(&format!("{}_Impl", sym_id)).unwrap();
             push_unique(output, &sym, is_trait.to_string());
             
-            let (_,is_impl) = impl_tokens.at(&format!("impl {}_Vtbl", sym_id)).unwrap();
+            let (_, is_impl) = impl_tokens.at(&format!("impl {}_Vtbl", sym_id)).unwrap();
             let is_impl = is_impl.find_close(Delim::Brace).unwrap();
-            sym[sym_end] = LiveId::from_str(&format!("{}_Vtbl2",sym_id)).unwrap();
+            sym[sym_end] = LiveId::from_str(&format!("{}_Vtbl2", sym_id)).unwrap();
             push_unique(output, &sym, is_impl.to_string());
-
+            
         }
     }
 }
@@ -418,29 +420,29 @@ fn generate_win32_outputs_from_file(file:&str, output:&mut Node, cache:&mut Vec<
 fn main() {
     let mut output = Node::Sub(Vec::new());
     let mut cache = Vec::new();
-    generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_app.rs",&mut output, &mut cache);
-    generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_window.rs",&mut output, &mut cache);
-    generate_win32_outputs_from_file("./platform/src/os/mswindows/d3d11.rs",&mut output, &mut cache);
-    generate_win32_outputs_from_file("./platform/src/os/mswindows/wasapi.rs",&mut output, &mut cache);
-    generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_midi.rs",&mut output, &mut cache);
-    generate_win32_outputs_from_file("./tools/windows_strip/platform_win32_deps.rs",&mut output, &mut cache);
+    generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_app.rs", &mut output, &mut cache);
+    generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_window.rs", &mut output, &mut cache);
+    generate_win32_outputs_from_file("./platform/src/os/mswindows/d3d11.rs", &mut output, &mut cache);
+    generate_win32_outputs_from_file("./platform/src/os/mswindows/wasapi.rs", &mut output, &mut cache);
+    generate_win32_outputs_from_file("./platform/src/os/mswindows/win32_midi.rs", &mut output, &mut cache);
+    generate_win32_outputs_from_file("./tools/windows_strip/platform_win32_deps.rs", &mut output, &mut cache);
     
-    fn generate_string_from_outputs(node:&Node, output:&mut String){
-        match node{
-            Node::Sub(vec)=>{
-                for (sub,node) in vec{
-                    if let Node::Value(v) = node{
+    fn generate_string_from_outputs(node: &Node, output: &mut String) {
+        match node {
+            Node::Sub(vec) => {
+                for (sub, node) in vec {
+                    if let Node::Value(v) = node {
                         output.push_str(&v);
                         output.push_str("\n");
                     }
-                    else{
+                    else {
                         output.push_str(&format!("pub mod {}{{\n", sub));
                         generate_string_from_outputs(node, output);
                         output.push_str("}\n");
                     }
                 }
             }
-            _=>panic!()
+            _ => panic!()
         }
     }
     
@@ -449,6 +451,6 @@ fn main() {
     gen.push_str("#![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]\npub mod Win32{\n");
     generate_string_from_outputs(&output, &mut gen);
     gen.push_str("\n}\n");
-    // lets write the output file 
-    fs::write("./platform/bind/windows/src/Windows/mod.rs", gen).unwrap();    
-} 
+    // lets write the output file
+    fs::write("./platform/bind/windows/src/Windows/mod.rs", gen).unwrap();
+}

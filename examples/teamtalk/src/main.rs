@@ -100,9 +100,9 @@ impl App {
                 let time_now = Instant::now();
                 // nonblockingly (timeout=1ns) check our discovery socket for peers
                 while let Ok((_, mut addr)) = read_discovery.recv_from(&mut other_uid) {
-                    //if client_uid == u64::from_be_bytes(other_uid) {
-                    //    continue;
-                    //}
+                    if client_uid == u64::from_be_bytes(other_uid) {
+                        continue;
+                    }
                     addr.set_port(41532);
                     if let Some(time) = peer_addrs.get_mut(&addr) {
                         *time = time_now;
@@ -115,9 +115,9 @@ impl App {
                 peer_addrs.retain( | _, time | *time > time_now - Duration::from_secs(5));
                 
                 // fill the mic stream recv side buffers, and block if nothing
-                mic_recv.recv_stream(1, 3);
+                mic_recv.recv_stream();
                 loop {
-                    if mic_recv.read_buffer(0, &mut output_buffer, 0, 0) == 0 {
+                    if mic_recv.read_buffer(0, &mut output_buffer, 1) == 0 {
                         break;
                     }
                     
@@ -185,20 +185,20 @@ impl App {
             }
         });
         
-        cx.audio_input(move | _id, _device, _time, mut input_buffer | {
+        cx.audio_input(0, move | _device, _time, mut input_buffer | {
             input_buffer.make_single_channel();
             mic_send.write_buffer(0, input_buffer).unwrap();
             AudioBuffer::default()
         });
         
-        cx.audio_output(move | _id, _device, _time, output_buffer | {
+        cx.audio_output(0, move | _device, _time, output_buffer | {
             //println!("buffer {:?}",_time);
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
-            mix_recv.try_recv_stream(1, 8);
+            mix_recv.try_recv_stream();
             let mut chan = AudioBuffer::new_like(output_buffer);
             for i in 0..mix_recv.num_routes() {
-                if mix_recv.read_buffer(i, &mut chan, 0, 1) != 0 {
+                if mix_recv.read_buffer(i, &mut chan, 1) != 0 {
                     for i in 0..chan.data.len() {
                         output_buffer.data[i] += chan.data[i];
                     }
@@ -225,12 +225,12 @@ impl App {
             }
             _ => ()
         }
-        
+         
         self.ui.handle_event(cx, event);
         self.window.handle_event(cx, event);
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d) {
+    pub fn draw(&mut self, cx: &mut Cx2d) { 
         if self.window.begin(cx).not_redrawing() {
             return;
         }
