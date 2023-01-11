@@ -12,11 +12,14 @@ use {
             mswindows::{
                 win32_midi::*,
                 win32_event::*,
+                wasapi::WasapiAccess,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
             },
             cx_desktop::EventFlow,
         },
+        audio::AudioDevicesEvent,
+        midi::MidiPortsEvent,
         pass::{CxPassParent},
         cx_api::{CxOsApi, CxOsOp},
     }
@@ -177,7 +180,7 @@ impl Cx {
                 }
                 Win32Event::Signal(se) => {
                     //println!("SIGNAL!");
-                    //self.handle_core_midi_signals(&se);
+                    self.handle_media_signals(&se);
                     self.call_event_handler(&Event::Signal(se));
                 }
                 //Win32Event::MenuCommand(e) => {
@@ -323,8 +326,55 @@ impl CxOsApi for Cx {
 }
 
 
+impl Cx {
+    pub (crate) fn handle_media_signals(&mut self, ev: &SignalEvent) {
+        if ev.signals.contains(&live_id!(Win32MidiPortsChanged).into()) {
+            let descs = {
+                let win32_midi = self.os.win32_midi();
+                let mut win32_midi = win32_midi.lock().unwrap();
+                win32_midi.update_port_list();
+                win32_midi.get_descs()
+            };
+            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
+                descs,
+            }));
+        }
+        if ev.signals.contains(&live_id!(WasapiDeviceChange).into()){
+            let descs = {
+                let wasapi = self.os.wasapi();
+                let mut wasapi = wasapi.lock().unwrap();
+                wasapi.update_device_list();
+                wasapi.get_descs()
+            };
+            self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
+                descs
+            }));
+        }
+    }
+    
+}
+
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) win32_midi: Option<Arc<Mutex<Win32MidiAccess >> >,
+    pub (crate) wasapi: Option<Arc<Mutex<WasapiAccess >> >,
 }
 
+impl CxOs {
+    
+    pub fn win32_midi(&mut self) -> Arc<Mutex<Win32MidiAccess >> {
+        if self.win32_midi.is_none() {
+            self.win32_midi = Some(Arc::new(Mutex::new(Win32MidiAccess::new().unwrap())));
+            Cx::post_signal(live_id!(Win32MidiPortsChanged).into());
+        }
+        self.win32_midi.as_ref().unwrap().clone()
+    }
+    
+    pub fn wasapi(&mut self) -> Arc<Mutex<WasapiAccess >> {
+        if self.wasapi.is_none() {
+            self.wasapi = Some(Arc::new(Mutex::new(WasapiAccess::new())));
+            Cx::post_signal(live_id!(WasapiDeviceChange).into());
+        }
+        self.wasapi.as_ref().unwrap().clone()
+    }
+}
