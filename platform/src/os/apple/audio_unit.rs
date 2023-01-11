@@ -566,8 +566,8 @@ pub struct RunningAudioUnit {
 #[derive(Default)]
 pub struct AudioUnitAccess {
     pub audio_devices: Vec<CoreAudioDevice>,
-    pub audio_input_cb: Arc<Mutex<Option<Box<dyn FnMut(usize, AudioDeviceId, AudioTime, AudioBuffer) -> AudioBuffer + Send + 'static >> > >,
-    pub audio_output_cb: Arc<Mutex<Option<Box<dyn FnMut(usize, AudioDeviceId, AudioTime, &mut AudioBuffer) + Send + 'static >> > >,
+    pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioDeviceId, AudioTime, AudioBuffer) -> AudioBuffer + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
+    pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioDeviceId, AudioTime, &mut AudioBuffer) + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
     pub audio_inputs: Arc<Mutex<Vec<RunningAudioUnit >> >,
     pub audio_outputs: Arc<Mutex<Vec<RunningAudioUnit >> >
 }
@@ -602,35 +602,35 @@ impl AudioUnitAccess {
             });
             // create the new ones
             let mut new = Vec::new();
-            for device_id in devices {
+            for (index, device_id) in devices.iter().enumerate() {
                 if audio_inputs.iter().find( | v | v.device_id == *device_id).is_none() {
-                    new.push(*device_id)
+                    new.push((index,*device_id))
                 }
             }
-            for device_id in &new {
+            for (_,device_id) in &new {
                 audio_inputs.push(RunningAudioUnit {
                     device_id: *device_id,
                     audio_unit: None
                 });
             }
             new
-            
         };
-        for (index, device_id) in new.into_iter().enumerate() {
+        for (index, device_id) in new {
             // lets create an audio input
             let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Input)[0];
             let audio_inputs = self.audio_inputs.clone();
-            let audio_input_cb = self.audio_input_cb.clone();
+            let audio_input_cb = self.audio_input_cb[index].clone();
             
             self.new_audio_io(unit_info, device_id, move | result | {
                 let mut audio_inputs = audio_inputs.lock().unwrap();
                 match result {
                     Ok(audio_unit) => {
+                        
                         let running = audio_inputs.iter_mut().find( | v | v.device_id == device_id).unwrap();
                         let audio_input_cb = audio_input_cb.clone();
                         audio_unit.set_input_handler(move | time, output | {
                             if let Some(audio_input_cb) = &mut *audio_input_cb.lock().unwrap() {
-                                return audio_input_cb(index, device_id, time, output)
+                                return audio_input_cb(device_id, time, output)
                             }
                             output
                         });
@@ -665,12 +665,12 @@ impl AudioUnitAccess {
             });
             // create the new ones
             let mut new = Vec::new();
-            for device_id in devices {
+            for (index, device_id) in devices.iter().enumerate() {
                 if audio_outputs.iter().find( | v | v.device_id == *device_id).is_none() {
-                    new.push(*device_id)
+                    new.push((index,*device_id))
                 }
             }
-            for device_id in &new {
+            for (_,device_id) in &new {
                 audio_outputs.push(RunningAudioUnit {
                     device_id: *device_id,
                     audio_unit: None
@@ -679,11 +679,11 @@ impl AudioUnitAccess {
             new
             
         };
-        for (index, device_id) in new.into_iter().enumerate() {
+        for (index, device_id) in new {
             // lets create an audio input
             let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Output)[0];
             let audio_outputs = self.audio_outputs.clone();
-            let audio_output_cb = self.audio_output_cb.clone();
+            let audio_output_cb = self.audio_output_cb[index].clone();
             
             self.new_audio_io(unit_info, device_id, move | result | {
                 let mut audio_inputs = audio_outputs.lock().unwrap();
@@ -694,7 +694,7 @@ impl AudioUnitAccess {
                         let audio_output_cb = audio_output_cb.clone();
                         audio_unit.set_output_provider(move | time, output | {
                             if let Some(audio_output_cb) = &mut *audio_output_cb.lock().unwrap() {
-                                audio_output_cb(index, device_id, time, output)
+                                audio_output_cb(device_id, time, output)
                             }
                         });
                         running.audio_unit = Some(audio_unit);
@@ -733,7 +733,7 @@ impl AudioUnitAccess {
         ]};
     }
     
-    pub fn observe_audio_unit_termination(device_id: AudioDeviceID) {
+    pub fn observe_audio_unit_termination(core_device_id: AudioDeviceID) {
         
         #[allow(non_snake_case)]
         unsafe extern "system" fn listener_fn(
@@ -753,7 +753,7 @@ impl AudioUnitAccess {
         };
         
         let result = unsafe {AudioObjectAddPropertyListener(
-            device_id,
+            core_device_id,
             &prop_addr,
             Some(listener_fn),
             std::ptr::null_mut(),
@@ -1034,7 +1034,7 @@ impl AudioUnitAccess {
                     }
                     _ => ()
                 }
-                
+                AudioUnitAccess::observe_audio_unit_termination(core_device_id);
                 Ok(AudioUnit {
                     view_controller: Arc::new(Mutex::new(None)),
                     param_tree_observer: None,
