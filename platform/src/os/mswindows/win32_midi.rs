@@ -39,43 +39,12 @@ use {
 };
 
 #[derive(Clone)]
-pub struct OsMidiInput(pub (crate) Arc<Mutex<Win32MidiAccess >>);
-
-#[derive(Clone)]
 pub struct OsMidiOutput(pub (crate) Arc<Mutex<Win32MidiAccess >>);
 
-impl MidiOutputApi for MidiOutput {
-    fn port_desc(&self, port: MidiPortId) -> Option<MidiPortDesc> {
-        self.0.0.lock().unwrap().port_desc(port)
-    }
-    
-    fn set_ports(&self, ports: &[MidiPortId]) {
-        if ports.len() == 0 {
-            return
-        }
-        let mut win32_midi = self.0.0.lock().unwrap();
-        // find all ports we want enabled
-        for port_id in ports {
-            if let Some(port) = win32_midi.ports.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_output()) {
-                // alright lets open the right handle
-                if port.handle.is_closed() {
-                    port.handle = Win32MidiHandle::open_output(port.device_id);
-                }
-            }
-        }
-        // and the ones disabled
-        for port in &mut win32_midi.ports {
-            if ports.iter().find( | p | **p == port.desc.port_id).is_none() {
-                if port.desc.port_type.is_output() {
-                    port.handle = Win32MidiHandle::Closed;
-                }
-            }
-        }
-    }
-    
-    fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
+impl OsMidiOutput{
+    pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
         // send to a specific port or all ports
-        let mut win32_midi = self.0.0.lock().unwrap();
+        let mut win32_midi = self.0.lock().unwrap();
         let short_msg = ((d.data2 as u32) << 16) | ((d.data1 as u32) << 8) | d.data0 as u32;
         for port in &mut win32_midi.ports {
             if port.desc.port_type.is_output()
@@ -87,45 +56,6 @@ impl MidiOutputApi for MidiOutput {
                 }
             }
         }
-    }
-}
-
-impl MidiInputApi for MidiInput {
-    fn port_desc(&self, port: MidiPortId) -> Option<MidiPortDesc> {
-        self.0.0.lock().unwrap().port_desc(port)
-    }
-    
-    fn set_ports(&self, ports: &[MidiPortId]) {
-        //return;
-        if ports.len() == 0 {
-            return
-        }
-        let mut win32_midi = self.0.0.lock().unwrap();
-        let input_senders = win32_midi.input_senders.clone();
-        // find all ports we want enabled
-        for port_id in ports {
-            if let Some(port) = win32_midi.ports.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_input()) {
-                // alright lets open the right handle
-                if port.handle.is_closed() {
-                    port.handle = Win32MidiHandle::open_input(port.device_id, *port_id, input_senders.clone());
-                }
-            }
-        }
-        // and the ones disabled
-        for port in &mut win32_midi.ports {
-            if ports.iter().find( | p | **p == port.desc.port_id).is_none() {
-                if port.desc.port_type.is_input() {
-                    port.handle = Win32MidiHandle::Closed;
-                }
-            }
-        }
-    }
-    
-    fn create_receiver(&self) -> MidiReceiver {
-        let senders = self.0.0.lock().unwrap().input_senders.clone();
-        let (send, recv) = mpsc::channel();
-        senders.lock().unwrap().push(send);
-        MidiReceiver(Some(recv))
     }
 }
 
@@ -247,11 +177,60 @@ pub struct Win32MidiAccess {
 
 
 impl Win32MidiAccess {
-    pub fn port_desc(&self, port: MidiPortId) -> Option<MidiPortDesc> {
-        if let Some(port) = self.ports.iter().find( | p | p.desc.port_id == port) {
-            return Some(port.desc.clone())
+    
+    pub fn create_midi_input(&self) -> MidiInput {
+        let senders = self.input_senders.clone();
+        let (send, recv) = mpsc::channel();
+        senders.lock().unwrap().push(send);
+        MidiInput(Some(recv))
+    }
+    
+    pub fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
+        if ports.len() == 0 {
+            return
         }
-        None
+        // find all ports we want enabled
+        for port_id in ports {
+            if let Some(port) = self.ports.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_output()) {
+                // alright lets open the right handle
+                if port.handle.is_closed() {
+                    port.handle = Win32MidiHandle::open_output(port.device_id);
+                }
+            }
+        }
+        // and the ones disabled
+        for port in &mut self.ports {
+            if ports.iter().find( | p | **p == port.desc.port_id).is_none() {
+                if port.desc.port_type.is_output() {
+                    port.handle = Win32MidiHandle::Closed;
+                }
+            }
+        }
+    }
+        
+    pub  fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
+        //return;
+        if ports.len() == 0 {
+            return
+        }
+        let input_senders = self.input_senders.clone();
+        // find all ports we want enabled
+        for port_id in ports {
+            if let Some(port) = self.ports.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_input()) {
+                // alright lets open the right handle
+                if port.handle.is_closed() {
+                    port.handle = Win32MidiHandle::open_input(port.device_id, *port_id, input_senders.clone());
+                }
+            }
+        }
+        // and the ones disabled
+        for port in &mut self.ports {
+            if ports.iter().find( | p | **p == port.desc.port_id).is_none() {
+                if port.desc.port_type.is_input() {
+                    port.handle = Win32MidiHandle::Closed;
+                }
+            }
+        }
     }
     
     pub fn new() -> Result<Self,
@@ -328,10 +307,10 @@ impl Win32MidiAccess {
         panic!("No unique midi port id available")
     }
     
-    pub fn get_ports(&self) -> Vec<MidiPortId> {
+    pub fn get_descs(&self) -> Vec<MidiPortDesc> {
         let mut out = Vec::new();
         for port in &self.ports {
-            out.push(port.desc.port_id)
+            out.push(port.desc.clone())
         }
         out
     }

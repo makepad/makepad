@@ -11,6 +11,5 @@ pub mod mswindows;
 
 pub(crate) use crate::os::mswindows::d3d11::*;
 pub(crate) use crate::os::mswindows::mswindows::*;
-pub(crate) use crate::os::mswindows::wasapi::OsAudioDevice;
-pub(crate) use crate::os::mswindows::win32_midi::{OsMidiInput, OsMidiOutput};
+pub(crate) use crate::os::mswindows::win32_midi::{OsMidiOutput};
 
