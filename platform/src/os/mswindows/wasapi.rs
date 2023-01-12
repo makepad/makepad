@@ -176,15 +176,10 @@ impl WasapiAccess {
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {
             let mut audio_inputs = self.audio_inputs.lock().unwrap();
-            // lets shut down the ones we dont use
-            audio_inputs.retain_mut( | v | {
-                if devices.contains(&v.device_id) {
-                    true
-                }
-                else {
-                    println!("TERMINATING INPUT");
+           // lets shut down the ones we dont use
+            audio_inputs.iter_mut().for_each( | v | {
+                if !devices.contains(&v.device_id) {
                     v.signal_termination();
-                    false
                 }
             });
             // create the new ones
@@ -207,10 +202,8 @@ impl WasapiAccess {
                 let host_time = 0u64;
                 let rate_scalar = 44100f64;
                 while let Ok(buffer) = wasapi.wait_for_buffer(){
-                    if let Some(v) = audio_inputs.lock().unwrap().iter_mut().find(|v| v.device_id == device_id){
-                        if v.is_terminated{
-                            break;
-                        }
+                    if audio_inputs.lock().unwrap().iter().find(|v| v.device_id == device_id && v.is_terminated).is_some(){
+                        break;
                     }
                     if let Some(fbox) = &mut *audio_input_cb.lock().unwrap(){
                         let ret_buffer = fbox(
@@ -226,10 +219,8 @@ impl WasapiAccess {
                         wasapi.release_buffer(buffer);
                     }
                 }
-                if let Some(v) = audio_inputs.lock().unwrap().iter_mut().find(|v| v.device_id == device_id){
-                    v.is_terminated = true;
-                }
-                println!("Ending input")
+                let mut audio_inputs = audio_inputs.lock().unwrap();
+                audio_inputs.retain(|v| v.device_id != device_id);
             });
         } 
     }
@@ -238,14 +229,9 @@ impl WasapiAccess {
         let new = {
             let mut audio_outputs = self.audio_outputs.lock().unwrap();
             // lets shut down the ones we dont use
-            audio_outputs.retain_mut( | v | {
-                if devices.contains(&v.device_id) {
-                    true
-                }
-                else {
-                    // shut it down
+            audio_outputs.iter_mut().for_each( | v | {
+                if !devices.contains(&v.device_id) {
                     v.signal_termination();
-                    false
                 }
             });
             // create the new ones
@@ -267,12 +253,10 @@ impl WasapiAccess {
                 audio_outputs.lock().unwrap().push(wasapi.base.get_ref());
                 let sample_time = 0f64;
                 let host_time = 0u64;
-                let rate_scalar = 44100f64;
+                let rate_scalar = 48000f64;
                 while let Ok(mut buffer) = wasapi.wait_for_buffer(){
-                    if let Some(v) = audio_outputs.lock().unwrap().iter().find(|v| v.device_id == device_id){
-                        if v.is_terminated{
-                            break;
-                        }
+                    if audio_outputs.lock().unwrap().iter().find(|v| v.device_id == device_id && v.is_terminated).is_some(){
+                        break;
                     }
                     if let Some(fbox) = &mut *audio_output_cb.lock().unwrap(){
                         fbox(
@@ -288,30 +272,9 @@ impl WasapiAccess {
                         wasapi.release_buffer(buffer);
                     }
                 }
-                if let Some(v) = audio_outputs.lock().unwrap().iter_mut().find(|v| v.device_id == device_id){
-                    v.is_terminated = true;
-                }
-                println!("Ending output")
+                let mut audio_outputs = audio_outputs.lock().unwrap();
+                audio_outputs.retain(|v| v.device_id != device_id);
             });
-            
-            // lets create an audio input
-            /*
-            std::thread::spawn(move || {
-                let mut wasapi = WasapiOutput::new();
-                let sample_time = 0f64;
-                let host_time = 0u64;
-                let rate_scalar = 44100f64;
-                loop {
-                    let mut buffer = wasapi.wait_for_buffer().unwrap();
-                    let mut fbox = fbox.lock().unwrap();
-                    fbox(AudioTime {
-                        sample_time,
-                        host_time,
-                        rate_scalar
-                    }, &mut buffer.audio_buffer);
-                    wasapi.release_buffer(buffer);
-                }
-            });*/
         }
     }
     
@@ -366,21 +329,6 @@ struct WasapiBase {
     audio_buffer: Option<AudioBuffer>
 }
 
-/*
-    // add audio device enumeration for input and output
-    let col = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).unwrap();
-    let count = col.GetCount().unwrap();
-    for i in 0..count {
-        let endpoint = col.Item(i).unwrap();
-        let dev_id = endpoint.GetId().unwrap();
-        let props = endpoint.OpenPropertyStore(STGM_READ).unwrap();
-        let value = props.GetValue(&PKEY_Device_FriendlyName).unwrap();
-        assert!(value.Anonymous.Anonymous.vt == VT_LPWSTR);
-        let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
-        println!("{}, {}", dev_id.to_string().unwrap(), dev_name.to_string().unwrap());
-        
-    }
-*/
 
 impl WasapiBaseRef{
     pub fn signal_termination(&mut self){
@@ -580,7 +528,7 @@ implement_com!{
     interface_count: 1, 
     interfaces:{
         0: IMMNotificationClient
-    }
+    } 
 }
 
 impl IMMNotificationClient_Impl for WasapiChangeListener {
