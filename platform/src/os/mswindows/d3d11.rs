@@ -75,6 +75,7 @@ use {
                 ID3D11InputLayout,
                 ID3D11Buffer,
                 D3D11CreateDevice,
+                ID3D11Resource
             },
             Win32::Graphics::Direct3D::{
                 Fxc::D3DCompile,
@@ -215,16 +216,25 @@ impl Cx {
                     let buffers = [geometry.os.geom_vbuf.buffer.clone(), draw_item.os.inst_vbuf.buffer.clone()];
                     d3d11_cx.context.IASetVertexBuffers(0, 2, Some(buffers.as_ptr()), Some(strides.as_ptr()), Some(offsets.as_ptr()));
                     
-                    let buffers = [
-                        shp.live_uniforms.buffer.clone(),
-                        shp.const_table_uniforms.buffer.clone(),
-                        draw_item.os.draw_uniforms.buffer.clone(),
-                        self.passes[pass_id].os.pass_uniforms.buffer.clone(),
-                        draw_list.os.view_uniforms.buffer.clone(),
-                        draw_item.os.user_uniforms.buffer.clone(),
-                    ];
-                    d3d11_cx.context.VSSetConstantBuffers(0, Some(&buffers));
-                    d3d11_cx.context.PSSetConstantBuffers(0, Some(&buffers));
+                    fn buffer_slot(d3d11_cx: &D3d11Cx, index: u32, buffer: &Option<ID3D11Buffer>) {
+                        unsafe {
+                            if let Some(buffer) = buffer.clone() {
+                                let buffers = [buffer];
+                                d3d11_cx.context.VSSetConstantBuffers(index, Some(&buffers));
+                                d3d11_cx.context.PSSetConstantBuffers(index, Some(&buffers));
+                            }
+                            else {
+                                d3d11_cx.context.VSSetConstantBuffers(index, None);
+                                d3d11_cx.context.PSSetConstantBuffers(index, None);
+                            }
+                        }
+                    }
+                    buffer_slot(d3d11_cx, 0, &shp.live_uniforms.buffer);
+                    buffer_slot(d3d11_cx, 1, &shp.const_table_uniforms.buffer);
+                    buffer_slot(d3d11_cx, 2, &draw_item.os.draw_uniforms.buffer);
+                    buffer_slot(d3d11_cx, 3, &self.passes[pass_id].os.pass_uniforms.buffer);
+                    buffer_slot(d3d11_cx, 4, &draw_list.os.view_uniforms.buffer);
+                    buffer_slot(d3d11_cx, 5, &draw_item.os.user_uniforms.buffer);
                 }
                 
                 for i in 0..sh.mapping.textures.len() {
@@ -251,15 +261,19 @@ impl Cx {
                         },
                         _ => ()
                     }
-                    
-                    let resources = [cxtexture.os.shader_resource_view.clone()];
                     unsafe {
-                        d3d11_cx.context.PSSetShaderResources(i as u32, Some(&resources));
-                        d3d11_cx.context.VSSetShaderResources(i as u32, Some(&resources));
+                        if let Some(sr) = &cxtexture.os.shader_resource_view {
+                            d3d11_cx.context.PSSetShaderResources(i as u32, Some(&[sr.clone()]));
+                            d3d11_cx.context.VSSetShaderResources(i as u32, Some(&[sr.clone()]));
+                        }
+                        else {
+                            d3d11_cx.context.PSSetShaderResources(i as u32, None);
+                            d3d11_cx.context.VSSetShaderResources(i as u32, None);
+                        }
                     }
                 }
                 //if self.passes[pass_id].debug{
-                  // println!("DRAWING {} {}", geometry.indices.len(), instances);
+                // println!("DRAWING {} {}", geometry.indices.len(), instances);
                 //}
                 unsafe {
                     d3d11_cx.context.DrawIndexedInstanced(
@@ -304,7 +318,7 @@ impl Cx {
         let mut color_textures = Vec::new();
         
         if let Some(render_target) = first_target {
-            color_textures.push(Some(render_target.clone()));
+            color_textures.push(render_target.clone());
             let color = self.passes[pass_id].clear_color;
             let color = [color.x, color.y, color.z, color.w];
             unsafe {d3d11_cx.context.ClearRenderTargetView(first_target.as_ref().unwrap(), color.as_ptr())}
@@ -314,7 +328,7 @@ impl Cx {
                 let cxtexture = &mut self.textures[color_texture.texture_id];
                 let is_initial = cxtexture.os.update_render_target(d3d11_cx, &cxtexture.desc, pass_size * dpi_factor);
                 let render_target = cxtexture.os.render_target_view.clone();
-                color_textures.push(render_target.clone());
+                color_textures.push(render_target.clone().unwrap());
                 // possibly clear it
                 match color_texture.clear_color {
                     PassClearColor::InitWith(color) => {
@@ -357,7 +371,7 @@ impl Cx {
             }
             unsafe {d3d11_cx.context.OMSetRenderTargets(
                 Some(&color_textures),
-                None,//cxtexture.os.depth_stencil_view.as_ref().unwrap()
+                None, //cxtexture.os.depth_stencil_view.as_ref().unwrap()
             )}
         }
         else {
@@ -378,7 +392,7 @@ impl Cx {
     pub fn draw_pass_to_window(&mut self, pass_id: PassId, vsync: bool, dpi_factor: f64, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-
+        
         self.setup_pass_render_targets(pass_id, dpi_factor, &d3d11_window.render_target_view, d3d11_cx);
         
         let mut zbias = 0.0;
@@ -392,7 +406,7 @@ impl Cx {
             d3d11_cx
         );
         d3d11_window.present(vsync);
-        if d3d11_window.first_draw{
+        if d3d11_window.first_draw {
             d3d11_window.win32_window.show();
             d3d11_window.first_draw = false;
         }
@@ -496,12 +510,13 @@ impl D3d11Window {
             ).unwrap();
             
             let swap_texture = swap_chain.GetBuffer(0).unwrap();
-            let render_target_view = d3d11_cx.device.CreateRenderTargetView(&swap_texture, None).unwrap();
-            swap_chain.SetBackgroundColor(&mut DXGI_RGBA{
-                r:0.3,
-                g:0.3, 
-                b:0.3,
-                a:1.0
+            let mut render_target_view = None;
+            d3d11_cx.device.CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view)).unwrap();
+            swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
+                r: 0.3,
+                g: 0.3,
+                b: 0.3,
+                a: 1.0
             }).unwrap();
             D3d11Window {
                 first_draw: true,
@@ -511,7 +526,7 @@ impl D3d11Window {
                 window_geom: wg,
                 win32_window: win32_window,
                 swap_texture: Some(swap_texture),
-                render_target_view: Some(render_target_view),
+                render_target_view: render_target_view,
                 swap_chain: swap_chain,
             }
         }
@@ -547,10 +562,11 @@ impl D3d11Window {
             ).unwrap();
             
             let swap_texture = self.swap_chain.GetBuffer(0).unwrap();
-            let render_target_view = d3d11_cx.device.CreateRenderTargetView(&swap_texture, None).unwrap();
+            let mut render_target_view = None;
+            d3d11_cx.device.CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view)).unwrap();
             
             self.swap_texture = Some(swap_texture);
-            self.render_target_view = Some(render_target_view);
+            self.render_target_view = render_target_view;
         }
     }
     
@@ -630,9 +646,8 @@ impl D3d11Buffer {
             SysMemSlicePitch: 0
         };
         
-        self.buffer = Some(
-            unsafe {d3d11_cx.device.CreateBuffer(&buffer_desc, Some(&sub_data)).unwrap()}
-        );
+        
+        unsafe {d3d11_cx.device.CreateBuffer(&buffer_desc, Some(&sub_data), Some(&mut self.buffer)).unwrap()}
     }
     
     pub fn update_with_u32_index_data(&mut self, d3d11_cx: &D3d11Cx, data: &[u32]) {
@@ -644,7 +659,7 @@ impl D3d11Buffer {
     }
     
     pub fn update_with_f32_constant_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
-        if data.len() == 0{
+        if data.len() == 0 {
             return
         }
         if (data.len() & 3) != 0 { // we have to align the data at the end
@@ -670,9 +685,7 @@ impl D3d11Buffer {
             MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
             StructureByteStride: 0
         };
-        self.buffer = Some(
-            unsafe {d3d11_cx.device.CreateBuffer(&buffer_desc, Some(&sub_data)).unwrap()}
-        );
+        unsafe {d3d11_cx.device.CreateBuffer(&buffer_desc, Some(&sub_data), Some(&mut self.buffer)).unwrap()}
     }
 }
 
@@ -733,15 +746,19 @@ impl CxOsTexture {
             MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
         };
         
-        let texture = unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None).unwrap()};
-        let shader_resource_view = unsafe {d3d11_cx.device.CreateShaderResourceView(&texture, None).unwrap()};
-        let render_target_view = unsafe {d3d11_cx.device.CreateRenderTargetView(&texture, None).unwrap()};
+        let mut texture = None;
+        unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None, Some(&mut texture)).unwrap()};
+        let resource: ID3D11Resource = texture.as_ref().unwrap().into();
+        let mut shader_resource_view = None;
+        unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
+        let mut render_target_view = None;
+        unsafe {d3d11_cx.device.CreateRenderTargetView(&resource, None, Some(&mut render_target_view)).unwrap()};
         
         self.width = width;
         self.height = height;
-        self.texture = Some(texture);
-        self.shader_resource_view = Some(shader_resource_view);
-        self.render_target_view = Some(render_target_view);
+        self.texture = texture;
+        self.shader_resource_view = shader_resource_view;
+        self.render_target_view = render_target_view;
         
         return true
     }
@@ -782,7 +799,9 @@ impl CxOsTexture {
             MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
         };
         
-        let texture = unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None).unwrap()};
+        let mut texture = None;
+        unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, None, Some(&mut texture)).unwrap()};
+        let resource: ID3D11Resource = texture.as_ref().unwrap().into();
         //let shader_resource_view = unsafe {d3d11_cx.device.CreateShaderResourceView(&texture, None).unwrap()};
         
         let dsv_desc = D3D11_DEPTH_STENCIL_VIEW_DESC {
@@ -792,12 +811,13 @@ impl CxOsTexture {
             ..Default::default()
         };
         
-        let depth_stencil_view = unsafe {d3d11_cx.device.CreateDepthStencilView(&texture, Some(&dsv_desc)).unwrap()};
+        let mut depth_stencil_view = None;
+        unsafe {d3d11_cx.device.CreateDepthStencilView(&resource, Some(&dsv_desc), Some(&mut depth_stencil_view)).unwrap()};
         
         self.width = width;
         self.height = height;
-        self.depth_stencil_view = Some(depth_stencil_view);
-        self.texture = Some(texture);
+        self.depth_stencil_view = depth_stencil_view;
+        self.texture = texture;
         self.shader_resource_view = None; //Some(shader_resource_view);
         
         return true
@@ -838,13 +858,16 @@ impl CxOsTexture {
             MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
         };
         
-        let texture = unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, Some(&sub_data)).unwrap()};
-        let shader_resource_view = unsafe {d3d11_cx.device.CreateShaderResourceView(&texture, None).unwrap()};
+        let mut texture = None;
+        unsafe {d3d11_cx.device.CreateTexture2D(&texture_desc, Some(&sub_data), Some(&mut texture)).unwrap()};
+        let resource: ID3D11Resource = texture.as_ref().unwrap().into();
+        let mut shader_resource_view = None;
+        unsafe {d3d11_cx.device.CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view)).unwrap()};
         
         self.width = width;
         self.height = height;
-        self.texture = Some(texture);
-        self.shader_resource_view = Some(shader_resource_view);
+        self.texture = texture;
+        self.shader_resource_view = shader_resource_view;
     }
     
 }
@@ -866,9 +889,7 @@ impl CxOsPass {
                 BlendOpAlpha: D3D11_BLEND_OP_ADD,
                 RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
             };
-            self.blend_state = Some(
-                unsafe {d3d11_cx.device.CreateBlendState(&blend_desc).unwrap()}
-            );
+            unsafe {d3d11_cx.device.CreateBlendState(&blend_desc, Some(&mut self.blend_state)).unwrap()}
         }
         
         if self.raster_state.is_none() {
@@ -884,9 +905,7 @@ impl CxOsPass {
                 ScissorEnable: FALSE,
                 SlopeScaledDepthBias: 0.0,
             };
-            self.raster_state = Some(
-                unsafe {d3d11_cx.device.CreateRasterizerState(&raster_desc).unwrap()}
-            );
+            unsafe {d3d11_cx.device.CreateRasterizerState(&raster_desc, Some(&mut self.raster_state)).unwrap()}
         }
         
         if self.depth_stencil_state.is_none() {
@@ -910,9 +929,7 @@ impl CxOsPass {
                     StencilFunc: D3D11_COMPARISON_ALWAYS,
                 },
             };
-            self.depth_stencil_state = Some(
-                unsafe {d3d11_cx.device.CreateDepthStencilState(&ds_desc).unwrap()}
-            );
+            unsafe {d3d11_cx.device.CreateDepthStencilState(&ds_desc, Some(&mut self.depth_stencil_state)).unwrap()}
         }
         
         unsafe {
@@ -1024,16 +1041,20 @@ impl CxOsDrawShader {
             }
         };
         
-        let vs = unsafe {d3d11_cx.device.CreateVertexShader(
+        let mut vs = None;
+        unsafe {d3d11_cx.device.CreateVertexShader(
             std::slice::from_raw_parts(vs_blob.GetBufferPointer() as *const u8, vs_blob.GetBufferSize() as usize),
-            None
+            None,
+            Some(&mut vs)
         ).unwrap()};
         
-        let ps = unsafe {d3d11_cx.device.CreatePixelShader(
+        let mut ps = None;
+        unsafe {d3d11_cx.device.CreatePixelShader(
             std::slice::from_raw_parts(ps_blob.GetBufferPointer() as *const u8, ps_blob.GetBufferSize() as usize),
-            None
+            None,
+            Some(&mut ps)
         ).unwrap()};
-         
+        
         let mut layout_desc = Vec::new();
         let mut strings = Vec::new();
         
@@ -1099,10 +1120,12 @@ impl CxOsDrawShader {
             }
         }
         
-        let input_layout = unsafe {
+        let mut input_layout = None;
+        unsafe {
             d3d11_cx.device.CreateInputLayout(
                 &layout_desc,
                 std::slice::from_raw_parts(vs_blob.GetBufferPointer() as *const u8, vs_blob.GetBufferSize() as usize),
+                Some(&mut input_layout)
             ).unwrap()
         };
         
@@ -1116,11 +1139,11 @@ impl CxOsDrawShader {
             hlsl,
             const_table_uniforms,
             live_uniforms,
-            pixel_shader: ps,
-            vertex_shader: vs,
+            pixel_shader: ps.unwrap(),
+            vertex_shader: vs.unwrap(),
             pixel_shader_blob: ps_blob,
             vertex_shader_blob: vs_blob,
-            input_layout
+            input_layout: input_layout.unwrap()
         })
     }
 }

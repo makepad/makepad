@@ -57,7 +57,7 @@ impl OsMidiOutput{
             }
         }
     }
-}
+} 
 
 type InputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData) >> >>;
 
@@ -250,7 +250,7 @@ impl Win32MidiAccess {
         fn szname32_to_string(name: [u16; 32]) -> Option<String> {
             if let Some(end) = name.iter().position( | v | *v == 0) {
                 return Some(String::from_utf16(&name[0..end]).unwrap());
-            }
+            }  
             None
         }
         fn reuse_handle(old_ports: &[Win32MidiPort], port_id: MidiPortId) -> Win32MidiHandle {
@@ -259,8 +259,9 @@ impl Win32MidiAccess {
             }
             Win32MidiHandle::Closed
         }
-        
-        unsafe {
+         
+        unsafe {     
+            println!("{}",midiInGetNumDevs());
             for i in 0..midiInGetNumDevs() {
                 let mut caps = MIDIINCAPSW::default();
                 if midiInGetDevCapsW(i as usize, &mut caps, std::mem::size_of::<MIDIOUTCAPSW>() as u32) == 0 {

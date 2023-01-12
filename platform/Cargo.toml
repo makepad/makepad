@@ -44,6 +44,9 @@ makepad-objc-sys = { path = "./bind/objc-sys", version = "0.3.0" }
 # version = "0.3"
 # features = ["dwmapi", "libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
 
+[target.'cfg(windows)'.dependencies.futures]
+version = "0.3"
+
 [target.'cfg(windows)'.dependencies.makepad-windows]
 version = "0.43"
 path = "./bind/windows"
@@ -75,5 +78,11 @@ features = [
     "Win32_System_Ole",
     "Win32_Devices_FunctionDiscovery",
     "Win32_System_Threading",
-    "Win32_Security"
+    "Win32_Security",
+    "Devices_Enumeration",
+    "Devices_Midi",
+    "Foundation_Collections",
+    "Storage",
+    "Storage_Streams",
+    "implement"
 ]

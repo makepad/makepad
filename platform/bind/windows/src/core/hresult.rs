@@ -33,11 +33,11 @@ impl HRESULT {
 
     /// Converts the [`HRESULT`] to [`Result<()>`][Result<_>].
     #[inline]
-    pub const fn ok(self) -> Result<()> {
+    pub fn ok(self) -> Result<()> {
         if self.is_ok() {
             Ok(())
         } else {
-            Err(Error { code: self, info: None })
+            Err(Error::from(self))
         }
     }
 
@@ -88,7 +88,7 @@ impl HRESULT {
         unsafe {
             let size = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, std::ptr::null(), self.0 as _, 0, PWSTR(&mut message.0 as *mut _ as *mut _), 0, std::ptr::null());
 
-            HSTRING::from_wide(wide_trim_end(std::slice::from_raw_parts(message.0 as *const u16, size as usize)))
+            HSTRING::from_wide(wide_trim_end(std::slice::from_raw_parts(message.0 as *const u16, size as usize))).unwrap_or_default()
         }
     }
 
@@ -128,7 +128,7 @@ impl std::fmt::Display for HRESULT {
 
 impl std::fmt::Debug for HRESULT {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("HRESULT({})", self))
+        f.write_fmt(format_args!("HRESULT({self})"))
     }
 }
 
