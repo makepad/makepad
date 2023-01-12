@@ -220,6 +220,7 @@ impl App {
                 cx.use_midi_inputs(&ports.all_inputs());
             }
             Event::AudioDevices(devices) => {
+                println!("AUDIO DEVICE CHANGE");
                 cx.use_audio_inputs(&devices.default_input());
                 cx.use_audio_outputs(&devices.default_output());
             }
