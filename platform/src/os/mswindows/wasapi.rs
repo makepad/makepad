@@ -2,6 +2,9 @@
 use {
     std::sync::{Arc, Mutex},
     crate::{
+        cx::Cx,
+        cx_api::CxOsApi,
+        implement_com,
         makepad_live_id::*,
         os::mswindows::win32_app::{FALSE},
         audio::{
@@ -65,6 +68,7 @@ use {
                 IAudioRenderClient,
             },
             Win32::System::Threading::{
+                SetEvent,
                 WaitForSingleObject,
                 CreateEventA,
             },
@@ -77,11 +81,13 @@ use {
 
 #[derive(Default)]
 pub struct WasapiAccess {
+    pub change_listener: Option<IMMNotificationClient>,
     pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioDeviceId, AudioTime, AudioBuffer) -> AudioBuffer + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioDeviceId, AudioTime, &mut AudioBuffer) + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
-    pub audio_inputs: Arc<Mutex<Vec<WasapiInput >> >,
-    pub audio_outputs: Arc<Mutex<Vec<WasapiOutput >> >,
-    pub descs: Vec<AudioDeviceDesc>,
+    enumerator: Option<IMMDeviceEnumerator>,
+    audio_inputs: Arc<Mutex<Vec<WasapiBaseRef >> >,
+    audio_outputs: Arc<Mutex<Vec<WasapiBaseRef >> >,
+    descs: Vec<AudioDeviceDesc>,
 }
 
 
@@ -100,7 +106,11 @@ unsafe fn enumerate_devices(device_type: AudioDeviceType, enumerator: &IMMDevice
         AudioDeviceType::Output => eRender,
         AudioDeviceType::Input => eCapture
     };
-    let def_device = enumerator.GetDefaultAudioEndpoint(flow, eConsole).unwrap();
+    let def_device = enumerator.GetDefaultAudioEndpoint(flow, eConsole);
+    if def_device.is_err(){
+        return
+    }
+    let def_device = def_device.unwrap();
     let (_, def_id) = get_device_descs(&def_device);
     let col = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE).unwrap();
     let count = col.GetCount().unwrap();
@@ -135,8 +145,18 @@ unsafe fn find_device_by_id(search_device_id: AudioDeviceId)->Option<IMMDevice>{
     
 impl WasapiAccess {
     pub fn new() -> Self {
-        unsafe {CoInitialize(None).unwrap();}
-        WasapiAccess::default()
+        unsafe {
+            CoInitialize(None).unwrap();
+            let change_listener:IMMNotificationClient = WasapiChangeListener{}.into();
+            let enumerator:IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+            enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();
+            //let change_listener:IMMNotificationClient = WasapiChangeListener{}.into();
+            WasapiAccess{  
+                enumerator: Some(enumerator),
+                change_listener: Some(change_listener),
+                ..Default::default()
+            }
+        }
     }
     
     pub fn update_device_list(&mut self) {
@@ -146,30 +166,31 @@ impl WasapiAccess {
             enumerate_devices(AudioDeviceType::Input, &enumerator, &mut out);
             enumerate_devices(AudioDeviceType::Output, &enumerator, &mut out);
             self.descs = out;
-        }
+        } 
     }
     
     pub fn get_descs(&self) -> Vec<AudioDeviceDesc> {
         self.descs.clone()
-    }
+    } 
     
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {
             let mut audio_inputs = self.audio_inputs.lock().unwrap();
             // lets shut down the ones we dont use
             audio_inputs.retain_mut( | v | {
-                if devices.contains(&v.base.device_id) {
+                if devices.contains(&v.device_id) {
                     true
                 }
                 else {
-                    // stop wasapi
+                    println!("TERMINATING INPUT");
+                    v.signal_termination();
                     false
                 }
             });
             // create the new ones
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
-                if audio_inputs.iter().find( | v | v.base.device_id == *device_id).is_none() {
+                if audio_inputs.iter().find( | v | v.device_id == *device_id).is_none() {
                     new.push((index, *device_id))
                 }
             }
@@ -177,15 +198,20 @@ impl WasapiAccess {
         };
         for (index, device_id) in new {
             let audio_input_cb = self.audio_input_cb[index].clone();
+            let audio_inputs = self.audio_inputs.clone();
             
             std::thread::spawn(move || {
                 let mut wasapi = WasapiInput::new(device_id, 2);
+                audio_inputs.lock().unwrap().push(wasapi.base.get_ref());
                 let sample_time = 0f64;
                 let host_time = 0u64;
                 let rate_scalar = 44100f64;
-                loop {
-                    let buffer = wasapi.wait_for_buffer().unwrap();
-                    
+                while let Ok(buffer) = wasapi.wait_for_buffer(){
+                    if let Some(v) = audio_inputs.lock().unwrap().iter_mut().find(|v| v.device_id == device_id){
+                        if v.is_terminated{
+                            break;
+                        }
+                    }
                     if let Some(fbox) = &mut *audio_input_cb.lock().unwrap(){
                         let ret_buffer = fbox(
                             device_id,
@@ -200,8 +226,12 @@ impl WasapiAccess {
                         wasapi.release_buffer(buffer);
                     }
                 }
+                if let Some(v) = audio_inputs.lock().unwrap().iter_mut().find(|v| v.device_id == device_id){
+                    v.is_terminated = true;
+                }
+                println!("Ending input")
             });
-        }
+        } 
     }
     
     pub fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
@@ -209,18 +239,19 @@ impl WasapiAccess {
             let mut audio_outputs = self.audio_outputs.lock().unwrap();
             // lets shut down the ones we dont use
             audio_outputs.retain_mut( | v | {
-                if devices.contains(&v.base.device_id) {
+                if devices.contains(&v.device_id) {
                     true
                 }
                 else {
                     // shut it down
+                    v.signal_termination();
                     false
                 }
             });
             // create the new ones
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
-                if audio_outputs.iter().find( | v | v.base.device_id == *device_id).is_none() {
+                if audio_outputs.iter().find( | v | v.device_id == *device_id).is_none() {
                     new.push((index, *device_id))
                 }
             }
@@ -229,16 +260,20 @@ impl WasapiAccess {
         };
         for (index, device_id) in new {
             let audio_output_cb = self.audio_output_cb[index].clone();
+            let audio_outputs = self.audio_outputs.clone();
             
             std::thread::spawn(move || {
-                
                 let mut wasapi = WasapiOutput::new(device_id, 2);
+                audio_outputs.lock().unwrap().push(wasapi.base.get_ref());
                 let sample_time = 0f64;
                 let host_time = 0u64;
                 let rate_scalar = 44100f64;
-                loop {
-                    let mut buffer = wasapi.wait_for_buffer().unwrap();
-                    
+                while let Ok(mut buffer) = wasapi.wait_for_buffer(){
+                    if let Some(v) = audio_outputs.lock().unwrap().iter().find(|v| v.device_id == device_id){
+                        if v.is_terminated{
+                            break;
+                        }
+                    }
                     if let Some(fbox) = &mut *audio_output_cb.lock().unwrap(){
                         fbox(
                             device_id,
@@ -252,8 +287,11 @@ impl WasapiAccess {
                     else{
                         wasapi.release_buffer(buffer);
                     }
-                    
                 }
+                if let Some(v) = audio_outputs.lock().unwrap().iter_mut().find(|v| v.device_id == device_id){
+                    v.is_terminated = true;
+                }
+                println!("Ending output")
             });
             
             // lets create an audio input
@@ -313,6 +351,12 @@ fn new_float_waveformatextensible(samplerate: usize, channel_count: usize) -> WA
     }
 }
 
+struct WasapiBaseRef{
+    device_id: AudioDeviceId,
+    is_terminated: bool,
+    event: HANDLE,
+}
+
 struct WasapiBase {
     device_id: AudioDeviceId,
     device:IMMDevice,
@@ -321,7 +365,6 @@ struct WasapiBase {
     channel_count: usize,
     audio_buffer: Option<AudioBuffer>
 }
-
 
 /*
     // add audio device enumeration for input and output
@@ -339,7 +382,22 @@ struct WasapiBase {
     }
 */
 
+impl WasapiBaseRef{
+    pub fn signal_termination(&mut self){
+        self.is_terminated = true;
+        unsafe{SetEvent(self.event)};
+    }
+}
+
+
 impl WasapiBase {
+    pub fn get_ref(&self)->WasapiBaseRef{
+        WasapiBaseRef{
+            is_terminated: false,
+            device_id: self.device_id,
+            event: self.event
+        }
+    }
     
     pub fn new(device_id:AudioDeviceId, channel_count: usize) -> Self {
         unsafe {
@@ -408,7 +466,11 @@ impl WasapiOutput {
                 if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
                     return Err(())
                 };
-                let padding = self.base.client.GetCurrentPadding().unwrap();
+                let padding = self.base.client.GetCurrentPadding();
+                if padding.is_err(){
+                    return Err(())
+                }
+                let padding = padding.unwrap();
                 let buffer_size = self.base.client.GetBufferSize().unwrap();
                 let req_size = buffer_size - padding;
                 if req_size > 0 {
@@ -458,23 +520,26 @@ impl WasapiInput {
      pub fn new(device_id:AudioDeviceId, channel_count: usize) -> Self {
         let base = WasapiBase::new(device_id, channel_count);
         let capture_client = unsafe {base.client.GetService().unwrap()};
-        Self {
+        Self { 
             capture_client,
             base
         }
     }
     
-    
     pub fn wait_for_buffer(&mut self) -> Result<AudioBuffer, ()> {
         unsafe {
             loop {
                 if WaitForSingleObject(self.base.event, 2000) != WAIT_OBJECT_0 {
+                    println!("Wait for object error");
                     return Err(())
                 };
                 let mut pdata: *mut u8 = 0 as *mut _;
                 let mut frame_count = 0u32;
                 let mut dwflags = 0u32;
-                self.capture_client.GetBuffer(&mut pdata, &mut frame_count, &mut dwflags, None, None).unwrap();
+                
+                if self.capture_client.GetBuffer(&mut pdata, &mut frame_count, &mut dwflags, None, None).is_err(){
+                    return Err(())
+                }
                 
                 if frame_count == 0 {
                     continue;
@@ -505,134 +570,22 @@ impl WasapiInput {
     }
 }
 
-#[macro_export]
-macro_rules!windows_com_interface {
-    (
-        $ base_struct: ident( $ iface_count: tt)
-            $ impl_struct: ident( $ ( $ iface_index: tt: $ iface: ident), *)
-    ) => {
-        #[repr(C)]
-        struct $ impl_struct {
-            identity: *const crate::windows_crate::core::IUnknown_Vtbl,
-            vtables:
-            ( $ (*const < $ iface as crate::windows_crate::core::Vtable> ::Vtable), *, ()),
-            this: $ base_struct,
-            count: crate::windows_crate::core::WeakRefCount,
-        }
-        
-        impl $ impl_struct {
-            const VTABLES:
-            ( $ (< $ iface as crate::windows_crate::core::Vtable> ::Vtable), *, ()) =
-            ( $ (< $ iface as crate::windows_crate::core::Vtable> ::Vtable ::new ::<Self, $ base_struct, {-1 - $ iface_index}>()), *, ());
-            
-            const IDENTITY: crate::windows_crate::core::IUnknown_Vtbl = crate::windows_crate::core::IUnknown_Vtbl::new::<Self,
-            0> ();
-            
-            fn new(this: $ base_struct) -> Self {
-                Self {
-                    identity: &Self::IDENTITY,
-                    vtables: ( $ (&Self::VTABLES. $ iface_index), *, ()),
-                    this,
-                    count: crate::windows_crate::core::WeakRefCount ::new(),
-                }
-            }
-        }
-        
-        impl crate::windows_crate::core::IUnknownImpl for $ impl_struct {
-            type Impl = $ base_struct;
-            
-            fn get_impl(&self) -> &Self ::Impl {
-                &self.this
-            }
-            
-            unsafe fn QueryInterface(&self, iid: &crate::windows_crate::core::GUID, interface: *mut *const ::core ::ffi ::c_void) -> crate::windows_crate::core::HRESULT {
-                *interface =
-                if iid == &<crate::windows_crate::core::IUnknown as crate::windows_crate::core::Interface> ::IID {
-                    &self.identity as *const _ as *const _
-                }
-                $ (else if < $ iface as crate::windows_crate::core::Vtable> ::Vtable::matches(iid) {
-                    &self.vtables. $ iface_index as *const _ as *const _
-                }) *
-                else {
-                    std::ptr::null_mut()
-                };
-                
-                if!(*interface).is_null() {
-                    self.count.add_ref();
-                    return crate::windows_crate::core::HRESULT(0);
-                }
-                
-                *interface = self.count.query(iid, &self.identity as *const _ as *mut _);
-                
-                if (*interface).is_null() {
-                    crate::windows_crate::core::HRESULT(-2147467262i32)
-                }
-                else {
-                    crate::windows_crate::core::HRESULT(0)
-                }
-            }
-            
-            fn AddRef(&self) -> u32 {self.count.add_ref()}
-            
-            unsafe fn Release(&self) -> u32 {
-                let remaining = self.count.release();
-                if remaining == 0 {
-                    let _ = Box ::from_raw(self as *const Self as *mut Self);
-                } remaining
-            }
-        }
-        
-        impl $ base_struct {
-            unsafe fn cast<I: crate::windows_crate::core::Interface> (&self) -> crate::windows_crate::core::Result<I> {
-                let boxed = (self as *const _ as *const *mut std::ffi::c_void).sub(1 + 2) as *mut $ impl_struct;
-                let mut result = None;
-                < $ impl_struct as crate::windows_crate::core::IUnknownImpl>::QueryInterface(&*boxed, &I::IID, &mut result as *mut _ as _).and_some(result)
-            }
-        }
-        
-        impl std::convert::From< $ base_struct> for crate::windows_crate::core::IUnknown {
-            fn from(this: $ base_struct) -> Self {
-                let this = $ impl_struct::new(this);
-                let boxed = std::mem::ManuallyDrop::new(Box::new(this));
-                unsafe {std::mem ::transmute(&boxed.identity)}
-            }
-        }
-        
-        $ (
-            impl std::convert::From< $ base_struct> for $ iface {
-                fn from(this: $ base_struct) -> Self {
-                    let this = $ impl_struct::new(this);
-                    let this = std::mem::ManuallyDrop::new(Box::new(this));
-                    let vtable_ptr = &this.vtables. $ iface_index;
-                    unsafe {std::mem ::transmute(vtable_ptr)}
-                }
-            }
-            
-            impl crate::windows_crate::core::AsImpl< $ base_struct> for $ iface {
-                fn as_impl(&self) -> & $ base_struct {
-                    let this = crate::windows_crate::core::Vtable::as_raw(self);
-                    unsafe {
-                        let this = (this as *mut *mut ::core ::ffi ::c_void).sub(1 + $ iface_index) as *mut $ impl_struct ::< >;
-                        &(*this).this
-                    }
-                }
-            }
-        ) *
+struct WasapiChangeListener {
+}
+
+implement_com!{
+    for_struct: WasapiChangeListener,
+    identity: IMMNotificationClient,
+    wrapper_struct: WasapiChangeListener_Com,
+    interface_count: 1, 
+    interfaces:{
+        0: IMMNotificationClient
     }
 }
 
-struct WasapiEvent {
-}
-
-windows_com_interface!(
-    WasapiEvent(1)
-    WasapiEvent_Impl(
-        0: IMMNotificationClient
-    )
-);
-
-impl IMMNotificationClient_Impl for WasapiEvent {
+impl IMMNotificationClient_Impl for WasapiChangeListener {
     fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows_crate::core::Result<()> {
+        Cx::post_signal(live_id!(WasapiDeviceChange).into());
         Ok(())
     }
     fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows_crate::core::Result<()> {
@@ -642,6 +595,7 @@ impl IMMNotificationClient_Impl for WasapiEvent {
         Ok(())
     }
     fn OnDefaultDeviceChanged(&self, _flow: EDataFlow, _role: ERole, _pwstrdefaultdeviceid: &crate::windows_crate::core::PCWSTR) -> crate::windows_crate::core::Result<()> {
+        Cx::post_signal(live_id!(WasapiDeviceChange).into());
         Ok(())
     }
     fn OnPropertyValueChanged(&self, _pwstrdeviceid: &PCWSTR, _key: &PROPERTYKEY) -> crate::windows_crate::core::Result<()> {
@@ -649,164 +603,3 @@ impl IMMNotificationClient_Impl for WasapiEvent {
     }
     
 }
-
-/*
-#[repr(C)] 
-struct Thing_Impl {
-    identity: *const IInspectable_Vtbl,
-    vtables:
-    (*const <IInterfaceA  as Vtable> ::Vtable, * const <IInterfaceB as Vtable> ::Vtable,),
-    this: Thing,
-    count: WeakRefCount,
-} 
-
-impl Thing_Impl{
-    const VTABLES:
-    
-    (<IInterfaceA as Vtable>::Vtable, 
-        <IInterfaceB as Vtable>::Vtable,) =
-        
-    (<IInterfaceA as Vtable> Vtable::new::<Self, Thing, -1>(), 
-     <IInterfaceB as Vtable> Vtable::new::<Self, Thing, -2>(),
-    );
-    
-    const IDENTITY: IInspectable_Vtbl = IInspectable_Vtbl::new::<Self, IInterfaceA, 0> ();
-    
-    fn new(this: Thing ::< >) -> Self{
-        Self{
-            identity: &Self::IDENTITY,
-            vtables: (&Self::VTABLES.0, &Self::VTABLES.1,),
-            this,
-            count: WeakRefCount ::new(),
-        }
-    }
-}
-
-impl IUnknownImpl for Thing_Impl{
-    type Impl = Thing;
-    
-    fn get_impl(&self) -> &Self ::Impl{
-        &self.this
-    } 
-    
-    unsafe fn QueryInterface(&self, iid: &GUID, interface: * mut *const ::core ::ffi ::c_void) -> HRESULT{
-        *interface = 
-        if iid == &<IUnknown as Interface> ::IID 
-           || iid == &<IInspectable as Interface> ::IID
-           || iid == &<IAgileObject as Interface> ::IID{
-            &self.identity as *const _ as *const _
-        } 
-        else if <IInterfaceA as Vtable> Vtable::matches(iid) {
-            &self.vtables.0 as *const _ as *const _
-        } 
-        else if <IInterfaceB as Vtable> Vtable::matches(iid) {
-            &self.vtables.1 as *const _ as *const _
-        }
-        else {
-            std::ptr::null_mut()
-        };
-        
-        if! (*interface).is_null(){
-            self.count.add_ref();
-            return HRESULT(0);
-        } 
-        
-        *interface = self.count.query(iid, &self.identity as *const _ as *mut _);
-        
-        if (*interface).is_null(){
-            HRESULT(0x8000_4002)
-        } 
-        else {
-            HRESULT(0)
-        }
-    } 
-    
-    fn AddRef(&self) -> u32 {self.count.add_ref()} 
-    
-    unsafe fn Release(&self) -> u32 {
-        let remaining = self.count.release();
-        if remaining == 0{
-            let _ = ::std ::boxed ::Box ::
-            from_raw(self as *const Self as *mut Self);
-        } remaining
-    }
-}
-
- impl Thing{
-     unsafe fn cast<I:Interface> (&self) -> Result<I>{
-        let boxed = (self as *const _ as *const *mut std::ffi::c_void).sub(1 + 2) as *mut Thing_Impl;
-        let mut result = None;
-        <Thing_Impl as IUnknownImpl>::QueryInterface(&*boxed, &I::IID, &mut result as *mut _ as _).and_some(result)
-    }
-} 
-
-impl std::convert::From<Thing> for IUnknown{
-    fn from(this: Thing) -> Self{
-        let this = Thing_Impl::new(this);
-        let boxed = std::mem::ManuallyDrop::new(Box::new(this));
-        unsafe{std::mem ::transmute(&boxed.identity)}
-    }
-} 
-
-impl std::convert::From<Thing> for IInspectable{
-    fn from(this: Thing) -> Self{
-        let this = Thing_Impl::new(this);
-        let boxed = std::mem::ManuallyDrop::new(Box::new(this));
-        unsafe{std::mem::transmute(&boxed.identity)}
-    }
-} 
-
-impl < > ::core ::convert ::From < Thing ::< >> for IInterfaceA < >{
-    fn from(this: Thing ::< >) -> Self
-    {
-        let this = Thing_Impl ::< > ::new(this);
-        let mut this = ::core ::
-        mem ::ManuallyDrop ::new(::std ::boxed ::Box ::new(this));
-        let
-        vtable_ptr = &this.vtables.0;
-        unsafe
-        {::core ::mem ::transmute(vtable_ptr)}
-    }
-} 
-
-impl < > ::windows ::core ::AsImpl < Thing ::< >> for IInterfaceA < >{
-    fn as_impl(&self) -> &Thing ::< >
-    {
-        let this = ::windows ::core ::Vtable ::as_raw(self);
-        unsafe
-        {
-            let this =
-            (this as *mut *mut ::core ::ffi ::c_void).sub(1 + 0) as *mut
-            Thing_Impl ::< >;
-            &(*this).this
-        }
-    }
-} 
-
-impl < > ::core ::convert ::From < Thing ::< >> for IInterfaceB < >{
-    fn from(this: Thing ::< >) -> Self
-    {
-        let this = Thing_Impl ::< > ::new(this);
-        let mut this = ::core ::
-        mem ::ManuallyDrop ::new(::std ::boxed ::Box ::new(this));
-        let
-        vtable_ptr = &this.vtables.1;
-        unsafe
-        {::core ::mem ::transmute(vtable_ptr)}
-    }
-} 
-
-impl < > ::windows ::core ::AsImpl < Thing ::< >> for IInterfaceB < >{
-    fn as_impl(&self) -> &Thing ::< >
-    {
-        let this = ::windows ::core ::Vtable ::as_raw(self);
-        unsafe
-        {
-            let this =
-            (this as *mut *mut ::core ::ffi ::c_void).sub(1 + 1) as *mut
-            Thing_Impl ::< >;
-            &(*this).this
-        }
-    }
-} 
-*/
