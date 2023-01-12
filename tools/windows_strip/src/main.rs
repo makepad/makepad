@@ -408,6 +408,12 @@ fn generate_win32_outputs_from_file(file: &str, output: &mut Node, cache: &mut V
             sym[sym_end] = LiveId::from_str(&format!("{}_Impl", sym_id)).unwrap();
             push_unique(output, &sym, is_trait.to_string());
             
+            if let Some((_, is_runtime_name)) = impl_tokens.at(&format!("impl ::windows::core::RuntimeName for {}", sym_id)){
+                let is_runtime_name = is_runtime_name.find_close(Delim::Brace).unwrap();
+                sym[sym_end] = LiveId::from_str(&format!("{}_RuntimeName", sym_id)).unwrap();
+                push_unique(output, &sym, is_runtime_name.to_string());
+            }
+            
             let (_, is_impl) = impl_tokens.at(&format!("impl {}_Vtbl", sym_id)).unwrap();
             let is_impl = is_impl.find_close(Delim::Brace).unwrap();
             sym[sym_end] = LiveId::from_str(&format!("{}_Vtbl2", sym_id)).unwrap();

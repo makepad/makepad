@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]
 pub mod Win32{
 pub mod UI{
-pub mod WindowsAndMessaging{
+pub mod WindowsAndMessaging{ 
 #[repr(C)]pub struct WNDCLASSEXW {
     pub cbSize: u32,
     pub style: WNDCLASS_STYLES,
@@ -1588,6 +1588,8 @@ pub trait IPropertyStore_Impl: Sized {
     fn Commit(&self) -> ::windows::core::Result<()>;
 }
 
+impl ::windows::core::RuntimeName for IPropertyStore {}
+
 impl IPropertyStore_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IPropertyStore_Impl, const OFFSET: isize>() -> IPropertyStore_Vtbl {
         unsafe extern "system" fn GetCount<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IPropertyStore_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, cprops: *mut u32) -> ::windows::core::HRESULT {
@@ -2867,6 +2869,8 @@ pub trait ID3D11Device_Impl: Sized {
     fn GetExceptionMode(&self) -> u32;
 }
 
+impl ::windows::core::RuntimeName for ID3D11Device {}
+
 impl ID3D11Device_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Device_Impl, const OFFSET: isize>() -> ID3D11Device_Vtbl {
         unsafe extern "system" fn CreateBuffer<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Device_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *const D3D11_BUFFER_DESC, pinitialdata: *const D3D11_SUBRESOURCE_DATA, ppbuffer: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
@@ -4052,6 +4056,8 @@ pub trait ID3D11DeviceContext_Impl: Sized + ID3D11DeviceChild_Impl {
     fn FinishCommandList(&self, restoredeferredcontextstate: super::super::Foundation::BOOL) -> ::windows::core::Result<ID3D11CommandList>;
 }
 
+impl ::windows::core::RuntimeName for ID3D11DeviceContext {}
+
 impl ID3D11DeviceContext_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceContext_Impl, const OFFSET: isize>() -> ID3D11DeviceContext_Vtbl {
         unsafe extern "system" fn VSSetConstantBuffers<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceContext_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, startslot: u32, numbuffers: u32, ppconstantbuffers: *const *mut ::core::ffi::c_void) {
@@ -4789,6 +4795,8 @@ pub trait ID3D11RenderTargetView_Impl: Sized + ID3D11View_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_RENDER_TARGET_VIEW_DESC);
 }
 
+impl ::windows::core::RuntimeName for ID3D11RenderTargetView {}
+
 impl ID3D11RenderTargetView_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11RenderTargetView_Impl, const OFFSET: isize>() -> ID3D11RenderTargetView_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11RenderTargetView_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_RENDER_TARGET_VIEW_DESC) {
@@ -4875,6 +4883,8 @@ pub trait ID3D11Texture2D_Impl: Sized + ID3D11Resource_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE2D_DESC);
 }
 
+impl ::windows::core::RuntimeName for ID3D11Texture2D {}
+
 impl ID3D11Texture2D_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture2D_Impl, const OFFSET: isize>() -> ID3D11Texture2D_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture2D_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE2D_DESC) {
@@ -4954,6 +4964,8 @@ pub struct ID3D11ShaderResourceView_Vtbl {
 pub trait ID3D11ShaderResourceView_Impl: Sized + ID3D11View_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_SHADER_RESOURCE_VIEW_DESC);
 }
+
+impl ::windows::core::RuntimeName for ID3D11ShaderResourceView {}
 
 impl ID3D11ShaderResourceView_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ShaderResourceView_Impl, const OFFSET: isize>() -> ID3D11ShaderResourceView_Vtbl {
@@ -5035,6 +5047,8 @@ pub trait ID3D11DepthStencilView_Impl: Sized + ID3D11View_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_DEPTH_STENCIL_VIEW_DESC);
 }
 
+impl ::windows::core::RuntimeName for ID3D11DepthStencilView {}
+
 impl ID3D11DepthStencilView_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DepthStencilView_Impl, const OFFSET: isize>() -> ID3D11DepthStencilView_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DepthStencilView_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_DEPTH_STENCIL_VIEW_DESC) {
@@ -5111,6 +5125,8 @@ pub struct ID3D11BlendState_Vtbl {
 pub trait ID3D11BlendState_Impl: Sized + ID3D11DeviceChild_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_BLEND_DESC);
 }
+
+impl ::windows::core::RuntimeName for ID3D11BlendState {}
 
 impl ID3D11BlendState_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11BlendState_Impl, const OFFSET: isize>() -> ID3D11BlendState_Vtbl {
@@ -5189,6 +5205,8 @@ pub trait ID3D11RasterizerState_Impl: Sized + ID3D11DeviceChild_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_RASTERIZER_DESC);
 }
 
+impl ::windows::core::RuntimeName for ID3D11RasterizerState {}
+
 impl ID3D11RasterizerState_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11RasterizerState_Impl, const OFFSET: isize>() -> ID3D11RasterizerState_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11RasterizerState_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_RASTERIZER_DESC) {
@@ -5266,6 +5284,8 @@ pub trait ID3D11DepthStencilState_Impl: Sized + ID3D11DeviceChild_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_DEPTH_STENCIL_DESC);
 }
 
+impl ::windows::core::RuntimeName for ID3D11DepthStencilState {}
+
 impl ID3D11DepthStencilState_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DepthStencilState_Impl, const OFFSET: isize>() -> ID3D11DepthStencilState_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DepthStencilState_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_DEPTH_STENCIL_DESC) {
@@ -5332,6 +5352,8 @@ pub struct ID3D11PixelShader_Vtbl {
 
 pub trait ID3D11PixelShader_Impl: Sized + ID3D11DeviceChild_Impl {}
 
+impl ::windows::core::RuntimeName for ID3D11PixelShader {}
+
 impl ID3D11PixelShader_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11PixelShader_Impl, const OFFSET: isize>() -> ID3D11PixelShader_Vtbl {
         Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
@@ -5393,6 +5415,8 @@ pub struct ID3D11VertexShader_Vtbl {
 
 pub trait ID3D11VertexShader_Impl: Sized + ID3D11DeviceChild_Impl {}
 
+impl ::windows::core::RuntimeName for ID3D11VertexShader {}
+
 impl ID3D11VertexShader_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11VertexShader_Impl, const OFFSET: isize>() -> ID3D11VertexShader_Vtbl {
         Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
@@ -5453,6 +5477,8 @@ pub struct ID3D11InputLayout_Vtbl {
 }
 
 pub trait ID3D11InputLayout_Impl: Sized + ID3D11DeviceChild_Impl {}
+
+impl ::windows::core::RuntimeName for ID3D11InputLayout {}
 
 impl ID3D11InputLayout_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11InputLayout_Impl, const OFFSET: isize>() -> ID3D11InputLayout_Vtbl {
@@ -5529,6 +5555,8 @@ pub struct ID3D11Buffer_Vtbl {
 pub trait ID3D11Buffer_Impl: Sized + ID3D11Resource_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_BUFFER_DESC);
 }
+
+impl ::windows::core::RuntimeName for ID3D11Buffer {}
 
 impl ID3D11Buffer_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Buffer_Impl, const OFFSET: isize>() -> ID3D11Buffer_Vtbl {
@@ -5613,6 +5641,8 @@ pub struct ID3D11Asynchronous_Vtbl {
 pub trait ID3D11Asynchronous_Impl: Sized + ID3D11DeviceChild_Impl {
     fn GetDataSize(&self) -> u32;
 }
+
+impl ::windows::core::RuntimeName for ID3D11Asynchronous {}
 
 impl ID3D11Asynchronous_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Asynchronous_Impl, const OFFSET: isize>() -> ID3D11Asynchronous_Vtbl {
@@ -5705,6 +5735,8 @@ pub trait ID3D11ClassInstance_Impl: Sized + ID3D11DeviceChild_Impl {
     fn GetInstanceName(&self, pinstancename: ::windows::core::PSTR, pbufferlength: *mut usize);
     fn GetTypeName(&self, ptypename: ::windows::core::PSTR, pbufferlength: *mut usize);
 }
+
+impl ::windows::core::RuntimeName for ID3D11ClassInstance {}
 
 impl ID3D11ClassInstance_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassInstance_Impl, const OFFSET: isize>() -> ID3D11ClassInstance_Vtbl {
@@ -5813,6 +5845,8 @@ pub trait ID3D11Texture3D_Impl: Sized + ID3D11Resource_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE3D_DESC);
 }
 
+impl ::windows::core::RuntimeName for ID3D11Texture3D {}
+
 impl ID3D11Texture3D_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture3D_Impl, const OFFSET: isize>() -> ID3D11Texture3D_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture3D_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE3D_DESC) {
@@ -5899,6 +5933,8 @@ pub trait ID3D11Texture1D_Impl: Sized + ID3D11Resource_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_TEXTURE1D_DESC);
 }
 
+impl ::windows::core::RuntimeName for ID3D11Texture1D {}
+
 impl ID3D11Texture1D_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture1D_Impl, const OFFSET: isize>() -> ID3D11Texture1D_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Texture1D_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_TEXTURE1D_DESC) {
@@ -5980,6 +6016,8 @@ pub trait ID3D11Resource_Impl: Sized + ID3D11DeviceChild_Impl {
     fn SetEvictionPriority(&self, evictionpriority: u32);
     fn GetEvictionPriority(&self) -> u32;
 }
+
+impl ::windows::core::RuntimeName for ID3D11Resource {}
 
 impl ID3D11Resource_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Resource_Impl, const OFFSET: isize>() -> ID3D11Resource_Vtbl {
@@ -6076,6 +6114,8 @@ pub trait ID3D11UnorderedAccessView_Impl: Sized + ID3D11View_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC);
 }
 
+impl ::windows::core::RuntimeName for ID3D11UnorderedAccessView {}
+
 impl ID3D11UnorderedAccessView_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11UnorderedAccessView_Impl, const OFFSET: isize>() -> ID3D11UnorderedAccessView_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11UnorderedAccessView_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_UNORDERED_ACCESS_VIEW_DESC) {
@@ -6160,6 +6200,8 @@ pub trait ID3D11ClassLinkage_Impl: Sized + ID3D11DeviceChild_Impl {
     fn GetClassInstance(&self, pclassinstancename: &::windows::core::PCSTR, instanceindex: u32) -> ::windows::core::Result<ID3D11ClassInstance>;
     fn CreateClassInstance(&self, pclasstypename: &::windows::core::PCSTR, constantbufferoffset: u32, constantvectoroffset: u32, textureoffset: u32, sampleroffset: u32) -> ::windows::core::Result<ID3D11ClassInstance>;
 }
+
+impl ::windows::core::RuntimeName for ID3D11ClassLinkage {}
 
 impl ID3D11ClassLinkage_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ClassLinkage_Impl, const OFFSET: isize>() -> ID3D11ClassLinkage_Vtbl {
@@ -6248,6 +6290,8 @@ pub struct ID3D11GeometryShader_Vtbl {
 
 pub trait ID3D11GeometryShader_Impl: Sized + ID3D11DeviceChild_Impl {}
 
+impl ::windows::core::RuntimeName for ID3D11GeometryShader {}
+
 impl ID3D11GeometryShader_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11GeometryShader_Impl, const OFFSET: isize>() -> ID3D11GeometryShader_Vtbl {
         Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
@@ -6308,6 +6352,8 @@ pub struct ID3D11HullShader_Vtbl {
 }
 
 pub trait ID3D11HullShader_Impl: Sized + ID3D11DeviceChild_Impl {}
+
+impl ::windows::core::RuntimeName for ID3D11HullShader {}
 
 impl ID3D11HullShader_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11HullShader_Impl, const OFFSET: isize>() -> ID3D11HullShader_Vtbl {
@@ -6370,6 +6416,8 @@ pub struct ID3D11DomainShader_Vtbl {
 
 pub trait ID3D11DomainShader_Impl: Sized + ID3D11DeviceChild_Impl {}
 
+impl ::windows::core::RuntimeName for ID3D11DomainShader {}
+
 impl ID3D11DomainShader_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DomainShader_Impl, const OFFSET: isize>() -> ID3D11DomainShader_Vtbl {
         Self { base__: ID3D11DeviceChild_Vtbl::new::<Identity, Impl, OFFSET>() }
@@ -6430,6 +6478,8 @@ pub struct ID3D11ComputeShader_Vtbl {
 }
 
 pub trait ID3D11ComputeShader_Impl: Sized + ID3D11DeviceChild_Impl {}
+
+impl ::windows::core::RuntimeName for ID3D11ComputeShader {}
 
 impl ID3D11ComputeShader_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11ComputeShader_Impl, const OFFSET: isize>() -> ID3D11ComputeShader_Vtbl {
@@ -6497,6 +6547,8 @@ pub struct ID3D11SamplerState_Vtbl {
 pub trait ID3D11SamplerState_Impl: Sized + ID3D11DeviceChild_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_SAMPLER_DESC);
 }
+
+impl ::windows::core::RuntimeName for ID3D11SamplerState {}
 
 impl ID3D11SamplerState_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11SamplerState_Impl, const OFFSET: isize>() -> ID3D11SamplerState_Vtbl {
@@ -6572,6 +6624,8 @@ pub trait ID3D11DeviceChild_Impl: Sized {
     fn SetPrivateData(&self, guid: *const ::windows::core::GUID, datasize: u32, pdata: *const ::core::ffi::c_void) -> ::windows::core::Result<()>;
     fn SetPrivateDataInterface(&self, guid: *const ::windows::core::GUID, pdata: &::core::option::Option<::windows::core::IUnknown>) -> ::windows::core::Result<()>;
 }
+
+impl ::windows::core::RuntimeName for ID3D11DeviceChild {}
 
 impl ID3D11DeviceChild_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11DeviceChild_Impl, const OFFSET: isize>() -> ID3D11DeviceChild_Vtbl {
@@ -6666,6 +6720,8 @@ pub trait ID3D11View_Impl: Sized + ID3D11DeviceChild_Impl {
     fn GetResource(&self, ppresource: *mut ::core::option::Option<ID3D11Resource>);
 }
 
+impl ::windows::core::RuntimeName for ID3D11View {}
+
 impl ID3D11View_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11View_Impl, const OFFSET: isize>() -> ID3D11View_Vtbl {
         unsafe extern "system" fn GetResource<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11View_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppresource: *mut *mut ::core::ffi::c_void) {
@@ -6741,6 +6797,8 @@ pub trait ID3D11Query_Impl: Sized + ID3D11Asynchronous_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_QUERY_DESC);
 }
 
+impl ::windows::core::RuntimeName for ID3D11Query {}
+
 impl ID3D11Query_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>() -> ID3D11Query_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Query_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut D3D11_QUERY_DESC) {
@@ -6813,6 +6871,8 @@ pub struct ID3D11Predicate_Vtbl {
 
 pub trait ID3D11Predicate_Impl: Sized + ID3D11Query_Impl {}
 
+impl ::windows::core::RuntimeName for ID3D11Predicate {}
+
 impl ID3D11Predicate_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Predicate_Impl, const OFFSET: isize>() -> ID3D11Predicate_Vtbl {
         Self { base__: ID3D11Query_Vtbl::new::<Identity, Impl, OFFSET>() }
@@ -6882,6 +6942,8 @@ pub struct ID3D11Counter_Vtbl {
 pub trait ID3D11Counter_Impl: Sized + ID3D11Asynchronous_Impl {
     fn GetDesc(&self, pdesc: *mut D3D11_COUNTER_DESC);
 }
+
+impl ::windows::core::RuntimeName for ID3D11Counter {}
 
 impl ID3D11Counter_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11Counter_Impl, const OFFSET: isize>() -> ID3D11Counter_Vtbl {
@@ -6954,6 +7016,8 @@ pub struct ID3D11CommandList_Vtbl {
 pub trait ID3D11CommandList_Impl: Sized + ID3D11DeviceChild_Impl {
     fn GetContextFlags(&self) -> u32;
 }
+
+impl ::windows::core::RuntimeName for ID3D11CommandList {}
 
 impl ID3D11CommandList_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3D11CommandList_Impl, const OFFSET: isize>() -> ID3D11CommandList_Vtbl {
@@ -9083,6 +9147,8 @@ pub trait ID3DBlob_Impl: Sized {
     fn GetBufferSize(&self) -> usize;
 }
 
+impl ::windows::core::RuntimeName for ID3DBlob {}
+
 impl ID3DBlob_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3DBlob_Impl, const OFFSET: isize>() -> ID3DBlob_Vtbl {
         unsafe extern "system" fn GetBufferPointer<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ID3DBlob_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> *mut ::core::ffi::c_void {
@@ -9546,6 +9612,8 @@ pub trait IDXGIFactory2_Impl: Sized + IDXGIFactory1_Impl {
     fn CreateSwapChainForComposition(&self, pdevice: &::core::option::Option<::windows::core::IUnknown>, pdesc: *const DXGI_SWAP_CHAIN_DESC1, prestricttooutput: &::core::option::Option<IDXGIOutput>) -> ::windows::core::Result<IDXGISwapChain1>;
 }
 
+impl ::windows::core::RuntimeName for IDXGIFactory2 {}
+
 impl IDXGIFactory2_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>() -> IDXGIFactory2_Vtbl {
         unsafe extern "system" fn IsWindowedStereoEnabled<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory2_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> super::super::Foundation::BOOL {
@@ -9884,6 +9952,8 @@ pub trait IDXGISwapChain1_Impl: Sized + IDXGISwapChain_Impl {
     fn SetRotation(&self, rotation: Common::DXGI_MODE_ROTATION) -> ::windows::core::Result<()>;
     fn GetRotation(&self) -> ::windows::core::Result<Common::DXGI_MODE_ROTATION>;
 }
+
+impl ::windows::core::RuntimeName for IDXGISwapChain1 {}
 
 impl IDXGISwapChain1_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain1_Impl, const OFFSET: isize>() -> IDXGISwapChain1_Vtbl {
@@ -10826,6 +10896,8 @@ pub trait IDXGIAdapter1_Impl: Sized + IDXGIAdapter_Impl {
     fn GetDesc1(&self) -> ::windows::core::Result<DXGI_ADAPTER_DESC1>;
 }
 
+impl ::windows::core::RuntimeName for IDXGIAdapter1 {}
+
 impl IDXGIAdapter1_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIAdapter1_Impl, const OFFSET: isize>() -> IDXGIAdapter1_Vtbl {
         unsafe extern "system" fn GetDesc1<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIAdapter1_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_ADAPTER_DESC1) -> ::windows::core::HRESULT {
@@ -10928,6 +11000,8 @@ pub trait IDXGISurface_Impl: Sized + IDXGIDeviceSubObject_Impl {
     fn Map(&self, plockedrect: *mut DXGI_MAPPED_RECT, mapflags: u32) -> ::windows::core::Result<()>;
     fn Unmap(&self) -> ::windows::core::Result<()>;
 }
+
+impl ::windows::core::RuntimeName for IDXGISurface {}
 
 impl IDXGISurface_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISurface_Impl, const OFFSET: isize>() -> IDXGISurface_Vtbl {
@@ -11131,6 +11205,8 @@ pub trait IDXGIOutput_Impl: Sized + IDXGIObject_Impl {
     fn GetFrameStatistics(&self) -> ::windows::core::Result<DXGI_FRAME_STATISTICS>;
 }
 
+impl ::windows::core::RuntimeName for IDXGIOutput {}
+
 impl IDXGIOutput_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIOutput_Impl, const OFFSET: isize>() -> IDXGIOutput_Vtbl {
         unsafe extern "system" fn GetDesc<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIOutput_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pdesc: *mut DXGI_OUTPUT_DESC) -> ::windows::core::HRESULT {
@@ -11316,6 +11392,8 @@ pub trait IDXGIAdapter_Impl: Sized + IDXGIObject_Impl {
     fn CheckInterfaceSupport(&self, interfacename: *const ::windows::core::GUID) -> ::windows::core::Result<i64>;
 }
 
+impl ::windows::core::RuntimeName for IDXGIAdapter {}
+
 impl IDXGIAdapter_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIAdapter_Impl, const OFFSET: isize>() -> IDXGIAdapter_Vtbl {
         unsafe extern "system" fn EnumOutputs<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIAdapter_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, output: u32, ppoutput: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
@@ -11425,6 +11503,8 @@ pub trait IDXGIObject_Impl: Sized {
     fn GetPrivateData(&self, name: *const ::windows::core::GUID, pdatasize: *mut u32, pdata: *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
     fn GetParent(&self, riid: *const ::windows::core::GUID, ppparent: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
 }
+
+impl ::windows::core::RuntimeName for IDXGIObject {}
 
 impl IDXGIObject_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIObject_Impl, const OFFSET: isize>() -> IDXGIObject_Vtbl {
@@ -11573,6 +11653,8 @@ pub trait IDXGIFactory_Impl: Sized + IDXGIObject_Impl {
     fn CreateSoftwareAdapter(&self, module: super::super::Foundation::HINSTANCE) -> ::windows::core::Result<IDXGIAdapter>;
 }
 
+impl ::windows::core::RuntimeName for IDXGIFactory {}
+
 impl IDXGIFactory_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory_Impl, const OFFSET: isize>() -> IDXGIFactory_Vtbl {
         unsafe extern "system" fn EnumAdapters<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, adapter: u32, ppadapter: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
@@ -11696,6 +11778,8 @@ pub trait IDXGIDeviceSubObject_Impl: Sized + IDXGIObject_Impl {
     fn GetDevice(&self, riid: *const ::windows::core::GUID, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
 }
 
+impl ::windows::core::RuntimeName for IDXGIDeviceSubObject {}
+
 impl IDXGIDeviceSubObject_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIDeviceSubObject_Impl, const OFFSET: isize>() -> IDXGIDeviceSubObject_Vtbl {
         unsafe extern "system" fn GetDevice<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIDeviceSubObject_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, riid: *const ::windows::core::GUID, ppdevice: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
@@ -11815,6 +11899,8 @@ pub trait IDXGIFactory1_Impl: Sized + IDXGIFactory_Impl {
     fn EnumAdapters1(&self, adapter: u32) -> ::windows::core::Result<IDXGIAdapter1>;
     fn IsCurrent(&self) -> super::super::Foundation::BOOL;
 }
+
+impl ::windows::core::RuntimeName for IDXGIFactory1 {}
 
 impl IDXGIFactory1_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGIFactory1_Impl, const OFFSET: isize>() -> IDXGIFactory1_Vtbl {
@@ -11993,6 +12079,8 @@ pub trait IDXGISwapChain_Impl: Sized + IDXGIDeviceSubObject_Impl {
     fn GetFrameStatistics(&self) -> ::windows::core::Result<DXGI_FRAME_STATISTICS>;
     fn GetLastPresentCount(&self) -> ::windows::core::Result<u32>;
 }
+
+impl ::windows::core::RuntimeName for IDXGISwapChain {}
 
 impl IDXGISwapChain_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDXGISwapChain_Impl, const OFFSET: isize>() -> IDXGISwapChain_Vtbl {
@@ -12992,6 +13080,8 @@ pub trait ITypeComp_Impl: Sized {
     fn BindType(&self, szname: &::windows::core::PCWSTR, lhashval: u32, pptinfo: *mut ::core::option::Option<ITypeInfo>, pptcomp: *mut ::core::option::Option<ITypeComp>) -> ::windows::core::Result<()>;
 }
 
+impl ::windows::core::RuntimeName for ITypeComp {}
+
 impl ITypeComp_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeComp_Impl, const OFFSET: isize>() -> ITypeComp_Vtbl {
         unsafe extern "system" fn Bind<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeComp_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, szname: ::windows::core::PCWSTR, lhashval: u32, wflags: u16, pptinfo: *mut *mut ::core::ffi::c_void, pdesckind: *mut DESCKIND, pbindptr: *mut ::core::mem::ManuallyDrop<BINDPTR>) -> ::windows::core::HRESULT {
@@ -13110,6 +13200,8 @@ pub trait ITypeLib_Impl: Sized {
     fn FindName(&self, sznamebuf: &::windows::core::PWSTR, lhashval: u32, pptinfo: *mut ::core::option::Option<ITypeInfo>, rgmemid: *mut i32, pcfound: *mut u16) -> ::windows::core::Result<()>;
     fn ReleaseTLibAttr(&self, ptlibattr: *const TLIBATTR);
 }
+
+impl ::windows::core::RuntimeName for ITypeLib {}
 
 impl ITypeLib_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeLib_Impl, const OFFSET: isize>() -> ITypeLib_Vtbl {
@@ -13381,6 +13473,8 @@ pub trait IDispatch_Impl: Sized {
     fn Invoke(&self, dispidmember: i32, riid: *const ::windows::core::GUID, lcid: u32, wflags: DISPATCH_FLAGS, pdispparams: *const DISPPARAMS, pvarresult: *mut VARIANT, pexcepinfo: *mut EXCEPINFO, puargerr: *mut u32) -> ::windows::core::Result<()>;
 }
 
+impl ::windows::core::RuntimeName for IDispatch {}
+
 impl IDispatch_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDispatch_Impl, const OFFSET: isize>() -> IDispatch_Vtbl {
         unsafe extern "system" fn GetTypeInfoCount<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IDispatch_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pctinfo: *mut u32) -> ::windows::core::HRESULT {
@@ -13530,6 +13624,8 @@ pub trait IStream_Impl: Sized + ISequentialStream_Impl {
     fn Stat(&self, pstatstg: *mut STATSTG, grfstatflag: STATFLAG) -> ::windows::core::Result<()>;
     fn Clone(&self) -> ::windows::core::Result<IStream>;
 }
+
+impl ::windows::core::RuntimeName for IStream {}
 
 impl IStream_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStream_Impl, const OFFSET: isize>() -> IStream_Vtbl {
@@ -13788,6 +13884,8 @@ pub trait ITypeInfo_Impl: Sized {
     fn ReleaseVarDesc(&self, pvardesc: *const VARDESC);
 }
 
+impl ::windows::core::RuntimeName for ITypeInfo {}
+
 impl ITypeInfo_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>() -> ITypeInfo_Vtbl {
         unsafe extern "system" fn GetTypeAttr<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ITypeInfo_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pptypeattr: *mut *mut TYPEATTR) -> ::windows::core::HRESULT {
@@ -14012,6 +14110,8 @@ pub trait ISequentialStream_Impl: Sized {
     fn Read(&self, pv: *mut ::core::ffi::c_void, cb: u32, pcbread: *mut u32) -> ::windows::core::HRESULT;
     fn Write(&self, pv: *const ::core::ffi::c_void, cb: u32, pcbwritten: *mut u32) -> ::windows::core::HRESULT;
 }
+
+impl ::windows::core::RuntimeName for ISequentialStream {}
 
 impl ISequentialStream_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: ISequentialStream_Impl, const OFFSET: isize>() -> ISequentialStream_Vtbl {
@@ -15316,6 +15416,8 @@ pub trait IEnumSTATSTG_Impl: Sized {
     fn Clone(&self) -> ::windows::core::Result<IEnumSTATSTG>;
 }
 
+impl ::windows::core::RuntimeName for IEnumSTATSTG {}
+
 impl IEnumSTATSTG_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATSTG_Impl, const OFFSET: isize>() -> IEnumSTATSTG_Vtbl {
         unsafe extern "system" fn Next<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IEnumSTATSTG_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, celt: u32, rgelt: *mut super::STATSTG, pceltfetched: *mut u32) -> ::windows::core::HRESULT {
@@ -16201,6 +16303,8 @@ pub trait IStorage_Impl: Sized {
     fn Stat(&self, pstatstg: *mut super::STATSTG, grfstatflag: super::STATFLAG) -> ::windows::core::Result<()>;
 }
 
+impl ::windows::core::RuntimeName for IStorage {}
+
 impl IStorage_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>() -> IStorage_Vtbl {
         unsafe extern "system" fn CreateStream<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IStorage_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwcsname: ::windows::core::PCWSTR, grfmode: super::STGM, reserved1: u32, reserved2: u32, ppstm: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
@@ -16574,6 +16678,17 @@ impl ::core::fmt::Debug for STGMOVE {
 }
 }
 pub mod Threading{
+pub unsafe fn SetEvent<'a, P0>(hevent: P0) -> super::super::Foundation::BOOL
+where
+    P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
+{
+    #[cfg_attr(windows, link(name = "windows"))]
+    extern "system" {
+        fn SetEvent(hevent: super::super::Foundation::HANDLE) -> super::super::Foundation::BOOL;
+    }
+    SetEvent(hevent.into())
+}
+
 pub unsafe fn WaitForSingleObject<'a, P0>(hhandle: P0, dwmilliseconds: u32) -> super::super::Foundation::WIN32_ERROR
 where
     P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
@@ -16766,6 +16881,8 @@ pub trait IRecordInfo_Impl: Sized {
     fn RecordCreateCopy(&self, pvsource: *const ::core::ffi::c_void, ppvdest: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
     fn RecordDestroy(&self, pvrecord: *const ::core::ffi::c_void) -> ::windows::core::Result<()>;
 }
+
+impl ::windows::core::RuntimeName for IRecordInfo {}
 
 impl IRecordInfo_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IRecordInfo_Impl, const OFFSET: isize>() -> IRecordInfo_Vtbl {
@@ -17245,6 +17362,8 @@ pub trait IMMDeviceEnumerator_Impl: Sized {
     fn UnregisterEndpointNotificationCallback(&self, pclient: &::core::option::Option<IMMNotificationClient>) -> ::windows::core::Result<()>;
 }
 
+impl ::windows::core::RuntimeName for IMMDeviceEnumerator {}
+
 impl IMMDeviceEnumerator_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceEnumerator_Impl, const OFFSET: isize>() -> IMMDeviceEnumerator_Vtbl {
         unsafe extern "system" fn EnumAudioEndpoints<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceEnumerator_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, dataflow: EDataFlow, dwstatemask: u32, ppdevices: *mut *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
@@ -17385,6 +17504,8 @@ pub trait IMMNotificationClient_Impl: Sized {
     fn OnPropertyValueChanged(&self, pwstrdeviceid: &::windows::core::PCWSTR, key: &super::super::UI::Shell::PropertiesSystem::PROPERTYKEY) -> ::windows::core::Result<()>;
 }
 
+impl ::windows::core::RuntimeName for IMMNotificationClient {}
+
 impl IMMNotificationClient_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMNotificationClient_Impl, const OFFSET: isize>() -> IMMNotificationClient_Vtbl {
         unsafe extern "system" fn OnDeviceStateChanged<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMNotificationClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pwstrdeviceid: ::windows::core::PCWSTR, dwnewstate: u32) -> ::windows::core::HRESULT {
@@ -17498,6 +17619,8 @@ pub trait IMMDevice_Impl: Sized {
     fn GetId(&self) -> ::windows::core::Result<::windows::core::PWSTR>;
     fn GetState(&self) -> ::windows::core::Result<u32>;
 }
+
+impl ::windows::core::RuntimeName for IMMDevice {}
 
 impl IMMDevice_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDevice_Impl, const OFFSET: isize>() -> IMMDevice_Vtbl {
@@ -17682,6 +17805,8 @@ pub trait IAudioClient_Impl: Sized {
     fn GetService(&self, riid: *const ::windows::core::GUID, ppv: *mut *mut ::core::ffi::c_void) -> ::windows::core::Result<()>;
 }
 
+impl ::windows::core::RuntimeName for IAudioClient {}
+
 impl IAudioClient_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>() -> IAudioClient_Vtbl {
         unsafe extern "system" fn Initialize<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, sharemode: AUDCLNT_SHAREMODE, streamflags: u32, hnsbufferduration: i64, hnsperiodicity: i64, pformat: *const WAVEFORMATEX, audiosessionguid: *const ::windows::core::GUID) -> ::windows::core::HRESULT {
@@ -17841,6 +17966,8 @@ pub trait IAudioCaptureClient_Impl: Sized {
     fn GetNextPacketSize(&self) -> ::windows::core::Result<u32>;
 }
 
+impl ::windows::core::RuntimeName for IAudioCaptureClient {}
+
 impl IAudioCaptureClient_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioCaptureClient_Impl, const OFFSET: isize>() -> IAudioCaptureClient_Vtbl {
         unsafe extern "system" fn GetBuffer<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioCaptureClient_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppdata: *mut *mut u8, pnumframestoread: *mut u32, pdwflags: *mut u32, pu64deviceposition: *mut u64, pu64qpcposition: *mut u64) -> ::windows::core::HRESULT {
@@ -17922,6 +18049,8 @@ pub trait IAudioRenderClient_Impl: Sized {
     fn GetBuffer(&self, numframesrequested: u32) -> ::windows::core::Result<*mut u8>;
     fn ReleaseBuffer(&self, numframeswritten: u32, dwflags: u32) -> ::windows::core::Result<()>;
 }
+
+impl ::windows::core::RuntimeName for IAudioRenderClient {}
 
 impl IAudioRenderClient_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IAudioRenderClient_Impl, const OFFSET: isize>() -> IAudioRenderClient_Vtbl {
@@ -18287,6 +18416,8 @@ pub trait IMMDeviceCollection_Impl: Sized {
     fn GetCount(&self) -> ::windows::core::Result<u32>;
     fn Item(&self, ndevice: u32) -> ::windows::core::Result<IMMDevice>;
 }
+
+impl ::windows::core::RuntimeName for IMMDeviceCollection {}
 
 impl IMMDeviceCollection_Vtbl {
     pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMMDeviceCollection_Impl, const OFFSET: isize>() -> IMMDeviceCollection_Vtbl {
