@@ -45,6 +45,15 @@ impl PCWSTR {
         String::from_utf16(self.as_wide())
     }
 
+    /// Copy the `PCWSTR` into an `HSTRING`.
+    ///
+    /// # Safety
+    ///
+    /// See the safety information for `PCWSTR::as_wide`.
+    pub unsafe fn to_hstring(&self) -> Result<HSTRING> {
+        HSTRING::from_wide(self.as_wide())
+    }
+
     /// Allow this string to be displayed.
     ///
     /// # Safety
@@ -57,12 +66,6 @@ impl PCWSTR {
 
 unsafe impl Abi for PCWSTR {
     type Abi = Self;
-}
-
-impl From<&HSTRING> for PCWSTR {
-    fn from(hstring: &HSTRING) -> Self {
-        Self(hstring.as_ptr())
-    }
 }
 
 // This just ensures that `None` can be used for optional PCWSTR parameters, which can be quite common

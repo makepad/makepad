@@ -5,26 +5,26 @@ use {
         audio::*,
         midi::*,
         media_api::CxMediaApi,
-        os::mswindows::win32_midi::*,
+        os::mswindows::winrt_midi::*,
     }
 };
 
 impl CxMediaApi for Cx {
     
     fn midi_input(&mut self) -> MidiInput {
-        self.os.win32_midi().lock().unwrap().create_midi_input()
+        self.os.winrt_midi().lock().unwrap().create_midi_input()
     }
     
     fn midi_output(&mut self)->MidiOutput{
-        MidiOutput(Some(OsMidiOutput(self.os.win32_midi())))
+        MidiOutput(Some(OsMidiOutput(self.os.winrt_midi())))
     }
 
     fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
-        self.os.win32_midi().lock().unwrap().use_midi_inputs(ports);
+        self.os.winrt_midi().lock().unwrap().use_midi_inputs(ports);
     }
     
     fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
-        self.os.win32_midi().lock().unwrap().use_midi_outputs(ports);
+        self.os.winrt_midi().lock().unwrap().use_midi_outputs(ports);
     }
 
     fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
