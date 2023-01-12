@@ -3,7 +3,6 @@ mod agile_reference;
 mod array;
 mod as_impl;
 pub(crate) mod bindings;
-mod borrowed;
 mod delay_load;
 mod error;
 mod event;
@@ -14,6 +13,7 @@ mod heap;
 mod hresult;
 mod inspectable;
 mod interface;
+mod manually_drop;
 mod param;
 mod ref_count;
 mod runtime_name;
@@ -33,8 +33,7 @@ pub use agile_reference::*;
 pub use array::*;
 #[doc(hidden)]
 pub use as_impl::*;
-pub use borrowed::*;
-pub(crate) use delay_load::*;
+pub use delay_load::*;
 pub use error::*;
 pub use event::*;
 pub use factory_cache::*;
@@ -45,6 +44,7 @@ pub(crate) use heap::*;
 pub use hresult::*;
 pub use inspectable::*;
 pub use interface::*;
+pub use manually_drop::*;
 pub use param::*;
 #[doc(hidden)]
 pub use ref_count::*;
@@ -75,13 +75,8 @@ pub use bindings::IAgileObject;
 pub use windows_implement::implement;
 
 #[doc(hidden)]
-#[cfg(feature = "interface")]
-pub use windows_interface::interface;
-
-extern "C" {
-    #[doc(hidden)]
-    pub fn memcmp(left: *const std::ffi::c_void, right: *const std::ffi::c_void, len: usize) -> i32;
-}
+#[cfg(feature = "implement")]
+//pub use windows_interface::interface;
 
 #[doc(hidden)]
 pub extern crate alloc;
@@ -124,3 +119,41 @@ macro_rules! interface_hierarchy {
 
 #[doc(hidden)]
 pub use interface_hierarchy;
+
+#[cfg(all(windows_raw_dylib, target_arch = "x86"))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! link {
+    ($library:literal $abi:literal fn $name:ident($($arg:ident: $argty:ty),*)->$ret:ty) => (
+        #[link(name = $library, kind = "raw-dylib", modifiers = "+verbatim", import_name_type = "undecorated")]
+        extern $abi {
+            pub fn $name($($arg: $argty),*) -> $ret;
+        }
+    )
+}
+
+#[cfg(all(windows_raw_dylib, not(target_arch = "x86")))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! link {
+    ($library:literal $abi:literal fn $name:ident($($arg:ident: $argty:ty),*)->$ret:ty) => (
+        #[link(name = $library, kind = "raw-dylib", modifiers = "+verbatim")]
+        extern "system" {
+            pub fn $name($($arg: $argty),*) -> $ret;
+        }
+    )
+}
+
+#[cfg(not(windows_raw_dylib))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! link {
+    ($library:literal $abi:literal fn $name:ident($($arg:ident: $argty:ty),*)->$ret:ty) => (
+        #[link(name = "windows")]
+        extern $abi {
+            pub fn $name($($arg: $argty),*) -> $ret;
+        }
+    )
+}
+
+pub use crate::link;

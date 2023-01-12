@@ -16,8 +16,7 @@ impl Error {
     /// point of failure.
     pub fn new(code: HRESULT, message: HSTRING) -> Self {
         unsafe {
-            if let Ok(function) = delay_load(s!("combase.dll"), s!("RoOriginateError")) {
-                let function: RoOriginateError = std::mem::transmute(function);
+            if let Some(function) = delay_load::<RoOriginateError>(s!("combase.dll"), s!("RoOriginateError")) {
                 function(code, std::mem::transmute_copy(&message));
             }
             let info = GetErrorInfo().and_then(|e| e.cast()).ok();
@@ -54,7 +53,7 @@ impl Error {
 
             if self.code == code {
                 let message = if !message.is_empty() { message } else { fallback };
-                return HSTRING::from_wide(wide_trim_end(message.as_wide()));
+                return HSTRING::from_wide(wide_trim_end(message.as_wide())).unwrap_or_default();
             }
         }
 
@@ -122,7 +121,7 @@ impl std::convert::From<HRESULT> for Error {
 
         if let Ok(info) = GetErrorInfo() {
             let message = unsafe { info.GetDescription().unwrap_or_default() };
-            Self::new(code, HSTRING::from_wide(message.as_wide()))
+            Self::new(code, HSTRING::from_wide(message.as_wide()).unwrap_or_default())
         } else {
             Self { code, info: None }
         }
@@ -149,7 +148,7 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-type RoOriginateError = extern "system" fn(code: HRESULT, message: std::mem::ManuallyDrop<HSTRING>) -> i32;
+type RoOriginateError = extern "system" fn(code: HRESULT, message: *mut std::ffi::c_void) -> i32;
 
 fn GetErrorInfo() -> Result<IErrorInfo> {
     let mut result = std::mem::MaybeUninit::zeroed();

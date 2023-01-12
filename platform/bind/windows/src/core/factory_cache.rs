@@ -53,16 +53,14 @@ pub fn factory<C: RuntimeName, I: Interface>() -> Result<I> {
     let mut factory: Option<I> = None;
     let name = HSTRING::from(C::NAME);
 
-    let code = if let Ok(function) = unsafe { delay_load(s!("combase.dll"), s!("RoGetActivationFactory")) } {
+    let code = if let Some(function) = unsafe { delay_load::<RoGetActivationFactory>(s!("combase.dll"), s!("RoGetActivationFactory")) } {
         unsafe {
-            let function: RoGetActivationFactory = std::mem::transmute(function);
             let mut code = function(std::mem::transmute_copy(&name), &I::IID, &mut factory as *mut _ as *mut _);
 
             // If RoGetActivationFactory fails because combase hasn't been loaded yet then load combase
             // automatically so that it "just works" for apartment-agnostic code.
             if code == CO_E_NOTINITIALIZED {
-                if let Ok(mta) = delay_load(s!("ole32.dll"), s!("CoIncrementMTAUsage")) {
-                    let mta: CoIncrementMTAUsage = std::mem::transmute(mta);
+                if let Some(mta) = delay_load::<CoIncrementMTAUsage>(s!("ole32.dll"), s!("CoIncrementMTAUsage")) {
                     let mut cookie = std::ptr::null_mut();
                     let _ = mta(&mut cookie);
                 }
@@ -121,15 +119,14 @@ where
 }
 
 unsafe fn get_activation_factory(library: PCSTR, name: &HSTRING) -> Result<IGenericFactory> {
-    let function = delay_load(library, s!("DllGetActivationFactory"))?;
-    let function: DllGetActivationFactory = std::mem::transmute(function);
+    let function = delay_load::<DllGetActivationFactory>(library, s!("DllGetActivationFactory")).ok_or_else(Error::from_win32)?;
     let mut abi = std::mem::MaybeUninit::zeroed();
     function(std::mem::transmute_copy(name), abi.as_mut_ptr()).from_abi(abi)
 }
 
 type CoIncrementMTAUsage = extern "system" fn(cookie: *mut *mut std::ffi::c_void) -> HRESULT;
-type RoGetActivationFactory = extern "system" fn(hstring: std::mem::ManuallyDrop<HSTRING>, interface: &GUID, result: *mut *mut std::ffi::c_void) -> HRESULT;
-type DllGetActivationFactory = extern "system" fn(name: std::mem::ManuallyDrop<HSTRING>, factory: *mut *mut std::ffi::c_void) -> HRESULT;
+type RoGetActivationFactory = extern "system" fn(hstring: *mut std::ffi::c_void, interface: &GUID, result: *mut *mut std::ffi::c_void) -> HRESULT;
+type DllGetActivationFactory = extern "system" fn(name: *mut std::ffi::c_void, factory: *mut *mut std::ffi::c_void) -> HRESULT;
 
 #[cfg(test)]
 mod tests {
