@@ -101,7 +101,7 @@ impl App {
                 // nonblockingly (timeout=1ns) check our discovery socket for peers
                 while let Ok((_, mut addr)) = read_discovery.recv_from(&mut other_uid) {
                     if client_uid == u64::from_be_bytes(other_uid) {
-                        continue;
+                    //    continue; 
                     }
                     addr.set_port(41532);
                     if let Some(time) = peer_addrs.get_mut(&addr) {
@@ -196,7 +196,7 @@ impl App {
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
             mix_recv.try_recv_stream();
-            let mut chan = AudioBuffer::new_like(output_buffer);
+              let mut chan = AudioBuffer::new_like(output_buffer);
             for i in 0..mix_recv.num_routes() {
                 if mix_recv.read_buffer(i, &mut chan, 1) != 0 {
                     for i in 0..chan.data.len() {
@@ -219,7 +219,10 @@ impl App {
             Event::MidiPorts(ports) => {
                 cx.use_midi_inputs(&ports.all_inputs());
             }
-            Event::AudioDevices(devices) => {
+            Event::AudioDevices(devices) => { 
+                for desc in &devices.descs{
+                    println!("{} default: {} input: {}", desc.name, desc.is_default, desc.device_type.is_input())
+                }
                 println!("AUDIO DEVICE CHANGE");
                 cx.use_audio_inputs(&devices.default_input());
                 cx.use_audio_outputs(&devices.default_output());
