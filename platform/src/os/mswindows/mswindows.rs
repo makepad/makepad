@@ -10,7 +10,7 @@ use {
         event::*,
         os::{
             mswindows::{
-                win32_midi::*,
+                winrt_midi::*,
                 win32_event::*,
                 wasapi::WasapiAccess,
                 d3d11::{D3d11Window, D3d11Cx},
@@ -328,13 +328,14 @@ impl CxOsApi for Cx {
 
 impl Cx {
     pub (crate) fn handle_media_signals(&mut self, ev: &SignalEvent) {
-        if ev.signals.contains(&live_id!(Win32MidiPortsChanged).into()) {
+        if ev.signals.contains(&live_id!(WinRTMidiPortsChanged).into()) {
             let descs = {
-                let win32_midi = self.os.win32_midi();
-                let mut win32_midi = win32_midi.lock().unwrap();
-                win32_midi.update_port_list();
-                win32_midi.get_descs()
+                let winrt_midi = self.os.winrt_midi();
+                let mut winrt_midi = winrt_midi.lock().unwrap();
+                winrt_midi.update_port_list();
+                winrt_midi.get_descs()
             };
+            println!("{:?}", descs);
             self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
                 descs,
             }));
@@ -356,18 +357,18 @@ impl Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    pub (crate) win32_midi: Option<Arc<Mutex<Win32MidiAccess >> >,
+    pub (crate) winrt_midi: Option<Arc<Mutex<Win32MidiAccess >> >,
     pub (crate) wasapi: Option<Arc<Mutex<WasapiAccess >> >,
 }
 
 impl CxOs {
     
-    pub fn win32_midi(&mut self) -> Arc<Mutex<Win32MidiAccess >> {
-        if self.win32_midi.is_none() {
-            self.win32_midi = Some(Arc::new(Mutex::new(Win32MidiAccess::new().unwrap())));
+    pub fn winrt_midi(&mut self) -> Arc<Mutex<Win32MidiAccess >> {
+        if self.winrt_midi.is_none() {
+            self.winrt_midi = Some(Arc::new(Mutex::new(Win32MidiAccess::new().unwrap())));
             Cx::post_signal(live_id!(Win32MidiPortsChanged).into());
         }
-        self.win32_midi.as_ref().unwrap().clone()
+        self.winrt_midi.as_ref().unwrap().clone()
     }
     
     pub fn wasapi(&mut self) -> Arc<Mutex<WasapiAccess >> {

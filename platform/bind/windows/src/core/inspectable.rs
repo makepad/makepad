@@ -57,7 +57,7 @@ impl std::fmt::Debug for IInspectable {
 
         let name = self.cast::<IStringable>().and_then(|s| s.ToString()).or_else(|_| self.GetRuntimeClassName()).unwrap_or_default();
 
-        write!(f, "{:?} {}", self.0, name)
+        write!(f, "{:?} {name}", self.0)
     }
 }
 
@@ -129,6 +129,7 @@ impl std::convert::TryFrom<&IInspectable> for HSTRING {
     }
 }
 
+#[cfg(feature = "implement")]
 impl IInspectable_Vtbl {
     pub const fn new<Identity: IUnknownImpl, Name: RuntimeName, const OFFSET: isize>() -> Self {
         unsafe extern "system" fn GetIids(_: *mut std::ffi::c_void, count: *mut u32, values: *mut *mut GUID) -> windows::core::HRESULT {

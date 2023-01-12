@@ -25,7 +25,7 @@ use {
                 GlobalUnlock,
                 GLOBAL_ALLOC_FLAGS,
             },
-            Win32::System::SystemServices::{
+            Win32::System::Ole::{
                 CF_UNICODETEXT
             },
             Win32::System::WindowsProgramming::{
@@ -476,7 +476,7 @@ impl Win32Window {
                         KeyCode::KeyV => { // paste
                             if OpenClipboard(None) == TRUE {
                                 let mut data: Vec<u16> = Vec::new();
-                                let h_clipboard_data = GetClipboardData(CF_UNICODETEXT.0).unwrap();
+                                let h_clipboard_data = GetClipboardData(CF_UNICODETEXT.0 as u32).unwrap();
                                 let h_clipboard_ptr = GlobalLock(h_clipboard_data.0) as *mut u16;
                                 let clipboard_size = GlobalSize(h_clipboard_data.0);
                                 if clipboard_size > 2 {
@@ -523,7 +523,7 @@ impl Win32Window {
                                     std::ptr::copy_nonoverlapping(data.as_ptr(), h_clipboard_ptr, data.len());
                                     
                                     GlobalUnlock(h_clipboard_data);
-                                    SetClipboardData(CF_UNICODETEXT.0, HANDLE(h_clipboard_data)).unwrap();
+                                    SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(h_clipboard_data)).unwrap();
                                     CloseClipboard();
                                 }
                             };
