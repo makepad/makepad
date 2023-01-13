@@ -18,6 +18,10 @@ impl CxMediaApi for Cx {
     fn midi_output(&mut self) -> MidiOutput {
         MidiOutput(Some(OsMidiOutput(self.os.core_midi())))
     }
+
+    fn midi_reset(&mut self) {
+        self.os.core_midi().lock().unwrap().midi_reset();
+    }
     
     fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
         self.os.core_midi().lock().unwrap().use_midi_inputs(ports);
