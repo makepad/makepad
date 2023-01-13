@@ -89,73 +89,23 @@ pub struct WasapiAccess {
     audio_outputs: Arc<Mutex<Vec<WasapiBaseRef >> >,
     descs: Vec<AudioDeviceDesc>,
 }
-
-
-unsafe fn get_device_descs(device: &IMMDevice) -> (String, String) {
-    let dev_id = device.GetId().unwrap();
-    let props = device.OpenPropertyStore(STGM_READ).unwrap();
-    let value = props.GetValue(&PKEY_Device_FriendlyName).unwrap();
-    assert!(value.Anonymous.Anonymous.vt == VT_LPWSTR);
-    let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
-    (dev_name.to_string().unwrap(), dev_id.to_string().unwrap())
-}
-
-// add audio device enumeration for input and output
-unsafe fn enumerate_devices(device_type: AudioDeviceType, enumerator: &IMMDeviceEnumerator, out: &mut Vec<AudioDeviceDesc>) {
-    let flow = match device_type {
-        AudioDeviceType::Output => eRender,
-        AudioDeviceType::Input => eCapture
-    };
-    let def_device = enumerator.GetDefaultAudioEndpoint(flow, eConsole);
-    if def_device.is_err(){
-        return
-    }
-    let def_device = def_device.unwrap();
-    let (_, def_id) = get_device_descs(&def_device);
-    let col = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE).unwrap();
-    let count = col.GetCount().unwrap();
-    for i in 0..count {
-        let device = col.Item(i).unwrap();
-        let (dev_name, dev_id) = get_device_descs(&device);
-        let device_id = AudioDeviceId(LiveId::from_str_unchecked(&dev_id));
-        out.push(AudioDeviceDesc {
-            device_id,
-            device_type,
-            is_default: def_id == dev_id,
-            channels: 2,
-            name: dev_name
-        });
-    }
-}
-
-unsafe fn find_device_by_id(search_device_id: AudioDeviceId)->Option<IMMDevice>{
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
-    let col = enumerator.EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE).unwrap();
-    let count = col.GetCount().unwrap();
-    for i in 0..count {
-        let device = col.Item(i).unwrap();
-        let (_, dev_id) = get_device_descs(&device);
-        let device_id = AudioDeviceId(LiveId::from_str_unchecked(&dev_id));
-        if device_id == search_device_id{
-            return Some(device)
-        }
-    }
-    None
-}
     
 impl WasapiAccess {
-    pub fn new() -> Self {
+    pub fn new() -> Arc<Mutex<Self>> {
         unsafe {
             CoInitialize(None).unwrap();
             let change_listener:IMMNotificationClient = WasapiChangeListener{}.into();
             let enumerator:IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();
             //let change_listener:IMMNotificationClient = WasapiChangeListener{}.into();
-            WasapiAccess{  
-                enumerator: Some(enumerator),
-                change_listener: Some(change_listener),
-                ..Default::default()
-            }
+            Cx::post_signal(live_id!(WasapiDeviceChange).into());            
+            Arc::new(Mutex::new(
+                WasapiAccess{  
+                    enumerator: Some(enumerator),
+                    change_listener: Some(change_listener),
+                    ..Default::default()
+                }
+            ))
         }
     }
     
@@ -163,8 +113,8 @@ impl WasapiAccess {
         unsafe {
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             let mut out = Vec::new();
-            enumerate_devices(AudioDeviceType::Input, &enumerator, &mut out);
-            enumerate_devices(AudioDeviceType::Output, &enumerator, &mut out);
+            Self::enumerate_devices(AudioDeviceType::Input, &enumerator, &mut out);
+            Self::enumerate_devices(AudioDeviceType::Output, &enumerator, &mut out);
             self.descs = out;
         } 
     }
@@ -278,41 +228,94 @@ impl WasapiAccess {
         }
     }
     
+    unsafe fn get_device_descs(device: &IMMDevice) -> (String, String) {
+        let dev_id = device.GetId().unwrap();
+        let props = device.OpenPropertyStore(STGM_READ).unwrap();
+        let value = props.GetValue(&PKEY_Device_FriendlyName).unwrap();
+        assert!(value.Anonymous.Anonymous.vt == VT_LPWSTR);
+        let dev_name = value.Anonymous.Anonymous.Anonymous.pwszVal;
+        (dev_name.to_string().unwrap(), dev_id.to_string().unwrap())
+    }
+    
+    // add audio device enumeration for input and output
+    unsafe fn enumerate_devices(device_type: AudioDeviceType, enumerator: &IMMDeviceEnumerator, out: &mut Vec<AudioDeviceDesc>) {
+        let flow = match device_type {
+            AudioDeviceType::Output => eRender,
+            AudioDeviceType::Input => eCapture
+        };
+        let def_device = enumerator.GetDefaultAudioEndpoint(flow, eConsole);
+        if def_device.is_err(){
+            return
+        }
+        let def_device = def_device.unwrap();
+        let (_, def_id) = Self::get_device_descs(&def_device);
+        let col = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE).unwrap();
+        let count = col.GetCount().unwrap();
+        for i in 0..count {
+            let device = col.Item(i).unwrap();
+            let (dev_name, dev_id) = Self::get_device_descs(&device);
+            let device_id = AudioDeviceId(LiveId::from_str_unchecked(&dev_id));
+            out.push(AudioDeviceDesc {
+                device_id,
+                device_type,
+                is_default: def_id == dev_id,
+                channels: 2,
+                name: dev_name
+            });
+        }
+    }
+    
+    unsafe fn find_device_by_id(search_device_id: AudioDeviceId)->Option<IMMDevice>{
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+        let col = enumerator.EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE).unwrap();
+        let count = col.GetCount().unwrap();
+        for i in 0..count {
+            let device = col.Item(i).unwrap();
+            let (_, dev_id) = Self::get_device_descs(&device);
+            let device_id = AudioDeviceId(LiveId::from_str_unchecked(&dev_id));
+            if device_id == search_device_id{
+                return Some(device)
+            }
+        }
+        None
+    }
+        
+    fn new_float_waveformatextensible(samplerate: usize, channel_count: usize) -> WAVEFORMATEXTENSIBLE {
+        let storebits = 32;
+        let validbits = 32;
+        let blockalign = channel_count * storebits / 8;
+        let byterate = samplerate * blockalign;
+        let wave_format = WAVEFORMATEX {
+            cbSize: 22,
+            nAvgBytesPerSec: byterate as u32,
+            nBlockAlign: blockalign as u16,
+            nChannels: channel_count as u16,
+            nSamplesPerSec: samplerate as u32,
+            wBitsPerSample: storebits as u16,
+            wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
+        };
+        let sample = WAVEFORMATEXTENSIBLE_0 {
+            wValidBitsPerSample: validbits as u16,
+        };
+        let subformat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        
+        let mask = match channel_count {
+            ch if ch <= 18 => {
+                // setting bit for each channel
+                (1 << ch) - 1
+            }
+            _ => 0,
+        };
+        WAVEFORMATEXTENSIBLE {
+            Format: wave_format,
+            Samples: sample,
+            SubFormat: subformat,
+            dwChannelMask: mask,
+        }
+    }
+    
 }
 
-fn new_float_waveformatextensible(samplerate: usize, channel_count: usize) -> WAVEFORMATEXTENSIBLE {
-    let storebits = 32;
-    let validbits = 32;
-    let blockalign = channel_count * storebits / 8;
-    let byterate = samplerate * blockalign;
-    let wave_format = WAVEFORMATEX {
-        cbSize: 22,
-        nAvgBytesPerSec: byterate as u32,
-        nBlockAlign: blockalign as u16,
-        nChannels: channel_count as u16,
-        nSamplesPerSec: samplerate as u32,
-        wBitsPerSample: storebits as u16,
-        wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
-    };
-    let sample = WAVEFORMATEXTENSIBLE_0 {
-        wValidBitsPerSample: validbits as u16,
-    };
-    let subformat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-    
-    let mask = match channel_count {
-        ch if ch <= 18 => {
-            // setting bit for each channel
-            (1 << ch) - 1
-        }
-        _ => 0,
-    };
-    WAVEFORMATEXTENSIBLE {
-        Format: wave_format,
-        Samples: sample,
-        SubFormat: subformat,
-        dwChannelMask: mask,
-    }
-}
 
 struct WasapiBaseRef{
     device_id: AudioDeviceId,
@@ -352,13 +355,13 @@ impl WasapiBase {
             
             CoInitialize(None).unwrap();
             
-            let device = find_device_by_id(device_id).unwrap();
+            let device = WasapiAccess::find_device_by_id(device_id).unwrap();
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).unwrap();
             
             let mut def_period = 0i64;
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
-            let wave_format = new_float_waveformatextensible(48000, channel_count);
+            let wave_format = WasapiAccess::new_float_waveformatextensible(48000, channel_count);
             
             client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,

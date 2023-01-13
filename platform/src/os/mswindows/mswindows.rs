@@ -331,8 +331,7 @@ impl Cx {
         if ev.signals.contains(&live_id!(WinRTMidiPortsChanged).into()) {
             let descs = {
                 let winrt_midi = self.os.winrt_midi();
-                let mut winrt_midi = winrt_midi.lock().unwrap();
-                winrt_midi.update_port_list();
+                let winrt_midi = winrt_midi.lock().unwrap();
                 winrt_midi.get_descs()
             };
             println!("{:?}", descs);
@@ -357,24 +356,22 @@ impl Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    pub (crate) winrt_midi: Option<Arc<Mutex<Win32MidiAccess >> >,
+    pub (crate) winrt_midi: Option<Arc<Mutex<WinRTMidiAccess >> >,
     pub (crate) wasapi: Option<Arc<Mutex<WasapiAccess >> >,
 }
 
 impl CxOs {
     
-    pub fn winrt_midi(&mut self) -> Arc<Mutex<Win32MidiAccess >> {
+    pub fn winrt_midi(&mut self) -> Arc<Mutex<WinRTMidiAccess >> {
         if self.winrt_midi.is_none() {
-            self.winrt_midi = Some(Arc::new(Mutex::new(Win32MidiAccess::new().unwrap())));
-            Cx::post_signal(live_id!(Win32MidiPortsChanged).into());
+            self.winrt_midi = Some(WinRTMidiAccess::new());
         }
         self.winrt_midi.as_ref().unwrap().clone()
     }
     
     pub fn wasapi(&mut self) -> Arc<Mutex<WasapiAccess >> {
         if self.wasapi.is_none() {
-            self.wasapi = Some(Arc::new(Mutex::new(WasapiAccess::new())));
-            Cx::post_signal(live_id!(WasapiDeviceChange).into());
+            self.wasapi = Some(WasapiAccess::new());
         }
         self.wasapi.as_ref().unwrap().clone()
     }
