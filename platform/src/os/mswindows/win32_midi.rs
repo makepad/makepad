@@ -288,6 +288,12 @@ impl Win32MidiAccess {
         }
     }
     
+    pub fn midi_reset(&self){
+        self.use_midi_inputs(&self, &[]);
+        self.use_midi_outputs(&self, &[]);
+        Cx::post_signal(live_id!(Win32MidiInputsChanged).into());
+    }
+    
     pub fn get_unique_port_id(&self, name: &str, w_mid: u16, w_pid: u16) -> MidiPortId {
         let name = format!("{}{}{}", name, w_mid, w_pid);
         for i in 0..100 {
