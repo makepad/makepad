@@ -186,9 +186,6 @@ impl Win32MidiAccess {
     }
     
     pub fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
-        if ports.len() == 0 {
-            return
-        }
         // find all ports we want enabled
         for port_id in ports {
             if let Some(port) = self.ports.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_output()) {
@@ -209,10 +206,6 @@ impl Win32MidiAccess {
     }
         
     pub  fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
-        //return;
-        if ports.len() == 0 {
-            return
-        }
         let input_senders = self.input_senders.clone();
         // find all ports we want enabled
         for port_id in ports {
@@ -233,15 +226,14 @@ impl Win32MidiAccess {
         }
     }
     
-    pub fn new() -> Result<Self,
-    ()> {
+    pub fn new() -> Arc<Mutex<Self>> {
         // alrighty lets initialize midi.
         let input_senders = InputSenders::default();
         Cx::post_signal(live_id!(Win32MidiInputsChanged).into());
-        Ok(Win32MidiAccess {
+        Arc::new(Mutex::new(Win32MidiAccess {
             input_senders,
             ports: Vec::new()
-        })
+        }))
     }
     
     pub fn update_port_list(&mut self) {
@@ -261,7 +253,6 @@ impl Win32MidiAccess {
         }
          
         unsafe {     
-            println!("{}",midiInGetNumDevs());
             for i in 0..midiInGetNumDevs() {
                 let mut caps = MIDIINCAPSW::default();
                 if midiInGetDevCapsW(i as usize, &mut caps, std::mem::size_of::<MIDIOUTCAPSW>() as u32) == 0 {

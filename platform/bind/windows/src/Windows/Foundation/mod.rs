@@ -1,11 +1,11 @@
 #[cfg(feature = "Foundation_Collections")]
 pub mod Collections;
-#[cfg(feature = "Foundation_Diagnostics")]
-pub mod Diagnostics;
-#[cfg(feature = "Foundation_Metadata")]
-pub mod Metadata;
-#[cfg(feature = "Foundation_Numerics")]
-pub mod Numerics;
+//#[cfg(feature = "Foundation_Diagnostics")]
+//pub mod Diagnostics;
+//#[cfg(feature = "Foundation_Metadata")]
+//pub mod Metadata;\
+//#[cfg(feature = "Foundation_Numerics")]
+//pub mod Numerics;
 #[doc = "*Required features: `\"Foundation\"`*"]
 #[repr(transparent)]
 pub struct IAsyncAction(::windows::core::IUnknown);
