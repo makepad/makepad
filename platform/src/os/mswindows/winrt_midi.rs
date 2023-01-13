@@ -68,7 +68,6 @@ pub struct WinRTMidiAccess {
 enum WinRTMidiEvent {
     UpdateDevices,
     SendMidi(Option<MidiPortId>, MidiData),
-    Terminate,
     UseMidiInputs(Vec<MidiPortId>),
     UseMidiOutputs(Vec<MidiPortId>),
 }
@@ -181,9 +180,6 @@ impl WinRTMidiAccess {
                         }
                         midi_access_clone.lock().unwrap().descs = descs;
                         Cx::post_signal(live_id!(WinRTMidiPortsChanged).into());
-                    }
-                    WinRTMidiEvent::Terminate => {
-                        break;
                     }
                     WinRTMidiEvent::UseMidiOutputs(ports) => {
                         //let cself = midi_access_clone.lock().unwrap();

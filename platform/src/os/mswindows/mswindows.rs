@@ -58,13 +58,15 @@ impl Cx {
         d3d11_cx: &mut D3d11Cx,
         d3d11_windows: &mut Vec<D3d11Window>
     ) -> EventFlow {
-        self.handle_platform_ops(d3d11_windows, d3d11_cx, win32_app);
+        if let EventFlow::Exit = self.handle_platform_ops(d3d11_windows, d3d11_cx, win32_app){
+            return EventFlow::Exit
+        }
         
         let mut paint_dirty = false;
         for event in events {
             
             //self.process_desktop_pre_event(&mut event);
-            match event {
+            match event { 
                 Win32Event::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                     for window in d3d11_windows.iter_mut() {
                         if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
@@ -221,7 +223,8 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx, win32_app: &mut Win32App) {
+    fn handle_platform_ops(&mut self, d3d11_windows: &mut Vec<D3d11Window>, d3d11_cx: &D3d11Cx, win32_app: &mut Win32App)->EventFlow {
+        let mut ret = EventFlow::Poll;
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -239,10 +242,13 @@ impl Cx {
                     window.is_created = true;
                 },
                 CxOsOp::CloseWindow(window_id) => {
-                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
                         self.windows[window_id].is_created = false;
-                        window.win32_window.close_window();
-                        break;
+                        d3d11_windows[index].win32_window.close_window();
+                        d3d11_windows.remove(index);
+                        if d3d11_windows.len() == 0 {
+                            ret = EventFlow::Exit
+                        }
                     }
                 },
                 CxOsOp::MinimizeWindow(window_id) => {
@@ -298,6 +304,7 @@ impl Cx {
                 }
             }
         }
+        ret
     }
 }
 
@@ -334,7 +341,6 @@ impl Cx {
                 let winrt_midi = winrt_midi.lock().unwrap();
                 winrt_midi.get_descs()
             };
-            println!("{:?}", descs);
             self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
                 descs,
             }));

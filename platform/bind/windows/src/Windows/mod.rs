@@ -1,10 +1,10 @@
 #![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]
- pub mod Foundation;pub mod Win32{
+ pub mod Foundation;pub mod Win32{ 
 pub mod UI{
 pub mod WindowsAndMessaging{
 #[repr(C)]pub struct WNDCLASSEXW {
     pub cbSize: u32,
-    pub style: WNDCLASS_STYLES, 
+    pub style: WNDCLASS_STYLES,
     pub lpfnWndProc: WNDPROC,
     pub cbClsExtra: i32,
     pub cbWndExtra: i32,
@@ -12515,6 +12515,40 @@ impl ::core::fmt::Debug for DECIMAL_1_0 {
 
 }
 pub mod System{
+pub mod Threading{
+pub unsafe fn ExitProcess(uexitcode: u32) -> ! {
+    ::windows::core::link ! ( "kernel32.dll""system" fn ExitProcess ( uexitcode : u32 ) -> ! );
+    ExitProcess(uexitcode)
+}
+
+pub unsafe fn SetEvent<P0>(hevent: P0) -> super::super::Foundation::BOOL
+where
+    P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
+{
+    ::windows::core::link ! ( "kernel32.dll""system" fn SetEvent ( hevent : super::super::Foundation:: HANDLE ) -> super::super::Foundation:: BOOL );
+    SetEvent(hevent.into())
+}
+
+pub unsafe fn WaitForSingleObject<P0>(hhandle: P0, dwmilliseconds: u32) -> super::super::Foundation::WIN32_ERROR
+where
+    P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
+{
+    ::windows::core::link ! ( "kernel32.dll""system" fn WaitForSingleObject ( hhandle : super::super::Foundation:: HANDLE , dwmilliseconds : u32 ) -> super::super::Foundation:: WIN32_ERROR );
+    WaitForSingleObject(hhandle.into(), dwmilliseconds)
+}
+
+pub unsafe fn CreateEventA<P0, P1, P2>(lpeventattributes: ::core::option::Option<*const super::super::Security::SECURITY_ATTRIBUTES>, bmanualreset: P0, binitialstate: P1, lpname: P2) -> ::windows::core::Result<super::super::Foundation::HANDLE>
+where
+    P0: ::std::convert::Into<super::super::Foundation::BOOL>,
+    P1: ::std::convert::Into<super::super::Foundation::BOOL>,
+    P2: ::std::convert::Into<::windows::core::InParam<::windows::core::PCSTR>>,
+{
+    ::windows::core::link ! ( "kernel32.dll""system" fn CreateEventA ( lpeventattributes : *const super::super::Security:: SECURITY_ATTRIBUTES , bmanualreset : super::super::Foundation:: BOOL , binitialstate : super::super::Foundation:: BOOL , lpname : :: windows::core::PCSTR ) -> super::super::Foundation:: HANDLE );
+    let result__ = CreateEventA(::core::mem::transmute(lpeventattributes.unwrap_or(::std::ptr::null())), bmanualreset.into(), binitialstate.into(), lpname.into().abi());
+    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows::core::Error::from_win32)
+}
+
+}
 pub mod LibraryLoader{
 pub unsafe fn GetModuleHandleW<P0>(lpmodulename: P0) -> ::windows::core::Result<super::super::Foundation::HINSTANCE>
 where
@@ -16692,35 +16726,6 @@ impl ::core::fmt::Debug for STGMOVE {
 }
 
 }
-}
-pub mod Threading{
-pub unsafe fn SetEvent<P0>(hevent: P0) -> super::super::Foundation::BOOL
-where
-    P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
-{
-    ::windows::core::link ! ( "kernel32.dll""system" fn SetEvent ( hevent : super::super::Foundation:: HANDLE ) -> super::super::Foundation:: BOOL );
-    SetEvent(hevent.into())
-}
-
-pub unsafe fn WaitForSingleObject<P0>(hhandle: P0, dwmilliseconds: u32) -> super::super::Foundation::WIN32_ERROR
-where
-    P0: ::std::convert::Into<super::super::Foundation::HANDLE>,
-{
-    ::windows::core::link ! ( "kernel32.dll""system" fn WaitForSingleObject ( hhandle : super::super::Foundation:: HANDLE , dwmilliseconds : u32 ) -> super::super::Foundation:: WIN32_ERROR );
-    WaitForSingleObject(hhandle.into(), dwmilliseconds)
-}
-
-pub unsafe fn CreateEventA<P0, P1, P2>(lpeventattributes: ::core::option::Option<*const super::super::Security::SECURITY_ATTRIBUTES>, bmanualreset: P0, binitialstate: P1, lpname: P2) -> ::windows::core::Result<super::super::Foundation::HANDLE>
-where
-    P0: ::std::convert::Into<super::super::Foundation::BOOL>,
-    P1: ::std::convert::Into<super::super::Foundation::BOOL>,
-    P2: ::std::convert::Into<::windows::core::InParam<::windows::core::PCSTR>>,
-{
-    ::windows::core::link ! ( "kernel32.dll""system" fn CreateEventA ( lpeventattributes : *const super::super::Security:: SECURITY_ATTRIBUTES , bmanualreset : super::super::Foundation:: BOOL , binitialstate : super::super::Foundation:: BOOL , lpname : :: windows::core::PCSTR ) -> super::super::Foundation:: HANDLE );
-    let result__ = CreateEventA(::core::mem::transmute(lpeventattributes.unwrap_or(::std::ptr::null())), bmanualreset.into(), binitialstate.into(), lpname.into().abi());
-    (!result__.is_invalid()).then(|| result__).ok_or_else(::windows::core::Error::from_win32)
-}
-
 }
 }
 pub mod Media{

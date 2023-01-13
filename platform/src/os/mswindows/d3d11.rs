@@ -776,6 +776,9 @@ impl CxOsTexture {
         if self.width == width && self.height == height {
             return false
         }
+        if width == 0 || height == 0{
+            return false;
+        }
         
         let format;
         match desc.format {

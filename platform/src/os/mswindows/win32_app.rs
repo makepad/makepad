@@ -69,6 +69,9 @@ use {
                 PROCESS_PER_MONITOR_DPI_AWARE,
                 MDT_EFFECTIVE_DPI
             },
+            Win32::System::Threading::{
+                ExitProcess
+            },
             Win32::System::LibraryLoader::{
                 GetModuleHandleW,
                 LoadLibraryA,
@@ -191,7 +194,7 @@ impl Win32App {
                             debug_assert_eq!(msg.message, WM_QUIT);
                             self.event_flow = EventFlow::Exit;
                         }
-                        else {
+                        else { 
                             TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                             if !self.was_signal_poll(){
@@ -211,9 +214,7 @@ impl Win32App {
                             DispatchMessageW(&msg);
                         }
                     }
-                    EventFlow::Exit => {
-                        return
-                    }
+                    EventFlow::Exit=>panic!()
                 }
             }
         }
@@ -222,6 +223,9 @@ impl Win32App {
     pub fn do_callback(&mut self, events: Vec<Win32Event>) {
         if let Some(mut callback) = self.event_callback.take() {
             self.event_flow = callback(self, events);
+            if let EventFlow::Exit = self.event_flow{
+                unsafe{ExitProcess(0);}
+            }
             self.event_callback = Some(callback);
         }
     }
