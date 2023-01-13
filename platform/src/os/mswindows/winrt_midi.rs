@@ -12,6 +12,7 @@ use {
                 TypedEventHandler,
             },
             Storage::Streams::{
+                DataWriter,
                 DataReader
             },
             Devices::Enumeration::{
@@ -19,7 +20,7 @@ use {
                 DeviceInformation,
                 DeviceInformationUpdate
             },
-            Devices::Midi::{MidiInPort, MidiOutPort, MidiMessageReceivedEventArgs},
+            Devices::Midi::{MidiInPort, MidiOutPort, IMidiOutPort, MidiMessageReceivedEventArgs},
         }
     },
 };
@@ -31,21 +32,8 @@ type WindowsResult<T> = crate::windows_crate::core::Result<T>;
 pub struct OsMidiOutput(pub (crate) Arc<Mutex<WinRTMidiAccess >>);
 
 impl OsMidiOutput {
-    pub fn send(&self, _port_id: Option<MidiPortId>, _d: MidiData) {
-        // send to a specific port or all ports
-        /*
-        let mut win32_midi = self.0.lock().unwrap();
-        let _short_msg = ((d.data2 as u32) << 16) | ((d.data1 as u32) << 8) | d.data0 as u32;
-        for port in &mut win32_midi.ports {
-            if port.desc.port_type.is_output()
-                && (port_id.is_none() || port.desc.port_id == port_id.unwrap()) {
-                /*if let Win32MidiHandle::OpenOut(hmidiout) = port.handle{
-                    unsafe{
-                        midiOutShortMsg(hmidiout, short_msg);
-                    }
-                }*/
-            }
-        }*/
+    pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
+        let _ =  self.0.lock().unwrap().event_sender.send(WinRTMidiEvent::SendMidi(port_id, d));
     }
 }
 
@@ -64,15 +52,22 @@ pub struct WinRTMidiInput {
     midi_input: MidiInPort,
 }
 
+#[derive(Clone)]
+pub struct WinRTMidiOutput {
+    port_id: MidiPortId,
+    midi_output: IMidiOutPort,
+}
+
 pub struct WinRTMidiAccess {
     input_senders: InputSenders,
-    watch_sender: mpsc::Sender<WatchEvent>,
+    event_sender: mpsc::Sender<WinRTMidiEvent>,
     descs: Vec<MidiPortDesc>,
 }
 
 #[derive(Clone)]
-enum WatchEvent {
+enum WinRTMidiEvent {
     UpdateDevices,
+    SendMidi(Option<MidiPortId>, MidiData),
     Terminate,
     UseMidiInputs(Vec<MidiPortId>),
     UseMidiOutputs(Vec<MidiPortId>),
@@ -80,8 +75,13 @@ enum WatchEvent {
 
 impl WinRTMidiAccess {
     
-    async fn create_midi_port(winrt_id: &str) -> WindowsResult<MidiInPort> {
+    async fn create_midi_in_port(winrt_id: &str) -> WindowsResult<MidiInPort> {
         let port = MidiInPort::FromIdAsync(&winrt_id.into()) ? .await ?;
+        Ok(port)
+    }
+    
+    async fn create_midi_out_port(winrt_id: &str) -> WindowsResult<IMidiOutPort> {
+        let port = MidiOutPort::FromIdAsync(&winrt_id.into()) ? .await ?;
         Ok(port)
     }
     
@@ -123,7 +123,7 @@ impl WinRTMidiAccess {
         let input_senders = InputSenders::default();
         let midi_access = Arc::new(Mutex::new(Self {
             descs: Vec::new(),
-            watch_sender: watch_sender.clone(),
+            event_sender: watch_sender.clone(),
             input_senders,
         }));
         let midi_access_clone = midi_access.clone();
@@ -133,34 +133,35 @@ impl WinRTMidiAccess {
             let mut ports_list = Vec::new();
             
             let mut midi_inputs = Vec::new();
+            let mut midi_outputs = Vec::new();
             
             // initiate device list update
-            watch_sender.send(WatchEvent::UpdateDevices).unwrap();
+            watch_sender.send(WinRTMidiEvent::UpdateDevices).unwrap();
             // now lets watch device changes
             let query = MidiInPort::GetDeviceSelector().unwrap();
             let input_watcher = DeviceInformation::CreateWatcherAqsFilter(&query).unwrap();
             let query = MidiInPort::GetDeviceSelector().unwrap();
             let output_watcher = DeviceInformation::CreateWatcherAqsFilter(&query).unwrap();
             
-            fn bind_watcher(watch_sender: mpsc::Sender::<WatchEvent>, watcher: &DeviceWatcher) {
+            fn bind_watcher(watch_sender: mpsc::Sender::<WinRTMidiEvent>, watcher: &DeviceWatcher) {
                 let sender = watch_sender.clone();
                 watcher.Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(move | _, _ | {
-                    let _ = sender.send(WatchEvent::UpdateDevices);
+                    let _ = sender.send(WinRTMidiEvent::UpdateDevices);
                     Ok(())
                 })).unwrap();
                 let sender = watch_sender.clone();
                 watcher.Removed(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move | _, _ | {
-                    let _ = sender.send(WatchEvent::UpdateDevices);
+                    let _ = sender.send(WinRTMidiEvent::UpdateDevices);
                     Ok(())
                 })).unwrap();
                 let sender = watch_sender.clone();
                 watcher.Updated(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move | _, _ | {
-                    let _ = sender.send(WatchEvent::UpdateDevices);
+                    let _ = sender.send(WinRTMidiEvent::UpdateDevices);
                     Ok(())
                 })).unwrap();
                 let sender = watch_sender.clone();
                 watcher.EnumerationCompleted(&TypedEventHandler::new(move | _, _ | {
-                    let _ = sender.send(WatchEvent::UpdateDevices);
+                    let _ = sender.send(WinRTMidiEvent::UpdateDevices);
                     Ok(())
                 })).unwrap();
             }
@@ -172,7 +173,7 @@ impl WinRTMidiAccess {
             
             while let Ok(msg) = watch_receiver.recv() {
                 match msg {
-                    WatchEvent::UpdateDevices => {
+                    WinRTMidiEvent::UpdateDevices => {
                         ports_list = futures::executor::block_on(Self::get_ports_list()).unwrap();
                         let mut descs = Vec::new();
                         for port in &ports_list {
@@ -181,30 +182,40 @@ impl WinRTMidiAccess {
                         midi_access_clone.lock().unwrap().descs = descs;
                         Cx::post_signal(live_id!(WinRTMidiPortsChanged).into());
                     }
-                    WatchEvent::Terminate => {
+                    WinRTMidiEvent::Terminate => {
                         break;
                     }
-                    WatchEvent::UseMidiOutputs(ports) => {
+                    WinRTMidiEvent::UseMidiOutputs(ports) => {
                         //let cself = midi_access_clone.lock().unwrap();
                         // find all ports we want enabled
                         for port_id in &ports {
-                            if let Some(_port) = ports_list.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_output()) {
+                            if let Some(port) = ports_list.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_output()) {
                                 // open this output
+                                let midi_output = futures::executor::block_on(Self::create_midi_out_port(&port.winrt_id)).unwrap();
+                                midi_outputs.push(WinRTMidiOutput{
+                                    port_id: *port_id,
+                                    midi_output
+                                });
                             }
                         }
                         // and the ones disabled
                         for port in &mut ports_list {
                             if ports.iter().find( | p | **p == port.desc.port_id).is_none() && port.desc.port_type.is_output() {
                                 // close this output
+                                if let Some(index) = midi_outputs.iter().position(|v| v.port_id == port.desc.port_id){
+                                    let out = &midi_outputs[index];
+                                    out.midi_output.Close().unwrap();
+                                    midi_outputs.remove(index);
+                                }
                             }
                         }
                     }
-                    WatchEvent::UseMidiInputs(ports) => {
+                    WinRTMidiEvent::UseMidiInputs(ports) => {
                         // find all ports we want enabled
                         for port_id in &ports {
                             if let Some(port) = ports_list.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_input()) {
                                 // open this input
-                                let midi_input = futures::executor::block_on(Self::create_midi_port(&port.winrt_id)).unwrap();
+                                let midi_input = futures::executor::block_on(Self::create_midi_in_port(&port.winrt_id)).unwrap();
                                 
                                 let input_senders = midi_access_clone.lock().unwrap().input_senders.clone();
                                 let port_id = *port_id;
@@ -242,6 +253,16 @@ impl WinRTMidiAccess {
                             }
                         }
                     }
+                    WinRTMidiEvent::SendMidi(port_id, midi_data)=>{
+                        let writer = DataWriter::new().unwrap();
+                        writer.WriteBytes(&midi_data.data).unwrap();
+                        let buffer = writer.DetachBuffer().unwrap();
+                        for output in &mut midi_outputs {
+                            if port_id.is_none() || output.port_id == port_id.unwrap() {
+                                output.midi_output.SendBuffer(&buffer).unwrap();
+                            }
+                        }
+                    }                    
                 }
             }
             input_watcher.Stop().unwrap();
@@ -263,11 +284,11 @@ impl WinRTMidiAccess {
     }
     
     pub fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
-        self.watch_sender.send(WatchEvent::UseMidiOutputs(ports.to_vec())).unwrap();
+        self.event_sender.send(WinRTMidiEvent::UseMidiOutputs(ports.to_vec())).unwrap();
     }
     
     pub fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
-        self.watch_sender.send(WatchEvent::UseMidiInputs(ports.to_vec())).unwrap();
+        self.event_sender.send(WinRTMidiEvent::UseMidiInputs(ports.to_vec())).unwrap();
     }
     
     pub fn get_descs(&self) -> Vec<MidiPortDesc> {
