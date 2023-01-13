@@ -544,6 +544,13 @@ impl CocoaApp {
     pub fn do_callback(&mut self, events: Vec<CocoaEvent>) {
         if let Some(mut callback) = self.event_callback.take(){
             self.event_flow = callback(self, events);
+            if let EventFlow::Exit = self.event_flow{
+                unsafe{ 
+                    let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+                    let () = msg_send![ns_app, terminate:nil];    
+                }
+                println!("EXIT!");
+            }
             self.event_callback = Some(callback);
         }
         //s(*callback)(self, events);

@@ -1,6 +1,7 @@
 use {
     std::sync::{Arc, Mutex},
     std::sync::mpsc,
+    makepad_futures::executor,
     crate::{
         makepad_live_id::{live_id, LiveId},
         midi::*,
@@ -173,7 +174,7 @@ impl WinRTMidiAccess {
             while let Ok(msg) = watch_receiver.recv() {
                 match msg {
                     WinRTMidiEvent::UpdateDevices => {
-                        ports_list = futures::executor::block_on(Self::get_ports_list()).unwrap();
+                        ports_list = executor::block_on(Self::get_ports_list()).unwrap();
                         let mut descs = Vec::new();
                         for port in &ports_list {
                             descs.push(port.desc.clone());
@@ -187,7 +188,7 @@ impl WinRTMidiAccess {
                         for port_id in &ports {
                             if let Some(port) = ports_list.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_output()) {
                                 // open this output
-                                let midi_output = futures::executor::block_on(Self::create_midi_out_port(&port.winrt_id)).unwrap();
+                                let midi_output = executor::block_on(Self::create_midi_out_port(&port.winrt_id)).unwrap();
                                 midi_outputs.push(WinRTMidiOutput{
                                     port_id: *port_id,
                                     midi_output
@@ -211,7 +212,7 @@ impl WinRTMidiAccess {
                         for port_id in &ports {
                             if let Some(port) = ports_list.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_input()) {
                                 // open this input
-                                let midi_input = futures::executor::block_on(Self::create_midi_in_port(&port.winrt_id)).unwrap();
+                                let midi_input = executor::block_on(Self::create_midi_in_port(&port.winrt_id)).unwrap();
                                 
                                 let input_senders = midi_access_clone.lock().unwrap().input_senders.clone();
                                 let port_id = *port_id;
