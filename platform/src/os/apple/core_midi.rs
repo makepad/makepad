@@ -19,7 +19,7 @@ pub struct OsMidiOutput(pub (crate) Arc<Mutex<CoreMidiAccess >>);
 impl OsMidiOutput {
     pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
         let mut words = [0u32; 64];
-        words[0] = (0x20000000) | ((d.data0 as u32) << 16) | ((d.data1 as u32) << 8) | d.data2 as u32;
+        words[0] = (0x20000000) | ((d.data[0] as u32) << 16) | ((d.data[1] as u32) << 8) | d.data[2] as u32;
         let event_list = MIDIEventList {
             protocol: kMIDIProtocol_1_0,
             numPackets: 1,
@@ -80,10 +80,6 @@ pub struct CoreMidiAccess {
 impl CoreMidiAccess {
     
     pub fn use_midi_inputs(&self, ports: &[MidiPortId]) {
-        //return;
-        if ports.len() == 0 {
-            return
-        }
         // find all ports we want enabled
         for port_id in ports {
             if let Some(port) = self.ports.iter().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_input()) {
@@ -138,16 +134,14 @@ impl CoreMidiAccess {
                     let ump = packet.words[i as usize];
                     let ty = ((ump >> 28) & 0xf) as u8;
                     let _group = ((ump >> 24) & 0xf) as u8;
-                    let data0 = ((ump >> 16) & 0xff) as u8;
-                    let data1 = ((ump >> 8) & 0xff) as u8;
-                    let data2 = (ump & 0xff) as u8;
+                    let data = [
+                        ((ump >> 16) & 0xff) as u8,
+                        ((ump >> 8) & 0xff) as u8,
+                        (ump & 0xff) as u8
+                    ];
                     if ty == 0x02 { // midi 1.0 channel voice
                         senders.retain( | s | {
-                            s.send((midi_port_id, MidiData {
-                                data0,
-                                data1,
-                                data2
-                            })).is_ok()
+                            s.send((midi_port_id, MidiData {data})).is_ok()
                         });
                     }
                 }

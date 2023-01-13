@@ -1876,8 +1876,8 @@ impl AudioGraphNode for IronFishState {
             _ => ()
         }
         
-        if data.data0 == 0xb0 && data.data1 == 1 {
-            self.touch = (data.data2 as f32 - 40.0) / (127.0 - 40.0);
+        if data.data[0] == 0xb0 && data.data[1] == 1 {
+            self.touch = (data.data[2] as f32 - 40.0) / (127.0 - 40.0);
             self.touch += self.settings.touch.offset.get();
             self.touch *= self.settings.touch.scale.get();
             self.touch = self.touch.powf(self.settings.touch.curve.get() * 3.0).min(1.0).max(-1.0);
