@@ -20,6 +20,10 @@ use {
                 IDataReader,
                 IDataReaderFactory,
                 IDataReaderStatics,
+                DataWriterStoreOperation,
+                IDataWriterFactory,
+                IDataWriter,
+                IDataWriter_Vtbl,
             },
             Devices::Midi::{ 
                 IMidiMessage,
