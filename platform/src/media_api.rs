@@ -6,7 +6,7 @@ use crate::{
 pub trait CxMediaApi {
     fn midi_input(&mut self) -> MidiInput;
     fn midi_output(&mut self) -> MidiOutput;
-    
+    fn midi_reset(&mut self);
     fn use_midi_inputs(&mut self, ports:&[MidiPortId]);
     fn use_midi_outputs(&mut self, ports:&[MidiPortId]);
     

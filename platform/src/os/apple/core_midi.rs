@@ -183,6 +183,11 @@ impl CoreMidiAccess {
             ports: Vec::new(),
         })
     }
+
+    pub fn midi_reset(&self){
+        self.use_midi_inputs(&self, &[]);
+        Cx::post_signal(live_id!(CoreMidiPortsChanged).into());
+    }
     
     pub fn update_port_list(&mut self) {
         self.ports.clear();
