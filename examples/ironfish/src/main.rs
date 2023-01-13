@@ -1223,7 +1223,7 @@ main_app!(App);
 pub struct App {
     ui: FrameRef,
     audio_graph: AudioGraph,
-    window: BareWindow,
+    window: DesktopWindow,
     #[rust] midi_input: MidiInput,
 }
 
