@@ -19,6 +19,10 @@ impl CxMediaApi for Cx {
         MidiOutput(Some(OsMidiOutput(self.os.winrt_midi())))
     }
 
+    fn midi_reset(&mut self){
+        self.os.winrt_midi().lock().unwrap().midi_reset();
+    }
+
     fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
         self.os.winrt_midi().lock().unwrap().use_midi_inputs(ports);
     }
