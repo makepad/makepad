@@ -7,7 +7,7 @@ use {
 };
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MidiPortsEvent{
     pub descs: Vec<MidiPortDesc>,
 }
@@ -33,6 +33,25 @@ impl MidiPortsEvent{
     }
 }
 
+impl std::fmt::Debug for MidiPortsEvent{
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        for desc in &self.descs{
+            if desc.port_type.is_input(){
+                write!(f, "MIDI Input: {}\n",desc.name).unwrap()
+            }
+            else{
+                write!(f, "MIDI Output: {}\n",desc.name).unwrap()
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for MidiPortDesc{
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("name").field(&self.name).finish()
+    }
+}
 
 #[derive(Default)]
 pub struct MidiInput(pub (crate) Option<mpsc::Receiver<(MidiPortId, MidiData) >>);
@@ -59,9 +78,7 @@ impl MidiOutput{
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MidiData {
-    pub data0: u8,
-    pub data1: u8,
-    pub data2: u8
+    pub data: [u8;3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,7 +105,7 @@ impl MidiPortType {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct MidiPortId(pub LiveId);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MidiPortDesc {
     pub name: String,
     pub port_id: MidiPortId,
@@ -121,26 +138,28 @@ impl MidiEvent {
 impl Into<MidiData> for MidiNote {
     fn into(self) -> MidiData {
         MidiData {
-            data0: (if self.is_on {0x9}else {0x8} << 4) | self.channel,
-            data1: self.note_number,
-            data2: self.velocity
+            data: [
+                (if self.is_on {0x9}else {0x8} << 4) | self.channel,
+                self.note_number,
+                self.velocity
+            ]
         }
     }
 }
 
 impl MidiData {
     pub fn status(&self) -> u8 {
-        self.data0 >> 4
+        self.data[0] >> 4
     }
     pub fn channel(&self) -> u8 {
-        self.data0 & 0xf
+        self.data[0] & 0xf
     }
     
     pub fn decode(&self) -> MidiEvent {
         let status = self.status();
         let channel = self.channel();
         match status {
-            0x8 | 0x9 => MidiEvent::Note(MidiNote {is_on: status == 0x9, channel, note_number: self.data1, velocity: self.data2}),
+            0x8 | 0x9 => MidiEvent::Note(MidiNote {is_on: status == 0x9, channel, note_number: self.data[1], velocity: self.data[2]}),
             _ => MidiEvent::Unknown
         }
     }

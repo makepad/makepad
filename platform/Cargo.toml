@@ -48,7 +48,7 @@ makepad-objc-sys = { path = "./bind/objc-sys", version = "0.3.0" }
 version = "0.3"
 
 [target.'cfg(windows)'.dependencies.makepad-windows]
-version = "0.43"
+version = "0.3"
 path = "./bind/windows"
 features = [ 
     "Win32_Foundation", 

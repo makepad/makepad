@@ -72,7 +72,7 @@ pub use bindings::IAgileObject;
 
 #[doc(hidden)]
 #[cfg(feature = "implement")]
-pub use windows_implement::implement;
+//pub use windows_implement::implement;
 
 #[doc(hidden)]
 #[cfg(feature = "implement")]
