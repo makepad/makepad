@@ -185,7 +185,7 @@ impl CoreMidiAccess {
     }
 
     pub fn midi_reset(&self){
-        self.use_midi_inputs(&self, &[]);
+        self.use_midi_inputs(&[]);
         Cx::post_signal(live_id!(CoreMidiPortsChanged).into());
     }
     
