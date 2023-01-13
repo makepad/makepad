@@ -1448,6 +1448,7 @@ impl App {
         }
         
         if ui.get_button(id!(panic)).clicked(&actions) {
+            cx.midi_reset();
             self.audio_graph.all_notes_off();
         }
         
