@@ -132,8 +132,8 @@ impl WinRTMidiAccess {
             
             let mut ports_list = Vec::new();
             
-            let mut midi_inputs = Vec::new();
-            let mut midi_outputs = Vec::new();
+            let mut midi_inputs: Vec<WinRTMidiInput> = Vec::new();
+            let mut midi_outputs: Vec<WinRTMidiOutput>  = Vec::new();
             
             // initiate device list update
             watch_sender.send(WinRTMidiEvent::UpdateDevices).unwrap();
@@ -187,6 +187,9 @@ impl WinRTMidiAccess {
                         // find all ports we want enabled
                         for port_id in &ports {
                             if let Some(port) = ports_list.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_output()) {
+                                if midi_outputs.iter().find(|v| v.port_id == *port_id).is_some(){
+                                    continue; 
+                                }
                                 // open this output
                                 let midi_output = executor::block_on(Self::create_midi_out_port(&port.winrt_id)).unwrap();
                                 midi_outputs.push(WinRTMidiOutput{
@@ -194,30 +197,35 @@ impl WinRTMidiAccess {
                                     midi_output
                                 });
                             }
-                        }
-                        // and the ones disabled
-                        for port in &mut ports_list {
-                            if ports.iter().find( | p | **p == port.desc.port_id).is_none() && port.desc.port_type.is_output() {
-                                // close this output
-                                if let Some(index) = midi_outputs.iter().position(|v| v.port_id == port.desc.port_id){
-                                    let out = &midi_outputs[index];
-                                    out.midi_output.Close().unwrap();
-                                    midi_outputs.remove(index);
-                                }
+                        } 
+                        let mut index = 0; 
+                        while index < midi_outputs.len(){
+                            if ports.iter().find( | p | **p == midi_outputs[index].port_id).is_none() {
+                                let out = &midi_outputs[index];
+                                out.midi_output.Close().unwrap();
+                                midi_outputs.remove(index);
+                            }
+                            else{
+                                index += 1;
                             }
                         }
                     }
                     WinRTMidiEvent::UseMidiInputs(ports) => {
                         // find all ports we want enabled
                         for port_id in &ports {
+                            // check if the port is an input
                             if let Some(port) = ports_list.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_input()) {
-                                // open this input
+                                // check if we dont have it in our midi_inputs yet
+                                if midi_inputs.iter().find(|v| v.port_id == *port_id).is_some(){
+                                    continue;
+                                }
+                                // open this input  
                                 let midi_input = executor::block_on(Self::create_midi_in_port(&port.winrt_id)).unwrap();
-                                
                                 let input_senders = midi_access_clone.lock().unwrap().input_senders.clone();
                                 let port_id = *port_id;
                                 let event_token = midi_input.MessageReceived(&TypedEventHandler::<MidiInPort, MidiMessageReceivedEventArgs>::new(move | _, msg | {
-                                    let raw_data = msg.as_ref().unwrap().Message().unwrap().RawData().unwrap();
+                                    let msg = msg.as_ref().unwrap().Message().unwrap();
+                                    let raw_data = msg.RawData().unwrap();
                                     let data_reader = DataReader::FromBuffer(&raw_data).unwrap();
                                     let mut data = [0u8;3];
                                     if data_reader.ReadBytes(&mut data).is_ok(){
@@ -237,16 +245,16 @@ impl WinRTMidiAccess {
                                 });
                             }
                         }
-                        // and the ones disabled
-                        for port in &mut ports_list {
-                            if ports.iter().find( | p | **p == port.desc.port_id).is_none() && port.desc.port_type.is_input() {
-                                //close this input
-                                if let Some(index) = midi_inputs.iter().position(|v| v.port_id == port.desc.port_id){
-                                    let inp = &midi_inputs[index];
-                                    inp.midi_input.RemoveMessageReceived(inp.event_token).unwrap();
-                                    inp.midi_input.Close().unwrap();
-                                    midi_inputs.remove(index);
-                                }
+                        let mut index = 0;
+                        while index < midi_inputs.len(){
+                            if ports.iter().find( | p | **p == midi_inputs[index].port_id).is_none() {
+                                let inp = &midi_inputs[index];
+                                inp.midi_input.RemoveMessageReceived(inp.event_token).unwrap();
+                                inp.midi_input.Close().unwrap();
+                                midi_inputs.remove(index);
+                            }
+                            else{
+                                index += 1;
                             }
                         }
                     }
@@ -278,6 +286,12 @@ impl WinRTMidiAccess {
         let (send, recv) = mpsc::channel();
         senders.lock().unwrap().push(send);
         MidiInput(Some(recv))
+    }
+    
+    pub fn midi_reset(&self){
+        self.event_sender.send(WinRTMidiEvent::UseMidiOutputs(vec![])).unwrap();
+        self.event_sender.send(WinRTMidiEvent::UseMidiInputs(vec![])).unwrap();
+        self.event_sender.send(WinRTMidiEvent::UpdateDevices).unwrap();
     }
     
     pub fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
