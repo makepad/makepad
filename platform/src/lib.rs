@@ -14,6 +14,7 @@ pub mod live_atomic;
 pub mod thread;
 pub mod audio;
 pub mod midi;
+pub mod video_capture;
 
 mod draw_matrix;
 mod draw_shader;
