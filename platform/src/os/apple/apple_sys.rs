@@ -3,7 +3,6 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
-
 pub use {
     makepad_objc_sys::{
         runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO,},
@@ -21,6 +20,8 @@ pub use {
         ptr::NonNull,
     },
 };
+use crate::os::apple::apple_util::four_char_as_u32;
+
 
 //use bitflags::bitflags;
 
@@ -79,7 +80,7 @@ extern {
     pub static NSRunLoopCommonModes: ObjcId;
     pub static NSDefaultRunLoopMode: ObjcId;
     pub static NSProcessInfo: ObjcId;
-    pub fn NSStringFromClass(class:ObjcId)->ObjcId;
+    pub fn NSStringFromClass(class: ObjcId) -> ObjcId;
     
     pub fn __CFStringMakeConstantString(cStr: *const ::std::os::raw::c_char) -> CFStringRef;
     
@@ -94,15 +95,15 @@ extern {
         maxBufLen: u64,
         usedBufLen: *mut u64,
     ) -> u64;
-
+    
 }
 
 #[link(name = "ImageIO", kind = "framework")]
-extern{
-    pub static kUTTypePNG:ObjcId;
-    pub fn CGImageDestinationCreateWithURL(url:ObjcId, ty:ObjcId, count:u64, options:ObjcId)->ObjcId;    
-    pub fn CGImageDestinationAddImage(dest:ObjcId, img:ObjcId, props:ObjcId);    
-    pub fn CGImageDestinationFinalize(dest:ObjcId)->bool;    
+extern {
+    pub static kUTTypePNG: ObjcId;
+    pub fn CGImageDestinationCreateWithURL(url: ObjcId, ty: ObjcId, count: u64, options: ObjcId) -> ObjcId;
+    pub fn CGImageDestinationAddImage(dest: ObjcId, img: ObjcId, props: ObjcId);
+    pub fn CGImageDestinationFinalize(dest: ObjcId) -> bool;
 }
 
 #[link(name = "AppKit", kind = "framework")]
@@ -120,21 +121,21 @@ extern {
 }
 
 
-pub const kCGEventLeftMouseDown:u32 = 1;
-pub const kCGEventLeftMouseUp:u32 = 2;
+pub const kCGEventLeftMouseDown: u32 = 1;
+pub const kCGEventLeftMouseUp: u32 = 2;
 pub const kCGMouseEventClickState: u32 = 1;
 //pub const kCGEventSourceStateHIDSystemState: u32 = 1;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    pub fn CGEventSourceCreate(state_id:u32)->ObjcId;
-    pub fn CGEventSetIntegerValueField(event:ObjcId, field: u32, value:u64);
-    pub fn CGEventCreateMouseEvent(source:ObjcId, mouse_type: u32, pos:NSPoint, button:u32)->ObjcId;
-    pub fn CGEventCreateScrollWheelEvent(source:ObjcId, is_line:u32, wheel_count: u32, wheel1: i32, wheel2: i32, wheel3: i32)->ObjcId;
-    pub fn CGEventPostToPid(pid:u32, event:ObjcId);
-    pub fn CGEventPost(tap:u32, event:ObjcId);
+    pub fn CGEventSourceCreate(state_id: u32) -> ObjcId;
+    pub fn CGEventSetIntegerValueField(event: ObjcId, field: u32, value: u64);
+    pub fn CGEventCreateMouseEvent(source: ObjcId, mouse_type: u32, pos: NSPoint, button: u32) -> ObjcId;
+    pub fn CGEventCreateScrollWheelEvent(source: ObjcId, is_line: u32, wheel_count: u32, wheel1: i32, wheel2: i32, wheel3: i32) -> ObjcId;
+    pub fn CGEventPostToPid(pid: u32, event: ObjcId);
+    pub fn CGEventPost(tap: u32, event: ObjcId);
     
-    pub fn CGWindowListCreateImage(rect:NSRect, options:u32, window_id:u32, imageoptions:u32 )->ObjcId;
+    pub fn CGWindowListCreateImage(rect: NSRect, options: u32, window_id: u32, imageoptions: u32) -> ObjcId;
     pub fn CGMainDisplayID() -> u32;
     pub fn CGDisplayPixelsHigh(display: u32) -> u64;
     pub fn CGColorCreateGenericRGB(red: f64, green: f64, blue: f64, alpha: f64) -> ObjcId;
@@ -151,12 +152,90 @@ extern "C" {
 extern {
     pub static AVAudioUnitComponentManager: ObjcId;
     pub static AVAudioUnit: ObjcId;
+    pub static AVCaptureDevice: ObjcId;
     pub static AVAudioFormat: ObjcId;
     pub static AVAudioChannelLayout: ObjcId;
     pub static AVAudioSession: ObjcId;
+    pub static AVMediaTypeVideo: ObjcId;
+    pub static AVCaptureSession: ObjcId;
+    pub static AVCaptureDeviceInput: ObjcId;
+    pub static AVCaptureVideoDataOutput: ObjcId;
     pub static AVAudioSessionCategoryMultiRoute: ObjcId;
-    pub static  AVAudioSessionRouteChangeNotification:ObjcId;
+    pub static AVAudioSessionRouteChangeNotification: ObjcId;
+    pub static AVCaptureDeviceWasConnectedNotification: ObjcId;
+    pub static AVCaptureDeviceWasDisconnectedNotification: ObjcId;
 }
+
+pub type CMFormatDescriptionRef = ObjcId;
+pub const kCMPixelFormat_422YpCbCr8: u32 = four_char_as_u32("2vuy");
+pub const kCMPixelFormat_422YpCbCr8_yuvs: u32 = four_char_as_u32("yuvs");
+pub const kCMVideoCodecType_JPEG: u32 = four_char_as_u32("jpeg");
+pub const kCMVideoCodecType_JPEG_OpenDML: u32 = four_char_as_u32("dmb1");
+pub const kCMPixelFormat_8IndexedGray_WhiteIsZero: u32 = 0x00000028;
+pub const kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange: u32 = four_char_as_u32("420v");
+pub const kCVPixelFormatType_420YpCbCr8BiPlanarFullRange: u32 = four_char_as_u32("420f");
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct CMVideoDimensions {
+    pub width: i32,
+    pub height: i32,
+}
+
+pub type CMTimeValue = i64;
+pub type CMTimeScale = i32;
+pub type CMTimeEpoch = i64;
+pub type CMTimeFlags = u32;
+
+pub const kCMTimeFlags_Valid: CMTimeFlags = 1 << 0;
+pub const kCMTimeFlags_HasBeenRounded: CMTimeFlags = 1 << 1;
+pub const kCMTimeFlags_PositiveInfinity: CMTimeFlags = 1 << 2;
+pub const kCMTimeFlags_NegativeInfinity: CMTimeFlags = 1 << 3;
+pub const kCMTimeFlags_Indefinite: CMTimeFlags = 1 << 4;
+pub const kCMTimeFlags_ImpliedValueFlagsMask: CMTimeFlags = kCMTimeFlags_PositiveInfinity
+    | kCMTimeFlags_NegativeInfinity
+    | kCMTimeFlags_Indefinite;
+
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct CMTime {
+    pub value: CMTimeValue,
+    pub timescale: CMTimeScale,
+    pub flags: CMTimeFlags,
+    pub epoch: CMTimeEpoch,
+}
+
+pub type CMSampleBufferRef = *mut c_void;
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct __CVBuffer {
+    _unused: [u8; 0],
+}
+pub type CVBufferRef = *mut __CVBuffer;
+pub type CVImageBufferRef = CVBufferRef;
+pub type CVPixelBufferRef = CVImageBufferRef;
+pub type CVPixelBufferLockFlags = u64;
+pub type CVReturn = i32;
+
+#[link(name = "CoreMedia", kind = "framework")]
+extern {
+    pub fn CMVideoFormatDescriptionGetDimensions(videoDesc: CMFormatDescriptionRef) -> CMVideoDimensions;
+    pub fn CMFormatDescriptionGetMediaSubType(desc: CMFormatDescriptionRef) -> u32;
+    pub fn CMSampleBufferGetImageBuffer(sbuf: CMSampleBufferRef) -> CVImageBufferRef;
+    
+    pub fn dispatch_queue_create(label: *const std::os::raw::c_char, attr: ObjcId,) -> ObjcId;
+    pub fn dispatch_release(object: ObjcId);
+}
+
+#[link(name = "CoreVideo", kind = "framework")]
+extern {
+    pub fn CVPixelBufferLockBaseAddress(pixelBuffer: CVPixelBufferRef, lockFlags: CVPixelBufferLockFlags,) -> CVReturn;
+    pub fn CVPixelBufferUnlockBaseAddress(pixelBuffer: CVPixelBufferRef, unlockFlags: CVPixelBufferLockFlags,) -> CVReturn;
+    pub fn CVPixelBufferGetDataSize(pixelBuffer: CVPixelBufferRef) -> std::os::raw::c_ulong;
+    pub fn CVPixelBufferGetBaseAddress(pixelBuffer: CVPixelBufferRef) -> *mut c_void;
+}    
 
 
 // Foundation
@@ -171,8 +250,8 @@ pub struct CFRange {
 }
 
 pub const kCFStringEncodingUTF8: u32 = 134217984;
-pub const kCGWindowListOptionIncludingWindow: u32 = 1<<3;
-pub const kCGWindowImageBoundsIgnoreFraming: u32 = 1<<0;
+pub const kCGWindowListOptionIncludingWindow: u32 = 1 << 3;
+pub const kCGWindowImageBoundsIgnoreFraming: u32 = 1 << 0;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]

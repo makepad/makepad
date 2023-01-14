@@ -47,6 +47,14 @@ impl CxMediaApi for Cx {
     where F: FnMut(AudioDeviceId, AudioTime, AudioBuffer) -> AudioBuffer + Send + 'static {
         *self.os.wasapi().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
+    
+    fn video_capture<F>(&mut self, _index:usize, _f: F)
+    where F: FnMut(VideoCaptureFrame) + Send + 'static {
+    }
+
+    fn use_video_capture(&mut self, _devices:&[(VideoCaptureDeviceId, VideoCaptureFormatId)]){
+    }
+
 }
 
 
