@@ -99,6 +99,7 @@ pub struct CocoaClasses {
     pub menu_target: *const Class,
     pub view: *const Class,
     pub key_value_observing_delegate: *const Class,
+    pub video_callback_delegate: *const Class,
     pub const_attributes_for_marked_text: ObjcId,
     pub const_empty_string: RcObjcId,
 }
@@ -117,6 +118,7 @@ impl CocoaClasses{
             menu_delegate: define_menu_delegate(),
             app_delegate: define_app_delegate(),
             menu_target: define_menu_target_class(),
+            video_callback_delegate: define_av_video_callback_delegate(),
             view: define_cocoa_view_class(),
             key_value_observing_delegate: define_key_value_observing_delegate(),
             const_attributes_for_marked_text: unsafe{msg_send![

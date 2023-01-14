@@ -25,12 +25,14 @@ use {
                 get_cocoa_app_global,
                 init_cocoa_app_global
             },
+            av_capture::AvCaptureAccess,
             core_midi::CoreMidiAccess,
             audio_unit::AudioUnitAccess,
             metal::{MetalCx, MetalWindow, DrawPassMode},
         },
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
+        video_capture::VideoCaptureDevicesEvent,
         pass::{CxPassParent},
         event::{
             SignalEvent,
@@ -426,6 +428,18 @@ impl Cx{
                 descs
             }));
         }
+        
+        if ev.signals.contains(&live_id!(AvCaptureDevicesChanged).into()){
+            let descs = {
+                let av_capture = self.os.av_capture();
+                let mut av_capture = av_capture.lock().unwrap();
+                av_capture.update_device_list();
+                av_capture.get_descs()
+            };
+            self.call_event_handler(&Event::VideoCaptureDevices(VideoCaptureDevicesEvent{
+                descs
+            }));
+        }
     }
     
 }
@@ -435,6 +449,7 @@ pub struct CxOs {
     pub (crate) keep_alive_counter: usize,
     pub (crate) core_midi: Option<Arc<Mutex<CoreMidiAccess>>>,
     pub (crate) audio_unit: Option<Arc<Mutex<AudioUnitAccess>>>,
+    pub (crate) av_capture: Option<Arc<Mutex<AvCaptureAccess>>>,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
 }
@@ -442,7 +457,7 @@ pub struct CxOs {
 impl CxOs{
     pub fn audio_unit(&mut self)->Arc<Mutex<AudioUnitAccess>>{
         if self.audio_unit.is_none(){
-            self.audio_unit = Some(Arc::new(Mutex::new(AudioUnitAccess::new())));
+            self.audio_unit = Some(AudioUnitAccess::new());
             Cx::post_signal(live_id!(CoreAudioDeviceChange).into());
         }
         self.audio_unit.as_ref().unwrap().clone()
@@ -450,9 +465,17 @@ impl CxOs{
     
     pub fn core_midi(&mut self)->Arc<Mutex<CoreMidiAccess>>{
         if self.core_midi.is_none(){
-            self.core_midi = Some(Arc::new(Mutex::new(CoreMidiAccess::new().unwrap())));
+            self.core_midi = Some(CoreMidiAccess::new());
             Cx::post_signal(live_id!(CoreMidiPortsChanged).into());
         }
         self.core_midi.as_ref().unwrap().clone()
+    }
+    
+    pub fn av_capture(&mut self)->Arc<Mutex<AvCaptureAccess>>{
+        if self.av_capture.is_none(){
+            self.av_capture = Some(AvCaptureAccess::new());
+            Cx::post_signal(live_id!(AvCaptureDevicesChanged).into());
+        }
+        self.av_capture.as_ref().unwrap().clone()
     }
 }

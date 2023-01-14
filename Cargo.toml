@@ -16,6 +16,7 @@ workspace.members = [
     "examples/simple",
     "examples/touch",
     "examples/teamtalk",
+    "examples/video_mixer",
     "libs/wasm_bridge/test",
     "studio",
     "tools/windows_strip",

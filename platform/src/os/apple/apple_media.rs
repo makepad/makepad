@@ -3,6 +3,7 @@ use {
     crate::{
         cx::Cx,
         audio::*,
+        video_capture::*,
         midi::*,
         media_api::CxMediaApi,
         os::apple::core_midi::*
@@ -48,5 +49,14 @@ impl CxMediaApi for Cx {
         *self.os.audio_unit().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
     
+    fn video_capture<F>(&mut self, index:usize, f: F)
+    where F: FnMut(VideoCaptureFrame) + Send + 'static {
+        *self.os.av_capture().lock().unwrap().video_capture_cb[index].lock().unwrap() = Some(Box::new(f));
+    }
+
+    fn use_video_capture(&mut self, devices:&[(VideoCaptureDeviceId, VideoCaptureFormatId)]){
+        self.os.av_capture().lock().unwrap().use_video_capture(devices);
+    }
+
 }
 

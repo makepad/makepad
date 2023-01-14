@@ -13,7 +13,7 @@ pub mod audio_unit;
 pub mod core_audio;
 pub mod core_midi;
 pub mod apple_media;
-
+pub mod av_capture;
 pub(crate) use crate::os::apple::metal::*;
 pub(crate) use crate::os::apple::macos::*;
 pub(crate) use crate::os::apple::core_midi::{OsMidiOutput};
