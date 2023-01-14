@@ -79,46 +79,7 @@ pub struct CoreMidiAccess {
 
 impl CoreMidiAccess {
     
-    pub fn use_midi_inputs(&self, ports: &[MidiPortId]) {
-        // find all ports we want enabled
-        for port_id in ports {
-            if let Some(port) = self.ports.iter().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_input()) {
-                unsafe {
-                    MIDIPortConnectSource(self.midi_in_port, port.endpoint, port.desc.port_id.0.0 as *mut _);
-                }
-            }
-        }
-        // and the ones disabled
-        for port in &self.ports {
-            if ports.iter().find( | p | **p == port.desc.port_id).is_none() {
-                if port.desc.port_type.is_input() {
-                    unsafe {
-                        MIDIPortDisconnectSource(self.midi_in_port, port.endpoint);
-                    }
-                }
-            }
-        }
-    }
-        
-    pub fn use_midi_outputs(&self, _ports: &[MidiPortId]) {
-    }
-
-    pub fn midi_port_desc(&self, port:MidiPortId)->Option<MidiPortDesc>{
-        if let Some(port) = self.ports.iter().find( | p | p.desc.port_id == port) {
-            return Some(port.desc.clone())
-        }
-        None
-    }
-
-    pub fn create_midi_input(&self) -> MidiInput {
-        let senders = self.input_senders.clone();
-        let (send, recv) = mpsc::channel();
-        senders.lock().unwrap().push(send);
-        MidiInput(Some(recv))
-    }
-    
-    pub fn new() -> Result<Self,
-    OSError> {
+    pub fn new() -> Arc<Mutex<Self>> {
         let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
             Cx::post_signal(live_id!(CoreMidiPortsChanged).into());
         });
@@ -160,7 +121,7 @@ impl CoreMidiAccess {
                 ccfstr_from_str("Makepad"),
                 &mut midi_client,
                 &mut midi_notify as *mut _ as ObjcId
-            )) ?;
+            )).unwrap();
             
             OSError::from(MIDIInputPortCreateWithProtocol(
                 midi_client,
@@ -168,21 +129,60 @@ impl CoreMidiAccess {
                 kMIDIProtocol_1_0,
                 &mut midi_in_port,
                 &mut midi_receive as *mut _ as ObjcId
-            )) ?;
+            )).unwrap();
             OSError::from(MIDIOutputPortCreate(
                 midi_client,
                 ccfstr_from_str("MIDI Output"),
                 &mut midi_out_port
-            )) ?;
+            )).unwrap();
         }
         Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
-        Ok(Self {
+        Arc::new(Mutex::new(Self {
             input_senders,
             midi_in_port,
             midi_out_port,
             ports: Vec::new(),
-        })
+        }))
     }
+    
+    pub fn use_midi_inputs(&self, ports: &[MidiPortId]) {
+        // find all ports we want enabled
+        for port_id in ports {
+            if let Some(port) = self.ports.iter().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_input()) {
+                unsafe {
+                    MIDIPortConnectSource(self.midi_in_port, port.endpoint, port.desc.port_id.0.0 as *mut _);
+                }
+            }
+        }
+        // and the ones disabled
+        for port in &self.ports {
+            if ports.iter().find( | p | **p == port.desc.port_id).is_none() {
+                if port.desc.port_type.is_input() {
+                    unsafe {
+                        MIDIPortDisconnectSource(self.midi_in_port, port.endpoint);
+                    }
+                }
+            }
+        }
+    }
+        
+    pub fn use_midi_outputs(&self, _ports: &[MidiPortId]) {
+    }
+
+    pub fn midi_port_desc(&self, port:MidiPortId)->Option<MidiPortDesc>{
+        if let Some(port) = self.ports.iter().find( | p | p.desc.port_id == port) {
+            return Some(port.desc.clone())
+        }
+        None
+    }
+
+    pub fn create_midi_input(&self) -> MidiInput {
+        let senders = self.input_senders.clone();
+        let (send, recv) = mpsc::channel();
+        senders.lock().unwrap().push(send);
+        MidiInput(Some(recv))
+    }
+    
 
     pub fn midi_reset(&self){
         self.use_midi_inputs(&[]);

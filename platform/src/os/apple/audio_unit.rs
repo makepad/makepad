@@ -17,8 +17,6 @@ use {
     },
 };
 
-
-
 #[derive(Default)]
 pub struct AudioUnitAccess {
     pub audio_devices: Vec<CoreAudioDevice>,
@@ -45,6 +43,10 @@ pub struct RunningAudioUnit {
 }
 
 impl AudioUnitAccess {
+    pub fn new() -> Arc<Mutex<Self>> {
+        Self::observe_route_changes();
+        Arc::new(Mutex::new(Self::default()))
+    }
     
     pub fn get_descs(&self) -> Vec<AudioDeviceDesc> {
         let mut out = Vec::new();
@@ -180,10 +182,6 @@ impl AudioUnitAccess {
         }
     }
     
-    pub fn new() -> Self {
-        Self::observe_route_changes();
-        Self::default()
-    }
     
     pub fn observe_route_changes() {
         let center: ObjcId = unsafe {msg_send![class!(NSNotificationCenter), defaultCenter]};
