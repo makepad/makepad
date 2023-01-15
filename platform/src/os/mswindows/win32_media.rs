@@ -4,8 +4,10 @@ use {
         cx::Cx,
         audio::*,
         midi::*,
+        video_capture::*,
         media_api::CxMediaApi,
         os::mswindows::winrt_midi::*,
+        
     }
 };
 
