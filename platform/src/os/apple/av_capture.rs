@@ -64,6 +64,8 @@ impl AvCaptureSession {
                     CVPixelBufferLockBaseAddress(image_buffer, 0);
                     let len = CVPixelBufferGetDataSize(image_buffer);
                     let ptr =  CVPixelBufferGetBaseAddress(image_buffer);
+                    //let _height = CVPixelBufferGetHeight(image_buffer);
+                    //let _width = CVPixelBufferGetWidth(image_buffer);
                     let data = std::slice::from_raw_parts_mut(ptr as *mut u8, len as usize);
                     cb(VideoFrame{data});
                     CVPixelBufferUnlockBaseAddress(image_buffer, 0);
@@ -77,13 +79,30 @@ impl AvCaptureSession {
             let () = msg_send![device.as_id(), lockForConfiguration: &mut err];
             OSError::from_nserror(err).unwrap();
             
+            let format_ref: CMFormatDescriptionRef = msg_send![ format.format_obj.as_id(), formatDescription];
+            let res = CMVideoFormatDescriptionGetDimensions(format_ref);
+            
             let () = msg_send![device.as_id(), setActiveFormat: format.format_obj.as_id()];
             let () = msg_send![device.as_id(), setActiveVideoMinFrameDuration: format.min_frame_duration];
             let () = msg_send![device.as_id(), setActiveVideoMaxFrameDuration: format.min_frame_duration];
             
             let () = msg_send![device.as_id(), unlockForConfiguration];
             
+            let dict: ObjcId = msg_send![class!(NSMutableDictionary), dictionary];
+            let () = msg_send![dict, init];
+            
+            unsafe fn set_number(dict: ObjcId, name: ObjcId, value: u64) {
+                let num: ObjcId = msg_send![class!(NSNumber), numberWithLongLong: value];
+                let () = msg_send![dict, setObject: num forKey: name];
+            }
+            
+            set_number(dict, kCVPixelBufferPixelFormatTypeKey as ObjcId, four_char_as_u32("yuvs") as u64);
+            set_number(dict, kCVPixelBufferWidthKey as ObjcId, res.width as u64);
+            set_number(dict, kCVPixelBufferHeightKey as ObjcId, res.height as u64);
+            
             let output: ObjcId = msg_send![class!(AVCaptureVideoDataOutput), new];
+            let () = msg_send![output, setVideoSettings: dict];
+            
             let queue = dispatch_queue_create(std::ptr::null(), nil);
             
             let () = msg_send![output, setSampleBufferDelegate: callback.delegate.as_id() queue: queue];
