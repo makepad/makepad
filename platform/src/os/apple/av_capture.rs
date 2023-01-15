@@ -45,7 +45,8 @@ impl AvCaptureSession {
         capture_cb: Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >,
         input_id: VideoInputId,
         format: &AvFormatObj,
-        device: &RcObjcId
+        device: &RcObjcId,
+        video_format: VideoFormat
     ) -> Self {
         // lets start a capture session with a callback
         unsafe {
@@ -64,10 +65,16 @@ impl AvCaptureSession {
                     CVPixelBufferLockBaseAddress(image_buffer, 0);
                     let len = CVPixelBufferGetDataSize(image_buffer);
                     let ptr =  CVPixelBufferGetBaseAddress(image_buffer);
-                    //let _height = CVPixelBufferGetHeight(image_buffer);
-                    //let _width = CVPixelBufferGetWidth(image_buffer);
+                    let height = CVPixelBufferGetHeight(image_buffer) as usize;
+                    let width = CVPixelBufferGetWidth(image_buffer) as usize; 
                     let data = std::slice::from_raw_parts_mut(ptr as *mut u8, len as usize);
-                    cb(VideoFrame{data});
+                    if width != video_format.width || height != video_format.height{
+                        println!("Video format not correct got {} x {} for {:?}", width, height, video_format);
+                    }
+                    cb(VideoFrame{
+                        video_format, 
+                        data
+                    });
                     CVPixelBufferUnlockBaseAddress(image_buffer, 0);
                 }
             }));
@@ -169,13 +176,14 @@ impl AvCaptureAccess {
                 let input = self.inputs.iter().find( | v | v.desc.input_id == d.0).unwrap();
                 let av_format = input.av_formats.iter().find( | v | v.format_id == d.1).unwrap();
                 let video_capture_cb = self.video_input_cb[index].clone();
-                let dev_format = input.desc.formats.iter().find( | v | v.format_id == d.1).unwrap();
-                println!("{:?}", dev_format);
+                let video_format = input.desc.formats.iter().find( | v | v.format_id == d.1).unwrap();
+                println!("{:?}", video_format);
                 self.sessions.push(AvCaptureSession::start_session(
                     video_capture_cb,
                     d.0,
                     av_format,
-                    &input.device_obj
+                    &input.device_obj,
+                    *video_format
                 ));
             }
         }
@@ -225,9 +233,7 @@ impl AvCaptureAccess {
                         kCMPixelFormat_8IndexedGray_WhiteIsZero => VideoPixelFormat::GRAY,
                         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange |
                         kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => VideoPixelFormat::NV12,
-                        _ => VideoPixelFormat::Unsupported(
-                            format!("{} - 0x{:08x}", std::str::from_utf8(&fcc.to_be_bytes()).unwrap_or("cannot decode"), fcc)
-                        )
+                        _ => VideoPixelFormat::Unsupported(fcc)
                     };
                     
                     let fr_ranges: ObjcId = msg_send![format_obj, videoSupportedFrameRateRanges];
