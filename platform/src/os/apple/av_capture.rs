@@ -237,18 +237,31 @@ impl AvCaptureAccess {
                     };
                     
                     let fr_ranges: ObjcId = msg_send![format_obj, videoSupportedFrameRateRanges];
-                    let fr_count: usize = msg_send![fr_ranges, count];
-                    let mut min_frame_duration = CMTime::default();
-                    let mut frame_rate = 0.0;
-                    for k in 0..fr_count {
-                        let range: ObjcId = msg_send![fr_ranges, objectAtIndex: k];
-                        let max: f64 = msg_send![range, maxFrameRate];
-                        if max > frame_rate {
-                            frame_rate = max;
-                            min_frame_duration = msg_send![range, minFrameDuration];
-                        }
+                    let range: ObjcId = msg_send![fr_ranges, objectAtIndex: 0];
+                    
+                    let min_frame_rate: f64 = msg_send![range, minFrameRate];
+                    let max_frame_rate: f64 = msg_send![range, maxFrameRate];
+                    let min_frame_duration: CMTime = msg_send![range, minFrameDuration];
+                    let max_frame_duration: CMTime = msg_send![range, maxFrameDuration];
+                    
+                    if min_frame_rate != max_frame_rate{ // this is not really what you'd want. but ok.
+                        let frame_rate = min_frame_rate;
+                        let format_id = LiveId::from_str_unchecked(&format!("{} {} {:?} {}", res.width, res.height, pixel_format, frame_rate)).into();
+                        av_formats.push(AvFormatObj {
+                            format_id,
+                            min_frame_duration: max_frame_duration,
+                            format_obj: RcObjcId::from_unowned(NonNull::new(format_obj).unwrap()),
+                        });
+                        formats.push(VideoFormat {
+                            format_id,
+                            width: res.width as usize,
+                            height: res.height as usize,
+                            pixel_format,
+                            frame_rate
+                        });
                     }
                     
+                    let frame_rate = max_frame_rate;
                     let format_id = LiveId::from_str_unchecked(&format!("{} {} {:?} {}", res.width, res.height, pixel_format, frame_rate)).into();
                     av_formats.push(AvFormatObj {
                         format_id,
@@ -261,7 +274,7 @@ impl AvCaptureAccess {
                         height: res.height as usize,
                         pixel_format,
                         frame_rate
-                    })
+                    });
                 }
                 inputs.push(AvVideoInput {
                     device_obj: RcObjcId::from_unowned(NonNull::new(device_obj).unwrap()),
