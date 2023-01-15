@@ -17,7 +17,7 @@ use {
         },
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
-        video_capture::VideoCaptureDevicesEvent,
+        video::VideoInputsEvent,
         draw_list::DrawListId,
         menu::MenuCommand,
     },
@@ -70,7 +70,7 @@ pub enum Event {
     
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
-    VideoCaptureDevices(VideoCaptureDevicesEvent),
+    VideoInputs(VideoInputsEvent),
     
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),

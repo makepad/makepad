@@ -25,7 +25,8 @@ use {
             },
             Win32::System::Com::{
                 STGM_READ,
-                CoInitialize,
+                COINIT_MULTITHREADED,
+                CoInitializeEx,
                 CoCreateInstance,
                 CLSCTX_ALL,
                 //STGM_READ,
@@ -79,12 +80,11 @@ use {
 };
 
 
-#[derive(Default)]
 pub struct WasapiAccess {
-    pub change_listener: Option<IMMNotificationClient>,
+    pub change_listener: IMMNotificationClient,
     pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioDeviceId, AudioTime, AudioBuffer) -> AudioBuffer + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioDeviceId, AudioTime, &mut AudioBuffer) + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
-    enumerator: Option<IMMDeviceEnumerator>,
+    enumerator: IMMDeviceEnumerator,
     audio_inputs: Arc<Mutex<Vec<WasapiBaseRef >> >,
     audio_outputs: Arc<Mutex<Vec<WasapiBaseRef >> >,
     descs: Vec<AudioDeviceDesc>,
@@ -93,7 +93,7 @@ pub struct WasapiAccess {
 impl WasapiAccess {
     pub fn new() -> Arc<Mutex<Self>> {
         unsafe {
-            CoInitialize(None).unwrap();
+            CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
             let change_listener:IMMNotificationClient = WasapiChangeListener{}.into();
             let enumerator:IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();
@@ -101,9 +101,13 @@ impl WasapiAccess {
             Cx::post_signal(live_id!(WasapiDeviceChange).into());            
             Arc::new(Mutex::new(
                 WasapiAccess{  
-                    enumerator: Some(enumerator),
-                    change_listener: Some(change_listener),
-                    ..Default::default()
+                    enumerator: enumerator,
+                    change_listener: change_listener,
+                    audio_input_cb: Default::default(),
+                    audio_output_cb: Default::default(),
+                    audio_inputs: Default::default(),
+                    audio_outputs: Default::default(),
+                    descs: Default::default(),
                 }
             ))
         }
@@ -353,7 +357,7 @@ impl WasapiBase {
     pub fn new(device_id:AudioDeviceId, channel_count: usize) -> Self {
         unsafe {
             
-            CoInitialize(None).unwrap();
+            CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
             
             let device = WasapiAccess::find_device_by_id(device_id).unwrap();
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).unwrap();
