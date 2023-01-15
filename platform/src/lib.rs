@@ -14,7 +14,7 @@ pub mod live_atomic;
 pub mod thread;
 pub mod audio;
 pub mod midi;
-pub mod video_capture;
+pub mod video;
 
 mod draw_matrix;
 mod draw_shader;
@@ -47,7 +47,7 @@ pub use makepad_wasm_bridge;
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
-pub use makepad_windows as windows_crate;
+pub use makepad_windows as windows_crate; 
  
 pub use {
     makepad_shader_compiler,

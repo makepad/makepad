@@ -11,6 +11,7 @@ use {
         os::{
             mswindows::{
                 winrt_midi::*,
+                media_foundation::*,
                 win32_event::*,
                 wasapi::WasapiAccess,
                 d3d11::{D3d11Window, D3d11Cx},
@@ -20,6 +21,7 @@ use {
         },
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
+        video::VideoInputsEvent,
         pass::{CxPassParent},
         cx_api::{CxOsApi, CxOsOp},
     }
@@ -356,6 +358,17 @@ impl Cx {
                 descs
             }));
         }
+        if ev.signals.contains(&live_id!(MediaFoundationInputsChange).into()){
+            let descs = {
+                let media_foundation = self.os.media_foundation();
+                let mut media_foundation = media_foundation.lock().unwrap();
+                media_foundation.update_inputs_list();
+                media_foundation.get_descs()
+            };
+            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
+                descs
+            }));
+        }
     }
     
 }
@@ -364,6 +377,7 @@ impl Cx {
 pub struct CxOs {
     pub (crate) winrt_midi: Option<Arc<Mutex<WinRTMidiAccess >> >,
     pub (crate) wasapi: Option<Arc<Mutex<WasapiAccess >> >,
+    pub (crate) media_foundation: Option<Arc<Mutex<MediaFoundationAccess >> >,
 }
 
 impl CxOs {
@@ -380,5 +394,12 @@ impl CxOs {
             self.wasapi = Some(WasapiAccess::new());
         }
         self.wasapi.as_ref().unwrap().clone()
+    }
+    
+    pub fn media_foundation(&mut self) -> Arc<Mutex<MediaFoundationAccess >> {
+        if self.media_foundation.is_none() {
+            self.media_foundation = Some(MediaFoundationAccess::new());
+        }
+        self.media_foundation.as_ref().unwrap().clone()
     }
 }

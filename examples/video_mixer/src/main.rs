@@ -48,15 +48,15 @@ impl App {
     }
     
     pub fn start_inputs(&mut self, cx: &mut Cx) {
-        cx.audio_input(0, move | _device, _time, input_buffer | {
+        /*cx.audio_input(0, move | _device, _time, input_buffer | {
             input_buffer
         });
         
         cx.audio_output(0, move | _device, _time, _output_buffer | {
-        });
+        });*/
         
-        cx.video_capture(0, move |img|{
-            println!("GOT {}", img.data.len()); 
+        cx.video_input(0, move |img|{
+            println!("Videoframe: {}", img.data.len()); 
         })
     }
     
@@ -73,19 +73,19 @@ impl App {
                 cx.use_midi_inputs(&ports.all_inputs());
             }
             Event::AudioDevices(devices) => { 
-                cx.use_audio_inputs(&devices.default_input());
-                cx.use_audio_outputs(&devices.default_output());
+                //cx.use_audio_inputs(&devices.default_input());
+                //cx.use_audio_outputs(&devices.default_output());
             }
-            Event::VideoCaptureDevices(devices)=>{
-                //println!("{:?}", devices);
-                cx.use_video_capture(&devices.find_highest(0));
+            Event::VideoInputs(devices)=>{
+                println!("Got devices!");
+                cx.use_video_input(&devices.find_highest(0));
             }
             _ => ()
         }
          
         self.ui.handle_event(cx, event);
         self.window.handle_event(cx, event);
-    }
+    } 
     
     pub fn draw(&mut self, cx: &mut Cx2d) { 
         if self.window.begin(cx).not_redrawing() {

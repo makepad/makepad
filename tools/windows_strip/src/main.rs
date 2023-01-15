@@ -332,6 +332,8 @@ fn generate_outputs_from_file( file: &str, output: &mut Node, cache: &mut Vec<(S
             false
         }
     }
+    
+    
     let prefixes_str = ["#[repr(C)]", "#[repr(C, packed(1))]", "#[repr(transparent)]"];
     let prefixes_tok = [parse_to_tokens(prefixes_str[0]), parse_to_tokens(prefixes_str[1]), parse_to_tokens(prefixes_str[2])];
     
@@ -492,8 +494,9 @@ fn main() {
     generate_outputs_from_file("./platform/src/os/mswindows/win32_window.rs", &mut output, &mut cache);
     generate_outputs_from_file("./platform/src/os/mswindows/d3d11.rs", &mut output, &mut cache);
     generate_outputs_from_file("./platform/src/os/mswindows/wasapi.rs", &mut output, &mut cache);
-    generate_outputs_from_file("./platform/src/os/mswindows/win32_midi.rs", &mut output, &mut cache);
+    //generate_outputs_from_file("./platform/src/os/mswindows/win32_midi.rs", &mut output, &mut cache);
     generate_outputs_from_file("./platform/src/os/mswindows/winrt_midi.rs", &mut output, &mut cache);
+    generate_outputs_from_file("./platform/src/os/mswindows/media_foundation.rs", &mut output, &mut cache);
     generate_outputs_from_file("./tools/windows_strip/dep_of_deps.rs", &mut output, &mut cache);
     
     fn generate_string_from_outputs(node: &Node, output: &mut String) {

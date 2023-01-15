@@ -7,13 +7,13 @@ use {
 pub const MAX_VIDEO_DEVICE_INDEX: usize = 32;
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct VideoCaptureDeviceId(pub LiveId);
+pub struct VideoInputId(pub LiveId);
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct VideoCaptureFormatId(pub LiveId);
+pub struct VideoFormatId(pub LiveId);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum VideoCapturePixelFormat {
+pub enum VideoPixelFormat {
     RGB24,
     YUY2,
     NV12,
@@ -22,7 +22,7 @@ pub enum VideoCapturePixelFormat {
     Unsupported(String)
 }
 
-impl VideoCapturePixelFormat{
+impl VideoPixelFormat{
     fn quality_priority(&self)->usize{
         match self{
             Self::RGB24 => 5,
@@ -35,34 +35,33 @@ impl VideoCapturePixelFormat{
     }
 }
 
-pub struct VideoCaptureFrame<'a>{
+pub struct VideoFrame<'a>{
     pub data: &'a[u8]
 }
 
 #[derive(Clone, Debug)]
-pub struct VideoCaptureFormat {
-    pub format_id: VideoCaptureFormatId,
+pub struct VideoFormat {
+    pub format_id: VideoFormatId,
     pub width: usize,
     pub height: usize,
     pub frame_rate: f64,
-    pub pixel_format: VideoCapturePixelFormat
+    pub pixel_format: VideoPixelFormat
 }
 
 #[derive(Clone, Debug)]
-pub struct VideoCaptureDeviceDesc {
-    pub device_id: VideoCaptureDeviceId,
+pub struct VideoInputDesc {
+    pub input_id: VideoInputId,
     pub name: String,
-    pub formats: Vec<VideoCaptureFormat>
+    pub formats: Vec<VideoFormat>
 }
 
 #[derive(Clone)]
-pub struct VideoCaptureDevicesEvent {
-    pub descs: Vec<VideoCaptureDeviceDesc>,
+pub struct VideoInputsEvent {
+    pub descs: Vec<VideoInputDesc>,
 }
 
-
-impl VideoCaptureDevicesEvent {
-    pub fn find_highest(&self, device_index:usize) -> Vec<(VideoCaptureDeviceId,VideoCaptureFormatId)> {
+impl VideoInputsEvent {
+    pub fn find_highest(&self, device_index:usize) -> Vec<(VideoInputId,VideoFormatId)> {
         if let Some(device) = self.descs.get(device_index){
             let mut max_pixels = 0;
             let mut max_frame_rate = 0.0;
@@ -70,16 +69,26 @@ impl VideoCaptureDevicesEvent {
             let mut format_id = None;
             for format in &device.formats {
                 let pixels = format.width * format.height;
+                if pixels >= max_pixels{
+                    max_pixels = pixels
+                }
+            }
+            for format in &device.formats {
+                let pixels = format.width * format.height;
+                if pixels == max_pixels && format.frame_rate >= max_frame_rate {
+                    max_frame_rate = format.frame_rate;
+                }
+            }
+            for format in &device.formats {
+                let pixels = format.width * format.height;
                 let quality = format.pixel_format.quality_priority();
-                if pixels >= max_pixels && format.frame_rate >= max_frame_rate && quality >= max_quality{
-                    max_pixels = pixels;
-                    max_frame_rate = max_frame_rate;
+                if pixels == max_pixels && format.frame_rate == max_frame_rate && quality >= max_quality{
                     max_quality = quality;
                     format_id = Some(format.format_id)
                 }
             }
             if let Some(format_id) = format_id{
-                return vec![(device.device_id, format_id)]
+                return vec![(device.input_id, format_id)]
             }
         }
         vec![]
@@ -87,7 +96,7 @@ impl VideoCaptureDevicesEvent {
 }
 
 
-impl std::fmt::Debug for VideoCaptureDevicesEvent {
+impl std::fmt::Debug for VideoInputsEvent {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         for desc in &self.descs {
             write!(f, "Capture Device: {}\n", desc.name).unwrap();
