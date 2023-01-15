@@ -197,7 +197,7 @@ impl AvCaptureAccess {
                     let format_ref: CMFormatDescriptionRef = msg_send![format_obj, formatDescription];
                     let res = CMVideoFormatDescriptionGetDimensions(format_ref);
                     let fcc = CMFormatDescriptionGetMediaSubType(format_ref);
-                    // lets turn fcc into a string
+
                     #[allow(non_upper_case_globals)]
                     let pixel_format = match fcc {
                         kCMPixelFormat_422YpCbCr8 | kCMPixelFormat_422YpCbCr8_yuvs => VideoCapturePixelFormat::YUY2,
