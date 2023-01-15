@@ -12,14 +12,14 @@ pub struct VideoInputId(pub LiveId);
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct VideoFormatId(pub LiveId);
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum VideoPixelFormat {
     RGB24,
     YUY2,
     NV12,
     GRAY,
     MJPEG,
-    Unsupported(String)
+    Unsupported(u32)
 }
 
 impl VideoPixelFormat{
@@ -36,10 +36,11 @@ impl VideoPixelFormat{
 }
 
 pub struct VideoFrame<'a>{
+    pub video_format: VideoFormat,
     pub data: &'a[u8]
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct VideoFormat {
     pub format_id: VideoFormatId,
     pub width: usize,
