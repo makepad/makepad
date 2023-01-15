@@ -1,6 +1,6 @@
 use crate::{
     audio::{AudioDeviceId, AudioTime, AudioBuffer},
-    video_capture::*,
+    video::*,
     midi::*,
 };
 
@@ -18,6 +18,6 @@ pub trait CxMediaApi {
     fn audio_output<F>(&mut self, index:usize, f: F) where F: FnMut(AudioDeviceId, AudioTime, &mut AudioBuffer) + Send  + 'static;
     fn audio_input<F>(&mut self, index:usize, f: F) where F: FnMut(AudioDeviceId, AudioTime, AudioBuffer)->AudioBuffer + Send  + 'static;
 
-    fn video_capture<F>(&mut self, index:usize, f: F) where F: FnMut(VideoCaptureFrame) + Send  + 'static;
-    fn use_video_capture(&mut self, devices:&[(VideoCaptureDeviceId, VideoCaptureFormatId)]);
+    fn video_input<F>(&mut self, index:usize, f: F) where F: FnMut(VideoFrame) + Send  + 'static;
+    fn use_video_input(&mut self, devices:&[(VideoInputId, VideoFormatId)]);
 } 

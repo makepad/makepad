@@ -82,14 +82,14 @@ macro_rules!implement_com{
                 } remaining
             }
         }
-        
+        /*
         impl $ for_struct {
             unsafe fn cast<I: crate::windows_crate::core::Interface> (&self) -> crate::windows_crate::core::Result<I> {
                 let boxed = (self as *const _ as *const *mut std::ffi::c_void).sub(1 + $interface_count) as *mut $ wrapper_struct;
                 let mut result = None;
                 < $ wrapper_struct as crate::windows_crate::core::IUnknownImpl>::QueryInterface(&*boxed, &I::IID, &mut result as *mut _ as _).and_some(result)
             }
-        }
+        }*/
         
         impl std::convert::From< $ for_struct> for crate::windows_crate::core::IUnknown {
             fn from(this: $ for_struct) -> Self {

@@ -4,7 +4,7 @@ use {
         makepad_live_id::*,
         cx::Cx,
         cx_api::CxOsApi,
-        video_capture::*,
+        video::*,
         os::apple::cocoa_delegate::AvVideoCaptureCallback,
         os::apple::apple_util::*,
         os::apple::apple_sys::*,
@@ -13,28 +13,28 @@ use {
 };
 
 struct AvFormatObj {
-    format_id: VideoCaptureFormatId,
+    format_id: VideoFormatId,
     min_frame_duration: CMTime,
     format_obj: RcObjcId
 }
 
-struct AvVideoCaptureDevice {
+struct AvVideoInput {
     device_obj: RcObjcId,
-    desc: VideoCaptureDeviceDesc,
+    desc: VideoInputDesc,
     av_formats: Vec<AvFormatObj>
 }
 
 #[derive(Default)]
 pub struct AvCaptureAccess {
     pub access_granted: bool,
-    pub video_capture_cb: [Arc<Mutex<Option<Box<dyn FnMut(VideoCaptureFrame) + Send + 'static >> > >; MAX_VIDEO_DEVICE_INDEX],
-    devices: Vec<AvVideoCaptureDevice>,
+    pub video_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >; MAX_VIDEO_DEVICE_INDEX],
+    inputs: Vec<AvVideoInput>,
     sessions: Vec<AvCaptureSession>,
 }
 
 pub struct AvCaptureSession {
-    pub device_id: VideoCaptureDeviceId,
-    pub format_id: VideoCaptureFormatId,
+    pub input_id: VideoInputId,
+    pub format_id: VideoFormatId,
     pub callback: AvVideoCaptureCallback,
     pub session: RcObjcId,
     pub queue: ObjcId
@@ -42,8 +42,8 @@ pub struct AvCaptureSession {
 
 impl AvCaptureSession {
     fn start_session(
-        capture_cb: Arc<Mutex<Option<Box<dyn FnMut(VideoCaptureFrame) + Send + 'static >> > >,
-        device_id: VideoCaptureDeviceId,
+        capture_cb: Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >,
+        input_id: VideoInputId,
         format: &AvFormatObj,
         device: &RcObjcId
     ) -> Self {
@@ -65,7 +65,7 @@ impl AvCaptureSession {
                     let len = CVPixelBufferGetDataSize(image_buffer);
                     let ptr =  CVPixelBufferGetBaseAddress(image_buffer);
                     let data = std::slice::from_raw_parts_mut(ptr as *mut u8, len as usize);
-                    cb(VideoCaptureFrame{data});
+                    cb(VideoFrame{data});
                     CVPixelBufferUnlockBaseAddress(image_buffer, 0);
                 }
             }));
@@ -94,7 +94,7 @@ impl AvCaptureSession {
             
             Self {
                 queue,
-                device_id,
+                input_id,
                 format_id: format.format_id,
                 callback,
                 session: RcObjcId::from_unowned(NonNull::new(session).unwrap())
@@ -134,10 +134,10 @@ impl AvCaptureAccess {
         capture_access
     }
     
-    pub fn use_video_capture(&mut self, devices: &[(VideoCaptureDeviceId, VideoCaptureFormatId)]) {
+    pub fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
         // enable these video capture devices / disabling others
         self.sessions.retain_mut( | d | {
-            if devices.contains(&(d.device_id, d.format_id)) {
+            if inputs.contains(&(d.input_id, d.format_id)) {
                 true
             }
             else {
@@ -145,23 +145,24 @@ impl AvCaptureAccess {
                 false
             }
         });
-        for (index, d) in devices.iter().enumerate() {
-            if self.sessions.iter().find( | v | v.device_id == d.0 && v.format_id == d.1).is_none() {
-                let device = self.devices.iter().find( | v | v.desc.device_id == d.0).unwrap();
-                let av_format = device.av_formats.iter().find( | v | v.format_id == d.1).unwrap();
-                let video_capture_cb = self.video_capture_cb[index].clone();
-                //let dev_format = device.desc.formats.iter().find( | v | v.format_id == d.1).unwrap();
+        for (index, d) in inputs.iter().enumerate() {
+            if self.sessions.iter().find( | v | v.input_id == d.0 && v.format_id == d.1).is_none() {
+                let input = self.inputs.iter().find( | v | v.desc.input_id == d.0).unwrap();
+                let av_format = input.av_formats.iter().find( | v | v.format_id == d.1).unwrap();
+                let video_capture_cb = self.video_input_cb[index].clone();
+                let dev_format = input.desc.formats.iter().find( | v | v.format_id == d.1).unwrap();
+                println!("{:?}", dev_format);
                 self.sessions.push(AvCaptureSession::start_session(
                     video_capture_cb,
                     d.0,
                     av_format,
-                    &device.device_obj
+                    &input.device_obj
                 ));
             }
         }
     }
     
-    pub fn update_device_list(&mut self) {
+    pub fn update_input_list(&mut self) {
         unsafe {
             let types: ObjcId = msg_send![class!(NSMutableArray), array];
             let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeBuiltInDualCamera")];
@@ -181,7 +182,7 @@ impl AvCaptureAccess {
             ];
             let device_objs: ObjcId = msg_send![session, devices];
             let device_count: usize = msg_send![device_objs, count];
-            let mut devices = Vec::new();
+            let mut inputs = Vec::new();
             
             for i in 0..device_count {
                 
@@ -200,12 +201,12 @@ impl AvCaptureAccess {
 
                     #[allow(non_upper_case_globals)]
                     let pixel_format = match fcc {
-                        kCMPixelFormat_422YpCbCr8 | kCMPixelFormat_422YpCbCr8_yuvs => VideoCapturePixelFormat::YUY2,
-                        kCMVideoCodecType_JPEG | kCMVideoCodecType_JPEG_OpenDML => VideoCapturePixelFormat::MJPEG,
-                        kCMPixelFormat_8IndexedGray_WhiteIsZero => VideoCapturePixelFormat::GRAY,
+                        kCMPixelFormat_422YpCbCr8 | kCMPixelFormat_422YpCbCr8_yuvs => VideoPixelFormat::YUY2,
+                        kCMVideoCodecType_JPEG | kCMVideoCodecType_JPEG_OpenDML => VideoPixelFormat::MJPEG,
+                        kCMPixelFormat_8IndexedGray_WhiteIsZero => VideoPixelFormat::GRAY,
                         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange |
-                        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => VideoCapturePixelFormat::NV12,
-                        _ => VideoCapturePixelFormat::Unsupported(
+                        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => VideoPixelFormat::NV12,
+                        _ => VideoPixelFormat::Unsupported(
                             format!("{} - 0x{:08x}", std::str::from_utf8(&fcc.to_be_bytes()).unwrap_or("cannot decode"), fcc)
                         )
                     };
@@ -229,7 +230,7 @@ impl AvCaptureAccess {
                         min_frame_duration,
                         format_obj: RcObjcId::from_unowned(NonNull::new(format_obj).unwrap()),
                     });
-                    formats.push(VideoCaptureFormat {
+                    formats.push(VideoFormat {
                         format_id,
                         width: res.width as usize,
                         height: res.height as usize,
@@ -237,24 +238,24 @@ impl AvCaptureAccess {
                         frame_rate
                     })
                 }
-                devices.push(AvVideoCaptureDevice {
+                inputs.push(AvVideoInput {
                     device_obj: RcObjcId::from_unowned(NonNull::new(device_obj).unwrap()),
-                    desc: VideoCaptureDeviceDesc {
-                        device_id: LiveId::from_str_unchecked(&uuid).into(),
+                    desc: VideoInputDesc {
+                        input_id: LiveId::from_str_unchecked(&uuid).into(),
                         name,
                         formats
                     },
                     av_formats
                 });
             }
-            self.devices = devices;
+            self.inputs = inputs;
         }
     }
     
-    pub fn get_descs(&mut self) -> Vec<VideoCaptureDeviceDesc> {
+    pub fn get_descs(&mut self) -> Vec<VideoInputDesc> {
         let mut out = Vec::new();
-        for device in &self.devices {
-            out.push(device.desc.clone());
+        for input in &self.inputs {
+            out.push(input.desc.clone());
         }
         out
     }
@@ -263,7 +264,6 @@ impl AvCaptureAccess {
         let center: ObjcId = unsafe {msg_send![class!(NSNotificationCenter), defaultCenter]};
         let block = objc_block!(move | _note: ObjcId | {
             Cx::post_signal(live_id!(AvCaptureDevicesChanged).into());
-            println!("CAMERA GOT PLUGGED IN")
         });
         let () = unsafe {msg_send![
             center,

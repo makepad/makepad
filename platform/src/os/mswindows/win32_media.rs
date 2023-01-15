@@ -4,7 +4,7 @@ use {
         cx::Cx,
         audio::*,
         midi::*,
-        video_capture::*,
+        video::*,
         media_api::CxMediaApi,
         os::mswindows::winrt_midi::*,
         
@@ -50,11 +50,13 @@ impl CxMediaApi for Cx {
         *self.os.wasapi().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
     
-    fn video_capture<F>(&mut self, _index:usize, _f: F)
-    where F: FnMut(VideoCaptureFrame) + Send + 'static {
+    fn video_input<F>(&mut self, index:usize, f: F)
+    where F: FnMut(VideoFrame) + Send + 'static {
+        *self.os.media_foundation().lock().unwrap().video_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
 
-    fn use_video_capture(&mut self, _devices:&[(VideoCaptureDeviceId, VideoCaptureFormatId)]){
+    fn use_video_input(&mut self, inputs:&[(VideoInputId, VideoFormatId)]){
+        self.os.media_foundation().lock().unwrap().use_video_input(inputs);
     }
 
 }
