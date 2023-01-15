@@ -10,6 +10,7 @@ use {
         },
         windows_crate::{
             core::{
+                //Interface,
                 PWSTR,
                 GUID,
                 HRESULT,
@@ -33,6 +34,7 @@ use {
                 IMFMediaType,
                 IMFSourceReader,
                 IMFSourceReaderCallback,
+                //IMF2DBuffer,
                 IMFSourceReaderCallback_Impl,
                 MFCreateSourceReaderFromMediaSource,
                 MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
@@ -78,14 +80,17 @@ struct MfInput {
 }
 
 impl MfInput {
-    fn activate(&mut self, format_id: VideoFormatId, callback: Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >) {
+    fn activate(&mut self, video_format: VideoFormat, callback: Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >) {
         if self.active_format.is_some() {panic!()};
-        self.active_format = Some(format_id);
+        self.active_format = Some(video_format.format_id);
         let cb = self.reader_callback.as_impl();
-        *cb.callback.lock().unwrap() = Some(callback);
+        *cb.config.lock().unwrap() = Some(SourceReaderConfig{
+            video_format,
+            callback
+        });
         *cb.source_reader.lock().unwrap() = Some(self.source_reader.clone());
         unsafe { // trigger first frame
-            let mt = self.media_types.iter().find( | v | v.format_id == format_id).unwrap();
+            let mt = self.media_types.iter().find( | v | v.format_id == video_format.format_id).unwrap();
             //let desc = self.desc.formats.iter().find( | v | v.format_id == format_id).unwrap();
             self.source_reader.SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, None, &mt.media_type).unwrap();
             self.source_reader.ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, 0, None, None, None, None).unwrap();
@@ -131,8 +136,9 @@ impl MediaFoundationAccess {
         // enable these video capture devices / disabling others
         for (index, (input_id, format_id)) in inputs.iter().enumerate() {
             if let Some(input) = self.inputs.iter_mut().find( | v | v.desc.input_id == *input_id) {
+                let video_format = input.desc.formats.iter().find(|f| f.format_id == *format_id).unwrap();
                 if input.active_format.is_none() { // activate
-                    input.activate(*format_id, self.video_input_cb[index].clone());
+                    input.activate(*video_format, self.video_input_cb[index].clone());
                 }
             }
         }
@@ -190,7 +196,7 @@ impl MediaFoundationAccess {
                     attributes.SetUINT32(&MF_READWRITE_DISABLE_CONVERTERS, TRUE.0 as u32).unwrap();
                     
                     let reader_callback: IMFSourceReaderCallback = SourceReaderCallback {
-                        callback: Mutex::new(None),
+                        config: Mutex::new(None),
                         source_reader: Mutex::new(None)
                     }.into();
                     
@@ -217,7 +223,7 @@ impl MediaFoundationAccess {
                             MFVideoFormat_NV12 => VideoPixelFormat::NV12,
                             MFVideoFormat_GRAY => VideoPixelFormat::GRAY,
                             MFVideoFormat_MJPG => VideoPixelFormat::MJPEG,
-                            guid => VideoPixelFormat::Unsupported(format!("{:?}", guid))
+                            guid => VideoPixelFormat::Unsupported(guid.data1)
                         };
                         
                         let format_id = LiveId::from_str_unchecked(&format!("{} {} {} {:?}", width, height, frame_rate, pixel_format)).into();
@@ -274,10 +280,13 @@ impl MediaFoundationAccess {
 }
 
 
+struct SourceReaderConfig{
+    video_format: VideoFormat,
+    callback:Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >
+}
+
 struct SourceReaderCallback {
-    callback: Mutex<Option<
-        Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >
-    >>,
+    config: Mutex<Option<SourceReaderConfig>>,
     source_reader: Mutex<Option< IMFSourceReader >>,
 }
 
@@ -304,15 +313,42 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
         unsafe{
             if let Some(sample) = psample{
                 if let Ok(buffer) = sample.GetBufferByIndex(0){
-                    let mut ptr = 0 as *mut u8;
-                    let mut len = 0;
-                    if buffer.Lock(&mut ptr, None, Some(&mut len)).is_ok(){
-                        let data = std::slice::from_raw_parts_mut(ptr, len as usize);
-                        let cb = self.callback.lock().unwrap();
-                        if let Some(cb) = &*cb{
-                            if let Some(cb) = &mut *cb.lock().unwrap(){
-                                cb(VideoFrame{data});
+                    let config = self.config.lock().unwrap();
+                    if let Some(config) = &*config{
+                        if let Some(cb) = &mut *config.callback.lock().unwrap(){
+                            let mut ptr = 0 as *mut u8;
+                            let mut len = 0;
+                            if buffer.Lock(&mut ptr, None, Some(&mut len)).is_ok(){
+                                let data = std::slice::from_raw_parts_mut(ptr, len as usize);
+                                cb(VideoFrame{
+                                    video_format: config.video_format,
+                                    data
+                                });
+                                buffer.Unlock().unwrap();
                             }
+                            /*
+                            let buffer_2d:IMF2DBuffer = buffer.cast()?;
+                            let mut ptr = 0 as *mut u8;
+                            let mut stride = 0;
+                            
+                            if buffer_2d.Lock2D(&mut ptr, &mut stride).is_ok(){
+                                let video_format = config.video_format;
+                                let data = match video_format.pixel_format{
+                                    VideoPixelFormat::YUY2=>std::slice::from_raw_parts_mut(ptr, video_format.width * video_format.height * 2),
+                                    VideoPixelFormat::NV12=>std::slice::from_raw_parts_mut(ptr, video_format.width * video_format.height * 2),
+                                    VideoPixelFormat::GRAY=>std::slice::from_raw_parts_mut(ptr, video_format.width * video_format.height),
+                                    VideoPixelFormat::RGB24=>std::slice::from_raw_parts_mut(ptr, video_format.width * video_format.height * 3),
+                                    VideoPixelFormat::MJPEG=>std::slice::from_raw_parts_mut(ptr, stride.abs() as usize),
+                                    VideoPixelFormat::Unsupported(_)=>&mut []
+                                };
+                                
+                                cb(VideoFrame{
+                                    flipped: stride < 0,
+                                    stride: stride.abs() as usize,
+                                    video_format,
+                                    data
+                                });
+                            }*/
                         }
                         buffer.Unlock().unwrap();
                     };
