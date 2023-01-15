@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)]#![allow(non_upper_case_globals)]
  pub mod Foundation;pub mod Win32{
-pub mod UI{
+pub mod UI{ 
 pub mod WindowsAndMessaging{
 #[repr(C)]pub struct WNDCLASSEXW {
     pub cbSize: u32,
@@ -19430,6 +19430,151 @@ impl IMFSourceReaderCallback_Vtbl {
     }
     pub fn matches(iid: &windows::core::GUID) -> bool {
         iid == &<IMFSourceReaderCallback as ::windows::core::Interface>::IID
+    }
+}
+
+#[repr(transparent)]pub struct IMF2DBuffer(::windows::core::IUnknown);
+impl IMF2DBuffer {
+    pub unsafe fn Lock2D(&self, ppbscanline0: *mut *mut u8, plpitch: *mut i32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Lock2D)(::windows::core::Vtable::as_raw(self), ppbscanline0, plpitch).ok()
+    }
+    pub unsafe fn Unlock2D(&self) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).Unlock2D)(::windows::core::Vtable::as_raw(self)).ok()
+    }
+    pub unsafe fn GetScanline0AndPitch(&self, pbscanline0: *mut *mut u8, plpitch: *mut i32) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).GetScanline0AndPitch)(::windows::core::Vtable::as_raw(self), pbscanline0, plpitch).ok()
+    }
+    #[doc = "*Required features: `\"Win32_Foundation\"`*"]
+    #[cfg(feature = "Win32_Foundation")]
+    pub unsafe fn IsContiguousFormat(&self) -> ::windows::core::Result<super::super::Foundation::BOOL> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).IsContiguousFormat)(::windows::core::Vtable::as_raw(self), result__.as_mut_ptr()).from_abi(result__)
+    }
+    pub unsafe fn GetContiguousLength(&self) -> ::windows::core::Result<u32> {
+        let mut result__ = ::core::mem::MaybeUninit::zeroed();
+        (::windows::core::Vtable::vtable(self).GetContiguousLength)(::windows::core::Vtable::as_raw(self), result__.as_mut_ptr()).from_abi(result__)
+    }
+    pub unsafe fn ContiguousCopyTo(&self, pbdestbuffer: &mut [u8]) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).ContiguousCopyTo)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pbdestbuffer.as_ptr()), pbdestbuffer.len() as _).ok()
+    }
+    pub unsafe fn ContiguousCopyFrom(&self, pbsrcbuffer: &[u8]) -> ::windows::core::Result<()> {
+        (::windows::core::Vtable::vtable(self).ContiguousCopyFrom)(::windows::core::Vtable::as_raw(self), ::core::mem::transmute(pbsrcbuffer.as_ptr()), pbsrcbuffer.len() as _).ok()
+    }
+}
+impl ::core::cmp::Eq for IMF2DBuffer {}
+impl ::core::cmp::PartialEq for IMF2DBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl ::core::clone::Clone for IMF2DBuffer {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl ::core::fmt::Debug for IMF2DBuffer {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_tuple("IMF2DBuffer").field(&self.0).finish()
+    }
+}
+unsafe impl ::windows::core::Vtable for IMF2DBuffer {
+    type Vtable = IMF2DBuffer_Vtbl;
+}
+unsafe impl ::windows::core::Interface for IMF2DBuffer {
+    const IID: ::windows::core::GUID = ::windows::core::GUID::from_u128(0x7dc9d5f9_9ed9_44ec_9bbf_0600bb589fbb);
+}
+
+::windows::core::interface_hierarchy!(IMF2DBuffer, ::windows::core::IUnknown);
+
+#[repr(C)]
+pub struct IMF2DBuffer_Vtbl {
+    pub base__: ::windows::core::IUnknown_Vtbl,
+    pub Lock2D: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, ppbscanline0: *mut *mut u8, plpitch: *mut i32) -> ::windows::core::HRESULT,
+    pub Unlock2D: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT,
+    pub GetScanline0AndPitch: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbscanline0: *mut *mut u8, plpitch: *mut i32) -> ::windows::core::HRESULT,
+    #[cfg(feature = "Win32_Foundation")]
+    pub IsContiguousFormat: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pfiscontiguous: *mut super::super::Foundation::BOOL) -> ::windows::core::HRESULT,
+    #[cfg(not(feature = "Win32_Foundation"))]
+    IsContiguousFormat: usize,
+    pub GetContiguousLength: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pcblength: *mut u32) -> ::windows::core::HRESULT,
+    pub ContiguousCopyTo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbdestbuffer: *mut u8, cbdestbuffer: u32) -> ::windows::core::HRESULT,
+    pub ContiguousCopyFrom: unsafe extern "system" fn(this: *mut ::core::ffi::c_void, pbsrcbuffer: *const u8, cbsrcbuffer: u32) -> ::windows::core::HRESULT,
+}
+
+pub trait IMF2DBuffer_Impl: Sized {
+    fn Lock2D(&self, ppbscanline0: *mut *mut u8, plpitch: *mut i32) -> ::windows::core::Result<()>;
+    fn Unlock2D(&self) -> ::windows::core::Result<()>;
+    fn GetScanline0AndPitch(&self, pbscanline0: *mut *mut u8, plpitch: *mut i32) -> ::windows::core::Result<()>;
+    fn IsContiguousFormat(&self) -> ::windows::core::Result<super::super::Foundation::BOOL>;
+    fn GetContiguousLength(&self) -> ::windows::core::Result<u32>;
+    fn ContiguousCopyTo(&self, pbdestbuffer: *mut u8, cbdestbuffer: u32) -> ::windows::core::Result<()>;
+    fn ContiguousCopyFrom(&self, pbsrcbuffer: *const u8, cbsrcbuffer: u32) -> ::windows::core::Result<()>;
+}
+
+impl ::windows::core::RuntimeName for IMF2DBuffer {}
+
+impl IMF2DBuffer_Vtbl {
+    pub const fn new<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMF2DBuffer_Impl, const OFFSET: isize>() -> IMF2DBuffer_Vtbl {
+        unsafe extern "system" fn Lock2D<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMF2DBuffer_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, ppbscanline0: *mut *mut u8, plpitch: *mut i32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Lock2D(::core::mem::transmute_copy(&ppbscanline0), ::core::mem::transmute_copy(&plpitch)).into()
+        }
+        unsafe extern "system" fn Unlock2D<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMF2DBuffer_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.Unlock2D().into()
+        }
+        unsafe extern "system" fn GetScanline0AndPitch<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMF2DBuffer_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbscanline0: *mut *mut u8, plpitch: *mut i32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.GetScanline0AndPitch(::core::mem::transmute_copy(&pbscanline0), ::core::mem::transmute_copy(&plpitch)).into()
+        }
+        unsafe extern "system" fn IsContiguousFormat<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMF2DBuffer_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pfiscontiguous: *mut super::super::Foundation::BOOL) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.IsContiguousFormat() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pfiscontiguous, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn GetContiguousLength<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMF2DBuffer_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pcblength: *mut u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            match this.GetContiguousLength() {
+                ::core::result::Result::Ok(ok__) => {
+                    ::core::ptr::write(pcblength, ::core::mem::transmute(ok__));
+                    ::windows::core::HRESULT(0)
+                }
+                ::core::result::Result::Err(err) => err.into(),
+            }
+        }
+        unsafe extern "system" fn ContiguousCopyTo<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMF2DBuffer_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbdestbuffer: *mut u8, cbdestbuffer: u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.ContiguousCopyTo(::core::mem::transmute_copy(&pbdestbuffer), ::core::mem::transmute_copy(&cbdestbuffer)).into()
+        }
+        unsafe extern "system" fn ContiguousCopyFrom<Identity: ::windows::core::IUnknownImpl<Impl = Impl>, Impl: IMF2DBuffer_Impl, const OFFSET: isize>(this: *mut ::core::ffi::c_void, pbsrcbuffer: *const u8, cbsrcbuffer: u32) -> ::windows::core::HRESULT {
+            let this = (this as *const *const ()).offset(OFFSET) as *const Identity;
+            let this = (*this).get_impl();
+            this.ContiguousCopyFrom(::core::mem::transmute_copy(&pbsrcbuffer), ::core::mem::transmute_copy(&cbsrcbuffer)).into()
+        }
+        Self {
+            base__: ::windows::core::IUnknown_Vtbl::new::<Identity, OFFSET>(),
+            Lock2D: Lock2D::<Identity, Impl, OFFSET>,
+            Unlock2D: Unlock2D::<Identity, Impl, OFFSET>,
+            GetScanline0AndPitch: GetScanline0AndPitch::<Identity, Impl, OFFSET>,
+            IsContiguousFormat: IsContiguousFormat::<Identity, Impl, OFFSET>,
+            GetContiguousLength: GetContiguousLength::<Identity, Impl, OFFSET>,
+            ContiguousCopyTo: ContiguousCopyTo::<Identity, Impl, OFFSET>,
+            ContiguousCopyFrom: ContiguousCopyFrom::<Identity, Impl, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows::core::GUID) -> bool {
+        iid == &<IMF2DBuffer as ::windows::core::Interface>::IID
     }
 }
 
