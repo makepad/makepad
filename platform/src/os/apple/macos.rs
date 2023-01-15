@@ -32,7 +32,7 @@ use {
         },
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
-        video_capture::VideoCaptureDevicesEvent,
+        video::VideoInputsEvent,
         pass::{CxPassParent},
         event::{
             SignalEvent,
@@ -433,10 +433,10 @@ impl Cx{
             let descs = {
                 let av_capture = self.os.av_capture();
                 let mut av_capture = av_capture.lock().unwrap();
-                av_capture.update_device_list();
+                av_capture.update_input_list();
                 av_capture.get_descs()
             };
-            self.call_event_handler(&Event::VideoCaptureDevices(VideoCaptureDevicesEvent{
+            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
                 descs
             }));
         }
