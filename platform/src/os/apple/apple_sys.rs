@@ -231,10 +231,15 @@ extern {
 
 #[link(name = "CoreVideo", kind = "framework")]
 extern {
+    pub static kCVPixelBufferWidthKey: CFStringRef;
+    pub static kCVPixelBufferHeightKey: CFStringRef;
+    pub static kCVPixelBufferPixelFormatTypeKey: CFStringRef;
     pub fn CVPixelBufferLockBaseAddress(pixelBuffer: CVPixelBufferRef, lockFlags: CVPixelBufferLockFlags,) -> CVReturn;
     pub fn CVPixelBufferUnlockBaseAddress(pixelBuffer: CVPixelBufferRef, unlockFlags: CVPixelBufferLockFlags,) -> CVReturn;
     pub fn CVPixelBufferGetDataSize(pixelBuffer: CVPixelBufferRef) -> std::os::raw::c_ulong;
     pub fn CVPixelBufferGetBaseAddress(pixelBuffer: CVPixelBufferRef) -> *mut c_void;
+    pub fn CVPixelBufferGetWidth(pixelBuffer: CVPixelBufferRef) -> usize;
+    pub fn CVPixelBufferGetHeight(pixelBuffer: CVPixelBufferRef) -> usize;
 }    
 
 
