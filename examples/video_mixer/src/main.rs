@@ -56,7 +56,7 @@ impl App {
         });*/
         
         cx.video_input(0, move |img|{
-            println!("Videoframe: {}", img.data.len()); 
+            //println!("Videoframe: {}", img.data.len()); 
         })
     }
     
