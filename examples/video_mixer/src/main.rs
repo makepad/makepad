@@ -1,9 +1,3 @@
-/*
-TeamTalk is a LAN (only) p2p audiochat supporting as many clients as you have bandwidth.
-For 6 clients it should pull about 25 megabits. You can use it to have a super low latency
-helicopter-headset experience, silent disco, and so on.
-*/
-
 pub use makepad_audio_graph;
 pub use makepad_audio_graph::makepad_widgets;
 pub use makepad_audio_graph::makepad_platform;
@@ -88,7 +82,7 @@ impl App {
     } 
     
     pub fn draw(&mut self, cx: &mut Cx2d) { 
-        if self.window.begin(cx).not_redrawing() {
+        if self.window.begin(cx).is_not_redrawing() {
             return;
         }
         

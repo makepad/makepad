@@ -78,7 +78,7 @@ impl AudioGraph {
         self.from_ui.send(FromUI::AllNotesOff).unwrap();
     }
     
-    fn render_to_output_buffer(node: &mut Node, to_ui: &ToUISender<ToUIDisplayMsg>, time: AudioTime, output: &mut AudioBuffer) {
+    fn render_to_output_buffer(node: &mut Node, to_ui: &ToUISender<ToUIDisplayMsg>, info: AudioInfo, output: &mut AudioBuffer) {
         
         while let Ok(msg) = node.from_ui.try_recv() {
             match msg {
@@ -110,7 +110,7 @@ impl AudioGraph {
                 to_ui,
                 buffers: &mut node.display_buffers
             };
-            root.render_to_audio_buffer(time, &mut [output], &[], &mut dg);
+            root.render_to_audio_buffer(info, &mut [output], &[], &mut dg);
             // lets output this buffer to the UI
             //if let Some(mut display_buffer) = dg.pop_buffer() {
             //    display_buffer.copy_from(&node.buffer);
@@ -134,10 +134,10 @@ impl AudioGraph {
         
         let to_ui = Arc::new(Mutex::new(to_ui));
         
-        cx.audio_output(0, move | _device, time, output_buffer | {
+        cx.audio_output(0, move | info, output_buffer | {
             let mut state = state.lock().unwrap();
             let to_ui = to_ui.lock().unwrap();
-            Self::render_to_output_buffer(&mut state, &to_ui, time, output_buffer);
+            Self::render_to_output_buffer(&mut state, &to_ui, info, output_buffer);
         });
     }
     
@@ -151,7 +151,7 @@ impl AudioGraph {
             root.handle_event_fn(cx, event, &mut | _, _ | {});
         }
         
-        while let Ok(to_ui) = self.to_ui.try_recv(event) {
+        while let Ok(to_ui) = self.to_ui.try_recv() {
             match to_ui {
                 ToUIDisplayMsg::DisplayAudio {voice, buffer, active} => {
                     //log!("GOT DISPLAY AUDIO");

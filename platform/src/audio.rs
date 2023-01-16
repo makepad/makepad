@@ -9,6 +9,12 @@ pub const MAX_AUDIO_DEVICE_INDEX: usize = 32;
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct AudioDeviceId(pub LiveId);
 
+#[derive(Clone, Copy, Debug)]
+pub struct AudioInfo{
+    pub device_id: AudioDeviceId,
+    pub time: Option<AudioTime>
+}
+
 #[derive(Clone, Debug)]
 pub struct AudioDeviceDesc {
     pub device_id: AudioDeviceId,

@@ -3,10 +3,9 @@ use {
     std::{
         rc::Rc,
         cell::{RefCell},
-        sync::Mutex,
         ptr,
         time::Instant,
-        collections::{HashMap,HashSet},
+        collections::{HashMap},
         os::raw::{c_void}
     },
     crate::{
@@ -41,8 +40,8 @@ use {
             TextInputEvent,
             TextCopyEvent,
             TimerEvent,
-            Signal,
-            SignalEvent,
+            //Signal,
+            //SignalEvent,
             DraggedItem,
             KeyModifiers,
         },
@@ -92,7 +91,7 @@ pub struct CocoaTimer {
 pub struct CocoaClasses {
     pub window: *const Class,
     pub window_delegate: *const Class,
-    pub post_delegate: *const Class,
+    //pub post_delegate: *const Class,
     pub timer_delegate: *const Class,
     pub menu_delegate: *const Class,
     pub app_delegate: *const Class,
@@ -113,7 +112,7 @@ impl CocoaClasses{
         Self{
             window: define_cocoa_window_class(),
             window_delegate: define_cocoa_window_delegate(),
-            post_delegate: define_cocoa_post_delegate(),
+            //post_delegate: define_cocoa_post_delegate(),
             timer_delegate: define_cocoa_timer_delegate(),
             menu_delegate: define_menu_delegate(),
             app_delegate: define_app_delegate(),
@@ -137,7 +136,7 @@ pub struct CocoaApp {
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<CocoaTimer>,
-    pub signals: Mutex<RefCell<HashSet<Signal>>>,
+    //pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
     last_key_mod: KeyModifiers,
     pasteboard: ObjcId,
@@ -166,7 +165,7 @@ impl CocoaApp {
                 timer_delegate_instance:msg_send![get_cocoa_class_global().timer_delegate, new],
                 menu_delegate_instance:msg_send![get_cocoa_class_global().menu_delegate, new],
                 //app_delegate_instance,
-                signals: Mutex::new(RefCell::new(HashSet::new())),
+                //signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
                 event_flow: EventFlow::Poll,
@@ -558,7 +557,7 @@ impl CocoaApp {
         //s(*callback)(self, events);
         //self.event_recur_block = false;
     }
-    
+    /*
     pub fn post_signal(signal: Signal) {
         unsafe {
             let cocoa_app = get_cocoa_app_global();
@@ -590,7 +589,7 @@ impl CocoaApp {
             }
             
         }
-    }
+    }*/
     
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
         if self.current_cursor != cursor {
@@ -674,7 +673,7 @@ impl CocoaApp {
             }
         }
     }
-    
+    /*
     pub fn send_signal_event(&mut self) {
         let signals = if let Ok(signals) = self.signals.lock(){
             let mut new_signals = HashSet::new();
@@ -688,7 +687,7 @@ impl CocoaApp {
             })
         ]);
         self.do_callback(vec![CocoaEvent::Paint]);
-    }
+    }*/
     
     pub fn send_command_event(&mut self, command: MenuCommand) {
         self.do_callback(vec![

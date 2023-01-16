@@ -10,7 +10,6 @@ use {
             DraggedItem,
             Timer,
             Trigger,
-            Signal,
             WebSocketAutoReconnect,
             WebSocket,
             NextFrame,
@@ -42,13 +41,10 @@ use {
 pub trait CxOsApi {
     fn init(&mut self);
     
-    fn post_signal(signal: Signal);
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
     
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);
-
-
 }
 
 #[derive(PartialEq)]
@@ -298,10 +294,6 @@ impl Cx {
         self.next_frame_id += 1;
         self.new_next_frames.insert(res);
         res
-    }
-    
-    pub fn send_signal(&mut self, signal: Signal) {
-        self.signals.insert(signal);
     }
     
     pub fn send_trigger(&mut self, area: Area, trigger: Trigger) {

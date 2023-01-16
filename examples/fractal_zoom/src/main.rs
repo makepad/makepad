@@ -46,7 +46,7 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx).not_redrawing() {
+        if self.window.begin(cx).is_not_redrawing() {
             return;
         }
         while self.ui.draw(cx).is_not_done(){};

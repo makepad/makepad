@@ -34,11 +34,10 @@ use {
         midi::MidiPortsEvent,
         video::VideoInputsEvent,
         pass::{CxPassParent},
+        thread::Signal,
         event::{
-            SignalEvent,
             WebSocket,
             WebSocketAutoReconnect,
-            Signal,
             Event,
         },
         cx_api::{CxOsApi, CxOsOp},
@@ -81,9 +80,10 @@ impl Cx {
                 cx.cocoa_event_callback(cocoa_app, events, &mut metal_cx, &mut metal_windows)
             }
         }));
+        // lets set our signal poll timer
         
         // final bit of initflow
-        //get_cocoa_app_global().start_timer(0, 0.2, true);
+        get_cocoa_app_global().start_timer(0, 0.008, true);
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
         get_cocoa_app_global().event_loop();
@@ -151,6 +151,11 @@ impl Cx {
                             self.os.keep_alive_counter -= 1;
                             self.repaint_windows();
                             paint_dirty = true;
+                        }
+                        // chheck signals
+                        if Signal::check_and_clear_ui_signal(){
+                            self.handle_media_signals();
+                            self.call_event_handler(&Event::Signal);
                         }
                         continue;
                     }
@@ -274,11 +279,6 @@ impl Cx {
                 CocoaEvent::Timer(e) => {
                     self.call_event_handler(&Event::Timer(e))
                 }
-                CocoaEvent::Signal(se) => {
-                    //println!("SIGNAL!");
-                    self.handle_media_signals(&se);
-                    self.call_event_handler(&Event::Signal(se));
-                }
                 CocoaEvent::MenuCommand(e) => {
                     self.call_event_handler(&Event::MenuCommand(e))
                 }
@@ -382,15 +382,6 @@ impl CxOsApi for Cx {
         self.desktop_load_dependencies();
     }
     
-    fn post_signal(signal: Signal) {
-        for arg in std::env::args() {
-            if arg == "--stdin-loop" {
-                return Self::stdin_post_signal(signal);
-            }
-        }
-        CocoaApp::post_signal(signal);
-    }
-    
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
@@ -405,8 +396,8 @@ impl CxOsApi for Cx {
 }
 
 impl Cx{
-    pub(crate) fn handle_media_signals(&mut self, ev:&SignalEvent){
-        if ev.signals.contains(&live_id!(CoreMidiPortsChanged).into()){
+    pub(crate) fn handle_media_signals(&mut self){
+        if self.os.core_midi_change.check_and_clear(){
             let descs = {
                 let core_midi = self.os.core_midi();
                 let mut core_midi = core_midi.lock().unwrap();
@@ -417,7 +408,7 @@ impl Cx{
                 descs,
             }));
         }
-        if ev.signals.contains(&live_id!(CoreAudioDeviceChange).into()){
+        if self.os.core_audio_change.check_and_clear(){
             let descs = {
                 let audio_unit = self.os.audio_unit();
                 let mut audio_unit = audio_unit.lock().unwrap();
@@ -428,8 +419,7 @@ impl Cx{
                 descs
             }));
         }
-        
-        if ev.signals.contains(&live_id!(AvCaptureDevicesChanged).into()){
+        if self.os.av_capture_change.check_and_clear(){
             let descs = {
                 let av_capture = self.os.av_capture();
                 let mut av_capture = av_capture.lock().unwrap();
@@ -452,30 +442,8 @@ pub struct CxOs {
     pub (crate) av_capture: Option<Arc<Mutex<AvCaptureAccess>>>,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
+    pub (crate) core_audio_change: Signal,
+    pub (crate) core_midi_change: Signal,
+    pub (crate) av_capture_change: Signal,
 }
 
-impl CxOs{
-    pub fn audio_unit(&mut self)->Arc<Mutex<AudioUnitAccess>>{
-        if self.audio_unit.is_none(){
-            self.audio_unit = Some(AudioUnitAccess::new());
-            Cx::post_signal(live_id!(CoreAudioDeviceChange).into());
-        }
-        self.audio_unit.as_ref().unwrap().clone()
-    }
-    
-    pub fn core_midi(&mut self)->Arc<Mutex<CoreMidiAccess>>{
-        if self.core_midi.is_none(){
-            self.core_midi = Some(CoreMidiAccess::new());
-            Cx::post_signal(live_id!(CoreMidiPortsChanged).into());
-        }
-        self.core_midi.as_ref().unwrap().clone()
-    }
-    
-    pub fn av_capture(&mut self)->Arc<Mutex<AvCaptureAccess>>{
-        if self.av_capture.is_none(){
-            self.av_capture = Some(AvCaptureAccess::new());
-            Cx::post_signal(live_id!(AvCaptureDevicesChanged).into());
-        }
-        self.av_capture.as_ref().unwrap().clone()
-    }
-}

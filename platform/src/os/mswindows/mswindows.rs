@@ -8,6 +8,7 @@ use {
         makepad_live_id::*,
         cx::*,
         event::*,
+        thread::Signal,
         os::{
             mswindows::{
                 winrt_midi::*,
@@ -182,10 +183,12 @@ impl Cx {
                 Win32Event::Timer(e) => {
                     self.call_event_handler(&Event::Timer(e))
                 }
-                Win32Event::Signal(se) => {
+                Win32Event::Signal => {
                     //println!("SIGNAL!");
-                    self.handle_media_signals(&se);
-                    self.call_event_handler(&Event::Signal(se));
+                    if Signal::check_and_clear_ui_signal(){
+                        self.handle_media_signals();
+                        self.call_event_handler(&Event::Signal);
+                    }
                 }
                 //Win32Event::MenuCommand(e) => {
                 //    self.call_event_handler(&Event::MenuCommand(e))
@@ -317,10 +320,6 @@ impl CxOsApi for Cx {
         self.desktop_load_dependencies();
     }
     
-    fn post_signal(signal: Signal) {
-        Win32App::post_signal(signal);
-    }
-    
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
@@ -336,8 +335,8 @@ impl CxOsApi for Cx {
 
 
 impl Cx {
-    pub (crate) fn handle_media_signals(&mut self, ev: &SignalEvent) {
-        if ev.signals.contains(&live_id!(WinRTMidiPortsChanged).into()) {
+    pub (crate) fn handle_media_signals(&mut self) {
+        if self.os.winrt_midi_change.check_and_clear(){
             let descs = {
                 let winrt_midi = self.os.winrt_midi();
                 let winrt_midi = winrt_midi.lock().unwrap();
@@ -347,7 +346,7 @@ impl Cx {
                 descs,
             }));
         }
-        if ev.signals.contains(&live_id!(WasapiDeviceChange).into()){
+        if self.os.wasapi_change.check_and_clear(){
             let descs = {
                 let wasapi = self.os.wasapi();
                 let mut wasapi = wasapi.lock().unwrap();
@@ -358,7 +357,7 @@ impl Cx {
                 descs
             }));
         }
-        if ev.signals.contains(&live_id!(MediaFoundationInputsChange).into()){
+        if self.os.media_foundation_change.check_and_clear(){
             let descs = {
                 let media_foundation = self.os.media_foundation();
                 let mut media_foundation = media_foundation.lock().unwrap();
@@ -370,7 +369,6 @@ impl Cx {
             }));
         }
     }
-    
 }
 
 #[derive(Default)]
@@ -378,28 +376,8 @@ pub struct CxOs {
     pub (crate) winrt_midi: Option<Arc<Mutex<WinRTMidiAccess >> >,
     pub (crate) wasapi: Option<Arc<Mutex<WasapiAccess >> >,
     pub (crate) media_foundation: Option<Arc<Mutex<MediaFoundationAccess >> >,
+    pub (crate) wasapi_change: Signal,
+    pub (crate) media_foundation_change: Signal,
+    pub (crate) winrt_midi_change: Signal,
 }
 
-impl CxOs {
-    
-    pub fn winrt_midi(&mut self) -> Arc<Mutex<WinRTMidiAccess >> {
-        if self.winrt_midi.is_none() {
-            self.winrt_midi = Some(WinRTMidiAccess::new());
-        }
-        self.winrt_midi.as_ref().unwrap().clone()
-    }
-    
-    pub fn wasapi(&mut self) -> Arc<Mutex<WasapiAccess >> {
-        if self.wasapi.is_none() {
-            self.wasapi = Some(WasapiAccess::new());
-        }
-        self.wasapi.as_ref().unwrap().clone()
-    }
-    
-    pub fn media_foundation(&mut self) -> Arc<Mutex<MediaFoundationAccess >> {
-        if self.media_foundation.is_none() {
-            self.media_foundation = Some(MediaFoundationAccess::new());
-        }
-        self.media_foundation.as_ref().unwrap().clone()
-    }
-}
