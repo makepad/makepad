@@ -8,6 +8,10 @@ use {
     }
 };
 
+pub struct WebAudioAccess{
+    
+}
+
 #[repr(C)]
 pub struct WebAudioOutputClosure{
     pub callback: Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send  + 'static>,

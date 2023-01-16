@@ -31,6 +31,7 @@ pub struct FromWasmStartTimer {
     pub interval: f64
 }
 
+
 #[derive(FromWasm)]
 pub struct FromWasmStopTimer {
     pub id: f64,
