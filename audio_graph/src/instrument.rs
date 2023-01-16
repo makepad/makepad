@@ -48,7 +48,7 @@ impl AudioGraphNode for Node {
         }
     }
     
-    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer], display:&mut DisplayAudioGraph) {
+    fn render_to_audio_buffer(&mut self, info: AudioInfo, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer], display:&mut DisplayAudioGraph) {
         // reverse over the steps chaining the audio nodes
         let steps = &mut self.steps;
         let num_steps = steps.len();
@@ -56,10 +56,10 @@ impl AudioGraphNode for Node {
             if i == 0 { // first one uses our main output buffer
                 let step = &mut steps[0];
                 if i == num_steps - 1 { // last one uses external inputs
-                    step.graph_node.render_to_audio_buffer(time, outputs, inputs, display);
+                    step.graph_node.render_to_audio_buffer(info, outputs, inputs, display);
                 }
                 else{
-                    step.graph_node.render_to_audio_buffer(time, outputs, &[&step.input_buffer], display);
+                    step.graph_node.render_to_audio_buffer(info, outputs, &[&step.input_buffer], display);
                 }
             }
             else {
@@ -67,11 +67,11 @@ impl AudioGraphNode for Node {
                 let output_buffer = &mut step0[i - 1].input_buffer;
                 output_buffer.resize_like(outputs[0]);
                 if i == num_steps - 1 { // last one uses external inputs
-                    step1[0].graph_node.render_to_audio_buffer(time, &mut[output_buffer], inputs, display);
+                    step1[0].graph_node.render_to_audio_buffer(info, &mut[output_buffer], inputs, display);
                 }
                 else {
                     let step = &mut step1[0];
-                    step.graph_node.render_to_audio_buffer(time, &mut[output_buffer], &[&step.input_buffer], display);
+                    step.graph_node.render_to_audio_buffer(info, &mut[output_buffer], &[&step.input_buffer], display);
                 }
             };
         }

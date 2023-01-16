@@ -28,7 +28,7 @@ pub trait AudioGraphNode {
     fn all_notes_off(&mut self);
     fn render_to_audio_buffer(
         &mut self,
-        time: AudioTime,
+        info: AudioInfo,
         outputs: &mut [&mut AudioBuffer],
         inputs: &[&AudioBuffer],
         display: &mut DisplayAudioGraph

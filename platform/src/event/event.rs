@@ -49,7 +49,7 @@ pub enum Event {
     
     Timer(TimerEvent),
     
-    Signal(SignalEvent),
+    Signal,
     Trigger(TriggerEvent),
     MenuCommand(MenuCommand),
     KeyFocus(KeyFocusEvent),
@@ -169,13 +169,6 @@ pub struct TimerEvent {
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct Signal(pub LiveId);
-impl From<LiveId> for Signal {
-    fn from(live_id: LiveId) -> Signal {Signal(live_id)}
-}
-
-
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
 pub struct Trigger{
     pub id:LiveId,
     pub from:Area
@@ -202,11 +195,6 @@ pub struct WebSocketErrorEvent {
 pub struct WebSocketMessageEvent {
     pub web_socket: WebSocket,
     pub data: Vec<u8>
-}
-
-#[derive(Clone, Debug)]
-pub struct SignalEvent {
-    pub signals: HashSet<Signal>
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]

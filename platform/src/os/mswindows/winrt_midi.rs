@@ -3,10 +3,9 @@ use {
     std::sync::mpsc,
     makepad_futures::executor,
     crate::{
-        makepad_live_id::{live_id, LiveId},
+        thread::Signal,
+        makepad_live_id::{LiveId},
         midi::*,
-        cx::Cx,
-        cx_api::CxOsApi,
         windows_crate::{
             Foundation::{
                 EventRegistrationToken,
@@ -117,7 +116,7 @@ impl WinRTMidiAccess {
         Ok(ports)
     }
     
-    pub fn new() -> Arc<Mutex<Self >> {
+    pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
         
         let (watch_sender, watch_receiver) = mpsc::channel();
         let input_senders = InputSenders::default();
@@ -127,7 +126,7 @@ impl WinRTMidiAccess {
             input_senders,
         }));
         let midi_access_clone = midi_access.clone();
-        
+        let change_signal_clone = change_signal.clone();
         std::thread::spawn(move || {
             
             let mut ports_list = Vec::new();
@@ -180,7 +179,7 @@ impl WinRTMidiAccess {
                             descs.push(port.desc.clone());
                         }
                         midi_access_clone.lock().unwrap().descs = descs;
-                        Cx::post_signal(live_id!(WinRTMidiPortsChanged).into());
+                        change_signal_clone.set();
                     }
                     WinRTMidiEvent::UseMidiOutputs(ports) => {
                         //let cself = midi_access_clone.lock().unwrap();
@@ -235,6 +234,10 @@ impl WinRTMidiAccess {
                                                 data,
                                             })).is_ok()
                                         });
+                                        if senders.len()>0 {
+                                            // make sure our eventloop runs
+                                            Signal::set_ui_signal();
+                                        }
                                     }
                                     Ok(())
                                 })).unwrap();
@@ -277,7 +280,7 @@ impl WinRTMidiAccess {
         
         //output_watcher.Start().unwrap();
         // alrighty lets initialize midi.
-        Cx::post_signal(live_id!(WinRTMidiInputsChanged).into());
+        change_signal.set();
         midi_access
     }
     

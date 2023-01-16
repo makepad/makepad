@@ -273,7 +273,7 @@ struct CocoaPostInit {
     cocoa_app_ptr: *mut CocoaApp,
     signal_id: u64,
 }*/
-
+/*
 pub fn define_cocoa_post_delegate() -> *const Class {
     
     extern fn received_post(_this: &Object, _: Sel, _nstimer: ObjcId) {
@@ -303,7 +303,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     //decl.add_ivar::<usize>("status");
     
     return decl.register();
-}
+}*/
 
 pub fn define_cocoa_window_delegate() -> *const Class {
     

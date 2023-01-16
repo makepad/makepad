@@ -2,8 +2,7 @@ use {
     std::sync::{Arc, Mutex},
     crate::{
         makepad_live_id::*,
-        cx::Cx,
-        cx_api::CxOsApi,
+        thread::*,
         makepad_error_log::*,
         audio::*,
         midi::*,
@@ -19,9 +18,10 @@ use {
 
 #[derive(Default)]
 pub struct AudioUnitAccess {
+    pub change_signal: Signal,
     pub audio_devices: Vec<CoreAudioDevice>,
-    pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioDeviceId, AudioTime, AudioBuffer) -> AudioBuffer + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
-    pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioDeviceId, AudioTime, &mut AudioBuffer) + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
+    pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
+    pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
     pub audio_inputs: Arc<Mutex<Vec<RunningAudioUnit >> >,
     pub audio_outputs: Arc<Mutex<Vec<RunningAudioUnit >> >
 }
@@ -43,9 +43,16 @@ pub struct RunningAudioUnit {
 }
 
 impl AudioUnitAccess {
-    pub fn new() -> Arc<Mutex<Self>> {
-        Self::observe_route_changes();
-        Arc::new(Mutex::new(Self::default()))
+    pub fn new(change_signal:Signal) -> Arc<Mutex<Self>> {
+        Self::observe_route_changes(change_signal.clone());
+        Arc::new(Mutex::new(Self{
+            change_signal,
+            audio_devices: Default::default(),
+            audio_input_cb: Default::default(),
+            audio_output_cb:Default::default(),
+            audio_inputs:Default::default(),
+            audio_outputs:Default::default(),
+        }))
     }
     
     pub fn get_descs(&self) -> Vec<AudioDeviceDesc> {
@@ -95,7 +102,7 @@ impl AudioUnitAccess {
             let audio_inputs = self.audio_inputs.clone();
             let audio_input_cb = self.audio_input_cb[index].clone();
             
-            self.new_audio_io(unit_info, device_id, move | result | {
+            self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move | result | {
                 let mut audio_inputs = audio_inputs.lock().unwrap();
                 match result {
                     Ok(audio_unit) => {
@@ -104,7 +111,10 @@ impl AudioUnitAccess {
                         let audio_input_cb = audio_input_cb.clone();
                         audio_unit.set_input_handler(move | time, output | {
                             if let Some(audio_input_cb) = &mut *audio_input_cb.lock().unwrap() {
-                                return audio_input_cb(device_id, time, output)
+                                return audio_input_cb(AudioInfo{
+                                    device_id, 
+                                    time: Some(time)
+                                }, output)
                             }
                             output
                         });
@@ -158,8 +168,7 @@ impl AudioUnitAccess {
             let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Output)[0];
             let audio_outputs = self.audio_outputs.clone();
             let audio_output_cb = self.audio_output_cb[index].clone();
-            
-            self.new_audio_io(unit_info, device_id, move | result | {
+            self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move | result | {
                 let mut audio_inputs = audio_outputs.lock().unwrap();
                 match result {
                     Ok(audio_unit) => {
@@ -168,7 +177,10 @@ impl AudioUnitAccess {
                         let audio_output_cb = audio_output_cb.clone();
                         audio_unit.set_output_provider(move | time, output | {
                             if let Some(audio_output_cb) = &mut *audio_output_cb.lock().unwrap() {
-                                audio_output_cb(device_id, time, output)
+                                audio_output_cb(AudioInfo{
+                                    device_id, 
+                                    time:Some(time)
+                                }, output)
                             }
                         });
                         running.audio_unit = Some(audio_unit);
@@ -183,7 +195,7 @@ impl AudioUnitAccess {
     }
     
     
-    pub fn observe_route_changes() {
+    pub fn observe_route_changes(device_change:Signal) {
         let center: ObjcId = unsafe {msg_send![class!(NSNotificationCenter), defaultCenter]};
         unsafe {
             let mut err: ObjcId = nil;
@@ -192,7 +204,7 @@ impl AudioUnitAccess {
             let () = msg_send![audio_session, setActive: true error: &mut err];
         }
         let block = objc_block!(move | _note: ObjcId | {
-            Cx::post_signal(live_id!(CoreAudioDeviceChange).into());
+            device_change.set();
         });
         let () = unsafe {msg_send![
             center,
@@ -203,16 +215,17 @@ impl AudioUnitAccess {
         ]};
     }
     
-    pub fn observe_audio_unit_termination(core_device_id: AudioDeviceID) {
+    pub fn observe_audio_unit_termination(change_signal:Signal, core_device_id: AudioDeviceID) {
         
         #[allow(non_snake_case)]
         unsafe extern "system" fn listener_fn(
             _inObjectID: AudioObjectID,
             _inNumberAddresses: u32,
             _inAddresses: *const AudioObjectPropertyAddress,
-            _inClientData: *mut ()
+            inClientData: *mut ()
         ) -> OSStatus {
-            Cx::post_signal(live_id!(CoreAudioDeviceChange).into());
+            let x: *const Signal = inClientData as *const _;
+            (*x).set();
             0
         }
         
@@ -226,7 +239,7 @@ impl AudioUnitAccess {
             core_device_id,
             &prop_addr,
             Some(listener_fn),
-            std::ptr::null_mut(),
+            Box::into_raw(Box::new(change_signal)) as *mut _,
         )};
         
         if result != 0 {
@@ -414,6 +427,7 @@ impl AudioUnitAccess {
     
     pub fn new_audio_io<F: Fn(Result<AudioUnit, AudioError>) + Send + 'static>(
         &self,
+        change_signal: Signal,
         unit_info: &AudioUnitInfo,
         device_id: AudioDeviceId,
         unit_callback: F,
@@ -424,7 +438,7 @@ impl AudioUnitAccess {
         
         let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
             let () = unsafe {msg_send![av_audio_unit, retain]};
-            unsafe fn inner(core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
+            unsafe fn inner(change_signal: Signal, core_device_id: AudioDeviceID, av_audio_unit: ObjcId, error: ObjcId, unit_query: AudioUnitQuery) -> Result<AudioUnit, OSError> {
                 OSError::from_nserror(error) ?;
                 let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
                 let () = msg_send![av_audio_unit, retain];
@@ -504,7 +518,7 @@ impl AudioUnitAccess {
                     }
                     _ => ()
                 }
-                AudioUnitAccess::observe_audio_unit_termination(core_device_id);
+                AudioUnitAccess::observe_audio_unit_termination(change_signal, core_device_id);
                 Ok(AudioUnit {
                     view_controller: Arc::new(Mutex::new(None)),
                     param_tree_observer: None,
@@ -514,8 +528,8 @@ impl AudioUnitAccess {
                     au_audio_unit
                 })
             }
-            
-            match unsafe {inner(core_device_id, av_audio_unit, error, unit_query)} {
+            let change_signal = change_signal.clone();
+            match unsafe {inner(change_signal, core_device_id, av_audio_unit, error, unit_query)} {
                 Err(err) => unit_callback(Err(AudioError::System(format!("{:?}", err)))),
                 Ok(device) => unit_callback(Ok(device))
             }
@@ -710,7 +724,7 @@ pub struct AudioInstrumentState {
 
 impl AudioUnitClone {
     
-    pub fn render_to_audio_buffer(&self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]) {
+    pub fn render_to_audio_buffer(&self, info: AudioInfo, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]) {
         match self.unit_query {
             AudioUnitQuery::MusicDevice => (),
             AudioUnitQuery::Effect => (),
@@ -762,7 +776,7 @@ impl AudioUnitClone {
             );
             // ok we need to construct all these things
             let mut flags: u32 = 0;
-            let timestamp = time.to_audio_time_stamp();
+            let timestamp = info.time.unwrap().to_audio_time_stamp();
             for i in 0..outputs.len() {
                 unsafe {
                     let mut buffer_list = outputs[i].to_audio_buffer_list();

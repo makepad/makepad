@@ -16,7 +16,6 @@ use {
             DropEvent,
             TextCopyEvent,
             TimerEvent,
-            SignalEvent,
         },
     }
 };
@@ -46,5 +45,5 @@ pub enum Win32Event {
     KeyUp(KeyEvent),
     TextCopy(TextCopyEvent),
     Timer(TimerEvent),
-    Signal(SignalEvent),
+    Signal,
 }

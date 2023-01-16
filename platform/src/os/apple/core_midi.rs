@@ -2,9 +2,8 @@ use {
     std::sync::{Arc, Mutex},
     std::sync::mpsc,
     crate::{
-        cx::{Cx},
-        cx_api::CxOsApi,
-        makepad_live_id::{live_id, LiveId},
+        thread::Signal,
+        makepad_live_id::{LiveId},
         midi::*,
         os::apple::apple_sys::*,
         os::apple::core_audio::*,
@@ -63,15 +62,14 @@ impl CoreMidiPort {
     }
 }
 
-type InputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData) >> >>;
-
 pub struct CoreMidiPort {
     endpoint: MIDIEndpointRef,
     desc: MidiPortDesc
 }
 
 pub struct CoreMidiAccess {
-    input_senders: InputSenders,
+    change_signal: Signal,
+    input_senders: MidiInputSenders,
     midi_in_port: MIDIPortRef,
     midi_out_port: MIDIPortRef,
     ports: Vec<CoreMidiPort>,
@@ -79,12 +77,13 @@ pub struct CoreMidiAccess {
 
 impl CoreMidiAccess {
     
-    pub fn new() -> Arc<Mutex<Self>> {
+    pub fn new(change_signal:Signal) -> Arc<Mutex<Self>> {
+        let change_signal_clone = change_signal.clone();
         let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
-            Cx::post_signal(live_id!(CoreMidiPortsChanged).into());
+            change_signal_clone.set();
         });
         
-        let input_senders = InputSenders::default();
+        let input_senders = MidiInputSenders::default();
         let senders = input_senders.clone();
         let mut midi_receive = objc_block!(move | event_list: &MIDIEventList, user_data: u64 | {
             let midi_port_id = MidiPortId(LiveId(user_data));
@@ -109,7 +108,7 @@ impl CoreMidiAccess {
             }
             if senders.len()>0 {
                 // make sure our eventloop runs
-                Cx::post_signal(live_id!(MidiInput).into());
+                Signal::set_ui_signal();
             }
         });
         
@@ -136,8 +135,9 @@ impl CoreMidiAccess {
                 &mut midi_out_port
             )).unwrap();
         }
-        Cx::post_signal(live_id!(CoreMidiInputsChanged).into());
+        change_signal.set();
         Arc::new(Mutex::new(Self {
+            change_signal,
             input_senders,
             midi_in_port,
             midi_out_port,
@@ -186,7 +186,7 @@ impl CoreMidiAccess {
 
     pub fn midi_reset(&self){
         self.use_midi_inputs(&[]);
-        Cx::post_signal(live_id!(CoreMidiPortsChanged).into());
+        self.change_signal.set();
     }
     
     pub fn update_port_list(&mut self) {

@@ -62,7 +62,7 @@ impl AudioGraphNode for Node {
     
     fn render_to_audio_buffer(
         &mut self,
-        time: AudioTime,
+        info: AudioInfo,
         outputs: &mut [&mut AudioBuffer],
         _inputs: &[&AudioBuffer],
         display: &mut DisplayAudioGraph
@@ -72,7 +72,7 @@ impl AudioGraphNode for Node {
         output.zero();
         for i in 0..self.inputs.len() {
             let input = &mut self.inputs[i];
-            input.render_to_audio_buffer(time, &mut [&mut self.buffer], &[], display);
+            input.render_to_audio_buffer(info, &mut [&mut self.buffer], &[], display);
             for c in 0..output.channel_count() {
                 let out_channel = output.channel_mut(c);
                 let in_channel = self.buffer.channel(c);

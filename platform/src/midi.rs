@@ -1,4 +1,5 @@
 use {
+    std::sync::{Arc, Mutex},
     std::sync::mpsc,
     crate::{
         os::{OsMidiOutput},
@@ -57,6 +58,8 @@ impl std::fmt::Debug for MidiPortDesc{
 pub struct MidiInput(pub (crate) Option<mpsc::Receiver<(MidiPortId, MidiData) >>);
 unsafe impl Send for MidiInput {}
 
+pub type MidiInputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData) >> >>;
+
 impl MidiInput {
     pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
         if let Some(recv) = &mut self.0 {
@@ -79,6 +82,16 @@ impl MidiOutput{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MidiData {
     pub data: [u8;3],
+}
+
+impl std::convert::From<u32> for MidiData {
+    fn from(data: u32) -> Self {
+        MidiData {
+            data: [((data >> 16) & 0xff) as u8,
+             ((data >> 8) & 0xff) as u8,
+             ((data >> 0) & 0xff) as u8]
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

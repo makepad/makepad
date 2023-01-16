@@ -2,8 +2,7 @@ use {
     std::sync::{Arc, Mutex},
     crate::{
         makepad_live_id::*,
-        cx::Cx,
-        cx_api::CxOsApi,
+        thread::Signal,
         video::*,
         os::{
             mswindows::win32_app::{TRUE},
@@ -113,11 +112,11 @@ pub struct MediaFoundationAccess {
 } 
 
 impl MediaFoundationAccess {
-    pub fn new() -> Arc<Mutex<Self >> {
+    pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
         unsafe {
             //CoInitialize(None);
             CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
-            let change_listener: IMMNotificationClient = MediaFoundationChangeListener {}.into();
+            let change_listener: IMMNotificationClient = MediaFoundationChangeListener {change_signal:change_signal.clone()}.into();
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             enumerator.RegisterEndpointNotificationCallback(&change_listener).unwrap();
             
@@ -127,7 +126,7 @@ impl MediaFoundationAccess {
                 inputs: Default::default(),
                 video_input_cb: Default::default()
             }));
-            Cx::post_signal(live_id!(MediaFoundationInputsChange).into());
+            change_signal.set();
             access
         }
     }
@@ -309,7 +308,6 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
         _lltimestamp: i64,
         psample: &Option<IMFSample>
     ) -> crate::windows_crate::core::Result<()> {
-        // allright lets get that data.
         unsafe{
             if let Some(sample) = psample{
                 if let Ok(buffer) = sample.GetBufferByIndex(0){
@@ -376,6 +374,7 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
 
 
 struct MediaFoundationChangeListener {
+    change_signal: Signal
 }
 
 implement_com!{
@@ -390,7 +389,7 @@ implement_com!{
 
 impl IMMNotificationClient_Impl for MediaFoundationChangeListener {
     fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: u32) -> crate::windows_crate::core::Result<()> {
-        Cx::post_signal(live_id!(MediaFoundationInputsChange).into());
+        self.change_signal.set();
         Ok(())
     }
     fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows_crate::core::Result<()> {

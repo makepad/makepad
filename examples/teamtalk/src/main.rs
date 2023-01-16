@@ -185,13 +185,13 @@ impl App {
             }
         });
         
-        cx.audio_input(0, move | _device, _time, mut input_buffer | {
+        cx.audio_input(0, move | _info, mut input_buffer | {
             input_buffer.make_single_channel();
             mic_send.write_buffer(0, input_buffer).unwrap();
             AudioBuffer::default()
         });
         
-        cx.audio_output(0, move | _device, _time, output_buffer | {
+        cx.audio_output(0, move | _info, output_buffer | {
             //println!("buffer {:?}",_time);
             output_buffer.zero();
             // fill our read buffers on the audiostream without blocking
@@ -235,7 +235,7 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) { 
-        if self.window.begin(cx).not_redrawing() {
+        if self.window.begin(cx).is_not_redrawing() {
             return;
         }
         
