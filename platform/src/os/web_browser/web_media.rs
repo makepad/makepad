@@ -1,23 +1,59 @@
 
 use {
     crate::{
-        makepad_wasm_bridge::*,
         cx::Cx,
         audio::*,
         midi::*,
-        event::Event,
-        os::web_browser::{
-            to_wasm::{ToWasmMidiInputList, ToWasmMidiInputData},
-            from_wasm::{FromWasmStartMidiInput, FromWasmSpawnAudioOutput}
-        },
+        video::*,
         media_api::CxMediaApi,
-        os::web_browser::web_audio::*,
     }
 };
 
 
+impl Cx{
+    pub (crate) fn handle_media_signals(&mut self) {
+        self.os.handle_web_midi_signals();
+    }
+}
+
+
 impl CxMediaApi for Cx {
     
+    fn midi_input(&mut self) -> MidiInput {
+        self.os.web_midi_access.create_midi_input()
+    }
+    
+    fn midi_output(&mut self) -> MidiOutput {
+        self.os.web_midi_access.create_midi_output()
+    }
+    
+    fn midi_reset(&mut self) {
+    }
+    
+    fn use_midi_inputs(&mut self, _ports: &[MidiPortId]) {
+    }
+    
+    fn use_midi_outputs(&mut self, _ports: &[MidiPortId]) {
+    }
+    
+    fn use_audio_inputs(&mut self, _devices: &[AudioDeviceId]) {
+    }
+    
+    fn use_audio_outputs(&mut self, _devices: &[AudioDeviceId]) {
+    }
+    
+    fn audio_output<F>(&mut self, _index: usize, _f: F) where F: FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static {
+    }
+    
+    fn audio_input<F>(&mut self, _index: usize, _f: F) where F: FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static {
+    }
+    
+    fn video_input<F>(&mut self, _index: usize, _f: F) where F: FnMut(VideoFrame) + Send + 'static {
+    }
+    
+    fn use_video_input(&mut self, _inputs: &[(VideoInputId, VideoFormatId)]) {
+    }
+    /*
     fn send_midi_data(&mut self, _data:MidiData){
     }
     
@@ -63,5 +99,5 @@ impl CxMediaApi for Cx {
         }));
         
         self.os.from_wasm(FromWasmSpawnAudioOutput {closure_ptr: closure_ptr as u32});
-    }
+    }*/
 }

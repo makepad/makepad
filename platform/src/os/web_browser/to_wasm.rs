@@ -7,7 +7,7 @@ use {
         cx::{OsType, XrCapabilities},
         window::CxWindowPool,
         area::Area,
-        midi::{MidiInputInfo, MidiData, MidiInputData},
+        //midi::{MidiData},
         event::{
             XRButton,
             XRInput,
@@ -597,12 +597,6 @@ pub struct ToWasmAppGotFocus {}
 pub struct ToWasmAppLostFocus {}
 
 #[derive(ToWasm)]
-pub struct ToWasmSignal {
-    pub signals_hi: Vec<u32>,
-    pub signals_lo: Vec<u32>,
-}
-
-#[derive(ToWasm)]
 pub struct ToWasmWebSocketClose {
     pub web_socket_id: usize
 }
@@ -624,25 +618,10 @@ pub struct ToWasmWebSocketMessage {
     pub data: WasmDataU8
 }
 
-
-
 #[derive(ToWasm)]
 pub struct ToWasmMidiInputData {
     pub input_id: u32,
     pub data: u32,
-}
-
-impl Into<MidiInputData> for ToWasmMidiInputData {
-    fn into(self) -> MidiInputData {
-        MidiInputData {
-            input_id: self.input_id as usize,
-            data: MidiData {
-                data0: ((self.data >> 16) & 0xff) as u8,
-                data1: ((self.data >> 8) & 0xff) as u8,
-                data2: ((self.data >> 0) & 0xff) as u8,
-            }
-        }
-    }
 }
 
 #[derive(ToWasm)]
@@ -652,20 +631,7 @@ pub struct WMidiInputInfo {
     pub uid: String,
 }
 
-
 #[derive(ToWasm)]
 pub struct ToWasmMidiInputList {
     pub inputs: Vec<WMidiInputInfo>
 }
-
-impl Into<MidiInputInfo> for WMidiInputInfo {
-    fn into(self) -> MidiInputInfo {
-        MidiInputInfo {
-            manufacturer: self.manufacturer,
-            name: self.name,
-            uid: self.uid
-        }
-    }
-}
-
-

@@ -415,7 +415,7 @@ impl Frame {
             self.defer_walks.clear();
             
             if self.has_view {
-                if self.view.as_mut().unwrap().begin(cx).not_redrawing() {
+                if self.view.as_mut().unwrap().begin(cx).is_not_redrawing() {
                     return WidgetDraw::done()
                 };
                 walk = Walk::default();

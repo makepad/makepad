@@ -1379,8 +1379,6 @@ pub struct IronFishGlobalVoiceState {
     hypersaw2: HyperSawGlobalState,
 }
 
-
-
 pub struct IronFishState {
     //from_ui: FromUIReceiver<FromUI>,
     //to_ui: ToUISender<ToUI>,
@@ -1884,7 +1882,7 @@ impl AudioGraphNode for IronFishState {
         }
     }
     
-    fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer], display: &mut DisplayAudioGraph) {
+    fn render_to_audio_buffer(&mut self, _info: AudioInfo, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer], display: &mut DisplayAudioGraph) {
         self.fill_buffer(outputs[0], display)
     }
 }

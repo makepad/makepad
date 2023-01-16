@@ -1,10 +1,8 @@
 use {
     std::{
-        collections::{HashSet},
         ffi::OsStr,
         os::windows::ffi::OsStrExt,
         mem,
-        sync::{Mutex},
     },
     crate::{
         windows_crate::{
@@ -82,7 +80,7 @@ use {
                 QueryPerformanceFrequency,
             }
         },
-        event::{TimerEvent, Signal, SignalEvent},
+        event::{TimerEvent},
         cursor::MouseCursor,
         os::cx_desktop::EventFlow,
         os::mswindows::win32_event::Win32Event,
@@ -113,7 +111,6 @@ pub struct Win32App {
     pub window_class_name: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
-    pub race_signals: Mutex<HashSet<Signal>>,
     pub was_signal_poll: bool,
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
@@ -168,7 +165,6 @@ impl Win32App {
             was_signal_poll: false,
             time_start,
             time_freq,
-            race_signals: Mutex::new(HashSet::new()),
             event_callback: Some(event_callback),
             event_flow: EventFlow::Poll,
             all_windows: Vec::new(),
@@ -267,19 +263,9 @@ impl Win32App {
                     win32_app.do_callback(vec![Win32Event::Paint]);
                 },
                 Win32Timer::SignalPoll{..}=>{
-                    let signals = if let Ok(mut sigs) = get_win32_app_global().race_signals.lock() {
-                        let mut signals = HashSet::new();
-                        std::mem::swap(&mut *sigs, &mut signals);
-                        signals
-                    }
-                    else{
-                        panic!()
-                    };
-                    if signals.len()>0{
-                        get_win32_app_global().do_callback(vec![
-                            Win32Event::Signal(SignalEvent {signals})
-                        ]);
-                    }
+                    get_win32_app_global().do_callback(vec![
+                        Win32Event::Signal
+                    ]);
                     get_win32_app_global().was_signal_poll = true;
                 }
                 _ => ()
@@ -349,13 +335,6 @@ impl Win32App {
                 self.timers[slot] = Win32Timer::Free;
                 unsafe {KillTimer(None, win32_id);}
             }
-        }
-    }
-    
-    pub fn post_signal(signal: Signal) {
-        let win32_app = get_win32_app_global();
-        if let Ok(mut sigs) = win32_app.race_signals.lock() {
-            sigs.insert(signal);
         }
     }
     

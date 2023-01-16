@@ -165,7 +165,7 @@ impl App {
     // generated with the call to the macro `main_app` above.
     pub fn draw(&mut self, cx: &mut Cx2d) {
         // Indicate that we want to begin drawing to the window.
-        if self.window.begin(cx).not_redrawing() {
+        if self.window.begin(cx).is_not_redrawing() {
             return;
         }
         

@@ -133,13 +133,13 @@ pub use {
         menu::{
             MenuCommand,
         },
+        thread::Signal,
         event::{
             Margin,
             KeyCode,
             Event,
             Hit,
             DragHit,
-            Signal,
             Trigger,
             //MidiInputListEvent,
             WebSocket,
@@ -162,7 +162,6 @@ pub use {
             WindowMovedEvent,
             NextFrameEvent,
             TimerEvent,
-            SignalEvent,
             KeyEvent,
             KeyFocusEvent,
             TextInputEvent,

@@ -6,11 +6,13 @@ use {
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         os::{
+            web_midi::WebMidiAccess,
             web_browser::{
                 from_wasm::*,
                 to_wasm::*,
             },
         },
+        thread::Signal,
         window::{
             CxWindowPool
         },
@@ -20,7 +22,6 @@ use {
             WebSocketErrorEvent,
             WebSocketMessageEvent,
             WebSocketAutoReconnect,
-            Signal,
             Event,
             XRInput,
             TextCopyEvent,
@@ -84,7 +85,8 @@ impl Cx {
                         }
                     }
                     self.os.window_geom = tw.window_info.into();
-                    
+                    // start the signal poll timer
+                    self.os.from_wasm(FromWasmStartTimer{timer_id: 0.0, repeats: true, interval: 0.016});
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
                     
                     self.call_event_handler(&Event::Construct);
@@ -197,9 +199,17 @@ impl Cx {
                 
                 live_id!(ToWasmTimerFired) => {
                     let tw = ToWasmTimerFired::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&Event::Timer(TimerEvent {
-                        timer_id: tw.timer_id as u64
-                    }));
+                    if tw.timer_id == 0{ // signal poll timer
+                        if Signal::check_and_clear_ui_signal(){
+                            self.handle_media_signals();
+                            self.call_event_handler(&Event::Signal);
+                        }
+                    }
+                    else{
+                        self.call_event_handler(&Event::Timer(TimerEvent {
+                            timer_id: tw.timer_id as u64
+                        }));
+                    }
                 }
                 
                 live_id!(ToWasmAppGotFocus) => {
@@ -228,15 +238,6 @@ impl Cx {
                 live_id!(ToWasmPaintDirty) => {
                     let main_pass_id = self.windows[CxWindowPool::id_zero()].main_pass_id.unwrap();
                     self.passes[main_pass_id].paint_dirty = true;
-                }
-                
-                live_id!(ToWasmSignal) => {
-                    let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
-                    for i in 0..tw.signals_lo.len() {
-                        let signal_id = ((tw.signals_hi[i] as u64) << 32) | (tw.signals_lo[i] as u64);
-                        self.send_signal(Signal(LiveId(signal_id)));
-                    }
-                    self.handle_triggers_and_signals();
                 }
                 
                 live_id!(ToWasmWebSocketClose) => {
@@ -292,6 +293,7 @@ impl Cx {
         }
         
         self.handle_platform_ops();
+        self.handle_media_signals();
         
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
@@ -401,7 +403,6 @@ impl CxOsApi for Cx {
             ToWasmXRUpdate::to_string(),
             ToWasmAppGotFocus::to_string(),
             ToWasmAppLostFocus::to_string(),
-            ToWasmSignal::to_string(),
             ToWasmWebSocketOpen::to_string(),
             ToWasmWebSocketClose::to_string(),
             ToWasmWebSocketError::to_string(),
@@ -442,10 +443,6 @@ impl CxOsApi for Cx {
             FromWasmStartMidiInput::to_string(),
             FromWasmSpawnAudioOutput::to_string(),            
         ]);
-    }
-    
-    fn post_signal(signal: Signal,) {
-        unsafe {js_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
@@ -514,10 +511,14 @@ pub struct CxOs {
     pub (crate) window_geom: WindowGeom,
     
     pub (crate) from_wasm: Option<FromWasmMsg>,
+    
     pub (crate) vertex_buffers: usize,
     pub (crate) index_buffers: usize,
     pub (crate) vaos: usize,
+    
     pub (crate) xr_last_inputs: Option<Vec<XRInput >>,
+    
+    pub (crate) web_midi_access: WebMidiAccess,
     
     pub (crate) to_wasm_js: Vec<String>,
     pub (crate) from_wasm_js: Vec<String>
