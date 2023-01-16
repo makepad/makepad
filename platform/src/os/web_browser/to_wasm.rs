@@ -137,6 +137,10 @@ pub struct ToWasmTimerFired {
 }
 
 #[derive(ToWasm)]
+pub struct ToWasmSignal {
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmPaintDirty {
 }
 

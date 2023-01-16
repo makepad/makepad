@@ -38,7 +38,6 @@ impl Cx {
         let d3d11_windows = Rc::new(RefCell::new(Vec::new()));
         
         init_win32_app_global(Box::new({
-            
             let cx = cx.clone();
             move | win32_app,
             events | {
@@ -48,6 +47,7 @@ impl Cx {
                 cx.win32_event_callback(win32_app, events, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
+        
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
         get_win32_app_global().start_signal_poll();
@@ -184,15 +184,11 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(e))
                 }
                 Win32Event::Signal => {
-                    //println!("SIGNAL!");
                     if Signal::check_and_clear_ui_signal(){
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                 }
-                //Win32Event::MenuCommand(e) => {
-                //    self.call_event_handler(&Event::MenuCommand(e))
-                //}
             }
         }
         
@@ -302,10 +298,8 @@ impl Cx {
                     win32_app.stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(_dragged_item) => {
-                    //win32_app.start_dragging(dragged_item);
                 }
                 CxOsOp::UpdateMenu(_menu) => {
-                    //win32_app.update_app_menu(&menu, &self.command_settings)
                 }
             }
         }

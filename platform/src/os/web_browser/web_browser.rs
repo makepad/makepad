@@ -85,8 +85,6 @@ impl Cx {
                         }
                     }
                     self.os.window_geom = tw.window_info.into();
-                    // start the signal poll timer
-                    self.os.from_wasm(FromWasmStartTimer{timer_id: 0.0, repeats: true, interval: 0.016});
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
                     
                     self.call_event_handler(&Event::Construct);
@@ -197,19 +195,16 @@ impl Cx {
                     }
                 }
                 
+                live_id!(ToWasmSignal) =>{
+                    self.handle_media_signals();
+                    self.call_event_handler(&Event::Signal);
+                }
+                
                 live_id!(ToWasmTimerFired) => {
                     let tw = ToWasmTimerFired::read_to_wasm(&mut to_wasm);
-                    if tw.timer_id == 0{ // signal poll timer
-                        if Signal::check_and_clear_ui_signal(){
-                            self.handle_media_signals();
-                            self.call_event_handler(&Event::Signal);
-                        }
-                    }
-                    else{
-                        self.call_event_handler(&Event::Timer(TimerEvent {
-                            timer_id: tw.timer_id as u64
-                        }));
-                    }
+                    self.call_event_handler(&Event::Timer(TimerEvent {
+                        timer_id: tw.timer_id as u64
+                    }));
                 }
                 
                 live_id!(ToWasmAppGotFocus) => {
@@ -407,7 +402,7 @@ impl CxOsApi for Cx {
             ToWasmWebSocketClose::to_string(),
             ToWasmWebSocketError::to_string(),
             ToWasmWebSocketMessage::to_string(),
-        
+            ToWasmSignal::to_string(),
             ToWasmMidiInputData::to_string(),
             ToWasmMidiInputList::to_string(),
         ]);
@@ -561,6 +556,18 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
     msg.push_str(&out);
     msg.release_ownership()
 }
+
+#[export_name = "wasm_check_signal"]
+#[cfg(target_arch = "wasm32")]
+pub unsafe extern "C" fn wasm_check_signal() -> u32 {
+    if Signal::check_and_clear_ui_signal(){
+        1
+    }
+    else{
+        0
+    }
+}
+
 
 #[no_mangle]
 pub static mut BASE_ADDR: usize = 10;
