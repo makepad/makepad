@@ -85,7 +85,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.bind_screen_resize();
         this.focus_keyboard_input();
         this.to_wasm.ToWasmRedrawAll();
-        
+        this.start_signal_poll();
         this.do_wasm_pump();
         
         var loaders = document.getElementsByClassName('canvas_loader');
@@ -93,37 +93,8 @@ export class WasmWebBrowser extends WasmBridge {
             loaders[i].parentNode.removeChild(loaders[i])
         }
     }
-    
-    // from_wasm dispatch_on_app interface
-    
-    post_signal_to_wasm(signal_hi, signal_lo) {
-        let found = false;
-        for (let i = 0; i < this.signals_lo.length; i ++) {
-            let sl = this.signals_lo[i];
-            let sh = this.signals_hi[i];
-            if (sh == signal_hi && sl == signal_lo) {
-                found = true
-            }
-        }
-        if (!found) {
-            this.signals_lo.push(signal_lo);
-            this.signals_hi.push(signal_hi);
-        }
-        if (this.signal_timeout === null) {
-            this.signal_timeout = setTimeout(_ => {
-                this.signal_timeout = null;
-                this.to_wasm.ToWasmSignal({signals_lo: this.signals_lo, signals_hi: this.signals_hi});
-                this.signals_lo.length = 0
-                this.signals_hi.length = 0
-                this.do_wasm_pump();
-            }, 0)
-        }
-    }
-    
-    js_post_signal(signal_hi, signal_lo) {
-        this.post_signal_to_wasm(signal_hi, signal_lo);
-    }
-    
+
+
     FromWasmLoadDeps(args) {
         let promises = [];
         for (let path of args.deps) {
@@ -446,6 +417,15 @@ export class WasmWebBrowser extends WasmBridge {
         })
         
         this.workers.push(worker);
+    }
+    
+    start_signal_poll(){
+        this.poll_timer = window.setInterval(e => {
+            if (this.exports.wasm_check_signal() == 1){
+                this.to_wasm.ToWasmSignal();
+                this.do_wasm_pump();
+            }
+        }, 0.016 * 1000.0);
     }
     
     // calling into wasm
