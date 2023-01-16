@@ -8,11 +8,9 @@ use {
     },
     crate::{
         makepad_math::*,
-        makepad_live_id::LiveId,
         makepad_error_log::*,
         makepad_micro_serde::*,
         event::Event,
-        event::Signal,
         window::CxWindowPool,
         event::WindowGeom,
         texture::Texture,
@@ -54,14 +52,14 @@ impl Cx {
             }
         }
     }
-    
+    /*
     pub fn stdin_post_signal(signal: Signal) {
         let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-signal\", \"signal\":{}}}\n", signal.0.0).as_bytes());
     }
     
     pub fn stdin_render_done(buffer: u32) {
         let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-render\", \"buffer\":{}}}\n", buffer).as_bytes());
-    }
+    }*/
     
     
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
@@ -135,9 +133,8 @@ impl Cx {
                                 self.stdin_handle_platform_ops(metal_cx, &fb_texture);
                             }
                         }
-                        HostToStdin::Signal(signal_id) => {
-                            self.send_signal(Signal(LiveId(signal_id)));
-                            self.handle_triggers_and_signals();
+                        HostToStdin::Signal(_) => {
+                            self.handle_triggers();
                         }
                         HostToStdin::Tick {frame: _, time} => if let Some(ws) = window_size {
                             // poll the service for updates

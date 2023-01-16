@@ -2,8 +2,7 @@ use {
     std::sync::{Arc, Mutex},
     crate::{
         makepad_live_id::*,
-        cx::Cx,
-        cx_api::CxOsApi,
+        thread::Signal,
         video::*,
         os::apple::cocoa_delegate::AvVideoCaptureCallback,
         os::apple::apple_util::*,
@@ -24,7 +23,6 @@ struct AvVideoInput {
     av_formats: Vec<AvFormatObj>
 }
 
-#[derive(Default)]
 pub struct AvCaptureAccess {
     pub access_granted: bool,
     pub video_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >; MAX_VIDEO_DEVICE_INDEX],
@@ -137,12 +135,15 @@ impl AvCaptureSession {
 }
 
 impl AvCaptureAccess {
-    pub fn new() -> Arc<Mutex<Self >> {
+    pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
         
-        Self::observe_device_changes();
+        Self::observe_device_changes(change_signal.clone());
         
         let capture_access = Arc::new(Mutex::new(Self {
-            ..Default::default()
+            access_granted: false,
+            video_input_cb: Default::default(),
+            inputs: Default::default(),
+            sessions: Default::default(),
         }));
         
         let capture_access_clone = capture_access.clone();
@@ -151,7 +152,7 @@ impl AvCaptureAccess {
             if !accept {
                 return
             }
-            Cx::post_signal(live_id!(AvCaptureDevicesChanged).into());
+            change_signal.set();
         });
         unsafe {
             let () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType: AVMediaTypeVideo completionHandler: &request_cb];
@@ -298,10 +299,10 @@ impl AvCaptureAccess {
         out
     }
     
-    pub fn observe_device_changes() {
+    pub fn observe_device_changes(change_signal:Signal) {
         let center: ObjcId = unsafe {msg_send![class!(NSNotificationCenter), defaultCenter]};
         let block = objc_block!(move | _note: ObjcId | {
-            Cx::post_signal(live_id!(AvCaptureDevicesChanged).into());
+            change_signal.set();
         });
         let () = unsafe {msg_send![
             center,

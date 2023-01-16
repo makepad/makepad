@@ -372,7 +372,7 @@ pub trait ViewRedrawingApi {
     fn no() -> ViewRedrawing {Result::Err(())}
     fn yes() -> ViewRedrawing {Result::Ok(())}
     fn is_redrawing(&self) -> bool;
-    fn not_redrawing(&self) -> bool;
+    fn is_not_redrawing(&self) -> bool;
     fn expect_redraw(&self);
 }
 
@@ -383,7 +383,7 @@ impl ViewRedrawingApi for ViewRedrawing {
             Result::Err(_) => false
         }
     }
-    fn not_redrawing(&self) -> bool {
+    fn is_not_redrawing(&self) -> bool {
         match *self {
             Result::Ok(_) => false,
             Result::Err(_) => true

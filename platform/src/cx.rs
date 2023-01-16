@@ -29,7 +29,6 @@ use {
             CxFingers,
             CxFingerDrag,
             Event,
-            Signal,
             Trigger,
             CxKeyboard,
             NextFrame,
@@ -105,7 +104,6 @@ pub struct Cx {
     
     pub (crate) dependencies: HashMap<String, CxDependency>,
     
-    pub (crate) signals: HashSet<Signal>,
     pub (crate) triggers: HashMap<Area, Vec<Trigger >>,
     
     pub live_registry: Rc<RefCell<LiveRegistry >>,
@@ -211,7 +209,6 @@ impl Cx {
             
             dependencies: Default::default(),
             
-            signals: Default::default(),
             triggers: Default::default(),
             
             live_registry: Rc::new(RefCell::new(LiveRegistry::default())),

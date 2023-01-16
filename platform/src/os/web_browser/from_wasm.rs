@@ -261,6 +261,13 @@ pub struct FromWasmStartMidiInput {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmMidiOutput {
+    port: u32,
+    data: u32
+}
+
+
+#[derive(FromWasm)]
 pub struct FromWasmSpawnAudioOutput {
     pub closure_ptr: u32,
 }

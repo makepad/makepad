@@ -52,7 +52,7 @@ impl AudioGraphNode for Node {
     
     fn render_to_audio_buffer(
         &mut self,
-        time: AudioTime,
+        info: AudioInfo,
         outputs: &mut [&mut AudioBuffer],
         inputs: &[&AudioBuffer],
         display: &mut DisplayAudioGraph
@@ -65,7 +65,7 @@ impl AudioGraphNode for Node {
             }
         }
         if let Some(audio_unit) = &self.audio_unit {
-            audio_unit.render_to_audio_buffer(time, outputs, inputs);
+            audio_unit.render_to_audio_buffer(info, outputs, inputs);
             let display_buffer = display.pop_buffer_resize(outputs[0].frame_count(), outputs[0].channel_count());
             if let Some(mut buf) = display_buffer {
                 buf.copy_from(&outputs[0]);
@@ -120,9 +120,9 @@ impl AudioComponent for AudioUnitInstrument {
         })
     }
     
-    fn handle_event_fn(&mut self, _cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event_fn(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         // ui EVENT
-        while let Ok(to_ui) = self.to_ui.try_recv(event) {
+        while let Ok(to_ui) = self.to_ui.try_recv() {
             match to_ui {
                 ToUI::UIReady => {
                     if let Some(audio_unit) = &self.audio_unit {
