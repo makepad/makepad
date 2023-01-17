@@ -62,7 +62,7 @@ pub static mut COCOA_CLASSES: *const CocoaClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
 pub static mut COCOA_APP : *mut CocoaApp = 0 as *mut _;
 
-pub fn init_cocoa_app_global(event_callback:Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> EventFlow>){
+pub fn init_cocoa_app_global(event_callback:Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>){
     unsafe{
         COCOA_CLASSES = Box::into_raw(Box::new(CocoaClasses::new()));
         COCOA_APP = Box::into_raw(Box::new(CocoaApp::new(event_callback)));
@@ -141,7 +141,7 @@ pub struct CocoaApp {
     last_key_mod: KeyModifiers,
     pasteboard: ObjcId,
     startup_focus_hack_ran: bool,
-    event_callback: Option<Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> EventFlow>>,
+    event_callback: Option<Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>>,
     event_flow: EventFlow,
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
@@ -149,7 +149,7 @@ pub struct CocoaApp {
 }
 
 impl CocoaApp {
-    pub fn new(event_callback:Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> EventFlow>) -> CocoaApp {
+    pub fn new(event_callback:Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow>) -> CocoaApp {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let app_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().app_delegate, new];
@@ -364,7 +364,7 @@ impl CocoaApp {
                     let modifiers = get_event_key_modifier(ns_event);
                     //let key_char = get_event_char(ns_event);
                     let is_repeat: bool = msg_send![ns_event, isARepeat];
-                    self.do_callback(vec![
+                    self.do_callback(
                         CocoaEvent::KeyUp(KeyEvent {
                             key_code: key_code,
                             //key_char: key_char,
@@ -372,7 +372,7 @@ impl CocoaApp {
                             modifiers: modifiers,
                             time: self.time_now()
                         })
-                    ]);
+                    );
                 }
             },
             NSEventType::NSKeyDown => {
@@ -388,22 +388,22 @@ impl CocoaApp {
                             // was a paste
                             let nsstring: ObjcId = msg_send![self.pasteboard, stringForType: NSStringPboardType];
                             let string = nsstring_to_string(nsstring);
-                            self.do_callback(vec![
+                            self.do_callback(
                                 CocoaEvent::TextInput(TextInputEvent {
                                     input: string,
                                     was_paste: true,
                                     replace_last: false
                                 })
-                            ]);
+                            );
                         },
                         KeyCode::KeyX | KeyCode::KeyC => if modifiers.logo || modifiers.control {
                             // cut or copy.
                             let response = Rc::new(RefCell::new(None));
-                            self.do_callback(vec![
+                            self.do_callback(
                                 CocoaEvent::TextCopy(TextCopyEvent {
                                     response: response.clone()
                                 })
-                            ]);
+                            );
                             let response = response.borrow();
                             if let Some(response) = response.as_ref(){
                                 let nsstring = str_to_nsstring(&response);
@@ -415,14 +415,14 @@ impl CocoaApp {
                         _ => {}
                     }
                     
-                    self.do_callback(vec![
+                    self.do_callback(
                         CocoaEvent::KeyDown(KeyEvent {
                             key_code: key_code,
                             is_repeat: is_repeat,
                             modifiers: modifiers,
                             time: self.time_now()
                         })
-                    ]);
+                    );
                     /*
                     if is_return{
                         self.do_callback(&mut vec![
@@ -466,7 +466,9 @@ impl CocoaApp {
                 add_event(time, last_key_mod.logo, modifiers.logo, modifiers.clone(), &mut events, KeyCode::Logo);
                 add_event(time, last_key_mod.control, modifiers.control, modifiers.clone(), &mut events, KeyCode::Control);
                 if events.len() >0 {
-                    self.do_callback(events);
+                    for event in events{
+                        self.do_callback(event);
+                    }
                 }
             },
             NSEventType::NSMouseEntered => {},
@@ -532,7 +534,7 @@ impl CocoaApp {
                         }
                         
                         if ns_event == nil || event_wait {
-                            self.do_callback(vec![CocoaEvent::Paint]);
+                            self.do_callback(CocoaEvent::Paint);
                         }
                         
                         let () = msg_send![pool, release];
@@ -542,9 +544,9 @@ impl CocoaApp {
         }
     }
     
-    pub fn do_callback(&mut self, events: Vec<CocoaEvent>) {
+    pub fn do_callback(&mut self, event: CocoaEvent) {
         if let Some(mut callback) = self.event_callback.take(){
-            self.event_flow = callback(self, events);
+            self.event_flow = callback(self, event);
             if let EventFlow::Exit = self.event_flow{
                 unsafe{ 
                     let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
@@ -649,7 +651,7 @@ impl CocoaApp {
                 if !self.timers[i].repeats {
                     self.timers.remove(i);
                 }
-                self.do_callback(vec![CocoaEvent::Timer(TimerEvent {timer_id: timer_id})]);
+                self.do_callback(CocoaEvent::Timer(TimerEvent {timer_id: timer_id}));
                 // break the eventloop if its in blocked mode
                 unsafe {
                     let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
@@ -690,14 +692,14 @@ impl CocoaApp {
     }*/
     
     pub fn send_command_event(&mut self, command: MenuCommand) {
-        self.do_callback(vec![
+        self.do_callback(
             CocoaEvent::MenuCommand(command)
-        ]);
-        self.do_callback(vec![CocoaEvent::Paint]);
+        );
+        self.do_callback(CocoaEvent::Paint);
     }
     
     pub fn send_paint_event(&mut self) {
-        self.do_callback(vec![CocoaEvent::Paint]);
+        self.do_callback(CocoaEvent::Paint);
     }
     
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
