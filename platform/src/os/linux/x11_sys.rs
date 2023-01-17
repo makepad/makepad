@@ -1,3 +1,5 @@
+#![allow(non_upper_case_globals)]
+
 pub type Display = _XDisplay;
 
 pub type XID = ::std::os::raw::c_ulong;
@@ -512,6 +514,7 @@ pub struct XWindowAttributes {
     pub screen: *mut Screen,
 }
 
+#[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct Visual {
     pub ext_data: *mut XExtData,
