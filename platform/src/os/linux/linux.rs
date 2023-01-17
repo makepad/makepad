@@ -1,7 +1,13 @@
 use {
+    std::cell::RefCell,
     crate::{
+        event::Event,
+        cx::{Cx, OsType, },
+        gpu_info::GpuPerformance,
+        os::cx_desktop::EventFlow,
+        os::linux::opengl::{OpenglCx,OpenglWindow},
+        os::linux::xlib_event::XlibEvent,
         os::linux::xlib_app::XlibApp,
-        os::linux::xlib_window::XlibWindow,
     }
 };
 
