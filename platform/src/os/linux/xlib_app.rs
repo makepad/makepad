@@ -6,13 +6,16 @@ use {
         ffi::CStr,
         fs::File,
         io::Write,
+        time::Instant,
         os::unix::io::FromRawFd,
         mem,
         os::raw::{c_char, c_uchar, c_int, c_uint, c_ulong, c_long, c_void},
         ptr,
     },
     crate::{
-        event::{TimerEvent},
+        makepad_math::{DVec2,Rect},
+        os::linux::libc_sys,
+        event::*,
         cursor::MouseCursor,
         os::cx_desktop::EventFlow, 
         os::linux::x11_sys,
@@ -22,7 +25,6 @@ use {
 };
 
 static mut XLIB_APP: *mut XlibApp = 0 as *mut _;
-
 
 pub fn get_xlib_app_global() -> &'static mut XlibApp {
     unsafe {
@@ -36,7 +38,6 @@ pub fn init_win32_app_global(event_callback: Box<dyn FnMut(&mut XlibApp, Vec<Xli
     }
 }
 
-
 pub struct XlibApp {
     pub display: *mut x11_sys::Display,
     pub xim: x11_sys::XIM,
@@ -44,7 +45,7 @@ pub struct XlibApp {
     pub display_fd: c_int,
     pub signal_fds: [c_int; 2],
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
-    pub time_start: u64,
+    pub time_start: Instant,
     pub last_scroll_time: f64,
     pub last_click_time: f64,
     pub last_click_pos: (i32, i32),
@@ -55,22 +56,7 @@ pub struct XlibApp {
     pub free_timers: Vec<usize>,
     pub loop_block: bool,
     pub current_cursor: MouseCursor,
-    
-    pub atom_clipboard: x11_sys::Atom,
-    pub atom_net_wm_moveresize: x11_sys::Atom,
-    pub atom_wm_delete_window: x11_sys::Atom,
-    pub atom_wm_protocols: x11_sys::Atom,
-    pub atom_motif_wm_hints: x11_sys::Atom,
-    pub atom_net_wm_state: x11_sys::Atom,
-    pub atom_new_wm_state_maximized_horz: x11_sys::Atom,
-    pub atom_new_wm_state_maximized_vert: x11_sys::Atom,
-    pub atom_targets: x11_sys::Atom,
-    pub atom_utf8_string: x11_sys::Atom,
-    pub atom_text: x11_sys::Atom,
-    pub atom_multiple: x11_sys::Atom,
-    pub atom_text_plain: x11_sys::Atom,
-    pub atom_atom: x11_sys::Atom,
-    
+    pub atoms: XlibAtoms,
     pub dnd: Dnd,
 }
 
@@ -83,28 +69,17 @@ pub struct XlibTimer {
 }
 
 impl XlibApp {
-    pub fn new(event_callback: Box<dyn FnMut(&mut Win32App, Vec<Win32Event>) -> EventFlow>) -> XlibApp {
+    pub fn new(event_callback: Box<dyn FnMut(&mut XlibApp, Vec<XlibEvent>) -> EventFlow>) -> XlibApp {
         unsafe {
             let display = x11_sys::XOpenDisplay(ptr::null());
             let display_fd = x11_sys::XConnectionNumber(display);
             let xim = x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
             let mut signal_fds = [0, 0];
-            libc::pipe(signal_fds.as_mut_ptr());
+            libc_sys::pipe(signal_fds.as_mut_ptr());
+            x11_sys::XrmInitialize();  
             XlibApp {
-                atom_clipboard: X11_sys::XInternAtom(display, CString::new("CLIPBOARD").unwrap().as_ptr(), 0),
-                atom_net_wm_moveresize: X11_sys::XInternAtom(display, CString::new("_NET_WM_MOVERESIZE").unwrap().as_ptr(), 0),
-                atom_wm_delete_window: X11_sys::XInternAtom(display, CString::new("WM_DELETE_WINDOW").unwrap().as_ptr(), 0),
-                atom_wm_protocols: X11_sys::XInternAtom(display, CString::new("WM_PROTOCOLS").unwrap().as_ptr(), 0),
-                atom_motif_wm_hints: X11_sys::XInternAtom(display, CString::new("_MOTIF_WM_HINTS").unwrap().as_ptr(), 0),
-                atom_net_wm_state: X11_sys::XInternAtom(display, CString::new("_NET_WM_STATE").unwrap().as_ptr(), 0),
-                atom_new_wm_state_maximized_horz: X11_sys::XInternAtom(display, CString::new("_NET_WM_STATE_MAXIMIZED_HORZ").unwrap().as_ptr(), 0),
-                atom_new_wm_state_maximized_vert: X11_sys::XInternAtom(display, CString::new("_NET_WM_STATE_MAXIMIZED_VERT").unwrap().as_ptr(), 0),
-                atom_targets: X11_sys::XInternAtom(display, CString::new("TARGETS").unwrap().as_ptr(), 0),
-                atom_utf8_string: X11_sys::XInternAtom(display, CString::new("UTF8_STRING").unwrap().as_ptr(), 1),
-                atom_atom: X11_sys::XInternAtom(display, CString::new("ATOM").unwrap().as_ptr(), 0),
-                atom_text: X11_sys::XInternAtom(display, CString::new("TEXT").unwrap().as_ptr(), 0),
-                atom_text_plain: X11_sys::XInternAtom(display, CString::new("text/plain").unwrap().as_ptr(), 0),
-                atom_multiple: X11_sys::XInternAtom(display, CString::new("MULTIPLE").unwrap().as_ptr(), 0),
+                event_callback,
+                atoms:XlibAtoms::new(display),
                 xim,
                 display,
                 display_fd,
@@ -114,8 +89,7 @@ impl XlibApp {
                 last_click_time: 0.0,
                 last_click_pos: (0, 0),
                 window_map: HashMap::new(),
-                signals: Mutex::new(Vec::new()),
-                time_start: precise_time_ns(),
+                time_start: Instant::now(),
                 event_callback: None,
                 event_recur_block: false,
                 event_loop_running: true,
@@ -128,26 +102,11 @@ impl XlibApp {
         }
     }
     
-    pub fn init(&mut self) {
+    pub fn event_loop(&mut self){
         unsafe {
-            //unsafe {
-            X11_sys::XrmInitialize();
-            //}
-            GLOBAL_XLIB_APP = self;
-        }
-    }
-    
-    pub fn event_loop<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut XlibApp, &mut Vec<Event>) -> bool,
-    {
-        unsafe {
-            self.event_callback = Some(
-                &mut event_handler as *const dyn FnMut(&mut XlibApp, &mut Vec<Event>) -> bool
-                as *mut dyn FnMut(&mut XlibApp, &mut Vec<Event>) -> bool
-            );
             
             self.do_callback(&mut vec![
-                Event::Paint,
+                XlibEvent::Paint,
             ]);
             
             // Record the current time.
@@ -156,26 +115,26 @@ impl XlibApp {
             while self.event_loop_running {
                 if self.loop_block {
                     let mut fds = mem::MaybeUninit::uninit();
-                    libc::FD_ZERO(fds.as_mut_ptr());
-                    libc::FD_SET(self.display_fd, fds.as_mut_ptr());
-                    libc::FD_SET(self.signal_fds[0], fds.as_mut_ptr());
+                    libc_sys::FD_ZERO(fds.as_mut_ptr());
+                    libc_sys::FD_SET(self.display_fd, fds.as_mut_ptr());
+                    libc_sys::FD_SET(self.signal_fds[0], fds.as_mut_ptr());
                     // If there are any timers, we set the timeout for select to the `delta_timeout`
                     // of the first timer that should be fired. Otherwise, we set the timeout to
                     // None, so that select will block indefinitely.
                     let timeout = if let Some(timer) = self.timers.front() {
                         // println!("Select wait {}",(timer.delta_timeout.fract() * 1000000.0) as i64);
-                        Some(timeval {
+                        Some(libc_sys::timeval {
                             // `tv_sec` is in seconds, so take the integer part of `delta_timeout`
-                            tv_sec: timer.delta_timeout.trunc() as libc::time_t,
+                            tv_sec: timer.delta_timeout.trunc() as libc_sys::time_t,
                             // `tv_usec` is in microseconds, so take the fractional part of
                             // `delta_timeout` 1000000.0.
-                            tv_usec: (timer.delta_timeout.fract() * 1000000.0) as libc::time_t,
+                            tv_usec: (timer.delta_timeout.fract() * 1000000.0) as libc_sys::time_t,
                         })
                     }
                     else {
                         None
                     };
-                    let _nfds = libc::select(
+                    let _nfds = libc_sys::select(
                         self.display_fd.max(self.signal_fds[0]) + 1,
                         fds.as_mut_ptr(),
                         ptr::null_mut(),
@@ -208,16 +167,16 @@ impl XlibApp {
                     }
                     // Fire the timer, and allow the callback to cancel the repeat
                     self.do_callback(&mut vec![
-                        Event::Timer(TimerEvent {timer_id: timer.id})
+                        XlibEvent::Timer(TimerEvent {timer_id: timer.id})
                     ]);
                 }
                 
-                while self.display != ptr::null_mut() && X11_sys::XPending(self.display) != 0 {
+                while self.display != ptr::null_mut() && x11_sys::XPending(self.display) != 0 {
                     let mut event = mem::MaybeUninit::uninit();
-                    X11_sys::XNextEvent(self.display, event.as_mut_ptr());
+                    x11_sys::XNextEvent(self.display, event.as_mut_ptr());
                     let mut event = event.assume_init();
                     match event.type_ as u32 {
-                        X11_sys::SelectionNotify => {
+                        x11_sys::SelectionNotify => {
                             let selection = event.xselection;
                             if selection.property == self.dnd.atoms.selection {
                                 self.dnd.handle_selection_event(&selection);
@@ -228,14 +187,14 @@ impl XlibApp {
                                 let mut n_items = mem::MaybeUninit::uninit();
                                 let mut bytes_to_read = mem::MaybeUninit::uninit();
                                 let mut ret = mem::MaybeUninit::uninit();
-                                X11_sys::XGetWindowProperty(
+                                x11_sys::XGetWindowProperty(
                                     self.display,
                                     selection.requestor,
                                     selection.property,
                                     0,
                                     0,
                                     0,
-                                    X11_sys::AnyPropertyType as c_ulong,
+                                    x11_sys::AnyPropertyType as c_ulong,
                                     actual_type.as_mut_ptr(),
                                     actual_format.as_mut_ptr(),
                                     n_items.as_mut_ptr(),
@@ -248,14 +207,14 @@ impl XlibApp {
                                 let bytes_to_read = bytes_to_read.assume_init();
                                 //let mut ret = ret.assume_init();
                                 let mut bytes_after = mem::MaybeUninit::uninit();
-                                X11_sys::XGetWindowProperty(
+                                x11_sys::XGetWindowProperty(
                                     self.display,
                                     selection.requestor,
                                     selection.property,
                                     0,
                                     bytes_to_read as c_long,
                                     0,
-                                    X11_sys::AnyPropertyType as c_ulong,
+                                    x11_sys::AnyPropertyType as c_ulong,
                                     actual_type.as_mut_ptr(),
                                     actual_format.as_mut_ptr(),
                                     n_items.as_mut_ptr(),
@@ -268,21 +227,21 @@ impl XlibApp {
                                     let utf8_slice = std::slice::from_raw_parts::<u8>(ret as *const _ as *const u8, bytes_to_read as usize);
                                     if let Ok(utf8_string) = String::from_utf8(utf8_slice.to_vec()) {
                                         self.do_callback(&mut vec![
-                                            Event::TextInput(TextInputEvent {
+                                            XlibEvent::TextInput(TextInputEvent {
                                                 input: utf8_string,
                                                 was_paste: true,
                                                 replace_last: false
                                             })
                                         ]);
                                     }
-                                    X11_sys::XFree(ret as *mut _ as *mut c_void);
+                                    x11_sys::XFree(ret as *mut _ as *mut c_void);
                                 }
                             }
                         },
-                        X11_sys::SelectionRequest => {
+                        x11_sys::SelectionRequest => {
                             let request = event.xselectionrequest;
-                            let mut response = X11_sys::XSelectionEvent {
-                                type_: X11_sys::SelectionNotify as i32,
+                            let mut response = x11_sys::XSelectionEvent {
+                                type_: x11_sys::SelectionNotify as i32,
                                 serial: 0,
                                 send_event: 0,
                                 display: self.display,
@@ -294,25 +253,25 @@ impl XlibApp {
                             };
                             if request.target == self.atom_targets {
                                 let mut targets = [self.atom_utf8_string];
-                                X11_sys::XChangeProperty(
+                                x11_sys::XChangeProperty(
                                     self.display,
                                     request.requestor,
                                     request.property,
                                     4,
                                     32,
-                                    X11_sys::PropModeReplace as i32,
+                                    x11_sys::PropModeReplace as i32,
                                     targets.as_mut() as *mut _ as *mut c_uchar,
                                     targets.len() as i32
                                 );
                             }
                             else if request.target == self.atom_utf8_string {
-                                X11_sys::XChangeProperty(
+                                x11_sys::XChangeProperty(
                                     self.display,
                                     request.requestor,
                                     request.property,
                                     self.atom_utf8_string,
                                     8,
-                                    X11_sys::PropModeReplace as i32,
+                                    x11_sys::PropModeReplace as i32,
                                     self.clipboard.as_ptr() as *const _ as *const c_uchar,
                                     self.clipboard.len() as i32
                                 );
@@ -320,19 +279,19 @@ impl XlibApp {
                             else {
                                 response.property = 0;
                             }
-                            X11_sys::XSendEvent(self.display, request.requestor, 1, 0, &mut response as *mut _ as *mut X11_sys::XEvent);
+                            x11_sys::XSendEvent(self.display, request.requestor, 1, 0, &mut response as *mut _ as *mut x11_sys::XEvent);
                         },
-                        X11_sys::DestroyNotify => { // our window got destroyed
+                        x11_sys::DestroyNotify => { // our window got destroyed
                             
                             let destroy_window = event.xdestroywindow;
                             if let Some(window_ptr) = self.window_map.get(&destroy_window.window) {
                                 let window = &mut (**window_ptr);
-                                window.do_callback(&mut vec![Event::WindowClosed(WindowClosedEvent {
+                                window.do_callback(&mut vec![XlibEvent::WindowClosed(WindowClosedEvent {
                                     window_id: window.window_id,
                                 })]);
                             }
                         },
-                        X11_sys::ConfigureNotify => {
+                        x11_sys::ConfigureNotify => {
                             let cfg = event.xconfigure;
                             if let Some(window_ptr) = self.window_map.get(&cfg.window) {
                                 let window = &mut (**window_ptr);
@@ -341,8 +300,8 @@ impl XlibApp {
                                 }
                             }
                         },
-                        X11_sys::EnterNotify => {},
-                        X11_sys::LeaveNotify => {
+                        x11_sys::EnterNotify => {},
+                        x11_sys::LeaveNotify => {
                             let crossing = event.xcrossing;
                             if crossing.detail == 4 {
                                 if let Some(window_ptr) = self.window_map.get(&crossing.window) {
@@ -362,7 +321,7 @@ impl XlibApp {
                                 }
                             }
                         },
-                        X11_sys::MotionNotify => { // mousemove
+                        x11_sys::MotionNotify => { // mousemove
                             let motion = event.xmotion;
                             if let Some(window_ptr) = self.window_map.get(&motion.window) {
                                 let window = &mut (**window_ptr);
@@ -382,11 +341,11 @@ impl XlibApp {
                                     }
                                 }
                                 
-                                let pos = Vec2 {x: x as f32 / window.last_window_geom.dpi_factor, y: y as f32 / window.last_window_geom.dpi_factor};
+                                let pos = DVec2 {x: x as f64 / window.last_window_geom.dpi_factor, y: y as f64 / window.last_window_geom.dpi_factor};
                                 
                                 // query window for chrome
                                 let mut drag_query_events = vec![
-                                    Event::WindowDragQuery(WindowDragQueryEvent {
+                                    XlibEvent::WindowDragQuery(WindowDragQueryEvent {
                                         window_id: window.window_id,
                                         abs: window.last_mouse_pos,
                                         response: WindowDragQueryResponse::NoAnswer
@@ -690,16 +649,17 @@ impl XlibApp {
         }
     }
     
-    pub fn do_callback(&mut self, events: &mut Vec<Event>) {
-        unsafe {
-            if self.event_callback.is_none() || self.event_recur_block {
-                return
-            };
-            self.event_recur_block = true;
-            let callback = self.event_callback.unwrap();
-            self.loop_block = (*callback)(self, events);
-            self.event_recur_block = false;
-        }
+    pub fn do_callback(&mut self, events: &mut Vec<XlibEvent>) {
+        if let Some(mut callback) = self.event_callback.take(){
+            self.event_flow = callback(self, events);
+            if let EventFlow::Exit = self.event_flow{
+                self.event_loop_running = false;
+                unsafe {x11_sys::XCloseIM(self.xim)};
+                unsafe {x11_sys::XCloseDisplay(self.display)};
+                self.display = ptr::null_mut();  
+            }
+            self.event_callback = Some(callback);
+        }              
     }
     
     pub fn start_timer(&mut self, id: u64, timeout: f64, repeats: bool) {
@@ -784,14 +744,6 @@ impl XlibApp {
                 let _ = write!(&mut f, "\0");
             }
         }
-    }
-    
-    pub fn terminate_event_loop(&mut self) {
-        // maybe need to do more here
-        self.event_loop_running = false;
-        unsafe {X11_sys::XCloseIM(self.xim)};
-        unsafe {X11_sys::XCloseDisplay(self.display)};
-        self.display = ptr::null_mut();
     }
     
     pub fn time_now(&self) -> f64 {
@@ -1013,6 +965,44 @@ impl XlibApp {
             X11_sys::XK_Down => KeyCode::ArrowDown,
             X11_sys::XK_Up => KeyCode::ArrowUp,
             _ => KeyCode::Unknown,
+        }
+    }
+}
+
+pub struct XlibAtoms{
+    pub clipboard: x11_sys::Atom,
+    pub net_wm_moveresize: x11_sys::Atom,
+    pub wm_delete_window: x11_sys::Atom,
+    pub wm_protocols: x11_sys::Atom,
+    pub motif_wm_hints: x11_sys::Atom,
+    pub net_wm_state: x11_sys::Atom,
+    pub new_wm_state_maximized_horz: x11_sys::Atom,
+    pub new_wm_state_maximized_vert: x11_sys::Atom,
+    pub targets: x11_sys::Atom,
+    pub utf8_string: x11_sys::Atom,
+    pub text: x11_sys::Atom,
+    pub multiple: x11_sys::Atom,
+    pub text_plain: x11_sys::Atom,
+    pub atom: x11_sys::Atom,
+}
+
+impl XlibAtoms{
+    fn new(display:x11_sys::Display)->Self{
+        Self{
+            clipboard: x11_sys::XInternAtom(display, "CLIPBOARD\n".as_ptr(), 0),
+            net_wm_moveresize: x11_sys::XInternAtom(display, "_NET_WM_MOVERESIZE\0".as_ptr(), 0),
+            wm_delete_window: x11_sys::XInternAtom(display, "WM_DELETE_WINDOW\0".as_ptr(), 0),
+            wm_protocols: x11_sys::XInternAtom(display, "WM_PROTOCOLS\0".as_ptr(), 0),
+            motif_wm_hints: x11_sys::XInternAtom(display, "_MOTIF_WM_HINTS\0".as_ptr(), 0),
+            net_wm_state: x11_sys::XInternAtom(display, "_NET_WM_STATE\0".as_ptr(), 0),
+            new_wm_state_maximized_horz: x11_sys::XInternAtom(display, "_NET_WM_STATE_MAXIMIZED_HORZ\0".as_ptr(), 0),
+            new_wm_state_maximized_vert: x11_sys::XInternAtom(display, "_NET_WM_STATE_MAXIMIZED_VERT\0".as_ptr(), 0),
+            targets: x11_sys::XInternAtom(display, "TARGETS\0".as_ptr(), 0),
+            utf8_string: x11_sys::XInternAtom(display, "UTF8_STRING\0".as_ptr(), 1),
+            atom: x11_sys::XInternAtom(display, "ATOM\0".as_ptr(), 0),
+            text: x11_sys::XInternAtom(display, "TEXT\0".as_ptr(), 0),
+            text_plain: x11_sys::XInternAtom(display, "text/plain\0".as_ptr(), 0),
+            multiple: x11_sys::XInternAtom(display, "MULTIPLE\0".as_ptr(), 0),
         }
     }
 }
