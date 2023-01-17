@@ -3,7 +3,7 @@ use {
     std::sync::{mpsc},
     crate::{
         cx::Cx,
-        os::CxOS,
+        os::linux::linux::CxOs,
         audio::*,
         midi::*,
         video::*,
@@ -15,7 +15,7 @@ impl CxOs {
     
 }
 
-struct OsMidiOutput();
+pub struct OsMidiOutput();
 
 impl CxMediaApi for Cx {
     

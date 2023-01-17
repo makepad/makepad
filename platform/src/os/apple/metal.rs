@@ -83,6 +83,7 @@ impl Cx {
                 }else {
                     continue;
                 };
+                
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 if sh.os_shader_id.is_none() { // shader didnt compile somehow
                     continue;
@@ -106,7 +107,8 @@ impl Cx {
                 }
                 
                 // lets verify our instance_offset is not disaligned
-                let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
+                let instances = (draw_item.instances.as_ref().unwrap().len()
+                     / sh.mapping.instances.total_slots) as u64;
                 
                 if instances == 0 {
                     continue;
