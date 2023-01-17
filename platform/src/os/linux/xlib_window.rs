@@ -1,22 +1,36 @@
+use {
+    std::{
+        mem,
+        os::raw::{c_ulong, c_long, c_void},
+        ptr,
+    },
+    crate::{
+        window::WindowId,
+        makepad_math::{DVec2,Rect},
+        event::*,
+        cursor::MouseCursor,
+        os::linux::xlib_app::*,
+        os::linux::x11_sys,
+    },
+};
 
 
 #[derive(Clone)]
 pub struct XlibWindow {
     pub window: Option<c_ulong>,
-    pub xic: Option<X11_sys::XIC>,
-    pub attributes: Option<X11_sys::XSetWindowAttributes>,
-    pub visual_info: Option<X11_sys::XVisualInfo>,
+    pub xic: Option<x11_sys::XIC>,
+    pub attributes: Option<x11_sys::XSetWindowAttributes>,
+    pub visual_info: Option<x11_sys::XVisualInfo>,
     pub child_windows: Vec<XlibChildWindow>,
     
     pub last_nc_mode: Option<c_long>,
     pub window_id: WindowId,
-    pub xlib_app: *mut XlibApp,
     pub last_window_geom: WindowGeom,
     pub time_start: u64,
     
-    pub ime_spot: Vec2,
+    pub ime_spot: DVec2,
     pub current_cursor: MouseCursor,
-    pub last_mouse_pos: Vec2,
+    pub last_mouse_pos: DVec2,
     pub fingers_down: Vec<bool>,
 }
 
@@ -33,9 +47,7 @@ pub struct XlibChildWindow {
 
 impl XlibWindow {
     
-    pub fn new(xlib_app: &mut XlibApp, window_id: usize) -> XlibWindow {
-        let mut fingers_down = Vec::new();
-        fingers_down.resize(NUM_FINGERS, false);
+    pub fn new(window_id: WindowId) -> XlibWindow {
         
         XlibWindow {
             window: None,
@@ -43,24 +55,21 @@ impl XlibWindow {
             attributes: None,
             visual_info: None,
             child_windows: Vec::new(),
-            window_id: window_id,
-            xlib_app: xlib_app,
+            window_id,
             last_window_geom: WindowGeom::default(),
-            time_start: xlib_app.time_start,
             last_nc_mode: None,
-            ime_spot: Vec2::default(),
+            ime_spot: DVec2::default(),
             current_cursor: MouseCursor::Default,
-            last_mouse_pos: Vec2::default(),
-            fingers_down: fingers_down,
+            last_mouse_pos: DVec2::default(),
         }
     }
     
-    pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>, visual_info: X11_sys::XVisualInfo) {
+    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>, visual_info: x11_sys::XVisualInfo) {
         unsafe {
-            let display = (*self.xlib_app).display;
+            let display = get_xlib_app_global().display;
             
             // The default screen of the display
-            let default_screen = X11_sys::XDefaultScreen(display);
+            let default_screen = x11_sys::XDefaultScreen(display);
             
             // The root window of the default screen
             let root_window = X11_sys::XRootWindow(display, default_screen);

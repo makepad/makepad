@@ -235,7 +235,11 @@ impl DesktopWindow {
     pub fn end(&mut self, cx: &mut Cx2d) {
         while self.ui.draw(cx).is_not_done() {}
         self.debug_view.draw(cx);
-        cx.end_turtle();
+        
+        self.overlay.end(cx);
+
+        cx.end_overlay_turtle();
+        
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }
