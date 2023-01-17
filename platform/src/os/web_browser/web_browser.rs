@@ -298,6 +298,30 @@ impl Cx {
         self.os.from_wasm.take().unwrap().release_ownership()
     }
     
+         
+    pub fn handle_repaint(&mut self){
+        let mut passes_todo = Vec::new();
+         
+        self.compute_pass_repaint_order(&mut passes_todo);
+        self.repaint_id += 1;
+        for pass_id in &passes_todo {
+            match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Window(_) => {
+                    let dpi_factor = self.os.window_geom.dpi_factor;
+                    self.draw_pass_to_canvas(*pass_id, dpi_factor);
+                }
+                CxPassParent::Pass(parent_pass_id) => {
+                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    self.draw_pass_to_texture(*pass_id, dpi_factor);
+                },
+                CxPassParent::None => {
+                    self.draw_pass_to_texture(*pass_id, 1.0);
+                }
+            }
+        }    
+    }
+    
+    
     // empty stub
     pub fn event_loop<F>(&mut self, mut _event_handler: F)
     where F: FnMut(&mut Cx, Event) {
