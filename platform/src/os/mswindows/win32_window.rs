@@ -337,10 +337,10 @@ impl Win32Window {
         match msg {
             WM_ACTIVATE => {
                 if wparam.0 & 0xffff == WA_ACTIVE as usize {
-                    window.do_callback(vec![Win32Event::AppGotFocus]);
+                    window.do_callback(Win32Event::AppGotFocus);
                 }
                 else {
-                    window.do_callback(vec![Win32Event::AppLostFocus]);
+                    window.do_callback(Win32Event::AppLostFocus);
                 }
             },
             WM_NCCALCSIZE => {
@@ -398,13 +398,13 @@ impl Win32Window {
                     return LRESULT(HTBOTTOM as isize);
                 }
                 let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
-                window.do_callback(vec![
+                window.do_callback(
                     Win32Event::WindowDragQuery(WindowDragQueryEvent {
                         window_id: window.window_id,
                         abs: window.get_mouse_pos_from_lparam(lparam),
                         response: response.clone()
                     })
-                ]);
+                );
                 match response.get() {
                     WindowDragQueryResponse::Client => {
                         return LRESULT(HTCLIENT as isize);
@@ -485,13 +485,13 @@ impl Win32Window {
                                     GlobalUnlock(h_clipboard_data.0);
                                     CloseClipboard();
                                     if let Ok(utf8) = String::from_utf16(&data) {
-                                        window.do_callback(vec![
+                                        window.do_callback(
                                             Win32Event::TextInput(TextInputEvent {
                                                 input: utf8,
                                                 was_paste: true,
                                                 replace_last: false
                                             })
-                                        ]);
+                                        );
                                     }
                                 }
                                 else {
@@ -502,11 +502,11 @@ impl Win32Window {
                         }
                         KeyCode::KeyX | KeyCode::KeyC => {
                             let response = Rc::new(RefCell::new(None));
-                            window.do_callback(vec![
+                            window.do_callback(
                                 Win32Event::TextCopy(TextCopyEvent {
                                     response: response.clone()
                                 })
-                            ]);
+                            );
                             let response = response.borrow();
                             if let Some(response) = response.as_ref() {
                                 // plug it into the windows clipboard
@@ -531,47 +531,47 @@ impl Win32Window {
                         _ => ()
                     }
                 }
-                window.do_callback(vec![
+                window.do_callback(
                     Win32Event::KeyDown(KeyEvent {
                         key_code: key_code,
                         is_repeat: (lparam.0 & 0x7000_0000)>0,
                         modifiers: modifiers,
                         time: window.time_now()
                     })
-                ]);
+                );
             },
             WM_KEYUP | WM_SYSKEYUP => {
-                window.do_callback(vec![
+                window.do_callback(
                     Win32Event::KeyUp(KeyEvent {
                         key_code: Self::virtual_key_to_key_code(wparam),
                         is_repeat: lparam.0 & 0x7fff>0,
                         modifiers: Self::get_key_modifiers(),
                         time: window.time_now()
                     })
-                ]);
+                );
                 
             },
             WM_CHAR => {
                 if let Ok(utf8) = String::from_utf16(&[wparam.0 as u16]) {
                     let char_code = utf8.chars().next().unwrap();
                     if char_code >= ' ' {
-                        window.do_callback(vec![
+                        window.do_callback(
                             Win32Event::TextInput(TextInputEvent {
                                 input: utf8,
                                 was_paste: false,
                                 replace_last: false
                             })
-                        ]);
+                        );
                     }
                 }
             },
             WM_ENTERSIZEMOVE => {
                 get_win32_app_global().start_resize();
-                window.do_callback(vec![Win32Event::WindowResizeLoopStart(window.window_id)]);
+                window.do_callback(Win32Event::WindowResizeLoopStart(window.window_id));
             }
             WM_EXITSIZEMOVE => {
                 get_win32_app_global().stop_resize();
-                window.do_callback(vec![Win32Event::WindowResizeLoopStop(window.window_id)]);
+                window.do_callback(Win32Event::WindowResizeLoopStop(window.window_id));
             },
             WM_SIZE | WM_DPICHANGED => {
                 window.send_change_event();
@@ -591,20 +591,20 @@ impl Win32Window {
             }, */
             WM_CLOSE => { // close requested
                 let accept_close = Rc::new(Cell::new(true));
-                window.do_callback(vec![Win32Event::WindowCloseRequested(WindowCloseRequestedEvent {
+                window.do_callback(Win32Event::WindowCloseRequested(WindowCloseRequestedEvent {
                     window_id: window.window_id,
                     accept_close: accept_close.clone()
-                })]);
+                }));
                 if accept_close.get() {
                     DestroyWindow(hwnd);
                 }
             },
             WM_DESTROY => { // window actively destroyed
-                window.do_callback(vec![
+                window.do_callback(
                     Win32Event::WindowClosed(WindowClosedEvent {
                         window_id: window.window_id,
                     })
-                ]);
+                );
             },
             _ => {
                 return DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -826,8 +826,8 @@ impl Win32Window {
         get_win32_app_global().dpi_functions.hwnd_dpi_factor(self.hwnd.unwrap()) as f64
     }
     
-    pub fn do_callback(&mut self, events: Vec<Win32Event>) {
-        get_win32_app_global().do_callback(events);
+    pub fn do_callback(&mut self, event: Win32Event) {
+        get_win32_app_global().do_callback(event);
     }
     
     pub fn send_change_event(&mut self) {
@@ -836,22 +836,24 @@ impl Win32Window {
         let old_geom = self.last_window_geom.clone();
         self.last_window_geom = new_geom.clone();
         
-        self.do_callback(vec![
+        self.do_callback(
             Win32Event::WindowGeomChange(WindowGeomChangeEvent {
                 window_id: self.window_id,
                 old_geom: old_geom,
                 new_geom: new_geom
             }),
+        );
+        self.do_callback(
             Win32Event::Paint
-        ]);
+        );
     }
     
     pub fn send_focus_event(&mut self) {
-        self.do_callback(vec![Win32Event::AppGotFocus]);
+        self.do_callback(Win32Event::AppGotFocus);
     }
     
     pub fn send_focus_lost_event(&mut self) {
-        self.do_callback(vec![Win32Event::AppLostFocus]);
+        self.do_callback(Win32Event::AppLostFocus);
     }
     
     pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
@@ -859,14 +861,14 @@ impl Win32Window {
             unsafe {SetCapture(self.hwnd.unwrap());}
         }
         self.mouse_buttons_down += 1;
-        self.do_callback(vec![Win32Event::MouseDown(MouseDownEvent {
+        self.do_callback(Win32Event::MouseDown(MouseDownEvent {
             button,
             modifiers,
             window_id: self.window_id,
             abs: self.last_mouse_pos,
             time: self.time_now(),
             handled: Cell::new(Area::Empty),
-        })]);
+        }));
     }
     
     pub fn send_mouse_up(&mut self, button: usize, modifiers: KeyModifiers) {
@@ -877,28 +879,28 @@ impl Win32Window {
             unsafe {ReleaseCapture();}
             self.mouse_buttons_down = 0;
         }
-        self.do_callback(vec![Win32Event::MouseUp(MouseUpEvent {
+        self.do_callback(Win32Event::MouseUp(MouseUpEvent {
             button,
             modifiers,
             window_id: self.window_id,
             abs: self.last_mouse_pos,
             time: self.time_now()
-        })]);
+        }));
     }
     
     pub fn send_mouse_move(&mut self, pos: DVec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
-        self.do_callback(vec![Win32Event::MouseMove(MouseMoveEvent {
+        self.do_callback(Win32Event::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
             abs: pos,
             modifiers: modifiers,
             time: self.time_now(),
             handled: Cell::new(Area::Empty),
-        })]);
+        }));
     }
     
     pub fn send_scroll(&mut self, scroll: DVec2, modifiers: KeyModifiers, is_mouse: bool) {
-        self.do_callback(vec![
+        self.do_callback(
             Win32Event::Scroll(ScrollEvent {
                 window_id: self.window_id,
                 scroll,
@@ -909,15 +911,15 @@ impl Win32Window {
                 handled_x: Cell::new(false),
                 handled_y: Cell::new(false),
             })
-        ]);
+        );
     }
     
     pub fn send_close_requested_event(&mut self) -> bool {
         let accept_close = Rc::new(Cell::new(true));
-        self.do_callback(vec![Win32Event::WindowCloseRequested(WindowCloseRequestedEvent {
+        self.do_callback(Win32Event::WindowCloseRequested(WindowCloseRequestedEvent {
             window_id: self.window_id,
             accept_close: accept_close.clone()
-        })]);
+        }));
         if !accept_close.get() {
             return false
         }
@@ -925,11 +927,11 @@ impl Win32Window {
     }
     
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
-        self.do_callback(vec![Win32Event::TextInput(TextInputEvent {
+        self.do_callback(Win32Event::TextInput(TextInputEvent {
             input: input,
             was_paste: false,
             replace_last: replace_last
-        })])
+        }))
     }
     
     pub fn virtual_key_to_key_code(wparam: WPARAM) -> KeyCode {

@@ -3,6 +3,7 @@ use {
     std::sync::{mpsc},
     crate::{
         cx::Cx,
+        os::CxOS,
         audio::*,
         midi::*,
         video::*,

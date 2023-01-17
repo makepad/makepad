@@ -770,7 +770,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn dragging_session_ended_at_point_operation(this: &Object, _: Sel, _session: ObjcId, _point: NSPoint, _operation: NSDragOperation) {
         let window = get_cocoa_window(this);
-        window.do_callback(vec![CocoaEvent::DragEnd]);
+        window.do_callback(CocoaEvent::DragEnd);
     }
     
     extern fn dragging_entered(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
@@ -794,12 +794,12 @@ pub fn define_cocoa_view_class() -> *const Class {
         }));
         let action = Rc::new(Cell::new(DragAction::None));
         
-        window.do_callback(vec![CocoaEvent::Drag(DragEvent {
+        window.do_callback(CocoaEvent::Drag(DragEvent {
             handled: Cell::new(false),
             abs: pos,
             state: DragState::Over,
             action: action.clone()
-        })]);
+        }));
         
         match action.get(){
             DragAction::None => NSDragOperation::None,
@@ -846,14 +846,14 @@ pub fn define_cocoa_view_class() -> *const Class {
             let string = unsafe {CStr::from_ptr(msg_send![string, UTF8String])};
             file_urls.push(string.to_str().unwrap().to_string());
         }
-        let events = vec![CocoaEvent::Drop(DropEvent {
+
+        window.do_callback(CocoaEvent::Drop(DropEvent {
             handled: Cell::new(false),
             abs: pos,
             dragged_item: DraggedItem {
                 file_urls,
             }
-        })];
-        window.do_callback(events);
+        }));
     }
     
     /*
