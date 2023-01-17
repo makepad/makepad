@@ -19,29 +19,7 @@ use {
 };
 
 impl Cx {
-     
-    pub fn handle_repaint(&mut self){
-        let mut passes_todo = Vec::new();
-         
-        self.compute_pass_repaint_order(&mut passes_todo);
-        self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(_) => {
-                    let dpi_factor = self.os.window_geom.dpi_factor;
-                    self.draw_pass_to_canvas(*pass_id, dpi_factor);
-                }
-                CxPassParent::Pass(parent_pass_id) => {
-                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, dpi_factor);
-                },
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, 1.0);
-                }
-            }
-        }    
-    }
-    
+
     pub fn render_view(
         &mut self,
         pass_id: PassId,
@@ -223,7 +201,7 @@ impl Cx {
         pass_id: PassId,
         dpi_factor: f64
     ) {
-        let view_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
         // get the color and depth
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -254,7 +232,7 @@ impl Cx {
 
         self.render_view(
             pass_id,
-            view_id,
+            draw_list_id,
             &mut zbias,
             zbias_step
         );
@@ -262,7 +240,7 @@ impl Cx {
     
     pub fn draw_pass_to_texture(&mut self, pass_id: PassId, dpi_factor: f64) {
         let pass_size = self.passes[pass_id].pass_size;
-        let view_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
         self.setup_render_pass(pass_id, dpi_factor);
         
@@ -330,7 +308,7 @@ impl Cx {
         
         self.render_view(
             pass_id,
-            view_id,
+            draw_list_id,
             &mut zbias,
             zbias_step
         );

@@ -191,7 +191,7 @@ impl Cx {
                     if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                         let dpi_factor = window.window_geom.dpi_factor;
                         window.resize_buffers(&opengl_cx);
-                        self.draw_pass_to_window(*pass_id, true, dpi_factor, window, opengl_cx);
+                        self.draw_pass_to_window(*pass_id, dpi_factor, window, opengl_cx);
                     }
                 }
                 CxPassParent::Pass(parent_pass_id) => {
