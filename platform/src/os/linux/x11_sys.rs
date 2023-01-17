@@ -212,7 +212,17 @@ pub const XK_Left: u32 = 65361;
 pub const XK_Right: u32 = 65363;
 pub const XK_Down: u32 = 65364;
 pub const XK_Up: u32 = 65362;
+    
 
+#[link(name = "Xcursor")]
+extern "C" {
+    pub fn XcursorLibraryLoadCursor(
+        dpy: *mut Display,
+        file: *const ::std::os::raw::c_char,
+    ) -> Cursor;
+}
+
+#[link(name = "X11")]
 extern "C" {
     pub fn XOpenDisplay(arg1: *const ::std::os::raw::c_char) -> *mut Display;
     
@@ -381,11 +391,6 @@ extern "C" {
         arg5: *mut KeySym,
         arg6: *mut ::std::os::raw::c_int,
     ) -> ::std::os::raw::c_int;
-    
-    pub fn XcursorLibraryLoadCursor(
-        dpy: *mut Display,
-        file: *const ::std::os::raw::c_char,
-    ) -> Cursor;
     
     pub fn XDefineCursor(arg1: *mut Display, arg2: Window, arg3: Cursor) -> ::std::os::raw::c_int;
     pub fn XFreeCursor(arg1: *mut Display, arg2: Cursor) -> ::std::os::raw::c_int;

@@ -42,6 +42,7 @@ pub type PFNGLXCREATECONTEXTATTRIBSARBPROC = ::std::option::Option<
     ) -> GLXContext,
 >;
 
+#[link(name = "GLX")]
 extern "C" {
     pub fn glXGetProcAddressARB(arg1: *const GLubyte) -> __GLXextFuncPtr;
     
