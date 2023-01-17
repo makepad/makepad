@@ -4,7 +4,7 @@ use {
         time::Instant,
         mem,
         rc::Rc,
-        cell::{Cell,RefCell},
+        cell::{Cell, RefCell},
         os::raw::{c_char, c_int, c_uint, c_ulong, c_void, c_uchar, c_long},
         ptr,
     },
@@ -93,7 +93,7 @@ impl XlibApp {
         }
     }
     
-    pub fn event_loop_poll(&mut self) {
+    pub unsafe fn event_loop_poll(&mut self) {
         // Update the current time, and compute the amount of time that elapsed since we
         // last recorded the current time.
         while self.display != ptr::null_mut() && x11_sys::XPending(self.display) != 0 {
@@ -227,10 +227,10 @@ impl XlibApp {
                 x11_sys::LeaveNotify => {
                     let crossing = event.xcrossing;
                     if crossing.detail == 4 {
-                        if let Some(window_ptr) = self.window_map.get(&crossing.window) {
-                            let window = &mut (**window_ptr);
+                        if let Some(_window_ptr) = self.window_map.get(&crossing.window) {
                             //TODO figure this out
                             /*
+                            let window = &mut (**window_ptr);
                             window.do_callback(Event::FingerHover(FingerHoverEvent {
                                 digit: 0,
                                 window_id: window.window_id,
@@ -251,8 +251,8 @@ impl XlibApp {
                     let motion = event.xmotion;
                     if let Some(window_ptr) = self.window_map.get(&motion.window) {
                         let window = &mut (**window_ptr);
-                        let mut x = motion.x;
-                        let mut y = motion.y;
+                        let x = motion.x;
+                        let y = motion.y;
                         if window.window.is_none() {
                             return; // shutdown
                         }
@@ -554,9 +554,6 @@ impl XlibApp {
         unsafe {
             
             self.do_callback(XlibEvent::Paint);
-            
-            // Record the current time.
-            let mut select_time = self.time_now();
             
             loop {
                 match self.event_flow {
@@ -953,7 +950,7 @@ pub struct XlibAtoms {
 
 impl XlibAtoms {
     fn new(display: *mut x11_sys::Display) -> Self {
-        Self {
+        unsafe {Self {
             clipboard: x11_sys::XInternAtom(display, "CLIPBOARD\n".as_ptr() as *const _, 0),
             net_wm_moveresize: x11_sys::XInternAtom(display, "_NET_WM_MOVERESIZE\0".as_ptr() as *const _, 0),
             wm_delete_window: x11_sys::XInternAtom(display, "WM_DELETE_WINDOW\0".as_ptr() as *const _, 0),
@@ -968,7 +965,7 @@ impl XlibAtoms {
             text: x11_sys::XInternAtom(display, "TEXT\0".as_ptr() as *const _, 0),
             text_plain: x11_sys::XInternAtom(display, "text/plain\0".as_ptr() as *const _, 0),
             multiple: x11_sys::XInternAtom(display, "MULTIPLE\0".as_ptr() as *const _, 0),
-        }
+        }}
     }
 }
 

@@ -26,20 +26,23 @@ impl Cx {
         self.platform_type = OsType::Linux {custom_window_chrome: false};
         self.gpu_info.performance = GpuPerformance::Tier1;
         
-        let opengl_cx = Rc::new(RefCell::new(OpenglCx::new(xlib_app.display)));
+        let opengl_cx = Rc::new(RefCell::new(None));
         let opengl_windows = Rc::new(RefCell::new(Vec::new()));
         let cx = Rc::new(RefCell::new(self));
         
         init_xlib_app_global(Box::new({
             let cx = cx.clone();
+            let opengl_cx = opengl_cx.clone();
             move | xlib_app,
             events | {
                 let mut cx = cx.borrow_mut();
                 let mut opengl_cx = opengl_cx.borrow_mut();
                 let mut opengl_windows = opengl_windows.borrow_mut();
-                cx.xlib_event_callback(xlib_app, events, &mut opengl_cx, &mut *opengl_windows)
+                cx.xlib_event_callback(xlib_app, events, opengl_cx.as_mut().unwrap(), &mut *opengl_windows)
             }
         }));
+        
+        *opengl_cx.borrow_mut() = Some(OpenglCx::new(get_xlib_app_global().display));
         
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
@@ -106,7 +109,7 @@ impl Cx {
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
-                    self.hlsl_compile_shaders(&opengl_cx);
+                    self.opengl_compile_shaders(&opengl_cx);
                 }
                 // ok here we send out to all our childprocesses
                 
@@ -216,7 +219,7 @@ impl Cx {
                         &opengl_cx,
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
-                        &window.create_title
+                        &window.create_title,
                     );
                     window.window_geom = opengl_window.window_geom.clone();
                     opengl_windows.push(opengl_window);
