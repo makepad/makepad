@@ -440,6 +440,39 @@ impl Cx {
         ]};
         let () = unsafe {msg_send![command_buffer, commit]};
     }
+    
+     
+    pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
+        for draw_shader_ptr in &self.draw_shaders.compile_set {
+            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
+                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
+                let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
+                let gen = generate_metal::generate_shader(
+                    draw_shader_def.as_ref().unwrap(),
+                    &cx_shader.mapping.const_table,
+                    &self.shader_registry
+                );
+                
+                if cx_shader.mapping.flags.debug {
+                    log!("{}", gen.mtlsl);
+                }
+                // lets see if we have the shader already
+                for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
+                    if ds.mtlsl == gen.mtlsl {
+                        cx_shader.os_shader_id = Some(index);
+                        break;
+                    }
+                }
+                if cx_shader.os_shader_id.is_none() {
+                    if let Some(shp) = CxOsDrawShader::new(metal_cx, gen) {
+                        cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                        self.draw_shaders.os_shaders.push(shp);
+                    }
+                }
+            }
+        }
+        self.draw_shaders.compile_set.clear();
+    }
 }
 
 pub enum DrawPassMode {
@@ -564,41 +597,6 @@ pub enum PackType {
 
 pub struct SlErr {
     _msg: String
-}
-
-impl Cx {
-    
-    pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
-        for draw_shader_ptr in &self.draw_shaders.compile_set {
-            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
-                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
-                let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
-                let gen = generate_metal::generate_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry
-                );
-                
-                if cx_shader.mapping.flags.debug {
-                    log!("{}", gen.mtlsl);
-                }
-                // lets see if we have the shader already
-                for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                    if ds.mtlsl == gen.mtlsl {
-                        cx_shader.os_shader_id = Some(index);
-                        break;
-                    }
-                }
-                if cx_shader.os_shader_id.is_none() {
-                    if let Some(shp) = CxOsDrawShader::new(metal_cx, gen) {
-                        cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                        self.draw_shaders.os_shaders.push(shp);
-                    }
-                }
-            }
-        }
-        self.draw_shaders.compile_set.clear();
-    }
 }
 
 impl MetalCx {

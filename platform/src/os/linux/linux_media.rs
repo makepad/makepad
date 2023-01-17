@@ -17,6 +17,11 @@ impl CxOs {
 
 pub struct OsMidiOutput();
 
+impl OsMidiOutput{
+    pub fn send(&self, _port: Option<MidiPortId>, _data: MidiData){
+    }
+}
+
 impl CxMediaApi for Cx {
     
     fn midi_input(&mut self) -> MidiInput {

@@ -386,9 +386,7 @@ impl XlibWindow {
     }
 
     pub fn do_callback(&mut self, event: XlibEvent) {
-        unsafe {
-            get_xlib_app_global().do_callback(event);
-        }
+        get_xlib_app_global().do_callback(event);
     }
     
     pub fn send_change_event(&mut self) {
@@ -749,7 +747,7 @@ impl Dnd {
     }
 }
 
-struct DndAtoms {
+pub struct DndAtoms {
     pub action_private: x11_sys::Atom,
     pub aware: x11_sys::Atom,
     pub drop: x11_sys::Atom,
