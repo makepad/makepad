@@ -98,7 +98,7 @@ pub fn get_win32_app_global() -> &'static mut Win32App {
     }
 }
 
-pub fn init_win32_app_global(event_callback: Box<dyn FnMut(&mut Win32App, Vec<Win32Event>) -> EventFlow>) {
+pub fn init_win32_app_global(event_callback: Box<dyn FnMut(&mut Win32App, Win32Event) -> EventFlow>) {
     unsafe {
         WIN32_APP = Box::into_raw(Box::new(Win32App::new(event_callback)));
     }
@@ -107,7 +107,7 @@ pub fn init_win32_app_global(event_callback: Box<dyn FnMut(&mut Win32App, Vec<Wi
 pub struct Win32App {
     pub time_start: i64,
     pub time_freq: i64,
-    event_callback: Option<Box<dyn FnMut(&mut Win32App, Vec<Win32Event>) -> EventFlow >>,
+    event_callback: Option<Box<dyn FnMut(&mut Win32App, Win32Event) -> EventFlow >>,
     pub window_class_name: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
@@ -126,7 +126,7 @@ pub enum Win32Timer {
 }
 
 impl Win32App {
-    pub fn new(event_callback: Box<dyn FnMut(&mut Win32App, Vec<Win32Event>) -> EventFlow>) -> Win32App {
+    pub fn new(event_callback: Box<dyn FnMut(&mut Win32App, Win32Event) -> EventFlow>) -> Win32App {
 
         let window_class_name = encode_wide("MakepadWindow\0");
         let class = WNDCLASSEXW {
@@ -194,7 +194,7 @@ impl Win32App {
                             TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                             if !self.was_signal_poll(){
-                                self.do_callback(vec![Win32Event::Paint]);
+                                self.do_callback(Win32Event::Paint);
                             }
                         }
                     }
@@ -203,7 +203,7 @@ impl Win32App {
                         let ret = PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE);
                         let msg = msg.assume_init();
                         if ret == FALSE {
-                            self.do_callback(vec![Win32Event::Paint])
+                            self.do_callback(Win32Event::Paint)
                         }
                         else {
                             TranslateMessage(&msg);
@@ -216,9 +216,9 @@ impl Win32App {
         }
     }
     
-    pub fn do_callback(&mut self, events: Vec<Win32Event>) {
+    pub fn do_callback(&mut self, event: Win32Event) {
         if let Some(mut callback) = self.event_callback.take() {
-            self.event_flow = callback(self, events);
+            self.event_flow = callback(self, event);
             if let EventFlow::Exit = self.event_flow{
                 unsafe{ExitProcess(0);}
             }
@@ -257,15 +257,15 @@ impl Win32App {
         if let Some(hit_timer) = hit_timer {
             match hit_timer {
                 Win32Timer::Timer {timer_id, ..} => {
-                    win32_app.do_callback(vec![Win32Event::Timer(TimerEvent {timer_id: timer_id})]);
+                    win32_app.do_callback(Win32Event::Timer(TimerEvent {timer_id: timer_id}));
                 },
                 Win32Timer::Resize {..} => {
-                    win32_app.do_callback(vec![Win32Event::Paint]);
+                    win32_app.do_callback(Win32Event::Paint);
                 },
                 Win32Timer::SignalPoll{..}=>{
-                    get_win32_app_global().do_callback(vec![
+                    get_win32_app_global().do_callback(
                         Win32Event::Signal
-                    ]);
+                    );
                     get_win32_app_global().was_signal_poll = true;
                 }
                 _ => ()

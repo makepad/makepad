@@ -76,7 +76,7 @@ live_design!{
             draw_bg: {
                 shape: None
                 color: #5
-                radius: 2
+                radius: 2.0
             },
             layout: {
                 padding: 0,

@@ -12,20 +12,297 @@ use {
 
 live_design!{
     import crate::scroll_bars::ScrollBars;
-    
+    import makepad_draw::shader::std::*;
+        
     Frame = {{Frame}} {}
     
-    Solid = <Frame> {draw_bg: {shape: Solid}}
-    Rect = <Frame> {draw_bg: {shape: Rect}}
-    Box = <Frame> {draw_bg: {shape: Box}}
-    BoxX = <Frame> {draw_bg: {shape: BoxX}}
-    BoxY = <Frame> {draw_bg: {shape: BoxY}}
-    BoxAll = <Frame> {draw_bg: {shape: BoxAll}}
-    Circle = <Frame> {draw_bg: {shape: Circle}}
-    Hexagon = <Frame> {draw_bg: {shape: Hexagon}}
-    GradientX = <Frame> {draw_bg: {shape: Solid, fill: GradientX}}
-    GradientY = <Frame> {draw_bg: {shape: Solid, fill: GradientY}}
-    Image = <Frame> {draw_bg: {shape: Solid, fill: Image}}
+    Solid = <Frame> {draw_bg: {
+        fn get_color(self)->vec4{
+            return self.color
+        }
+
+        fn pixel(self)->vec4{
+            return Pal::premul(self.get_color())
+        }
+    }}
+    
+    Rect = <Frame> {draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0,0.0,0.0,0.0)
+        
+        fn get_color(self)->vec4{
+            return self.color
+        }
+        
+        fn get_border_color(self)->vec4{
+            return self.border_color
+        }
+
+        fn pixel(self)->vec4{
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            sdf.rect(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0)
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result
+        }
+    }}
+    
+    Box = <Frame> {draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance radius: 2.5
+        
+        fn get_color(self)->vec4{
+            return self.color
+        }
+        
+        fn get_border_color(self)->vec4{
+            return self.border_color
+        }
+        
+        fn pixel(self)->vec4{
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                max(1.0, self.radius)
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result;
+        }
+    }}
+    
+    BoxX = <Frame> {draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance radius: vec2(2.5,2.5)
+        
+        fn get_color(self)->vec4{
+            return self.color
+        }
+        
+        fn get_border_color(self)->vec4{
+            return self.border_color
+        }
+        
+        fn pixel(self)->vec4{
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box_x(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                self.radius.x,
+                self.radius.y
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result;
+        }
+    }}
+    
+    BoxY = <Frame> {draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance radius: vec2(2.5,2.5)
+        
+        fn get_color(self)->vec4{
+            return self.color
+        }
+        
+        fn get_border_color(self)->vec4{
+            return self.border_color
+        }
+        
+        fn pixel(self)->vec4{
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box_y(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                self.radius.x,
+                self.radius.y
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result;
+        }
+    }}
+    
+    BoxAll = <Frame> {draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance radius: vec4(2.5,2.5,2.5,2.5)
+        
+        fn get_color(self)->vec4{
+            return self.color
+        }
+        
+        fn get_border_color(self)->vec4{
+            return self.border_color
+        }
+        
+        fn pixel(self)->vec4{
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box_all(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                self.radius.x,
+                self.radius.y,
+                self.radius.z,
+                self.radius.w
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result;
+        }
+    }}
+    
+    Circle = <Frame> {draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance radius: 5.0
+        
+        fn get_color(self)->vec4{
+            return self.color
+        }
+        
+        fn get_border_color(self)->vec4{
+            return self.border_color
+        }
+        
+        fn pixel(self)->vec4{
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            if self.radius.x > 0.0 {
+                sdf.circle(
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    self.radius.x
+                )
+            }
+            else {
+                sdf.circle(
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    min(
+                        (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
+                        (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
+                    )
+                )
+            }
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result
+        }
+    }}
+    
+    Hexagon = <Frame> {draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance radius: 5
+        
+        fn get_color(self)->vec4{
+            return self.color
+        }
+        
+        fn get_border_color(self)->vec4{
+            return self.border_color
+        }
+        
+        fn pixel(self)->vec4{
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            if self.radius.x > 0.0 {
+                sdf.hexagon(
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    self.radius
+                )
+            }
+            else {
+                sdf.hexagon(
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    min(
+                        (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
+                        (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
+                    )
+                )
+            }
+            sdf.fill_keep(color)
+            if self.border_width > 0.0 {
+                sdf.stroke(self.border_color, self.border_width)
+            }
+            return sdf.result
+        }
+    }}
+    
+    GradientX = <Frame> {draw_bg: {
+       instance color2: #f00
+        fn get_color(self)->vec4{
+            return mix(self.color, self.color2, self.pos.x)
+        }
+
+        fn pixel(self)->vec4{
+            return Pal::premul(self.get_color())
+        }
+    }}
+    
+    GradientY = <Frame> {draw_bg: {
+       instance color2: #f00
+        fn get_color(self)->vec4{
+            return mix(self.color, self.color2, self.pos.y)
+        }
+
+        fn pixel(self)->vec4{
+            return Pal::premul(self.get_color())
+        } 
+    }}
+    
+    Image = <Frame> {draw_bg: {
+        texture image: texture2d
+        instance image_scale: vec2(1.0,1.0)
+        instance image_pan: vec2(0.0,0.0)
+        fn get_color(self)->vec4{
+            return sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
+        }
+
+        fn pixel(self)->vec4{
+            return Pal::premul(self.get_color())
+        }
+        
+        shape: Solid, fill: Image
+    }}
+    
     UserDraw = <Frame> {user_draw: true}
     ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
@@ -35,7 +312,9 @@ live_design!{
 #[derive(Live)]
 #[live_design_fn(widget_factory!(Frame))]
 pub struct Frame { // draw info per UI element
-    draw_bg: DrawShape,
+    draw_bg: DrawColor,
+    
+    #[live(true)] show_bg: bool,
     
     pub layout: Layout,
     
@@ -430,10 +709,10 @@ impl Frame {
                 self.layout.scroll
             };
             
-            if self.draw_bg.shape != Shape::None {
-                if self.draw_bg.fill == Fill::Image {
-                    self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
-                }
+            if self.show_bg{
+                //if self.draw_bg.fill == Fill::Image {
+                //    self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
+               // }
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
             }
             else {
@@ -478,7 +757,7 @@ impl Frame {
                     scroll_bars.draw_scroll_bars(cx);
                 };
                 
-                if self.draw_bg.shape != Shape::None {
+                if self.show_bg {
                     self.draw_bg.end(cx);
                     self.area = self.draw_bg.area();
                 }
