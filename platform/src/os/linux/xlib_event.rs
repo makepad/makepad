@@ -1,6 +1,5 @@
 use {
     crate::{
-        window::WindowId,
         event::{
             MouseDownEvent,
             MouseUpEvent,
@@ -24,8 +23,6 @@ use {
 pub enum XlibEvent {
     AppGotFocus,
     AppLostFocus,
-    WindowResizeLoopStart(WindowId),
-    WindowResizeLoopStop(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     WindowClosed(WindowClosedEvent),
     Paint,

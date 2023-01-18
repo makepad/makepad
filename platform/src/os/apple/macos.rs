@@ -73,11 +73,11 @@ impl Cx {
         init_cocoa_app_global(Box::new({
             let cx = cx.clone();
             move | cocoa_app,
-            events | {
+            event | {
                 let mut cx = cx.borrow_mut();
                 let mut metal_cx = metal_cx.borrow_mut();
                 let mut metal_windows = metal_windows.borrow_mut();
-                cx.cocoa_event_callback(cocoa_app, events, &mut metal_cx, &mut metal_windows)
+                cx.cocoa_event_callback(cocoa_app, event, &mut metal_cx, &mut metal_windows)
             }
         }));
         // lets set our signal poll timer
@@ -125,7 +125,7 @@ impl Cx {
     fn cocoa_event_callback(
         &mut self,
         cocoa_app: &mut CocoaApp,
-        events: Vec<CocoaEvent>,
+        event: CocoaEvent,
         metal_cx: &mut MetalCx,
         metal_windows: &mut Vec<MetalWindow>
     ) -> EventFlow {
@@ -133,155 +133,151 @@ impl Cx {
         self.handle_platform_ops(metal_windows, metal_cx, cocoa_app);
         
         let mut paint_dirty = false;
-        for event in events {
-            // keepalive check
-            match &event {
-                CocoaEvent::MouseDown(_) |
-                CocoaEvent::MouseMove(_) |
-                CocoaEvent::MouseUp(_) |
-                CocoaEvent::Scroll(_) |
-                CocoaEvent::KeyDown(_) |
-                CocoaEvent::KeyUp(_) |
-                CocoaEvent::TextInput(_) => {
-                    self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
-                }
-                CocoaEvent::Timer(te) => {
-                    if te.timer_id == 0 {
-                        if self.os.keep_alive_counter>0 {
-                            self.os.keep_alive_counter -= 1;
-                            self.repaint_windows();
-                            paint_dirty = true;
-                        }
-                        // chheck signals
-                        if Signal::check_and_clear_ui_signal(){
-                            self.handle_media_signals();
-                            self.call_event_handler(&Event::Signal);
-                        }
-                        continue;
-                    }
-                }
-                _ => ()
+        match &event {
+            CocoaEvent::MouseDown(_) |
+            CocoaEvent::MouseMove(_) |
+            CocoaEvent::MouseUp(_) |
+            CocoaEvent::Scroll(_) |
+            CocoaEvent::KeyDown(_) |
+            CocoaEvent::KeyUp(_) |
+            CocoaEvent::TextInput(_) => {
+                self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
             }
-            
-            //self.process_desktop_pre_event(&mut event);
-            match event {
-                CocoaEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
-                    for window in metal_windows.iter_mut() {
-                        if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
-                            self.repaint_pass(main_pass_id);
+            CocoaEvent::Timer(te) => {
+                if te.timer_id == 0 {
+                    if self.os.keep_alive_counter>0 {
+                        self.os.keep_alive_counter -= 1;
+                        self.repaint_windows();
+                    }
+                    // chheck signals
+                    if Signal::check_and_clear_ui_signal(){
+                        self.handle_media_signals();
+                        self.call_event_handler(&Event::Signal);
+                    }
+                    return EventFlow::Poll;
+                }
+            }
+            _ => ()
+        }
+        
+        //self.process_desktop_pre_event(&mut event);
+        match event {
+            CocoaEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+                for window in metal_windows.iter_mut() {
+                    if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
+                        self.repaint_pass(main_pass_id);
+                    }
+                }
+                paint_dirty = true;
+                self.call_event_handler(&Event::AppGotFocus);
+            }
+            CocoaEvent::AppLostFocus => {
+                self.call_event_handler(&Event::AppLostFocus);
+            }
+            CocoaEvent::WindowResizeLoopStart(window_id) => {
+                if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    window.start_resize();
+                }
+            }
+            CocoaEvent::WindowResizeLoopStop(window_id) => {
+                if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    window.stop_resize();
+                }
+            }
+            CocoaEvent::WindowGeomChange(re) => { // do this here because mac
+                if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
+                    window.window_geom = re.new_geom.clone();
+                    self.windows[re.window_id].window_geom = re.new_geom.clone();
+                    // redraw just this windows root draw list
+                    if re.old_geom.inner_size != re.new_geom.inner_size {
+                        if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                            self.redraw_pass_and_child_passes(main_pass_id);
                         }
                     }
-                    paint_dirty = true;
-                    self.call_event_handler(&Event::AppGotFocus);
                 }
-                CocoaEvent::AppLostFocus => {
-                    self.call_event_handler(&Event::AppLostFocus);
-                }
-                CocoaEvent::WindowResizeLoopStart(window_id) => {
-                    if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        window.start_resize();
+                // ok lets not redraw all, just this window
+                self.call_event_handler(&Event::WindowGeomChange(re));
+            }
+            CocoaEvent::WindowClosed(wc) => {
+                // lets remove the window from the set
+                let window_id = wc.window_id;
+                self.call_event_handler(&Event::WindowClosed(wc));
+                
+                self.windows[window_id].is_created = false;
+                if let Some(index) = metal_windows.iter().position( | w | w.window_id == window_id) {
+                    metal_windows.remove(index);
+                    if metal_windows.len() == 0 {
+                        return EventFlow::Exit
                     }
                 }
-                CocoaEvent::WindowResizeLoopStop(window_id) => {
-                    if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        window.stop_resize();
-                    }
+            }
+            CocoaEvent::Paint => {
+                if self.new_next_frames.len() != 0 {
+                    self.call_next_frame_event(cocoa_app.time_now());
                 }
-                CocoaEvent::WindowGeomChange(re) => { // do this here because mac
-                    if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
-                        window.window_geom = re.new_geom.clone();
-                        self.windows[re.window_id].window_geom = re.new_geom.clone();
-                        // redraw just this windows root draw list
-                        if re.old_geom.inner_size != re.new_geom.inner_size {
-                            if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                                self.redraw_pass_and_child_passes(main_pass_id);
-                            }
-                        }
-                    }
-                    // ok lets not redraw all, just this window
-                    self.call_event_handler(&Event::WindowGeomChange(re));
+                if self.need_redrawing() {
+                    self.call_draw_event();
+                    self.mtl_compile_shaders(&metal_cx);
                 }
-                CocoaEvent::WindowClosed(wc) => {
-                    // lets remove the window from the set
-                    let window_id = wc.window_id;
-                    self.call_event_handler(&Event::WindowClosed(wc));
-                    
-                    self.windows[window_id].is_created = false;
-                    if let Some(index) = metal_windows.iter().position( | w | w.window_id == window_id) {
-                        metal_windows.remove(index);
-                        if metal_windows.len() == 0 {
-                            return EventFlow::Exit
-                        }
-                    }
-                }
-                CocoaEvent::Paint => {
-                    if self.new_next_frames.len() != 0 {
-                        self.call_next_frame_event(cocoa_app.time_now());
-                    }
-                    if self.need_redrawing() {
-                        self.call_draw_event();
-                        self.mtl_compile_shaders(&metal_cx);
-                    }
-                    // ok here we send out to all our childprocesses
-                    
-                    self.handle_repaint(metal_windows, metal_cx);
-                }
-                CocoaEvent::MouseDown(e) => {
-                    self.fingers.process_tap_count(
-                        e.abs,
-                        e.time
-                    );
-                    self.fingers.mouse_down(e.button);
-                    self.call_event_handler(&Event::MouseDown(e.into()))
-                }
-                CocoaEvent::MouseMove(e) => {
-                    self.call_event_handler(&Event::MouseMove(e.into()));
-                    self.fingers.cycle_hover_area(live_id!(mouse).into());
-                    self.fingers.move_captures();
-                }
-                CocoaEvent::MouseUp(e) => {
-                    let button = e.button;
-                    self.call_event_handler(&Event::MouseUp(e.into()));
-                    self.fingers.mouse_up(button);
-                }
-                CocoaEvent::Scroll(e) => {
-                    self.call_event_handler(&Event::Scroll(e.into()))
-                }
-                CocoaEvent::WindowDragQuery(e) => {
-                    self.call_event_handler(&Event::WindowDragQuery(e))
-                }
-                CocoaEvent::WindowCloseRequested(e) => {
-                    self.call_event_handler(&Event::WindowCloseRequested(e))
-                }
-                CocoaEvent::TextInput(e) => {
-                    self.call_event_handler(&Event::TextInput(e))
-                }
-                CocoaEvent::Drag(e) => {
-                    self.call_event_handler(&Event::Drag(e))
-                }
-                CocoaEvent::Drop(e) => {
-                    self.call_event_handler(&Event::Drop(e))
-                }
-                CocoaEvent::DragEnd => {
-                    self.call_event_handler(&Event::DragEnd)
-                }
-                CocoaEvent::KeyDown(e) => {
-                    self.keyboard.process_key_down(e.clone());
-                    self.call_event_handler(&Event::KeyDown(e))
-                }
-                CocoaEvent::KeyUp(e) => {
-                    self.keyboard.process_key_up(e.clone());
-                    self.call_event_handler(&Event::KeyUp(e))
-                }
-                CocoaEvent::TextCopy(e) => {
-                    self.call_event_handler(&Event::TextCopy(e))
-                }
-                CocoaEvent::Timer(e) => {
-                    self.call_event_handler(&Event::Timer(e))
-                }
-                CocoaEvent::MenuCommand(e) => {
-                    self.call_event_handler(&Event::MenuCommand(e))
-                }
+                // ok here we send out to all our childprocesses
+                
+                self.handle_repaint(metal_windows, metal_cx);
+            }
+            CocoaEvent::MouseDown(e) => {
+                self.fingers.process_tap_count(
+                    e.abs,
+                    e.time
+                );
+                self.fingers.mouse_down(e.button);
+                self.call_event_handler(&Event::MouseDown(e.into()))
+            }
+            CocoaEvent::MouseMove(e) => {
+                self.call_event_handler(&Event::MouseMove(e.into()));
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.fingers.move_captures();
+            }
+            CocoaEvent::MouseUp(e) => {
+                let button = e.button;
+                self.call_event_handler(&Event::MouseUp(e.into()));
+                self.fingers.mouse_up(button);
+            }
+            CocoaEvent::Scroll(e) => {
+                self.call_event_handler(&Event::Scroll(e.into()))
+            }
+            CocoaEvent::WindowDragQuery(e) => {
+                self.call_event_handler(&Event::WindowDragQuery(e))
+            }
+            CocoaEvent::WindowCloseRequested(e) => {
+                self.call_event_handler(&Event::WindowCloseRequested(e))
+            }
+            CocoaEvent::TextInput(e) => {
+                self.call_event_handler(&Event::TextInput(e))
+            }
+            CocoaEvent::Drag(e) => {
+                self.call_event_handler(&Event::Drag(e))
+            }
+            CocoaEvent::Drop(e) => {
+                self.call_event_handler(&Event::Drop(e))
+            }
+            CocoaEvent::DragEnd => {
+                self.call_event_handler(&Event::DragEnd)
+            }
+            CocoaEvent::KeyDown(e) => {
+                self.keyboard.process_key_down(e.clone());
+                self.call_event_handler(&Event::KeyDown(e))
+            }
+            CocoaEvent::KeyUp(e) => {
+                self.keyboard.process_key_up(e.clone());
+                self.call_event_handler(&Event::KeyUp(e))
+            }
+            CocoaEvent::TextCopy(e) => {
+                self.call_event_handler(&Event::TextCopy(e))
+            }
+            CocoaEvent::Timer(e) => {
+                self.call_event_handler(&Event::Timer(e))
+            }
+            CocoaEvent::MenuCommand(e) => {
+                self.call_event_handler(&Event::MenuCommand(e))
             }
         }
         

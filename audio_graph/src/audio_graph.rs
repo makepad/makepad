@@ -48,7 +48,7 @@ impl LiveHook for AudioGraph {
         
         if let Some(root) = self.root.as_mut() {
             let graph_node = root.get_graph_node(cx);
-            self.from_ui.send(FromUI::NewRoot(graph_node)).unwrap();
+            let _ = self.from_ui.send(FromUI::NewRoot(graph_node));
         }
         
     }
@@ -70,14 +70,14 @@ impl AudioGraph {
     }
     
     pub fn send_midi_data(&self, data: MidiData) {
-        self.from_ui.send(FromUI::MidiData(data)).unwrap();
+        let _ = self.from_ui.send(FromUI::MidiData(data));
     }
     
     
     pub fn all_notes_off(&self) {
-        self.from_ui.send(FromUI::AllNotesOff).unwrap();
+        let _ =  self.from_ui.send(FromUI::AllNotesOff);
     }
-    
+     
     fn render_to_output_buffer(node: &mut Node, to_ui: &ToUISender<ToUIDisplayMsg>, info: AudioInfo, output: &mut AudioBuffer) {
         
         while let Ok(msg) = node.from_ui.try_recv() {
