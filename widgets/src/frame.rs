@@ -285,7 +285,7 @@ live_design!{
 
         fn pixel(self)->vec4{
             return Pal::premul(self.get_color())
-        }
+        } 
     }}
     
     Image = <Frame> {draw_bg: {
