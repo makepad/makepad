@@ -2,7 +2,6 @@ use {
     std::{
         rc::Rc,
         cell::Cell,
-        time::Instant,
         os::raw::{c_void}
     },
     crate::{
@@ -66,7 +65,6 @@ impl CocoaWindow {
             cocoa_app.cocoa_windows.push((window, view));
             CocoaWindow {
                 is_fullscreen: false,
-                time_start: cocoa_app.time_start,
                 live_resize_timer: nil,
                 window_delegate: window_delegate,
                 window: window,
