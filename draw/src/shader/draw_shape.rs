@@ -8,6 +8,7 @@ use {
 live_design!{
     import makepad_draw::shader::std::*;
     DrawShape= {{DrawShape}} {
+        debug: true
         texture image: texture2d
         
         fn get_color(self)->vec4{
@@ -34,12 +35,13 @@ live_design!{
 
         fn pixel(self) -> vec4 {
             let color = self.get_fill();
-            
+            return Pal::premul(color);
             match self.shape {
                 Shape::None => {
                     return #0000
                 }
                 Shape::Solid => {
+                    
                     return Pal::premul(color)
                 }
                 Shape::Rect => {
