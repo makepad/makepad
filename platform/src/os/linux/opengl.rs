@@ -697,7 +697,7 @@ impl CxOsDrawShader {
     pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, _opengl_cx: &OpenglCx) -> Self {
         
         let vertex = format!("
-            #version 100 
+            #version 100
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y)).zyxw;}} 
@@ -709,6 +709,7 @@ impl CxOsDrawShader {
         
         let pixel = format!("
             #version 100
+            #extension GL_OES_standard_derivatives : enable
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y)).zyxw;}}
@@ -716,7 +717,7 @@ impl CxOsDrawShader {
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", pixel);
+            {}\0", pixel); 
         
         unsafe {
             
@@ -898,7 +899,7 @@ pub struct OpenglWindow {
     pub window_geom: WindowGeom,
     pub opening_repaint_count: u32,
     pub cal_size: DVec2,
-    pub xlib_window: XlibWindow,
+    pub xlib_window: Box<XlibWindow>,
 }
 
 impl OpenglWindow {
@@ -910,7 +911,7 @@ impl OpenglWindow {
         title: &str
     ) -> OpenglWindow {
         
-        let mut xlib_window = XlibWindow::new(window_id);
+        let mut xlib_window = Box::new(XlibWindow::new(window_id));
         
         let visual_info = unsafe {mem::transmute(opengl_cx.visual_info)};
         let custom_window_chrome = false;
