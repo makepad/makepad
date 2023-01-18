@@ -771,7 +771,7 @@ impl XlibApp {
                 }
             }
         }
-    }
+    } 
     
     fn xkeystate_to_modifiers(&self, state: c_uint) -> KeyModifiers {
         KeyModifiers {
