@@ -101,9 +101,36 @@ live_design!{
             padding: 5
         }
         draw_bg: {
-            shape: ShadowBox,
-            radius: 4,
-            color: #0
+    
+            instance color: #0
+            
+            instance border_width: 0.0,
+            instance border_color: #0000,
+            instance inset: vec4(0.0,0.0,0.0,0.0),
+            instance radius: 4.0
+            
+            fn get_color(self)->vec4{
+                return self.color
+            }
+            
+            fn get_border_color(self)->vec4{
+                return self.border_color
+            }
+            
+            fn pixel(self)->vec4{
+    
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.blur = 20.0;
+                sdf.box(
+                    self.inset.x + self.border_width,
+                    self.inset.y + self.border_width,
+                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                    max(1.0, self.radius)
+                )
+                sdf.fill_keep(self.get_color())
+                return sdf.result;
+            }
         }
     }
 }
@@ -146,7 +173,7 @@ pub struct PopupMenu {
     view: View,
     menu_item: Option<LivePtr>,
     
-    draw_bg: DrawShape,
+    draw_bg: DrawQuad,
     layout: Layout,
     items: Vec<String>,
     #[rust] first_tap: bool,

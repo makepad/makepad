@@ -83,7 +83,7 @@ pub const fn shader_enum(i:u32)->u32{
 
 pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
-pub const DRAW_CALL_VAR_INSTANCES: usize = 16;
+pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
 #[derive(Default, Debug)]
 #[repr(C)]
@@ -510,6 +510,7 @@ impl DrawVars {
                 }
             }
             for input in &sh.mapping.var_instances.inputs {
+                
                 let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
                 let slots = input.slots;
                 if input.id == id {

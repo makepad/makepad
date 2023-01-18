@@ -44,7 +44,7 @@ pub use crate::{
         Cx2d
     },
     shader::{
-        draw_shape::{DrawShape, Shape, Fill},
+        //draw_shape::{DrawShape, Shape, Fill},
         draw_quad::DrawQuad,
         draw_text::DrawText,
         draw_color::DrawColor,
@@ -58,7 +58,7 @@ pub use crate::{
 pub fn live_design(cx: &mut Cx) {
     crate::shader::draw_quad::live_design(cx);
     crate::shader::draw_color::live_design(cx);
-    crate::shader::draw_shape::live_design(cx);
+    //crate::shader::draw_shape::live_design(cx);
     crate::shader::draw_text::live_design(cx);
     crate::geometry::geometry_gen::live_design(cx);
     crate::shader::std::live_design(cx);

@@ -40,11 +40,11 @@ impl Cx {
         init_win32_app_global(Box::new({
             let cx = cx.clone();
             move | win32_app,
-            events | {
+            event | {
                 let mut cx = cx.borrow_mut();
                 let mut d3d11_cx = d3d11_cx.borrow_mut();
                 let mut d3d11_windows = d3d11_windows.borrow_mut();
-                cx.win32_event_callback(win32_app, events, &mut d3d11_cx, &mut d3d11_windows)
+                cx.win32_event_callback(win32_app, event, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
         
@@ -57,7 +57,7 @@ impl Cx {
     fn win32_event_callback(
         &mut self,
         win32_app: &mut Win32App,
-        events: Vec<Win32Event>,
+        event: Win32Event,
         d3d11_cx: &mut D3d11Cx,
         d3d11_windows: &mut Vec<D3d11Window>
     ) -> EventFlow {
@@ -66,128 +66,126 @@ impl Cx {
         }
         
         let mut paint_dirty = false;
-        for event in events {
-            
-            //self.process_desktop_pre_event(&mut event);
-            match event { 
-                Win32Event::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
-                    for window in d3d11_windows.iter_mut() {
-                        if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
-                            self.repaint_pass(main_pass_id);
-                        }
-                    }
-                    paint_dirty = true;
-                    self.call_event_handler(&Event::AppGotFocus);
-                }
-                Win32Event::AppLostFocus => {
-                    self.call_event_handler(&Event::AppLostFocus);
-                }
-                Win32Event::WindowResizeLoopStart(window_id) => {
-                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        window.start_resize();
+    
+        //self.process_desktop_pre_event(&mut event);
+        match event { 
+            Win32Event::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+                for window in d3d11_windows.iter_mut() {
+                    if let Some(main_pass_id) = self.windows[window.window_id].main_pass_id {
+                        self.repaint_pass(main_pass_id);
                     }
                 }
-                Win32Event::WindowResizeLoopStop(window_id) => {
-                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        window.stop_resize();
-                    }
+                paint_dirty = true;
+                self.call_event_handler(&Event::AppGotFocus);
+            }
+            Win32Event::AppLostFocus => {
+                self.call_event_handler(&Event::AppLostFocus);
+            }
+            Win32Event::WindowResizeLoopStart(window_id) => {
+                if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    window.start_resize();
                 }
-                Win32Event::WindowGeomChange(re) => { // do this here because mac
-                    if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == re.window_id) {
-                        window.window_geom = re.new_geom.clone();
-                        self.windows[re.window_id].window_geom = re.new_geom.clone();
-                        // redraw just this windows root draw list
-                        if re.old_geom.inner_size != re.new_geom.inner_size {
-                            if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                                self.redraw_pass_and_child_passes(main_pass_id);
-                            }
-                        }
-                    }
-                    // ok lets not redraw all, just this window
-                    self.call_event_handler(&Event::WindowGeomChange(re));
+            }
+            Win32Event::WindowResizeLoopStop(window_id) => {
+                if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
+                    window.stop_resize();
                 }
-                Win32Event::WindowClosed(wc) => {
-                    let window_id = wc.window_id;
-                    self.call_event_handler(&Event::WindowClosed(wc));
-                    // lets remove the window from the set
-                    self.windows[window_id].is_created = false;
-                    if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
-                        d3d11_windows.remove(index);
-                        if d3d11_windows.len() == 0 {
-                            return EventFlow::Exit
+            }
+            Win32Event::WindowGeomChange(re) => { // do this here because mac
+                if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == re.window_id) {
+                    window.window_geom = re.new_geom.clone();
+                    self.windows[re.window_id].window_geom = re.new_geom.clone();
+                    // redraw just this windows root draw list
+                    if re.old_geom.inner_size != re.new_geom.inner_size {
+                        if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                            self.redraw_pass_and_child_passes(main_pass_id);
                         }
                     }
                 }
-                Win32Event::Paint => {
-                    if self.new_next_frames.len() != 0 {
-                        self.call_next_frame_event(win32_app.time_now());
+                // ok lets not redraw all, just this window
+                self.call_event_handler(&Event::WindowGeomChange(re));
+            }
+            Win32Event::WindowClosed(wc) => {
+                let window_id = wc.window_id;
+                self.call_event_handler(&Event::WindowClosed(wc));
+                // lets remove the window from the set
+                self.windows[window_id].is_created = false;
+                if let Some(index) = d3d11_windows.iter().position( | w | w.window_id == window_id) {
+                    d3d11_windows.remove(index);
+                    if d3d11_windows.len() == 0 {
+                        return EventFlow::Exit
                     }
-                    if self.need_redrawing() {
-                        self.call_draw_event();
-                        self.hlsl_compile_shaders(&d3d11_cx);
-                    }
-                    // ok here we send out to all our childprocesses
-                    
-                    self.handle_repaint(d3d11_windows, d3d11_cx);
                 }
-                Win32Event::MouseDown(e) => {
-                    self.fingers.process_tap_count(
-                        e.abs,
-                        e.time
-                    );
-                    self.fingers.mouse_down(e.button);
-                    self.call_event_handler(&Event::MouseDown(e.into()))
+            }
+            Win32Event::Paint => {
+                if self.new_next_frames.len() != 0 {
+                    self.call_next_frame_event(win32_app.time_now());
                 }
-                Win32Event::MouseMove(e) => {
-                    self.call_event_handler(&Event::MouseMove(e.into()));
-                    self.fingers.cycle_hover_area(live_id!(mouse).into());
-                    self.fingers.move_captures();
+                if self.need_redrawing() {
+                    self.call_draw_event();
+                    self.hlsl_compile_shaders(&d3d11_cx);
                 }
-                Win32Event::MouseUp(e) => {
-                    let button = e.button;
-                    self.call_event_handler(&Event::MouseUp(e.into()));
-                    self.fingers.mouse_up(button);
-                }
-                Win32Event::Scroll(e) => {
-                    self.call_event_handler(&Event::Scroll(e.into()))
-                }
-                Win32Event::WindowDragQuery(e) => {
-                    self.call_event_handler(&Event::WindowDragQuery(e))
-                }
-                Win32Event::WindowCloseRequested(e) => {
-                    self.call_event_handler(&Event::WindowCloseRequested(e))
-                }
-                Win32Event::TextInput(e) => {
-                    self.call_event_handler(&Event::TextInput(e))
-                }
-                Win32Event::Drag(e) => {
-                    self.call_event_handler(&Event::Drag(e))
-                }
-                Win32Event::Drop(e) => {
-                    self.call_event_handler(&Event::Drop(e))
-                }
-                Win32Event::DragEnd => {
-                    self.call_event_handler(&Event::DragEnd)
-                }
-                Win32Event::KeyDown(e) => {
-                    self.keyboard.process_key_down(e.clone());
-                    self.call_event_handler(&Event::KeyDown(e))
-                }
-                Win32Event::KeyUp(e) => {
-                    self.keyboard.process_key_up(e.clone());
-                    self.call_event_handler(&Event::KeyUp(e))
-                }
-                Win32Event::TextCopy(e) => {
-                    self.call_event_handler(&Event::TextCopy(e))
-                }
-                Win32Event::Timer(e) => {
-                    self.call_event_handler(&Event::Timer(e))
-                }
-                Win32Event::Signal => {
-                    if Signal::check_and_clear_ui_signal(){
-                        self.handle_media_signals();
-                        self.call_event_handler(&Event::Signal);
-                    }
+                // ok here we send out to all our childprocesses
+                
+                self.handle_repaint(d3d11_windows, d3d11_cx);
+            }
+            Win32Event::MouseDown(e) => {
+                self.fingers.process_tap_count(
+                    e.abs,
+                    e.time
+                );
+                self.fingers.mouse_down(e.button);
+                self.call_event_handler(&Event::MouseDown(e.into()))
+            }
+            Win32Event::MouseMove(e) => {
+                self.call_event_handler(&Event::MouseMove(e.into()));
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.fingers.move_captures();
+            }
+            Win32Event::MouseUp(e) => {
+                let button = e.button;
+                self.call_event_handler(&Event::MouseUp(e.into()));
+                self.fingers.mouse_up(button);
+            }
+            Win32Event::Scroll(e) => {
+                self.call_event_handler(&Event::Scroll(e.into()))
+            }
+            Win32Event::WindowDragQuery(e) => {
+                self.call_event_handler(&Event::WindowDragQuery(e))
+            }
+            Win32Event::WindowCloseRequested(e) => {
+                self.call_event_handler(&Event::WindowCloseRequested(e))
+            }
+            Win32Event::TextInput(e) => {
+                self.call_event_handler(&Event::TextInput(e))
+            }
+            Win32Event::Drag(e) => {
+                self.call_event_handler(&Event::Drag(e))
+            }
+            Win32Event::Drop(e) => {
+                self.call_event_handler(&Event::Drop(e))
+            }
+            Win32Event::DragEnd => {
+                self.call_event_handler(&Event::DragEnd)
+            }
+            Win32Event::KeyDown(e) => {
+                self.keyboard.process_key_down(e.clone());
+                self.call_event_handler(&Event::KeyDown(e))
+            }
+            Win32Event::KeyUp(e) => {
+                self.keyboard.process_key_up(e.clone());
+                self.call_event_handler(&Event::KeyUp(e))
+            }
+            Win32Event::TextCopy(e) => {
+                self.call_event_handler(&Event::TextCopy(e))
+            }
+            Win32Event::Timer(e) => {
+                self.call_event_handler(&Event::Timer(e))
+            }
+            Win32Event::Signal => {
+                if Signal::check_and_clear_ui_signal(){
+                    self.handle_media_signals();
+                    self.call_event_handler(&Event::Signal);
                 }
             }
         }
