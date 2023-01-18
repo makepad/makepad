@@ -77,7 +77,7 @@ impl AudioGraph {
     pub fn all_notes_off(&self) {
         let _ =  self.from_ui.send(FromUI::AllNotesOff);
     }
-    
+     
     fn render_to_output_buffer(node: &mut Node, to_ui: &ToUISender<ToUIDisplayMsg>, info: AudioInfo, output: &mut AudioBuffer) {
         
         while let Ok(msg) = node.from_ui.try_recv() {
