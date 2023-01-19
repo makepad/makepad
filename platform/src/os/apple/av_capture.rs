@@ -90,7 +90,7 @@ impl AvCaptureSession {
             let () = msg_send![device.as_id(), setActiveFormat: format.format_obj.as_id()];
             let () = msg_send![device.as_id(), setActiveVideoMinFrameDuration: format.min_frame_duration];
             let () = msg_send![device.as_id(), setActiveVideoMaxFrameDuration: format.min_frame_duration];
-            
+             
             let () = msg_send![device.as_id(), unlockForConfiguration];
             
             let dict: ObjcId = msg_send![class!(NSMutableDictionary), dictionary];

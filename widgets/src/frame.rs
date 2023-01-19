@@ -13,33 +13,34 @@ use {
 live_design!{
     import crate::scroll_bars::ScrollBars;
     import makepad_draw::shader::std::*;
-        
+    
     Frame = {{Frame}} {}
     
-    Solid = <Frame> {draw_bg: {
-        fn get_color(self)->vec4{
+    Solid = <Frame> {show_bg: true, draw_bg: {
+        
+        fn get_color(self) -> vec4 {
             return self.color
         }
-
-        fn pixel(self)->vec4{
+        
+        fn pixel(self) -> vec4 {
             return Pal::premul(self.get_color())
         }
     }}
     
-    Rect = <Frame> {draw_bg: {
+    Rect = <Frame> {show_bg: true,draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
-        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
         
-        fn get_color(self)->vec4{
+        fn get_color(self) -> vec4 {
             return self.color
         }
         
-        fn get_border_color(self)->vec4{
+        fn get_border_color(self) -> vec4 {
             return self.border_color
         }
-
-        fn pixel(self)->vec4{
+        
+        fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             sdf.rect(
                 self.inset.x + self.border_width,
@@ -55,21 +56,21 @@ live_design!{
         }
     }}
     
-    Box = <Frame> {draw_bg: {
+    Box = <Frame> {show_bg: true,draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
-        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
         instance radius: 2.5
         
-        fn get_color(self)->vec4{
+        fn get_color(self) -> vec4 {
             return self.color
         }
         
-        fn get_border_color(self)->vec4{
+        fn get_border_color(self) -> vec4 {
             return self.border_color
         }
         
-        fn pixel(self)->vec4{
+        fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             sdf.box(
                 self.inset.x + self.border_width,
@@ -86,21 +87,21 @@ live_design!{
         }
     }}
     
-    BoxX = <Frame> {draw_bg: {
+    BoxX = <Frame> {show_bg: true,draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
-        instance inset: vec4(0.0,0.0,0.0,0.0)
-        instance radius: vec2(2.5,2.5)
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        instance radius: vec2(2.5, 2.5)
         
-        fn get_color(self)->vec4{
+        fn get_color(self) -> vec4 {
             return self.color
         }
         
-        fn get_border_color(self)->vec4{
+        fn get_border_color(self) -> vec4 {
             return self.border_color
         }
         
-        fn pixel(self)->vec4{
+        fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             sdf.box_x(
                 self.inset.x + self.border_width,
@@ -118,21 +119,21 @@ live_design!{
         }
     }}
     
-    BoxY = <Frame> {draw_bg: {
+    BoxY = <Frame> {show_bg: true,draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
-        instance inset: vec4(0.0,0.0,0.0,0.0)
-        instance radius: vec2(2.5,2.5)
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        instance radius: vec2(2.5, 2.5)
         
-        fn get_color(self)->vec4{
+        fn get_color(self) -> vec4 {
             return self.color
         }
         
-        fn get_border_color(self)->vec4{
+        fn get_border_color(self) -> vec4 {
             return self.border_color
         }
         
-        fn pixel(self)->vec4{
+        fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             sdf.box_y(
                 self.inset.x + self.border_width,
@@ -150,21 +151,21 @@ live_design!{
         }
     }}
     
-    BoxAll = <Frame> {draw_bg: {
+    BoxAll = <Frame> {show_bg: true,draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
-        instance inset: vec4(0.0,0.0,0.0,0.0)
-        instance radius: vec4(2.5,2.5,2.5,2.5)
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        instance radius: vec4(2.5, 2.5, 2.5, 2.5)
         
-        fn get_color(self)->vec4{
+        fn get_color(self) -> vec4 {
             return self.color
         }
         
-        fn get_border_color(self)->vec4{
+        fn get_border_color(self) -> vec4 {
             return self.border_color
         }
         
-        fn pixel(self)->vec4{
+        fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             sdf.box_all(
                 self.inset.x + self.border_width,
@@ -184,21 +185,21 @@ live_design!{
         }
     }}
     
-    Circle = <Frame> {draw_bg: {
+    Circle = <Frame> {show_bg: true,draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
-        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
         instance radius: 5.0
         
-        fn get_color(self)->vec4{
+        fn get_color(self) -> vec4 {
             return self.color
         }
         
-        fn get_border_color(self)->vec4{
+        fn get_border_color(self) -> vec4 {
             return self.border_color
         }
         
-        fn pixel(self)->vec4{
+        fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             if self.radius.x > 0.0 {
                 sdf.circle(
@@ -225,21 +226,21 @@ live_design!{
         }
     }}
     
-    Hexagon = <Frame> {draw_bg: {
+    Hexagon = <Frame> {show_bg: true,draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
-        instance inset: vec4(0.0,0.0,0.0,0.0)
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
         instance radius: 5
         
-        fn get_color(self)->vec4{
+        fn get_color(self) -> vec4 {
             return self.color
         }
         
-        fn get_border_color(self)->vec4{
+        fn get_border_color(self) -> vec4 {
             return self.border_color
         }
         
-        fn pixel(self)->vec4{
+        fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             if self.radius.x > 0.0 {
                 sdf.hexagon(
@@ -266,41 +267,42 @@ live_design!{
         }
     }}
     
-    GradientX = <Frame> {draw_bg: {
-       instance color2: #f00
-        fn get_color(self)->vec4{
+    GradientX = <Frame> {show_bg: true,draw_bg: {
+        instance color2: #f00
+        fn get_color(self) -> vec4 {
             return mix(self.color, self.color2, self.pos.x)
         }
-
-        fn pixel(self)->vec4{
+        
+        fn pixel(self) -> vec4 {
             return Pal::premul(self.get_color())
         }
     }}
     
-    GradientY = <Frame> {draw_bg: {
-       instance color2: #f00
-        fn get_color(self)->vec4{
+    GradientY = <Frame> {show_bg: true,draw_bg: {
+        instance color2: #f00
+        fn get_color(self) -> vec4 {
             return mix(self.color, self.color2, self.pos.y)
         }
-
-        fn pixel(self)->vec4{
+        
+        fn pixel(self) -> vec4 {
             return Pal::premul(self.get_color())
-        } 
+        }
     }}
     
-    Image = <Frame> {draw_bg: {
+    Image = <Frame> {show_bg: true,draw_bg: {
         texture image: texture2d
-        instance image_scale: vec2(1.0,1.0)
-        instance image_pan: vec2(0.0,0.0)
-        fn get_color(self)->vec4{
+        instance image_scale: vec2(1.0, 1.0)
+        instance image_pan: vec2(0.0, 0.0)
+        fn get_color(self) -> vec4 {
             return sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
         }
-
-        fn pixel(self)->vec4{
+        
+        fn pixel(self) -> vec4 {
             return Pal::premul(self.get_color())
         }
         
-        shape: Solid, fill: Image
+        shape: Solid,
+        fill: Image
     }}
     
     UserDraw = <Frame> {user_draw: true}
@@ -314,7 +316,7 @@ live_design!{
 pub struct Frame { // draw info per UI element
     draw_bg: DrawColor,
     
-    #[live(true)] show_bg: bool,
+    #[live(false)] show_bg: bool,
     
     pub layout: Layout,
     
@@ -459,7 +461,7 @@ impl FrameRef {
         WidgetDraw::done()
     }
     
-    pub fn set_visible(&mut self, visible: bool){
+    pub fn set_visible(&mut self, visible: bool) {
         if let Some(mut inner) = self.inner_mut() {
             inner.visible = visible
         }
@@ -496,7 +498,7 @@ impl Widget for Frame {
         
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
-                child.handle_widget_event_fn(cx, event,dispatch_action);
+                child.handle_widget_event_fn(cx, event, dispatch_action);
             }
         }
         
@@ -601,7 +603,7 @@ impl Widget for Frame {
                 }
                 if let Some((widget, store_count)) = self.find_cache.get(&hash) {
                     let now_count = widget.strong_count();
-                    if now_count >= *store_count{
+                    if now_count >= *store_count {
                         return WidgetResult::found(widget.clone())
                     }
                 }
@@ -614,14 +616,14 @@ impl Widget for Frame {
                             return WidgetResult::found(result)
                         }
                     }
-                    else{
+                    else {
                         return WidgetResult::found(child.clone());
                     }
                 }
                 for child in self.children.values_mut() {
                     if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
                         let store_count = result.strong_count();
-                        self.find_cache.insert(hash, (result.clone(),store_count));
+                        self.find_cache.insert(hash, (result.clone(), store_count));
                         return WidgetResult::found(result)
                     }
                 }
@@ -636,7 +638,7 @@ impl Widget for Frame {
                             return WidgetResult::found(result)
                         }
                     }
-                    else{
+                    else {
                         return WidgetResult::found(child.clone());
                     }
                 }
@@ -709,10 +711,10 @@ impl Frame {
                 self.layout.scroll
             };
             
-            if self.show_bg{
+            if self.show_bg {
                 //if self.draw_bg.fill == Fill::Image {
                 //    self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
-               // }
+                // }
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
             }
             else {
