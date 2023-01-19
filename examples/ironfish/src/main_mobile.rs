@@ -722,7 +722,6 @@ live_design!{
                         
                     }
                 }
-
             }
 
             <Frame> {
