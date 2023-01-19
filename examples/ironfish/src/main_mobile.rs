@@ -760,7 +760,6 @@ live_design!{
                         
                     }
                 }
-
             }
 
             <Frame> {

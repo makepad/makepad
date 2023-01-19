@@ -56,7 +56,7 @@ live_design!{
     
     // WIDGETS
     ElementBox = <Frame> {
-        draw_bg: {color: #4}
+        draw_bg: {color: #0000}
         walk: {width: Fill, height: Fit}
         layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
     }
@@ -1191,10 +1191,11 @@ live_design!{
                 
                 // COLUMN 1
                 <ScrollY> {
-                    layout: {flow: Down, clip_y: true, clip_x: true, padding: {right: (SPACING_BASE_PADDING * 2)}, spacing: (SPACING_PANELS)}
+                  
+                    layout: {flow: Down, padding: {right: (SPACING_BASE_PADDING * 2)}, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: 350, margin: {right: (SPACING_BASE_PADDING * -1.0)}}
                     
-                    oscillators = <FishPanelSoundSources> {}
+                    oscillators = <FishPanelSoundSources> {  has_view:true,use_cache:true}
                     envelopes = <FishPanelEnvelopes> {}
                     <FishPanelFilter> {}
                     effects = <FishPanelEffects> {}

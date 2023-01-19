@@ -101,7 +101,7 @@ impl App {
                 // nonblockingly (timeout=1ns) check our discovery socket for peers
                 while let Ok((_, mut addr)) = read_discovery.recv_from(&mut other_uid) {
                     if client_uid == u64::from_be_bytes(other_uid) {
-                    //    continue; 
+                        continue; 
                     }
                     addr.set_port(41532);
                     if let Some(time) = peer_addrs.get_mut(&addr) {
