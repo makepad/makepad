@@ -312,7 +312,7 @@ live_design!{
             texture image: texture2d
             
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos)+vec4(0.2,0.0,0.0,0.0);
+                return sample2d_rt(self.image, self.pos);
             }
             
             shape: Solid,
