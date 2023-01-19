@@ -126,7 +126,7 @@ impl View {
         
         let view_will_redraw = cx.view_will_redraw(self) || always_redraw;
         
-        let mut is_main_draw_list = if cx.passes[pass_id].main_draw_list_id.is_none() {
+        let is_main_draw_list = if cx.passes[pass_id].main_draw_list_id.is_none() {
             cx.passes[pass_id].main_draw_list_id = Some(self.draw_list.id());
             true
         }
