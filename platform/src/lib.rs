@@ -17,7 +17,7 @@ pub mod midi;
 pub mod video;
 
 mod draw_matrix;
-mod draw_shader;
+mod draw_shader; 
 mod draw_list;
 mod draw_vars;
 
@@ -189,6 +189,7 @@ pub use {
         pass::{
             PassId,
             CxPassParent,
+            CxPassRect,
             Pass,
             PassClearColor,
             PassClearDepth

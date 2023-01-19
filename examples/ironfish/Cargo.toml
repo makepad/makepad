@@ -19,4 +19,4 @@ nightly = ["makepad-audio-graph/nightly"]
 
 [[bin]]
 name = "makepad-example-ironfish"
-path = "src/main_mobile.rs"
+path = "src/main.rs"

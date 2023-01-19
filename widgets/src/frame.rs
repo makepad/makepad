@@ -13,7 +13,7 @@ use {
 live_design!{
     import crate::scroll_bars::ScrollBars;
     import makepad_draw::shader::std::*;
-    
+    import makepad_draw::shader::draw_color::DrawColor;
     Frame = {{Frame}} {}
     
     Solid = <Frame> {show_bg: true, draw_bg: {
@@ -305,6 +305,21 @@ live_design!{
         fill: Image
     }}
     
+    CachedFrame = <Frame> {
+        has_view: true,
+        use_cache: true,
+        draw_bg: {
+            texture image: texture2d
+            
+            fn pixel(self) -> vec4 {
+                return sample2d_rt(self.image, self.pos)+vec4(0.2,0.0,0.0,0.0);
+            }
+            
+            shape: Solid,
+            fill: Image
+        }
+    }
+    
     UserDraw = <Frame> {user_draw: true}
     ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
@@ -339,6 +354,7 @@ pub struct Frame { // draw info per UI element
     #[rust] scroll_bars_obj: Option<ScrollBars>,
     
     #[live(false)] design_mode: bool,
+    #[rust] view_size: Option<DVec2>,
     #[rust] area: Area,
     #[rust] pub view: Option<View>,
     #[rust] cache: Option<FrameTextureCache>,
@@ -505,7 +521,9 @@ impl Widget for Frame {
                 // lets invalidate all children
                 redraw = true;
             });
-            cx.redraw_area_and_children(self.area);
+            if redraw {
+                cx.redraw_area_and_children(self.area);
+            }
         }
         
         for id in &self.draw_order {
@@ -699,6 +717,16 @@ impl Frame {
         self.draw_walk(cx, self.get_walk())
     }
     
+    pub fn walk_from_previous_size(&self, walk:Walk)->Walk{
+        let view_size = self.view_size.unwrap();
+        Walk {
+            abs_pos: walk.abs_pos,
+            width: if walk.width.is_fill(){walk.width}else{Size::Fixed(view_size.x)},
+            height: if walk.height.is_fill(){walk.height}else{Size::Fixed(view_size.y)},
+            margin: walk.margin
+        }
+    }
+     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if !self.visible {
             return WidgetDraw::done()
@@ -711,7 +739,13 @@ impl Frame {
                 // ok so.. how do we render this to texture
                 if self.use_cache {
                     if !cx.view_will_redraw(self.view.as_ref().unwrap()) {
-                        // bail but do emit a drawquad.
+                        if let Some(cache) = &self.cache{
+                            self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
+                            let walk = self.walk_from_previous_size(walk);
+                            self.draw_bg.draw_walk(cx, walk);
+                            self.area = self.draw_bg.area();
+                            cx.set_pass_area(&cache.pass, self.area);
+                        }
                         return WidgetDraw::done()
                     }
                     // lets start a pass
@@ -723,22 +757,16 @@ impl Frame {
                         });
                         let cache = self.cache.as_mut().unwrap();
                         cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
-                        cache.pass.add_color_texture(cx, &cache.color_texture, PassClearColor::InitWith(vec4(0.0, 0.0, 0.0, 0.0)));
+                        cache.pass.add_color_texture(cx, &cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
                     }
                     let cache = self.cache.as_mut().unwrap();
+                    cx.make_child_pass(&cache.pass); 
                     cx.begin_pass(&cache.pass);
                 }
                 
                 if self.view.as_mut().unwrap().begin(cx).is_not_redrawing() {
-                    // we need to just walk the turtle here.
-                    let rect = self.area.get_rect(cx);
-                    let walk = Walk {
-                        abs_pos: None,
-                        width: Size::Fixed(rect.size.x),
-                        height: Size::Fixed(rect.size.x),
-                        margin: walk.margin
-                    };
-                    cx.walk_turtle(walk);
+                    let walk = self.walk_from_previous_size(walk);
+                    cx.walk_turtle_with_area(&mut self.area, walk);
                     return WidgetDraw::done()
                 };
             }
@@ -754,9 +782,9 @@ impl Frame {
             };
             
             if self.show_bg {
-                if self.image.as_ref().len() > 0{
+                if self.image.as_ref().len() > 0 {
                     self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
-                 }
+                }
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
             }
             else {
@@ -803,6 +831,9 @@ impl Frame {
                 };
                 
                 if self.show_bg {
+                    if self.use_cache {
+                        panic!("dont use show_bg and use_cache at the same time");
+                    }
                     self.draw_bg.end(cx);
                     self.area = self.draw_bg.area();
                 }
@@ -816,11 +847,17 @@ impl Frame {
                 };
                 
                 if self.has_view {
+                    let rect = self.area.get_rect(cx);
+                    self.view_size = Some(rect.size);
                     self.view.as_mut().unwrap().end(cx);
                     if self.use_cache {
                         let cache = self.cache.as_mut().unwrap();
-                        let rect = self.area.get_rect(cx);
-                        cx.end_pass_with_size(&cache.pass, rect.size);
+                        cx.end_pass(&cache.pass);
+                        self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
+                        self.draw_bg.draw_abs(cx, rect);
+                        let area = self.draw_bg.area();
+                        let cache = self.cache.as_mut().unwrap();
+                        cx.set_pass_area(&cache.pass, area);
                     }
                 }
                 self.draw_state.end();
