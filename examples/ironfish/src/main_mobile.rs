@@ -52,8 +52,8 @@ live_design!{
     const COLOR_TODO = #xFF1493FF
     const COLOR_BG_GRADIENT_BRIGHT = #xFFFFFF20
     const COLOR_BG_GRADIENT_DARK = #xFFFFFF10
-    const FONT_SIZE_H1 = 16.0
-    const FONT_SIZE_H2 = 12.0
+    const FONT_SIZE_H1 = 17.5
+    const FONT_SIZE_H2 = 14.0
     
     // WIDGETS
     ElementBox = <Frame> {
@@ -187,16 +187,16 @@ live_design!{
                     2.0
                 )
                 
-                sdf.stroke_keep(
-                    mix(
-                        mix(
-                            mix(#x00000044, #x00000066, pow(self.pos.y, 4.0)),
-                            mix((COLOR_BEVEL_HIGHLIGHT), #x00000044, pow(self.pos.y, 0.25)),
-                            self.hover
-                        ),
-                        mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 0.75)),
-                    self.pressed), 1.
-                );
+                // sdf.stroke_keep(
+                //     mix(
+                //         mix(
+                //             mix(#x00000044, #x00000066, pow(self.pos.y, 4.0)),
+                //             mix((COLOR_BEVEL_HIGHLIGHT), #x00000044, pow(self.pos.y, 0.25)),
+                //             self.hover
+                //         ),
+                //         mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 0.75)),
+                //     self.pressed), 1.
+                // );
                 sdf.fill(
                     mix(
                         mix(
@@ -592,17 +592,6 @@ live_design!{
                 label: "BPM"
             }
         }
-        
-        arp = <InstrumentCheckbox> {
-            walk: { margin: 0, width: Fit, height: Fill }
-            layout: { padding: 0, spacing: 0 }
-            checkbox = {
-                walk: { margin: 0, height: Fill }
-                layout: { padding: 0, spacing: 0, align: {x: 0.0, y: 0.5} }
-                label: "Arp"
-            }
-            draw_bg: { color: (COLOR_HIDDEN_WHITE) }
-        }
 
         <Box> {
             walk: { width: Fit, height: Fill }
@@ -684,11 +673,31 @@ live_design!{
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                         sdf.box(1, 1, self.rect_size.x - 5, self.rect_size.y - 5, 2);
+                        sdf.glow_keep(
+                            mix(
+                                #FFFFFF00,
+                                #FFFFFF40,
+                                self.active
+                            ),
+                            1.0);
+                        sdf.glow_keep(
+                            mix(
+                                #FFFFFF00,
+                                #FFFFFF20,
+                                self.active
+                            ),
+                            1.5);
+                        sdf.glow_keep(
+                            mix(
+                                #FFFFFF00,
+                                #FFFFFF10,
+                                self.active
+                            ),
+                            2.0);
                         sdf.fill(
                             mix(
                                 #FFFFFF10,
                                 #FFFFFFFF,
-                                // mix(#xFFFFFFFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
                                 self.active
                             )
                         );
@@ -1196,23 +1205,55 @@ live_design!{
 
         <SequencerPanel> { walk: {height: Fill, width: Fill} }
     
+        <Box> {
+            walk: { width: Fit, height: Fit }
+            layout: {flow: Right}
+
+            draw_bg: { color: #x00FFFFFF }
+            <Image> { image: d"crate://self/resources/test.png", walk: { width: 100, height: 100 } }
+        }
+
         PresetNavigation = <Frame> {
             walk: { width: Fill, height: Fit }
             layout: {flow: Right}
 
             <FishButton> {
                 text: "<"
-                walk: {width: Fit, height: Fit}
+                walk: {width: 40, height: 40}
+                color: (COLOR_TEXT_H2)
+                draw_label: { text_style: {font_size: (FONT_SIZE_H1)} }
             }
+
             <Frame> {}
-            <FishButton> {
-                text: "Preset Name"
-                walk: {width: Fit, height: Fit}
+            
+
+            <Frame> {
+                walk: { width: Fit, height: Fit }
+                layout: {flow: Right}
+
+                label = <Label> {
+                    draw_label: {
+                        text_style: {font_size: (FONT_SIZE_H1)},
+                        color: (COLOR_TEXT_H2)
+                    }
+                    text: "Preset Name"
+                }
+
+                <FishButton> {
+                    text: "Edit"
+                    walk: {width: Fit, height: Fit}
+                    color: (COLOR_TEXT_H2)
+                    draw_label: { text_style: {font_size: (FONT_SIZE_H2)} }
+                }
             }
+
             <Frame> {}
+
             <FishButton> {
                 text: ">"
-                walk: {width: Fit, height: Fit}
+                walk: {width: 40, height: 40}
+                color: (COLOR_TEXT_H2)
+                draw_label: { text_style: {font_size: (FONT_SIZE_H1)} }
             }
         }
     }
@@ -1222,6 +1263,17 @@ live_design!{
         layout: {flow: Down}
         walk: {width: Fill, height: Fill}
         draw_bg: { color: #x00000020 }
+        
+        arp = <InstrumentCheckbox> {
+            walk: { margin: 0, width: Fit, height: Fill }
+            layout: { padding: 0, spacing: 0 }
+            checkbox = {
+                walk: { margin: 0, height: Fill }
+                layout: { padding: 0, spacing: 0, align: {x: 0.0, y: 0.5} }
+                label: "Arp"
+            }
+            draw_bg: { color: (COLOR_HIDDEN_WHITE) }
+        }
 
         label = <Label> {
             draw_label: {
@@ -1279,10 +1331,6 @@ live_design!{
                     // tab3_frame = <ModePresetmanager> {} # TODO: enable again
                 }
 
-                piano = <Piano> {
-                    walk: {width: Fill, height: Fit}
-                }
-                
                 menu = <Box> {
                     walk: { width: Fill, height: 150 }
                     layout: { flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20}
