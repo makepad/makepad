@@ -108,13 +108,19 @@ impl AudioStreamReceiver {
         
         // ok if we dont have enough data in our stack for output, just output nothing
         let mut total = 0;
-        for buf in route.buffers.iter() {
+        for buf in route.buffers.iter() { 
             total += buf.frame_count();
         }
 
         // check if we have enough buffer
         if total - route.start_offset < output.frame_count() * min_buf {
             return 0
+        }
+         
+        // flush down the buffer
+        while total > output.frame_count() * 4{
+            let buf = route.buffers.remove(0);
+            total -= buf.frame_count();
         }
         
         // ok so we need to eat from the start of the buffer vec until output is filled

@@ -15,7 +15,7 @@ use {
         draw_shader::CxDrawShaderMapping,
         pass::{PassClearColor, PassClearDepth, PassId},
         window::WindowId,
-        texture::{
+        texture::{ 
             TextureFormat,
             TextureDesc,
         },
