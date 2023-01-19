@@ -224,9 +224,14 @@ impl Cx {
         }
     }
     
-    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f64) {
-        let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_matrix(DVec2::default(), pass_size);
+    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f64)->Option<DVec2> {
+        let pass_rect = self.get_pass_rect(pass_id).unwrap();
+        //println!("{:?}", pass_rect);
+        if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5{
+            return None
+        }
+        
+        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
@@ -236,6 +241,7 @@ impl Cx {
             inherit_dpi_factor
         };
         self.passes[pass_id].set_dpi_factor(dpi_factor);
+        Some(pass_rect.size)
     }
     
     pub fn draw_pass_to_window(
@@ -307,10 +313,14 @@ impl Cx {
         dpi_factor: f64,
         opengl_cx: &OpenglCx,
     ) {
-        let pass_size = self.passes[pass_id].pass_size;
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
-        self.setup_render_pass(pass_id, dpi_factor);
+        let pass_size = if let Some(pz) = self.setup_render_pass(pass_id, dpi_factor){
+            pz
+        }
+        else{
+            return
+        };
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor

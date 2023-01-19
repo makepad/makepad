@@ -484,7 +484,7 @@ impl<'a> Cx2d<'a> {
         let dx = if dx.is_nan() {0.0}else {dx};
         let dy = if dy.is_nan() {0.0}else {dy};
         if dx == 0.0 && dy == 0.0 {
-            return
+            return 
         }
         let dx = (dx * current_dpi_factor).floor() / current_dpi_factor;
         let dy = (dy * current_dpi_factor).floor() / current_dpi_factor;
