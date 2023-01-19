@@ -61,7 +61,7 @@ live_design!{
         layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
     }
     
-    FishPanelContainer = <Frame> {
+    FishPanelContainer = <CachedFrame> {
         layout: {flow: Down},
         walk: {width: Fill, height: Fit}
     }
@@ -487,7 +487,7 @@ live_design!{
         }
     }
     
-    // PANELS  
+    // PANELS
     EnvelopePanel = <Frame> {
         layout: {flow: Down, padding: 0.0}
         walk: {width: Fill, height: Fit}
@@ -648,13 +648,15 @@ live_design!{
         }
     }
     
-    SequencerPanel = <GradientY> {
-        walk: {width: Fill, height: Fill}
-        layout: {flow: Down, spacing: 0.0, padding: {top: (SPACING_BASE_PADDING)}}
-        draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
-        
-        <SequencerControls> {}
-        sequencer = <Sequencer> {walk: {width: Fill, height: Fill}}
+    SequencerPanel = <CachedFrame>{
+        <GradientY> {
+            walk: {width: Fill, height: Fill}
+            layout: {flow: Down, spacing: 0.0, padding: {top: (SPACING_BASE_PADDING)}}
+            draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
+            
+            <SequencerControls> {}
+            sequencer = <Sequencer> {walk: {width: Fill, height: Fill}}
+        }
     }
     
     CrushFXPanel = <FishPanelContainer> {
@@ -1191,11 +1193,11 @@ live_design!{
                 
                 // COLUMN 1
                 <ScrollY> {
-                  
+                    
                     layout: {flow: Down, padding: {right: (SPACING_BASE_PADDING * 2)}, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: 350, margin: {right: (SPACING_BASE_PADDING * -1.0)}}
                     
-                    oscillators = <FishPanelSoundSources> {  has_view:true,use_cache:true}
+                    oscillators = <FishPanelSoundSources> {}
                     envelopes = <FishPanelEnvelopes> {}
                     <FishPanelFilter> {}
                     effects = <FishPanelEffects> {}
@@ -1207,7 +1209,7 @@ live_design!{
                     walk: {height: Fill, width: Fill}
                     
                     <SequencerPanel> {walk: {height: Fill, width: Fill}}
-                    <Frame> {
+                    <CachedFrame> {
                         layout: {flow: Down}
                         walk: {height: Fit, width: Fill}
                         

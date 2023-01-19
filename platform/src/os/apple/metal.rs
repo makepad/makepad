@@ -257,9 +257,13 @@ impl Cx {
         
         let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
         
-        let pass_size = self.passes[pass_id].pass_size;
+        let pass_rect = self.get_pass_rect(pass_id).unwrap();
+        //println!("{:?}", pass_rect);
+        if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5{
+            return
+        }
         
-        self.passes[pass_id].set_matrix(DVec2::default(), pass_size);
+        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
@@ -298,7 +302,7 @@ impl Cx {
                 
                 let cxtexture = &mut self.textures[color_texture.texture_id];
                 
-                cxtexture.os.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_size);
+                cxtexture.os.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_rect.size);
                 
                 let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
                 
@@ -347,7 +351,7 @@ impl Cx {
         // attach depth texture
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id];
-            cxtexture.os.update_render_target(metal_cx, AttachmentKind::Depth, &cxtexture.desc, dpi_factor * pass_size);
+            cxtexture.os.update_render_target(metal_cx, AttachmentKind::Depth, &cxtexture.desc, dpi_factor * pass_rect.size);
             let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
             
             let depth_attachment: ObjcId = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
