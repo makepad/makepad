@@ -3,7 +3,7 @@ use {
         ops::Deref,
         ops::DerefMut
     },
-    crate::{
+    crate::{ 
         makepad_math::DVec2,
         makepad_platform::{
             DrawEvent,
@@ -12,6 +12,7 @@ use {
             PassId,
             Pass,
             CxPassParent,
+            CxPassRect,
             Cx
         },
         nav::{
@@ -93,6 +94,12 @@ impl<'a> Cx2d<'a> {
         self.pass_stack.last().unwrap().dpi_factor
     }
     
+    pub fn make_child_pass(&mut self, pass: &Pass) {
+        let pass_id = self.pass_stack.last().unwrap().pass_id;
+        let cxpass = &mut self.passes[pass.pass_id()];
+        cxpass.parent = CxPassParent::Pass(pass_id);
+    }
+    
     pub fn begin_pass(&mut self, pass: &Pass) {
         let cxpass = &mut self.passes[pass.pass_id()];
         
@@ -100,11 +107,11 @@ impl<'a> Cx2d<'a> {
         
         let dpi_factor = match cxpass.parent {
             CxPassParent::Window(window_id) => {
-                self.passes[pass.pass_id()].pass_size = self.windows[window_id].get_inner_size();
+                self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Size(self.windows[window_id].get_inner_size()));
                 self.get_delegated_dpi_factor(pass.pass_id())
             }
             CxPassParent::Pass(pass_id) => {
-                self.passes[pass.pass_id()].pass_size = self.passes[pass_id].pass_size;
+                self.passes[pass.pass_id()].pass_rect = self.passes[pass_id].pass_rect.clone();
                 self.get_delegated_dpi_factor(pass_id)
             }
             _ => {
@@ -137,15 +144,14 @@ impl<'a> Cx2d<'a> {
         
     }
     
-    pub fn end_pass_with_size(&mut self, pass: &Pass, size:DVec2) {
-        let pass_id = self.pass_stack.last().unwrap().pass_id;
-        self.passes[pass_id].pass_size = size;
-        self.end_pass(pass);
+ 
+    
+    pub fn set_pass_area(&mut self, pass:&Pass, area: Area){
+        self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Area(area));
     }
     
     pub fn current_pass_size(&self) -> DVec2 {
-        let pass_id = self.pass_stack.last().unwrap().pass_id;
-        self.passes[pass_id].pass_size
+        self.cx.get_pass_rect(self.pass_stack.last().unwrap().pass_id).unwrap().size
     }
     
     pub fn view_will_redraw(&self, view: &View) -> bool {

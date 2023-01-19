@@ -3,11 +3,11 @@ use {
         any::{TypeId, Any},
     },
     crate::{
-        makepad_math::DVec2,
+        makepad_math::{DVec2, Rect},
         gpu_info::GpuInfo,
         cx::{Cx, OsType, XrCapabilities},
         event::{
-            DraggedItem,
+            DraggedItem, 
             Timer,
             Trigger,
             WebSocketAutoReconnect,
@@ -32,6 +32,7 @@ use {
         },
         pass::{
             PassId,
+            CxPassRect,
             CxPassParent
         },
     }
@@ -71,19 +72,20 @@ pub enum CxOsOp {
 }
 
 impl Cx {
-
-
+    
+    
     pub fn xr_capabilities(&self) -> &XrCapabilities {
         &self.xr_capabilities
     }
     
     
-    pub fn get_dependency(&self, path:&str)->Result<&Vec<u8>, String>{
-        if let Some(data) = self.dependencies.get(path){
-            if let Some(data) = &data.data{
-                return match data{
-                    Ok(data)=>Ok(data),
-                    Err(s)=>Err(s.clone())
+    pub fn get_dependency(&self, path: &str) -> Result<&Vec<u8>,
+    String> {
+        if let Some(data) = self.dependencies.get(path) {
+            if let Some(data) = &data.data {
+                return match data {
+                    Ok(data) => Ok(data),
+                    Err(s) => Err(s.clone())
                 }
             }
         }
@@ -93,7 +95,7 @@ impl Cx {
     pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
     pub fn platform_type(&self) -> &OsType {&self.platform_type}
-    pub fn cpu_cores(&self)->usize{self.cpu_cores}
+    pub fn cpu_cores(&self) -> usize {self.cpu_cores}
     pub fn gpu_info(&self) -> &GpuInfo {&self.gpu_info}
     
     pub fn update_menu(&mut self, menu: Menu) {
@@ -141,17 +143,17 @@ impl Cx {
         self.platform_ops.push(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval,
-            repeats:false
+            repeats: false
         });
         Timer(self.timer_id)
     }
-
+    
     pub fn start_interval(&mut self, interval: f64) -> Timer {
         self.timer_id += 1;
         self.platform_ops.push(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval,
-            repeats:true
+            repeats: true
         });
         Timer(self.timer_id)
     }
@@ -169,9 +171,9 @@ impl Cx {
     pub fn xr_stop_presenting(&mut self) {
         self.platform_ops.push(CxOsOp::XrStopPresenting);
     }
-     
+    
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f64 {
-        if let Some(draw_list_id) = area.draw_list_id(){
+        if let Some(draw_list_id) = area.draw_list_id() {
             let pass_id = self.draw_lists[draw_list_id].pass_id.unwrap();
             return self.get_delegated_dpi_factor(pass_id)
         }
@@ -196,7 +198,7 @@ impl Cx {
         }
         1.0
     }
-
+    
     pub fn redraw_pass_and_parent_passes(&mut self, pass_id: PassId) {
         let mut walk_pass_id = pass_id;
         loop {
@@ -211,6 +213,14 @@ impl Cx {
                     break;
                 }
             }
+        }
+    }
+    
+    pub fn get_pass_rect(&self, pass_id: PassId) -> Option<Rect> {
+        match self.passes[pass_id].pass_rect {
+            Some(CxPassRect::Area(area)) => Some(area.get_rect(self)),
+            Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size}),
+            None => None
         }
     }
     
@@ -237,19 +247,19 @@ impl Cx {
     pub fn redraw_all(&mut self) {
         self.new_draw_event.redraw_all = true;
     }
-
+    
     pub fn redraw_area(&mut self, area: Area) {
-        if let Some(draw_list_id) = area.draw_list_id(){
+        if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list(draw_list_id);
         }
     }
-
+    
     pub fn redraw_area_and_children(&mut self, area: Area) {
-        if let Some(draw_list_id) = area.draw_list_id(){
+        if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list_and_children(draw_list_id);
         }
     }
-
+    
     pub fn redraw_list(&mut self, draw_list_id: DrawListId) {
         if self.new_draw_event.draw_lists.iter().position( | v | *v == draw_list_id).is_some() {
             return;
@@ -307,23 +317,23 @@ impl Cx {
         }
     }
     
-    pub fn set_global<T: 'static + Any + Sized>(&mut self, value:T){
-        if !self.globals.iter().any(|v| v.0 == TypeId::of::<T>()){
+    pub fn set_global<T: 'static + Any + Sized>(&mut self, value: T) {
+        if !self.globals.iter().any( | v | v.0 == TypeId::of::<T>()) {
             self.globals.push((TypeId::of::<T>(), Box::new(value)));
         }
     }
     
-    pub fn get_global<T: 'static + Any>(&mut self)->&mut T{
-        let item = self.globals.iter_mut().find(|v| v.0 == TypeId::of::<T>()).unwrap();
+    pub fn get_global<T: 'static + Any>(&mut self) -> &mut T {
+        let item = self.globals.iter_mut().find( | v | v.0 == TypeId::of::<T>()).unwrap();
         item.1.downcast_mut().unwrap()
     }
-        
-    pub fn has_global<T: 'static + Any>(&mut self)->bool{
-        self.globals.iter_mut().find(|v| v.0 == TypeId::of::<T>()).is_some()
+    
+    pub fn has_global<T: 'static + Any>(&mut self) -> bool {
+        self.globals.iter_mut().find( | v | v.0 == TypeId::of::<T>()).is_some()
     }
     
-    pub fn global<T: 'static + Any + Default>(&mut self)->&mut T{
-        if !self.has_global::<T>(){
+    pub fn global<T: 'static + Any + Default>(&mut self) -> &mut T {
+        if !self.has_global::<T>() {
             self.set_global(T::default());
         }
         self.get_global::<T>()

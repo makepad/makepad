@@ -13,9 +13,10 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         id_pool::*,
+        area::Area,
         window::{
             WindowId,
-        },
+        }, 
         os::{
             CxOsPass,
         },
@@ -23,7 +24,7 @@ use {
             Cx,
         },
         draw_list::{
-            DrawListId
+            DrawListId 
         },
         live_traits::*,
         texture::{
@@ -146,7 +147,7 @@ impl Pass {
         if pass_size.x < 1.0{pass_size.x = 1.0};
         if pass_size.y < 1.0{pass_size.y = 1.0};
         let cxpass = &mut cx.passes[self.pass_id()];
-        cxpass.pass_size = pass_size;
+        cxpass.pass_rect = Some(CxPassRect::Size(pass_size));
     }
     
     pub fn set_window_clear_color(&self, cx: &mut Cx, clear_color: Vec4) {
@@ -235,6 +236,12 @@ pub enum PassMatrixMode{
 }
 
 #[derive(Clone)]
+pub enum CxPassRect{
+    Area(Area),
+    Size(DVec2)
+}
+
+#[derive(Clone)]
 pub struct CxPass {
     pub debug: bool,
     pub matrix_mode: PassMatrixMode,
@@ -248,7 +255,7 @@ pub struct CxPass {
     pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxPassParent,
     pub paint_dirty: bool,
-    pub pass_size: DVec2,
+    pub pass_rect: Option<CxPassRect>,
     pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
     pub os: CxOsPass,
@@ -271,7 +278,7 @@ impl Default for CxPass {
             main_draw_list_id: None,
             parent: CxPassParent::None,
             paint_dirty: false,
-            pass_size: DVec2::default(),
+            pass_rect: None,
             os: CxOsPass::default()
         }
     }

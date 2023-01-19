@@ -236,7 +236,7 @@ impl DrawText {
         let mut walk_x = pos.x;
         
         let cxfont = fonts_atlas.fonts[font_id].as_mut().unwrap();
-        let dpi_factor = cx.current_dpi_factor();
+        let dpi_factor = cx.current_dpi_factor(); 
         
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.text_style.font_size);
         
