@@ -372,4 +372,3 @@ pub struct CxOs {
     pub (crate) media_foundation_change: Signal,
     pub (crate) winrt_midi_change: Signal,
 }
-
