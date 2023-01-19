@@ -28,7 +28,8 @@ live_design!{
     import makepad_draw::shader::std::*;
     
     const SPACING_PANELS = 10.0
-    const SPACING_CONTROLS = 3.0
+    const SPACING_OS = 40.0
+    const SPACING_CONTROLS = 7.5
     const SPACING_BASE_PADDING = 6.0
     const HEIGHT_AUDIOVIZ = 125
     const COLOR_OSC = #xFFFF99FF // yellow
@@ -214,6 +215,9 @@ live_design!{
         
     }
     
+
+
+    
     FishSlider = <Slider> {
         walk: {
             height: 36,
@@ -289,6 +293,12 @@ live_design!{
         }
     }
     
+    TextSlider = <ElementBox> {
+        slider = <FishSlider> {
+            draw_slider: {bipolar: 0.0}
+        }
+    }
+
     InstrumentSlider = <ElementBox> {
         slider = <FishSlider> {
             draw_slider: {bipolar: 0.0}
@@ -443,8 +453,9 @@ live_design!{
     }
     
     PlayPause = <InstrumentCheckbox> {
-        walk: {width: Fit, height: Fit, margin: 10.0}
+        walk: {width: Fit, height: Fit, margin: {top: 10, right: 0, bottom: 0, left: 0}}
         layout: {align: {x: 0.0, y: 0.5}}
+        draw_bg: { color: (COLOR_HIDDEN_WHITE) }
         checkbox = {
             walk: {width: 20, height: 20}
             label: ""
@@ -565,14 +576,15 @@ live_design!{
         
     }
 
-    SequencerControls = <Frame> {
-        walk: {height: Fit, width: Fill }
-        layout: {flow: Right, padding: {top: 0.0, right: (SPACING_BASE_PADDING), bottom: 0.0, left: (SPACING_BASE_PADDING)}}
+    SequencerControls = <Box> {
+        walk: {height: Fit, width: Fill, margin: 0}
+        layout: {flow: Right, padding: 0, spacing: (SPACING_CONTROLS) }
 
         playpause = <PlayPause> {}
         
-        speed = <InstrumentSlider> {
-            walk: {width: 200}
+        speed = <TextSlider> {
+            walk: {width: Fill}
+            draw_bg: { color: (COLOR_HIDDEN_WHITE) }
             slider = {
                 draw_slider: {line_color: (COLOR_MUSIC)}
                 min: 0.0
@@ -581,44 +593,64 @@ live_design!{
             }
         }
         
-        <Frame> { walk: {width: Fill} }
-
-        rootnote = <InstrumentDropdown> {
-            walk: {height: Fill, width: Fit}
-            layout: {align: {x: 0.0, y: 0.5}}
-            dropdown = {
-                labels: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
-                values: [A, Asharp, B, C, Csharp, D, Dsharp, E, F, Fsharp, G, Gsharp]
+        arp = <InstrumentCheckbox> {
+            walk: { margin: 0, width: Fit, height: Fill }
+            layout: { padding: 0, spacing: 0 }
+            checkbox = {
+                walk: { margin: 0, height: Fill }
+                layout: { padding: 0, spacing: 0, align: {x: 0.0, y: 0.5} }
+                label: "Arp"
             }
+            draw_bg: { color: (COLOR_HIDDEN_WHITE) }
         }
-        
-        scaletype = <InstrumentDropdown> {
-            walk: {height: Fill, width: Fit}
-            layout: {align: {x: 0.0, y: 0.5}}
-            dropdown = {
-                labels: ["Minor", "Major", "Dorian", "Pentatonic"]
-                values: [Minor, Major, Dorian, Pentatonic]
+
+        <Box> {
+            walk: { width: Fit, height: Fill }
+            layout: {flow: Right, clip_x: true, spacing: 0 }
+
+            rootnote = <InstrumentDropdown> {
+                walk: {height: Fill, width: Fit, margin: 0}
+                layout: {align: {x: 0.0, y: 0.5}, padding: 0}
+                draw_bg: { color: (COLOR_HIDDEN_WHITE) }
+                dropdown = {
+                    walk: { margin: 5 }
+                    labels: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
+                    values: [A, Asharp, B, C, Csharp, D, Dsharp, E, F, Fsharp, G, Gsharp]
+                }
             }
+            
+            scaletype = <InstrumentDropdown> {
+                walk: {height: Fill, width: Fit}
+                layout: {align: {x: 0.0, y: 0.5}}
+                draw_bg: { color: (COLOR_HIDDEN_WHITE) }
+                dropdown = {
+                    walk: { margin: 5 }
+                    labels: ["Minor", "Major", "Dorian", "Pentatonic"]
+                    values: [Minor, Major, Dorian, Pentatonic]
+                }
+            }
+
         }
         
         <Frame> {
             walk: {width: Fit, height: Fill}
             layout: {align: {x: 0.0, y: 0.5}, spacing: (SPACING_CONTROLS)}
+
             clear_grid = <FishButton> {
                 text: "Clear"
                 walk: {width: Fit, height: Fit}
             }
-            grid_up = <FishButton> {
-                text: "↑"
-                walk: {width: Fit, height: Fit}
-            }
-            grid_down = <FishButton> {
-                text: "↓"
-                walk: {width: Fit, height: Fit}
-            }
+            // grid_up = <FishButton> {
+            //     text: "↑"
+            //     walk: {width: Fit, height: Fit}
+            // }
+            // grid_down = <FishButton> {
+            //     text: "↓"
+            //     walk: {width: Fit, height: Fit}
+            // }
         }
 
-    }    
+    }
 
     PianoControls = <GradientY> {
         layout: {flow: Right, padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
@@ -637,19 +669,16 @@ live_design!{
 
         <Frame> { walk: {width: Fill} }
 
-        arp = <InstrumentCheckbox> {
-            checkbox = { label: "Arp" }
-            walk: { width: Fit, height: Fit }
-        }
     } 
 
     SequencerPanel = <Frame> {
         walk: {width: Fill, height: Fill}
-        layout: {flow: Down, spacing: 0.0, padding: {top: (SPACING_BASE_PADDING)}}
+        layout: {flow: Down, spacing: 0.0}
 
         <SequencerControls> {}
         sequencer = <Sequencer> { 
-            walk: {width: Fill, height: Fill}
+            walk: {width: Fill, height: Fill, margin: {top: 10, right: 0, bottom: 10, left: 0}}
+
             button: {
                 draw_button: {
                     fn pixel(self) -> vec4 {
@@ -1158,15 +1187,34 @@ live_design!{
     }
     
 
-    ModeSequencer = <Box> {
-        visible: true, 
-        walk: { width: Fill, height: Fill }
-        draw_bg: { color: #x00000020 }
+    ModeSequencer = <Frame> {
+        visible: true 
+        walk: { width: Fill, height: Fill, margin: { top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS) }}
         layout: {flow: Down}
 
         // layout: { flow: Right, spacing: (SPACING_BASE_PADDING), padding: { top: (SPACING_BASE_PADDING * 2), right: (SPACING_BASE_PADDING * 2), bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2) }}
 
         <SequencerPanel> { walk: {height: Fill, width: Fill} }
+    
+        PresetNavigation = <Frame> {
+            walk: { width: Fill, height: Fit }
+            layout: {flow: Right}
+
+            <FishButton> {
+                text: "<"
+                walk: {width: Fit, height: Fit}
+            }
+            <Frame> {}
+            <FishButton> {
+                text: "Preset Name"
+                walk: {width: Fit, height: Fit}
+            }
+            <Frame> {}
+            <FishButton> {
+                text: ">"
+                walk: {width: Fit, height: Fit}
+            }
+        }
     }
 
     ModePlay = <Box> {
@@ -1225,11 +1273,14 @@ live_design!{
                     draw_bg: { color: #x00000020 }
                 }
 
-                application_pages = <Frame> {
-                    draw_bg: { color: #xFFFFFF20 }
+                application_pages = <Box> {
                     tab1_frame = <ModeSequencer> {}
-                    tab2_frame = <ModePlay> {}
-                    tab3_frame = <ModePresetmanager> {}
+                    // tab2_frame = <ModePlay> {} # TODO: enable again
+                    // tab3_frame = <ModePresetmanager> {} # TODO: enable again
+                }
+
+                piano = <Piano> {
+                    walk: {width: Fill, height: Fit}
                 }
                 
                 menu = <Box> {
@@ -1431,12 +1482,12 @@ impl App {
 
         ui.get_radio_group(&[
             id!(modes.tab1),
-            id!(modes.tab2),
-            id!(modes.tab3),
+            // id!(modes.tab2),
+            // id!(modes.tab3),
         ]).selected_to_visible(cx, &ui, &actions, &[
             id!(application_pages.tab1_frame),
-            id!(application_pages.tab2_frame),
-            id!(application_pages.tab3_frame),
+            // id!(application_pages.tab2_frame),
+            // id!(application_pages.tab3_frame),
         ]);
         
         
@@ -1455,6 +1506,29 @@ impl App {
             };
         });
         
+        let piano = ui.get_piano(id!(piano));
+        
+        while let Some((_, data)) = self.midi_input.receive() {
+            self.audio_graph.send_midi_data(data);
+            if let Some(note) = data.decode().on_note() {
+                piano.set_note(cx, note.is_on, note.note_number)
+            }
+        }
+        
+        for note in piano.notes_played(&actions) {
+            self.audio_graph.send_midi_data(MidiNote {
+                channel: 0,
+                is_on: note.is_on,
+                note_number: note.note_number,
+                velocity: note.velocity
+            }.into());
+        }
+        
+        if ui.get_button(id!(panic)).clicked(&actions) {
+            cx.midi_reset();
+            self.audio_graph.all_notes_off();
+        }
+
         let sequencer = ui.get_sequencer(id!(sequencer));
         // lets fetch and update the tick.
         
@@ -1468,6 +1542,12 @@ impl App {
         
         if ui.get_button(id!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx, &mut db);
+        }
+
+        self.data_bind(cx, &mut db, &actions);
+        if let Some(nodes) = db.from_widgets() {
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+            ironfish.settings.apply_over(cx, &nodes);
         }
         
     }
