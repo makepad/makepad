@@ -10,6 +10,7 @@ pub const GLX_RED_SIZE: u32 = 8;
 pub const GLX_GREEN_SIZE: u32 = 9;
 pub const GLX_BLUE_SIZE: u32 = 10;
 pub const GLX_ALPHA_SIZE: u32 = 11;
+pub const GLX_DEPTH_SIZE: u32 = 12;
 pub const None: u32 = 0;
 pub const True: u32 = 1;
 pub const False: u32 = 0;

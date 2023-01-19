@@ -82,7 +82,7 @@ impl View {
     }
     
     pub fn begin_overlay(&mut self, cx: &mut Cx2d) {
-        let pass_id = cx.pass_id.expect("No pass found in begin_overlay");
+        let pass_id = cx.pass_stack.last().unwrap().pass_id;
         let redraw_id = cx.cx.redraw_id;
         
         cx.draw_lists[self.draw_list.id()].pass_id = Some(pass_id);
@@ -117,7 +117,7 @@ impl View {
     fn begin_maybe(&mut self, cx: &mut Cx2d, always_redraw: bool) -> ViewRedrawing {
         
         // check if we have a pass id parent
-        let pass_id = cx.pass_id.expect("No pass found when begin_view");
+        let pass_id = cx.pass_stack.last().unwrap().pass_id;
         let redraw_id = cx.cx.redraw_id;
         
         cx.draw_lists[self.draw_list.id()].pass_id = Some(pass_id);
@@ -126,17 +126,22 @@ impl View {
         
         let view_will_redraw = cx.view_will_redraw(self) || always_redraw;
         
-        if cx.passes[pass_id].main_draw_list_id.is_none() {
+        let mut is_main_draw_list = if cx.passes[pass_id].main_draw_list_id.is_none() {
             cx.passes[pass_id].main_draw_list_id = Some(self.draw_list.id());
+            true
         }
+        else{
+            false
+        };
         
         // find the parent draw list id
         if let Some(parent_id) = codeflow_parent_id {
-            let parent = &mut cx.cx.draw_lists[parent_id];
-            parent.append_sub_list(redraw_id, self.draw_list.id());
-            // here we could chain the matrix...
-            
-            cx.nav_list_item_push(parent_id, NavItem::Child(self.draw_list.id()));
+            if !is_main_draw_list{
+                let parent = &mut cx.cx.draw_lists[parent_id];
+                parent.append_sub_list(redraw_id, self.draw_list.id());
+                
+                cx.nav_list_item_push(parent_id, NavItem::Child(self.draw_list.id()));
+            }
         }
         
         // set nesting draw list id for incremental repaint scanning
@@ -148,9 +153,9 @@ impl View {
             let w = Size::Fixed(cx.cx.draw_lists[self.draw_list.id()].rect.size.x);
             let h = Size::Fixed(cx.cx.draw_lists[self.draw_list.id()].rect.size.y);
             let walk = Walk {abs_pos: None, width: w, height: h, margin: walk.margin};
-            let pos = cx.peek_walk_pos(walk);*/
+            //let pos = cx.peek_walk_pos(walk);
             //if pos == cx.cx.draw_lists[self.draw_list.id()].rect.pos {
-            //    cx.walk_turtle(walk);
+             cx.walk_turtle(walk);*/
             return ViewRedrawing::no();
             //}
         }
