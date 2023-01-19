@@ -9,8 +9,8 @@ use {
 #[live_ignore]
 pub struct Layout {
     pub scroll: DVec2,
-    pub clip_x: bool,
-    pub clip_y: bool,
+    #[live(true)] pub clip_x: bool,
+    #[live(true)] pub clip_y: bool,
     pub padding: Padding,
     pub align: Align,
     pub flow: Flow,
@@ -25,7 +25,7 @@ impl Default for Layout{
             clip_y: true,
             padding: Padding::default(),
             align: Align{x:0.0,y:0.0},
-            flow: Flow::Down,
+            flow: Flow::Right,
             spacing: 0.0
         }
     }
@@ -480,13 +480,14 @@ impl<'a> Cx2d<'a> {
     }
     
     fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize) {
+        let current_dpi_factor = self.current_dpi_factor();
         let dx = if dx.is_nan() {0.0}else {dx};
         let dy = if dy.is_nan() {0.0}else {dy};
         if dx == 0.0 && dy == 0.0 {
             return
         }
-        let dx = (dx * self.current_dpi_factor).floor() / self.current_dpi_factor;
-        let dy = (dy * self.current_dpi_factor).floor() / self.current_dpi_factor;
+        let dx = (dx * current_dpi_factor).floor() / current_dpi_factor;
+        let dy = (dy * current_dpi_factor).floor() / current_dpi_factor;
         let d = dvec2(dx, dy);
         for i in align_start..align_end {
             let align_item = &self.align_list[i];

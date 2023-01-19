@@ -27,7 +27,7 @@ live_design!{
         }
     }}
     
-    Rect = <Frame> {show_bg: true,draw_bg: {
+    Rect = <Frame> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -56,7 +56,7 @@ live_design!{
         }
     }}
     
-    Box = <Frame> {show_bg: true,draw_bg: {
+    Box = <Frame> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -87,7 +87,7 @@ live_design!{
         }
     }}
     
-    BoxX = <Frame> {show_bg: true,draw_bg: {
+    BoxX = <Frame> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -119,7 +119,7 @@ live_design!{
         }
     }}
     
-    BoxY = <Frame> {show_bg: true,draw_bg: {
+    BoxY = <Frame> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -151,7 +151,7 @@ live_design!{
         }
     }}
     
-    BoxAll = <Frame> {show_bg: true,draw_bg: {
+    BoxAll = <Frame> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -185,7 +185,7 @@ live_design!{
         }
     }}
     
-    Circle = <Frame> {show_bg: true,draw_bg: {
+    Circle = <Frame> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -226,7 +226,7 @@ live_design!{
         }
     }}
     
-    Hexagon = <Frame> {show_bg: true,draw_bg: {
+    Hexagon = <Frame> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
         instance inset: vec4(0.0, 0.0, 0.0, 0.0)
@@ -267,7 +267,7 @@ live_design!{
         }
     }}
     
-    GradientX = <Frame> {show_bg: true,draw_bg: {
+    GradientX = <Frame> {show_bg: true, draw_bg: {
         instance color2: #f00
         fn get_color(self) -> vec4 {
             return mix(self.color, self.color2, self.pos.x)
@@ -278,7 +278,7 @@ live_design!{
         }
     }}
     
-    GradientY = <Frame> {show_bg: true,draw_bg: {
+    GradientY = <Frame> {show_bg: true, draw_bg: {
         instance color2: #f00
         fn get_color(self) -> vec4 {
             return mix(self.color, self.color2, self.pos.y)
@@ -289,7 +289,7 @@ live_design!{
         }
     }}
     
-    Image = <Frame> {show_bg: true,draw_bg: {
+    Image = <Frame> {show_bg: true, draw_bg: {
         texture image: texture2d
         instance image_scale: vec2(1.0, 1.0)
         instance image_pan: vec2(0.0, 0.0)
@@ -326,6 +326,7 @@ pub struct Frame { // draw info per UI element
     
     image_texture: Texture,
     
+    use_cache: bool,
     has_view: bool,
     #[live(true)] visible: bool,
     user_draw: bool,
@@ -340,12 +341,18 @@ pub struct Frame { // draw info per UI element
     #[live(false)] design_mode: bool,
     #[rust] area: Area,
     #[rust] pub view: Option<View>,
-    
+    #[rust] cache: Option<FrameTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] templates: ComponentMap<LiveId, (LivePtr, usize)>,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>
+}
+
+struct FrameTextureCache {
+    pass: Pass,
+    depth_texture: Texture,
+    color_texture: Texture,
 }
 
 impl LiveHook for Frame {
@@ -493,7 +500,12 @@ impl Widget for Frame {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
-            scroll_bars.handle_main_event(cx, event, &mut | _, _ | {});
+            let mut redraw = false;
+            scroll_bars.handle_main_event(cx, event, &mut | _, _ | {
+                // lets invalidate all children
+                redraw = true;
+            });
+            cx.redraw_area_and_children(self.area);
         }
         
         for id in &self.draw_order {
@@ -687,7 +699,7 @@ impl Frame {
         self.draw_walk(cx, self.get_walk())
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if !self.visible {
             return WidgetDraw::done()
         }
@@ -696,11 +708,41 @@ impl Frame {
             self.defer_walks.clear();
             
             if self.has_view {
+                // ok so.. how do we render this to texture
+                if self.use_cache {
+                    if !cx.view_will_redraw(self.view.as_ref().unwrap()) {
+                        // bail but do emit a drawquad.
+                        return WidgetDraw::done()
+                    }
+                    // lets start a pass
+                    if self.cache.is_none() {
+                        self.cache = Some(FrameTextureCache {
+                            pass: Pass::new(cx),
+                            depth_texture: Texture::new(cx),
+                            color_texture: Texture::new(cx)
+                        });
+                        let cache = self.cache.as_mut().unwrap();
+                        cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
+                        cache.pass.add_color_texture(cx, &cache.color_texture, PassClearColor::InitWith(vec4(0.0, 0.0, 0.0, 0.0)));
+                    }
+                    let cache = self.cache.as_mut().unwrap();
+                    cx.begin_pass(&cache.pass);
+                }
+                
                 if self.view.as_mut().unwrap().begin(cx).is_not_redrawing() {
+                    // we need to just walk the turtle here.
+                    let rect = self.area.get_rect(cx);
+                    let walk = Walk {
+                        abs_pos: None,
+                        width: Size::Fixed(rect.size.x),
+                        height: Size::Fixed(rect.size.x),
+                        margin: walk.margin
+                    };
+                    cx.walk_turtle(walk);
                     return WidgetDraw::done()
                 };
-                walk = Walk::default();
             }
+            
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
             let scroll = if let Some(scroll_bars) = &mut self.scroll_bars_obj {
@@ -712,14 +754,15 @@ impl Frame {
             };
             
             if self.show_bg {
-                //if self.draw_bg.fill == Fill::Image {
-                //    self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
-                // }
+                if self.image.as_ref().len() > 0{
+                    self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
+                 }
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
             }
             else {
                 cx.begin_turtle(walk, self.layout.with_scroll(scroll));
             }
+            
             
             if self.user_draw {
                 return WidgetDraw::not_done(WidgetRef::empty())
@@ -774,6 +817,11 @@ impl Frame {
                 
                 if self.has_view {
                     self.view.as_mut().unwrap().end(cx);
+                    if self.use_cache {
+                        let cache = self.cache.as_mut().unwrap();
+                        let rect = self.area.get_rect(cx);
+                        cx.end_pass_with_size(&cache.pass, rect.size);
+                    }
                 }
                 self.draw_state.end();
                 break;

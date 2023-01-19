@@ -1191,10 +1191,11 @@ live_design!{
                 
                 // COLUMN 1
                 <ScrollY> {
-                    layout: {flow: Down, clip_y: true, clip_x: true, padding: {right: (SPACING_BASE_PADDING * 2)}, spacing: (SPACING_PANELS)}
+                  
+                    layout: {flow: Down, padding: {right: (SPACING_BASE_PADDING * 2)}, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: 350, margin: {right: (SPACING_BASE_PADDING * -1.0)}}
                     
-                    oscillators = <FishPanelSoundSources> {}
+                    oscillators = <FishPanelSoundSources> {  has_view:true,use_cache:true}
                     envelopes = <FishPanelEnvelopes> {}
                     <FishPanelFilter> {}
                     effects = <FishPanelEffects> {}
