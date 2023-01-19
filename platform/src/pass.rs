@@ -122,6 +122,7 @@ impl LiveApply for Pass {
             }
             match nodes[index].id {
                 live_id!(clear_color) => cx.passes[self.pass_id()].clear_color = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                live_id!(dont_clear) => cx.passes[self.pass_id()].dont_clear = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 _=> {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
@@ -240,6 +241,7 @@ pub struct CxPass {
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<TextureId>,
     pub clear_depth: PassClearDepth,
+    pub dont_clear: bool,
     pub depth_init: f64,
     pub clear_color: Vec4,
     pub override_dpi_factor: Option<f64>,
@@ -256,6 +258,7 @@ impl Default for CxPass {
     fn default() -> Self {
         CxPass {
             debug: false,
+            dont_clear: false,
             matrix_mode: PassMatrixMode::Ortho,
             zbias_step: 0.001,
             pass_uniforms: PassUniforms::default(),
