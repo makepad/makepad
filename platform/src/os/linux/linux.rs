@@ -99,6 +99,7 @@ impl Cx {
                 if let Some(index) = opengl_windows.iter().position( | w | w.window_id == window_id) {
                     opengl_windows.remove(index);
                     if opengl_windows.len() == 0 {
+                        xlib_app.terminate_event_loop();
                         return EventFlow::Exit
                     }
                 }
