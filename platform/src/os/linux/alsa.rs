@@ -56,6 +56,7 @@ impl AlsaAccess {
             unsafe {
                 loop {
                     AlsaError::from("snd_card_next", snd_card_next(&mut card_num)) ?;
+                    println!("ALSA CARD ID {}", card_num);
                     if card_num <0 {
                         break;
                     }
@@ -74,6 +75,7 @@ impl AlsaAccess {
                     
                     let mut index = 0;
                     while *hints.offset(index) != std::ptr::null_mut(){
+                        println!("ALSA HINT ID {}", index);
                         let hint_ptr = *hints.offset(index);
                         let name_str = from_alloc_string(snd_device_name_get_hint(hint_ptr, "NAME\0".as_ptr())).unwrap_or("".into());
                         let desc_str = from_alloc_string(snd_device_name_get_hint(hint_ptr, "DESC\0".as_ptr())).unwrap_or("".into()).replace("\n"," ");

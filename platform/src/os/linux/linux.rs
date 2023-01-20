@@ -10,7 +10,6 @@ use {
             WebSocketAutoReconnect,
             Event,
         },
-        thread::Signal,
         pass::CxPassParent,
         cx::{Cx, OsType, },
         gpu_info::GpuPerformance,
