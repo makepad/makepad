@@ -108,6 +108,8 @@ live_design!{
             }
         },
         layout: {
+            clip_x: false,
+            clip_y: false,
             padding: {left:10,top:11, right:10, bottom:10}
             align: {y: 0.}
         },

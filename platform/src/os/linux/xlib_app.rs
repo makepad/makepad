@@ -752,8 +752,8 @@ impl XlibApp {
                 
                 MouseCursor::Default => self.load_first_cursor(&[b"left_ptr\0"]),
                 MouseCursor::Crosshair => self.load_first_cursor(&[b"crosshair"]),
-                MouseCursor::Hand => self.load_first_cursor(&[b"hand2\0", b"hand1\0"]),
-                MouseCursor::Arrow => self.load_first_cursor(&[b"arrow\0"]),
+                MouseCursor::Hand => self.load_first_cursor(&[b"left_ptr\0", b"hand1\0"]),
+                MouseCursor::Arrow => self.load_first_cursor(&[b"left_ptr\0\0"]),
                 MouseCursor::Move => self.load_first_cursor(&[b"move\0"]),
                 MouseCursor::NotAllowed => self.load_first_cursor(&[b"crossed_circle\0"]),
                 MouseCursor::Text => self.load_first_cursor(&[b"text\0", b"xterm\0"]),
