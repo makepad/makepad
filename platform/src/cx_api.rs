@@ -216,12 +216,18 @@ impl Cx {
         }
     }
     
-    pub fn get_pass_rect(&self, pass_id: PassId) -> Option<Rect> {
+    pub fn get_pass_rect(&self, pass_id: PassId, dpi:f64) -> Option<Rect> {
         match self.passes[pass_id].pass_rect {
-            Some(CxPassRect::Area(area)) => Some(area.get_rect(self)),
-            Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size}),
+            Some(CxPassRect::Area(area)) => {
+                let rect = area.get_rect(self)
+                Some(Rect{
+                    pos:rect.pos,
+                    size: (rect.size / dpi).floor() * dpi
+                }),
+            }
+            Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), (size / dpi).floor() * dpi}),
             None => None
-        }
+        } 
     }
     
     pub fn repaint_pass(&mut self, pass_id: PassId) {
