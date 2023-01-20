@@ -1070,6 +1070,14 @@ impl CxOsTexture {
             self.width = width;
             self.height = height;
             
+            if self.gl_texture.is_none() {
+                unsafe {
+                    let mut gl_texture = std::mem::MaybeUninit::uninit();
+                    gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                    self.gl_texture = Some(gl_texture.assume_init());
+                }
+            }
+            /*
             if let Some(gl_texture) = self.gl_texture.take() {
                 gl_sys::DeleteTextures(1, &gl_texture);
             }
@@ -1077,17 +1085,17 @@ impl CxOsTexture {
             if let Some(gl_renderbuffer) = self.gl_renderbuffer.take() {
                 gl_sys::DeleteTextures(1, &gl_renderbuffer);
             }
-             
+             */
             if !is_depth {
                 match desc.format {
                     TextureFormat::Default | TextureFormat::RenderBGRA => {
                         
-                        let mut gl_texture = std::mem::MaybeUninit::uninit();
-                        gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
-                        let gl_texture = gl_texture.assume_init();
-                        gl_sys::BindTexture(gl_sys::TEXTURE_2D, gl_texture);
+                        //let mut gl_texture = std::mem::MaybeUninit::uninit();
+                       // gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                       // let gl_texture = gl_texture.assume_init();
+                        gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
                         
-                        self.gl_texture = Some(gl_texture);
+                        //self.gl_texture = Some(gl_texture);
                         
                         gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
                         gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
@@ -1102,6 +1110,7 @@ impl CxOsTexture {
                             gl_sys::UNSIGNED_BYTE,
                             ptr::null()
                         );
+                        gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
                     },
                     _ => {
                         println!("update_platform_render_target unsupported texture format");
