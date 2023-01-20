@@ -6,15 +6,63 @@ use {
         audio::*,
         midi::*,
         video::*,
+        thread::Signal,
+        event::Event,
         media_api::CxMediaApi,
         os::mswindows::winrt_midi::*,
         os::mswindows::wasapi::*,
         os::mswindows::media_foundation::*,
-        os::mswindows::CxOs,
     }
 };
 
-impl CxOs {
+#[derive(Default)]
+pub struct CxWindowsMedia{
+    pub (crate) winrt_midi: Option<Arc<Mutex<WinRTMidiAccess >> >,
+    pub (crate) wasapi: Option<Arc<Mutex<WasapiAccess >> >,
+    pub (crate) media_foundation: Option<Arc<Mutex<MediaFoundationAccess >> >,
+    pub (crate) wasapi_change: Signal,
+    pub (crate) media_foundation_change: Signal,
+    pub (crate) winrt_midi_change: Signal,
+}
+
+impl Cx {
+    pub (crate) fn handle_media_signals(&mut self) {
+        if self.os.media.winrt_midi_change.check_and_clear(){
+            let descs = {
+                let winrt_midi = self.os.media.winrt_midi();
+                let winrt_midi = winrt_midi.lock().unwrap();
+                winrt_midi.get_descs()
+            };
+            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
+                descs,
+            }));
+        }
+        if self.os.media.wasapi_change.check_and_clear(){
+            let descs = {
+                let wasapi = self.os.media.wasapi();
+                let mut wasapi = wasapi.lock().unwrap();
+                wasapi.update_device_list();
+                wasapi.get_descs()
+            };
+            self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
+                descs
+            }));
+        }
+        if self.os.media.media_foundation_change.check_and_clear(){
+            let descs = {
+                let media_foundation = self.os.media.media_foundation();
+                let mut media_foundation = media_foundation.lock().unwrap();
+                media_foundation.update_inputs_list();
+                media_foundation.get_descs()
+            };
+            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
+                descs
+            }));
+        }
+    }
+}
+
+impl CxWindowsMedia {
     
     pub fn winrt_midi(&mut self) -> Arc<Mutex<WinRTMidiAccess >> {
         if self.winrt_midi.is_none() {
@@ -41,49 +89,49 @@ impl CxOs {
 impl CxMediaApi for Cx {
     
     fn midi_input(&mut self) -> MidiInput {
-        self.os.winrt_midi().lock().unwrap().create_midi_input()
+        self.os.media.winrt_midi().lock().unwrap().create_midi_input()
     }
     
     fn midi_output(&mut self)->MidiOutput{
-        MidiOutput(Some(OsMidiOutput(self.os.winrt_midi())))
+        MidiOutput(Some(OsMidiOutput(self.os.media.winrt_midi())))
     }
 
     fn midi_reset(&mut self){
-        self.os.winrt_midi().lock().unwrap().midi_reset();
+        self.os.media.winrt_midi().lock().unwrap().midi_reset();
     }
 
     fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
-        self.os.winrt_midi().lock().unwrap().use_midi_inputs(ports);
+        self.os.media.winrt_midi().lock().unwrap().use_midi_inputs(ports);
     }
     
     fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
-        self.os.winrt_midi().lock().unwrap().use_midi_outputs(ports);
+        self.os.media.winrt_midi().lock().unwrap().use_midi_outputs(ports);
     }
 
     fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
-        self.os.wasapi().lock().unwrap().use_audio_inputs(devices);
+        self.os.media.wasapi().lock().unwrap().use_audio_inputs(devices);
     }
     
     fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
-        self.os.wasapi().lock().unwrap().use_audio_outputs(devices);
+        self.os.media.wasapi().lock().unwrap().use_audio_outputs(devices);
     }
     
     fn audio_output<F>(&mut self, index:usize, f: F) where F: FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static {
-        *self.os.wasapi().lock().unwrap().audio_output_cb[index].lock().unwrap() = Some(Box::new(f));
+        *self.os.media.wasapi().lock().unwrap().audio_output_cb[index].lock().unwrap() = Some(Box::new(f));
     }
     
     fn audio_input<F>(&mut self, index:usize, f: F)
     where F: FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static {
-        *self.os.wasapi().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
+        *self.os.media.wasapi().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
     
     fn video_input<F>(&mut self, index:usize, f: F)
     where F: FnMut(VideoFrame) + Send + 'static {
-        *self.os.media_foundation().lock().unwrap().video_input_cb[index].lock().unwrap() = Some(Box::new(f));
+        *self.os.media.media_foundation().lock().unwrap().video_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
 
     fn use_video_input(&mut self, inputs:&[(VideoInputId, VideoFormatId)]){
-        self.os.media_foundation().lock().unwrap().use_video_input(inputs);
+        self.os.media.media_foundation().lock().unwrap().use_video_input(inputs);
     }
 
 }
