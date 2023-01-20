@@ -847,7 +847,9 @@ impl Frame {
                 };
                 
                 if self.has_view {
-                    let rect = self.area.get_rect(cx);
+                    let mut rect = self.area.get_rect(cx);
+                    let dpi = cx.get_current_dpi();
+                    rect.size = (rect.size / dpi).floor()*dpi;
                     self.view_size = Some(rect.size);
                     self.view.as_mut().unwrap().end(cx);
                     if self.use_cache {
