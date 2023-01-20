@@ -23,6 +23,7 @@ pub use libc_64::*;
 
 type c_int =  std::os::raw::c_int;
 type c_ulong = std::os::raw::c_ulong;
+type c_void = std::os::raw::c_void;
 
 pub const FD_SETSIZE: usize = 1024;
 
@@ -32,6 +33,7 @@ pub struct fd_set {
 }
 
 extern "C"{
+    pub fn free(arg1: *mut c_void);
     pub fn pipe(fds: *mut c_int) -> c_int;
     pub fn select(
         nfds: c_int,

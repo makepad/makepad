@@ -297,15 +297,15 @@ impl Cx {
             inherit_dpi_factor
         };
         
-        let pass_rect = self.get_pass_rect(pass_id).unwrap();
+        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
 
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
         let viewport = D3D11_VIEWPORT {
-            Width: (pass_size.x * dpi_factor) as f32,
-            Height: (pass_size.y * dpi_factor) as f32,
+            Width: (pass_rect.size.x * dpi_factor) as f32,
+            Height: (pass_rect.size.y * dpi_factor) as f32,
             MinDepth: 0.,
             MaxDepth: 1.,
             TopLeftX: 0.0,

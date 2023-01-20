@@ -1,7 +1,6 @@
 use {
     std::{
         rc::Rc,
-        sync::{Arc, Mutex},
         cell::{RefCell},
     },
     crate::{
@@ -11,18 +10,13 @@ use {
         thread::Signal,
         os::{
             mswindows::{
-                winrt_midi::*,
-                media_foundation::*,
+                win32_media::CxWindowsMedia,
                 win32_event::*,
-                wasapi::WasapiAccess,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
             },
             cx_desktop::EventFlow,
         },
-        audio::AudioDevicesEvent,
-        midi::MidiPortsEvent,
-        video::VideoInputsEvent,
         pass::{CxPassParent},
         cx_api::{CxOsApi, CxOsOp},
     }
@@ -325,50 +319,7 @@ impl CxOsApi for Cx {
     }
 }
 
-
-impl Cx {
-    pub (crate) fn handle_media_signals(&mut self) {
-        if self.os.winrt_midi_change.check_and_clear(){
-            let descs = {
-                let winrt_midi = self.os.winrt_midi();
-                let winrt_midi = winrt_midi.lock().unwrap();
-                winrt_midi.get_descs()
-            };
-            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
-                descs,
-            }));
-        }
-        if self.os.wasapi_change.check_and_clear(){
-            let descs = {
-                let wasapi = self.os.wasapi();
-                let mut wasapi = wasapi.lock().unwrap();
-                wasapi.update_device_list();
-                wasapi.get_descs()
-            };
-            self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
-                descs
-            }));
-        }
-        if self.os.media_foundation_change.check_and_clear(){
-            let descs = {
-                let media_foundation = self.os.media_foundation();
-                let mut media_foundation = media_foundation.lock().unwrap();
-                media_foundation.update_inputs_list();
-                media_foundation.get_descs()
-            };
-            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
-                descs
-            }));
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct CxOs {
-    pub (crate) winrt_midi: Option<Arc<Mutex<WinRTMidiAccess >> >,
-    pub (crate) wasapi: Option<Arc<Mutex<WasapiAccess >> >,
-    pub (crate) media_foundation: Option<Arc<Mutex<MediaFoundationAccess >> >,
-    pub (crate) wasapi_change: Signal,
-    pub (crate) media_foundation_change: Signal,
-    pub (crate) winrt_midi_change: Signal,
+    pub (crate) media: CxWindowsMedia,
 }
