@@ -225,14 +225,6 @@ impl Cx {
     }
     
     pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f64)->Option<DVec2> {
-        let pass_rect = self.get_pass_rect(pass_id).unwrap();
-        //println!("{:?}", pass_rect);
-        if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5{
-            return None
-        }
-        
-        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
-        self.passes[pass_id].paint_dirty = false;
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
@@ -240,8 +232,18 @@ impl Cx {
         else {
             inherit_dpi_factor
         };
+        let mut rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+        
+        //println!("{:?}", pass_rect);
+        if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5{
+            return None
+        }
+        
+        self.passes[pass_id].set_matrix(rect.pos, rect.size);
+        self.passes[pass_id].paint_dirty = false;
+        
         self.passes[pass_id].set_dpi_factor(dpi_factor);
-        Some(pass_rect.size)
+        Some(rect.size)
     }
     
     pub fn draw_pass_to_window(
