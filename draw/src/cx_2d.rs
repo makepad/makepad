@@ -151,7 +151,7 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn current_pass_size(&self) -> DVec2 {
-        self.cx.get_pass_rect(self.pass_stack.last().unwrap().pass_id).unwrap().size
+        self.cx.get_pass_rect(self.pass_stack.last().unwrap().pass_id, self.current_dpi_factor()).unwrap().size
     }
     
     pub fn view_will_redraw(&self, view: &View) -> bool {
