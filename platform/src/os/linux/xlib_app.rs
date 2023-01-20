@@ -36,6 +36,7 @@ pub fn init_xlib_app_global(event_callback: Box<dyn FnMut(&mut XlibApp, XlibEven
 
 pub struct XlibApp {
     pub display: *mut x11_sys::Display,
+    event_loop_running: bool,
     pub xim: x11_sys::XIM,
     pub clipboard: String,
     pub display_fd: c_int,
@@ -72,6 +73,7 @@ impl XlibApp {
             libc_sys::pipe(signal_fds.as_mut_ptr());
             x11_sys::XrmInitialize();
             XlibApp {
+                event_loop_running: true,
                 event_callback: Some(event_callback),
                 atoms: XlibAtoms::new(display),
                 xim,
@@ -205,7 +207,6 @@ impl XlibApp {
                     x11_sys::XSendEvent(self.display, request.requestor, 1, 0, &mut response as *mut _ as *mut x11_sys::XEvent);
                 },
                 x11_sys::DestroyNotify => { // our window got destroyed
-                    
                     let destroy_window = event.xdestroywindow;
                     if let Some(window_ptr) = self.window_map.get(&destroy_window.window) {
                         let window = &mut (**window_ptr);
@@ -555,7 +556,7 @@ impl XlibApp {
             
             self.do_callback(XlibEvent::Paint);
             
-            loop {
+            while self.event_loop_running {
                 match self.event_flow {
                     EventFlow::Exit => {
                         break;
@@ -630,12 +631,17 @@ impl XlibApp {
         if let Some(mut callback) = self.event_callback.take() {
             self.event_flow = callback(self, event);
             if let EventFlow::Exit = self.event_flow {
-                unsafe {x11_sys::XCloseIM(self.xim)};
-                unsafe {x11_sys::XCloseDisplay(self.display)};
-                self.display = ptr::null_mut();
+                self.terminate_event_loop();
             }
             self.event_callback = Some(callback);
         }
+    }
+    
+    pub fn terminate_event_loop(&mut self){
+        self.event_loop_running = false;
+        unsafe {x11_sys::XCloseIM(self.xim)};
+        unsafe {x11_sys::XCloseDisplay(self.display)};
+        self.display = ptr::null_mut();
     }
     
     pub fn start_timer(&mut self, id: u64, timeout: f64, repeats: bool) {
