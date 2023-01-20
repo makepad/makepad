@@ -17,7 +17,6 @@ use {
 impl Cx {
     pub (crate) fn handle_media_signals(&mut self) {
         if self.os.media.alsa_change.check_and_clear(){
-            println!("ALSA C HANGE");
             let descs = {
                 let alsa = self.os.media.alsa();
                 let mut alsa = alsa.lock().unwrap();
