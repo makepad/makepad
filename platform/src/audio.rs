@@ -33,10 +33,10 @@ impl std::fmt::Display for AudioDeviceDesc {
             write!(f, "[")?;
         }
         if self.device_type.is_input(){
-            write!(f, " Input]")?;
+            write!(f, "Input]")?;
         }
         else{
-            write!(f, " Output]")?;
+            write!(f, "Output]")?;
         }
         write!(f, " {}", self.name)?;
         Ok(())
