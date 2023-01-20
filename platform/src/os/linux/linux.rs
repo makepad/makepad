@@ -15,9 +15,12 @@ use {
         cx::{Cx, OsType, },
         gpu_info::GpuPerformance,
         os::cx_desktop::EventFlow,
-        os::linux::opengl::{OpenglCx,OpenglWindow},
-        os::linux::xlib_event::*,
-        os::linux::xlib_app::*,
+        os::linux::{
+            opengl::{OpenglCx,OpenglWindow},
+            xlib_event::*,
+            xlib_app::*,
+            linux_media::CxLinuxMedia
+        }
     }
 };
 
@@ -170,10 +173,8 @@ impl Cx {
                 self.call_event_handler(&Event::Timer(e))
             }
             XlibEvent::Signal => {
-                if Signal::check_and_clear_ui_signal() {
-                    self.handle_media_signals();
-                    self.call_event_handler(&Event::Signal);
-                }
+                self.handle_media_signals();
+                self.call_event_handler(&Event::Signal);
             }
         }
         
@@ -311,14 +312,8 @@ impl CxOsApi for Cx {
     }
 }
 
-
-impl Cx {
-    pub (crate) fn handle_media_signals(&mut self) {
-        
-    }
-}
-
 #[derive(Default)]
 pub struct CxOs {
+    pub (crate) media: CxLinuxMedia,
 }
 

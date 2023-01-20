@@ -4,18 +4,68 @@ use {
     crate::{
         cx::Cx,
         audio::*,
+        event::Event,
         video::*,
         midi::*,
+        thread::Signal,
         media_api::CxMediaApi,
         os::apple::core_midi::*,
-        os::apple::CxOs,
         os::apple::audio_unit::AudioUnitAccess,
         os::apple::av_capture::AvCaptureAccess,
     }
 };
 
 
-impl CxOs{
+impl Cx{
+    pub(crate) fn handle_media_signals(&mut self){
+        if self.os.media.core_midi_change.check_and_clear(){
+            let descs = {
+                let core_midi = self.os.media.core_midi();
+                let mut core_midi = core_midi.lock().unwrap();
+                core_midi.update_port_list();
+                core_midi.get_descs()
+            };
+            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent{
+                descs,
+            }));
+        }
+        if self.os.media.core_audio_change.check_and_clear(){
+            let descs = {
+                let audio_unit = self.os.media.audio_unit();
+                let mut audio_unit = audio_unit.lock().unwrap();
+                audio_unit.update_device_list().unwrap();
+                audio_unit.get_descs()
+            };
+            self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
+                descs
+            }));
+        }
+        if self.os.media.av_capture_change.check_and_clear(){
+            let descs = {
+                let av_capture = self.os.media.av_capture();
+                let mut av_capture = av_capture.lock().unwrap();
+                av_capture.update_input_list();
+                av_capture.get_descs()
+            };
+            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
+                descs
+            }));
+        }
+    }
+    
+}
+
+#[derive(Default)]
+pub struct CxAppleMedia{
+    pub (crate) core_midi: Option<Arc<Mutex<CoreMidiAccess>>>,
+    pub (crate) audio_unit: Option<Arc<Mutex<AudioUnitAccess>>>,
+    pub (crate) av_capture: Option<Arc<Mutex<AvCaptureAccess>>>,
+    pub (crate) core_audio_change: Signal,
+    pub (crate) core_midi_change: Signal,
+    pub (crate) av_capture_change: Signal,
+}
+
+impl CxAppleMedia{
     pub fn audio_unit(&mut self)->Arc<Mutex<AudioUnitAccess>>{
         if self.audio_unit.is_none(){
             self.audio_unit = Some(AudioUnitAccess::new(self.core_audio_change.clone()));
@@ -43,49 +93,49 @@ impl CxOs{
 
 impl CxMediaApi for Cx {
     fn midi_input(&mut self) -> MidiInput {
-        self.os.core_midi().lock().unwrap().create_midi_input()
+        self.os.media.core_midi().lock().unwrap().create_midi_input()
     }
     
     fn midi_output(&mut self) -> MidiOutput {
-        MidiOutput(Some(OsMidiOutput(self.os.core_midi())))
+        MidiOutput(Some(OsMidiOutput(self.os.media.core_midi())))
     }
 
     fn midi_reset(&mut self) {
-        self.os.core_midi().lock().unwrap().midi_reset();
+        self.os.media.core_midi().lock().unwrap().midi_reset();
     }
     
     fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
-        self.os.core_midi().lock().unwrap().use_midi_inputs(ports);
+        self.os.media.core_midi().lock().unwrap().use_midi_inputs(ports);
     }
     
     fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
-        self.os.core_midi().lock().unwrap().use_midi_outputs(ports);
+        self.os.media.core_midi().lock().unwrap().use_midi_outputs(ports);
     }
     
     fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
-        self.os.audio_unit().lock().unwrap().use_audio_inputs(devices);
+        self.os.media.audio_unit().lock().unwrap().use_audio_inputs(devices);
     }
     
     fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
-        self.os.audio_unit().lock().unwrap().use_audio_outputs(devices);
+        self.os.media.audio_unit().lock().unwrap().use_audio_outputs(devices);
     }
     
     fn audio_output<F>(&mut self, index:usize, f: F) where F: FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static {
-        *self.os.audio_unit().lock().unwrap().audio_output_cb[index].lock().unwrap() = Some(Box::new(f));
+        *self.os.media.audio_unit().lock().unwrap().audio_output_cb[index].lock().unwrap() = Some(Box::new(f));
     }
     
     fn audio_input<F>(&mut self, index:usize, f: F)
     where F: FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static {
-        *self.os.audio_unit().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
+        *self.os.media.audio_unit().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
     
     fn video_input<F>(&mut self, index:usize, f: F)
     where F: FnMut(VideoFrame) + Send + 'static {
-        *self.os.av_capture().lock().unwrap().video_input_cb[index].lock().unwrap() = Some(Box::new(f));
+        *self.os.media.av_capture().lock().unwrap().video_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
 
     fn use_video_input(&mut self, inputs:&[(VideoInputId, VideoFormatId)]){
-        self.os.av_capture().lock().unwrap().use_video_input(inputs);
+        self.os.media.av_capture().lock().unwrap().use_video_input(inputs);
     }
 
 }

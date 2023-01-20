@@ -24,6 +24,26 @@ pub struct AudioDeviceDesc {
     pub name: String,
 }
 
+impl std::fmt::Display for AudioDeviceDesc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_default{
+            write!(f, "[Default ")?;
+        }
+        else{
+            write!(f, "[")?;
+        }
+        if self.device_type.is_input(){
+            write!(f, " Input]")?;
+        }
+        else{
+            write!(f, " Output]")?;
+        }
+        write!(f, " {}", self.name)?;
+        Ok(())
+    }
+}
+
+
 #[derive(Clone, Debug)]
 pub struct AudioDevicesEvent{
     pub descs: Vec<AudioDeviceDesc>,

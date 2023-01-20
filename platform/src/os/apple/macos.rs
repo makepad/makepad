@@ -1,7 +1,6 @@
 use {
     std::{
         rc::Rc,
-        sync::{Arc, Mutex},
         cell::{RefCell},
     },
     makepad_objc_sys::{
@@ -25,14 +24,9 @@ use {
                 get_cocoa_app_global,
                 init_cocoa_app_global
             },
-            av_capture::AvCaptureAccess,
-            core_midi::CoreMidiAccess,
-            audio_unit::AudioUnitAccess,
+            apple_media::CxAppleMedia,
             metal::{MetalCx, MetalWindow, DrawPassMode},
         },
-        audio::AudioDevicesEvent,
-        midi::MidiPortsEvent,
-        video::VideoInputsEvent,
         pass::{CxPassParent},
         thread::Signal,
         event::{
@@ -391,55 +385,11 @@ impl CxOsApi for Cx {
     }
 }
 
-impl Cx{
-    pub(crate) fn handle_media_signals(&mut self){
-        if self.os.core_midi_change.check_and_clear(){
-            let descs = {
-                let core_midi = self.os.core_midi();
-                let mut core_midi = core_midi.lock().unwrap();
-                core_midi.update_port_list();
-                core_midi.get_descs()
-            };
-            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent{
-                descs,
-            }));
-        }
-        if self.os.core_audio_change.check_and_clear(){
-            let descs = {
-                let audio_unit = self.os.audio_unit();
-                let mut audio_unit = audio_unit.lock().unwrap();
-                audio_unit.update_device_list().unwrap();
-                audio_unit.get_descs()
-            };
-            self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
-                descs
-            }));
-        }
-        if self.os.av_capture_change.check_and_clear(){
-            let descs = {
-                let av_capture = self.os.av_capture();
-                let mut av_capture = av_capture.lock().unwrap();
-                av_capture.update_input_list();
-                av_capture.get_descs()
-            };
-            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
-                descs
-            }));
-        }
-    }
-    
-}
-
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) keep_alive_counter: usize,
-    pub (crate) core_midi: Option<Arc<Mutex<CoreMidiAccess>>>,
-    pub (crate) audio_unit: Option<Arc<Mutex<AudioUnitAccess>>>,
-    pub (crate) av_capture: Option<Arc<Mutex<AvCaptureAccess>>>,
+    pub (crate) media: CxAppleMedia,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
-    pub (crate) core_audio_change: Signal,
-    pub (crate) core_midi_change: Signal,
-    pub (crate) av_capture_change: Signal,
 }
 
