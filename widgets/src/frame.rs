@@ -845,10 +845,10 @@ impl Frame {
                     scroll_bars.set_area(self.area);
                     scroll_bars.end_nav_area(cx);
                 };
-                
+                 
                 if self.has_view {
                     let mut rect = self.area.get_rect(cx);
-                    let dpi = cx.get_current_dpi();
+                    let dpi = cx.current_dpi_factor();
                     rect.size = (rect.size / dpi).floor()*dpi;
                     self.view_size = Some(rect.size);
                     self.view.as_mut().unwrap().end(cx);

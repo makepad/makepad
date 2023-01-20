@@ -16,7 +16,7 @@ pub mod types {
     pub type GLboolean = raw::c_uchar;
     pub type GLchar = raw::c_char;
     pub type GLubyte = raw::c_uchar;
-    pub type GLsizeiptr = isize;
+    pub type GLsizeiptr = isize; 
 }
 pub use types::*;
 
