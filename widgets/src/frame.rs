@@ -742,7 +742,10 @@ impl Frame {
                         if let Some(cache) = &self.cache{
                             self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
                             let walk = self.walk_from_previous_size(walk);
-                            self.draw_bg.draw_walk(cx, walk);
+                            let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
+                            let dpi = cx.current_dpi_factor();
+                            rect.size = (rect.size / dpi).floor()*dpi;
+                            self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
                             cx.set_pass_area(&cache.pass, self.area);
                         }
@@ -848,9 +851,9 @@ impl Frame {
                  
                 if self.has_view {
                     let mut rect = self.area.get_rect(cx);
+                    self.view_size = Some(rect.size);
                     let dpi = cx.current_dpi_factor();
                     rect.size = (rect.size / dpi).floor()*dpi;
-                    self.view_size = Some(rect.size);
                     self.view.as_mut().unwrap().end(cx);
                     if self.use_cache {
                         let cache = self.cache.as_mut().unwrap();
