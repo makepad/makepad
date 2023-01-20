@@ -56,7 +56,6 @@ impl AlsaAccess {
             unsafe {
                 loop {
                     AlsaError::from("snd_card_next", snd_card_next(&mut card_num)) ?;
-                    println!("ALSA CARD ID {}", card_num);
                     if card_num <0 {
                         break;
                     }
@@ -75,7 +74,6 @@ impl AlsaAccess {
                     
                     let mut index = 0;
                     while *hints.offset(index) != std::ptr::null_mut(){
-                        println!("ALSA HINT ID {}", index);
                         let hint_ptr = *hints.offset(index);
                         let name_str = from_alloc_string(snd_device_name_get_hint(hint_ptr, "NAME\0".as_ptr())).unwrap_or("".into());
                         let desc_str = from_alloc_string(snd_device_name_get_hint(hint_ptr, "DESC\0".as_ptr())).unwrap_or("".into()).replace("\n"," ");
@@ -84,7 +82,7 @@ impl AlsaAccess {
                         let desc = AudioDeviceDesc {
                             device_id,
                             device_type: AudioDeviceType::Input,
-                            is_default: name_str.starts_with("plughw:"),
+                            is_default: false,
                             channels: 2,
                             name: desc_str
                         };
@@ -111,7 +109,26 @@ impl AlsaAccess {
             Err(e) => {
                 println!("ALSA ERROR {}", e.0)
             }
-            Ok(devices) => {
+            Ok(mut devices) => {
+                // pick a single default device
+                if let Some(device) = devices.iter_mut().find(|v| v.desc.device_type.is_output() && v.name.starts_with("plughw:")){
+                    device.desc.is_default = true;
+                }
+                else if let Some(device) = devices.iter_mut().find(|v| v.desc.device_type.is_output() && v.name.starts_with("dmix:")){
+                    device.desc.is_default = true;
+                }
+                else if let Some(device) = devices.iter_mut().find(|v| v.desc.device_type.is_output()){
+                    device.desc.is_default = true;
+                }
+                if let Some(device) = devices.iter_mut().find(|v| v.desc.device_type.is_input() && v.name.starts_with("plughw:")){
+                    device.desc.is_default = true;
+                }
+                else if let Some(device) = devices.iter_mut().find(|v| v.desc.device_type.is_input() && v.name.starts_with("dmix:")){
+                    device.desc.is_default = true;
+                }
+                else if let Some(device) = devices.iter_mut().find(|v| v.desc.device_type.is_input()){
+                    device.desc.is_default = true;
+                }
                 self.devices = devices;
             }
         }
