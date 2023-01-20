@@ -290,17 +290,17 @@ impl Cx {
     
     pub fn setup_pass_render_targets(&mut self, pass_id: PassId, inherit_dpi_factor: f64, first_target: &Option<ID3D11RenderTargetView >, d3d11_cx: &D3d11Cx) {
         
-        let pass_size = self.passes[pass_id].pass_size;
-        
-        self.passes[pass_id].set_matrix(DVec2::default(), pass_size);
-        
-        self.passes[pass_id].paint_dirty = false;
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
         }
         else {
             inherit_dpi_factor
         };
+        
+        let pass_rect = self.get_pass_rect(pass_id).unwrap();
+        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
+        self.passes[pass_id].paint_dirty = false;
+
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
         let viewport = D3D11_VIEWPORT {
@@ -326,7 +326,7 @@ impl Cx {
         else {
             for color_texture in self.passes[pass_id].color_textures.iter() {
                 let cxtexture = &mut self.textures[color_texture.texture_id];
-                let is_initial = cxtexture.os.update_render_target(d3d11_cx, &cxtexture.desc, pass_size * dpi_factor);
+                let is_initial = cxtexture.os.update_render_target(d3d11_cx, &cxtexture.desc, pass_rect.size * dpi_factor);
                 let render_target = cxtexture.os.render_target_view.clone();
                 color_textures.push(render_target.clone().unwrap());
                 // possibly clear it
@@ -348,7 +348,7 @@ impl Cx {
         // attach/clear depth buffers, if any
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id];
-            let is_initial = cxtexture.os.update_depth_stencil(d3d11_cx, &cxtexture.desc, pass_size * dpi_factor);
+            let is_initial = cxtexture.os.update_depth_stencil(d3d11_cx, &cxtexture.desc, pass_rect.size * dpi_factor);
             match self.passes[pass_id].clear_depth {
                 PassClearDepth::InitWith(depth_clear) => {
                     if is_initial {
