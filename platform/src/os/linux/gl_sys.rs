@@ -53,6 +53,7 @@ pub const RGBA: types::GLenum = 0x1908;
 pub const UNSIGNED_BYTE: types::GLenum = 0x1401;
 pub const DEPTH_COMPONENT32F: types::GLenum = 0x8CAC;
 pub const STATIC_DRAW: types::GLenum = 0x88E4;
+pub const NEAREST: types::GLenum = 0x2600;
 
 #[inline] pub unsafe fn GenVertexArrays(n: types::GLsizei, arrays: *mut types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenVertexArrays.f)(n, arrays)}
 #[inline] pub unsafe fn BindVertexArray(array: types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::BindVertexArray.f)(array)}
