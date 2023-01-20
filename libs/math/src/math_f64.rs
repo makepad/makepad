@@ -148,9 +148,8 @@ impl DVec2 {
     }
     
     pub fn floor(self) -> DVec2 {
-        let nf = 1.0 - f;
         return DVec2 {
-            x: self.x.floor(),
+            x: self.x.floor(), 
             y: self.y.floor(),
         };
     }
