@@ -16,7 +16,7 @@ use {
         makepad_math::{Mat4, DVec2, Vec4},
         pass::{PassClearColor, PassClearDepth, PassId},
         draw_list::DrawListId,
-        draw_shader::{CxDrawShaderMapping,DrawShaderTextureInput},
+        draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput},
         event::*,
         os::linux::x11_sys,
         os::linux::glx_sys,
@@ -224,18 +224,18 @@ impl Cx {
         }
     }
     
-    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f64)->Option<DVec2> {
+    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f64) -> Option<DVec2> {
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
         }
         else {
             inherit_dpi_factor
-        }; 
-        let mut pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+        };
+        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         
         //println!("{:?}", pass_rect);
-        if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5{
+        if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
             return None
         }
         
@@ -283,7 +283,7 @@ impl Cx {
             PassClearDepth::ClearWith(depth) => depth
         };
         
-        if !self.passes[pass_id].dont_clear{
+        if !self.passes[pass_id].dont_clear {
             unsafe {
                 gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
                 gl_sys::ClearDepth(clear_depth as f64);
@@ -317,10 +317,10 @@ impl Cx {
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
-        let pass_size = if let Some(pz) = self.setup_render_pass(pass_id, dpi_factor){
+        let pass_size = if let Some(pz) = self.setup_render_pass(pass_id, dpi_factor) {
             pz
         }
-        else{
+        else {
             return
         };
         
@@ -448,7 +448,7 @@ impl Cx {
     
     pub fn opengl_compile_shaders(&mut self, opengl_cx: &OpenglCx) {
         
-        unsafe{glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);}
+        unsafe {glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);}
         
         for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
@@ -733,7 +733,7 @@ impl CxOsDrawShader {
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", pixel); 
+            {}\0", pixel);
         
         unsafe {
             
@@ -1070,29 +1070,15 @@ impl CxOsTexture {
             self.width = width;
             self.height = height;
             
-            if self.gl_texture.is_none() {
-                unsafe {
-                    let mut gl_texture = std::mem::MaybeUninit::uninit();
-                    gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
-                    self.gl_texture = Some(gl_texture.assume_init());
-                }
-            }
-            /*
-            if let Some(gl_texture) = self.gl_texture.take() {
-                gl_sys::DeleteTextures(1, &gl_texture);
-            }
-            
-            if let Some(gl_renderbuffer) = self.gl_renderbuffer.take() {
-                gl_sys::DeleteTextures(1, &gl_renderbuffer);
-            }
-             */
             if !is_depth {
                 match desc.format {
                     TextureFormat::Default | TextureFormat::RenderBGRA => {
+                        if self.gl_texture.is_none() {
+                            let mut gl_texture = std::mem::MaybeUninit::uninit();
+                            gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
+                            self.gl_texture = Some(gl_texture.assume_init());
+                        }
                         
-                        //let mut gl_texture = std::mem::MaybeUninit::uninit();
-                       // gl_sys::GenTextures(1, gl_texture.as_mut_ptr());
-                       // let gl_texture = gl_texture.assume_init();
                         gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
                         
                         //self.gl_texture = Some(gl_texture);
@@ -1122,10 +1108,14 @@ impl CxOsTexture {
                 match desc.format {
                     TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
                         
-                        let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
-                        gl_sys::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
-                        let gl_renderbuffer = gl_renderbuf.assume_init();
-                        gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, gl_renderbuffer);
+                        if self.gl_renderbuffer.is_none() {
+                            let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
+                            gl_sys::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
+                            let gl_renderbuffer = gl_renderbuf.assume_init();
+                            self.gl_renderbuffer = Some(gl_renderbuffer);
+                        }
+                        
+                        gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, self.gl_renderbuffer.unwrap());
                         gl_sys::RenderbufferStorage(
                             gl_sys::RENDERBUFFER,
                             gl_sys::DEPTH_COMPONENT32F,
@@ -1133,7 +1123,6 @@ impl CxOsTexture {
                             height as i32
                         );
                         gl_sys::BindRenderbuffer(gl_sys::RENDERBUFFER, 0);
-                        self.gl_renderbuffer = Some(gl_renderbuffer);
                     },
                     _ => {
                         println!("update_platform_render_targete unsupported texture format");

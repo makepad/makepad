@@ -221,7 +221,7 @@ impl App {
             }
             Event::AudioDevices(devices) => { 
                 for desc in &devices.descs{
-                    println!("{} default: {} input: {}", desc.name, desc.is_default, desc.device_type.is_input())
+                    println!("{}", desc)
                 }
                 println!("AUDIO DEVICE CHANGE");
                 cx.use_audio_inputs(&devices.default_input());

@@ -12,6 +12,7 @@ use {
         makepad_math::DVec2,
         os::linux::libc_sys,
         event::*,
+        thread::Signal,
         cursor::MouseCursor,
         os::cx_desktop::EventFlow,
         os::linux::x11_sys,
@@ -596,6 +597,12 @@ impl XlibApp {
                         let last_select_time = select_time;
                         select_time = self.time_now();
                         let mut select_time_used = select_time - last_select_time;
+                        
+                        if Signal::check_and_clear_ui_signal() {
+                            self.do_callback(
+                                XlibEvent::Signal
+                            );
+                        }
                         
                         while let Some(timer) = self.timers.front_mut() {
                             // If the amount of time that elapsed is less than `delta_timeout` for the
