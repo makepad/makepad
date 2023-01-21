@@ -19,7 +19,7 @@ use {
 #[derive(Default)]
 pub struct AudioUnitAccess {
     pub change_signal: Signal,
-    pub audio_devices: Vec<CoreAudioDevice>,
+    pub device_descs: Vec<CoreAudioDeviceDesc>,
     pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
     pub audio_inputs: Arc<Mutex<Vec<RunningAudioUnit >> >,
@@ -32,7 +32,7 @@ pub enum AudioError {
     NoDevice
 }
 
-pub struct CoreAudioDevice {
+pub struct CoreAudioDeviceDesc {
     pub core_device_id: AudioDeviceID,
     pub desc: AudioDeviceDesc
 }
@@ -47,7 +47,7 @@ impl AudioUnitAccess {
         Self::observe_route_changes(change_signal.clone());
         Arc::new(Mutex::new(Self{
             change_signal,
-            audio_devices: Default::default(),
+            device_descs: Default::default(),
             audio_input_cb: Default::default(),
             audio_output_cb:Default::default(),
             audio_inputs:Default::default(),
@@ -57,7 +57,7 @@ impl AudioUnitAccess {
     
     pub fn get_descs(&self) -> Vec<AudioDeviceDesc> {
         let mut out = Vec::new();
-        for dev in &self.audio_devices {
+        for dev in &self.device_descs {
             out.push(dev.desc.clone());
         }
         out
@@ -248,7 +248,7 @@ impl AudioUnitAccess {
     }
     
     pub fn update_device_list(&mut self) -> Result<(), OSError> {
-        self.audio_devices.clear();
+        self.device_descs.clear();
         
         fn get_value<T: Sized>(device_id: AudioDeviceID, selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope, default: T) -> Result<T, OSError> {
             let prop_addr = AudioObjectPropertyAddress {
@@ -355,7 +355,7 @@ impl AudioUnitAccess {
             
             if input_channels>0 {
                 let device_id = LiveId::from_str_unchecked(&format!("{} {} input", device_name, core_device_id)).into();
-                self.audio_devices.push(CoreAudioDevice {
+                self.device_descs.push(CoreAudioDeviceDesc {
                     core_device_id,
                     desc: AudioDeviceDesc {
                         device_id,
@@ -368,7 +368,7 @@ impl AudioUnitAccess {
             }
             if output_channels>0 {
                 let device_id = LiveId::from_str_unchecked(&format!("{} {} output", device_name, core_device_id)).into();
-                self.audio_devices.push(CoreAudioDevice {
+                self.device_descs.push(CoreAudioDeviceDesc {
                     core_device_id,
                     desc: AudioDeviceDesc {
                         device_id,
@@ -434,7 +434,7 @@ impl AudioUnitAccess {
     ) {
         let unit_query = unit_info.unit_query;
         
-        let core_device_id = self.audio_devices.iter().find( | v | v.desc.device_id == device_id).unwrap().core_device_id;
+        let core_device_id = self.device_descs.iter().find( | v | v.desc.device_id == device_id).unwrap().core_device_id;
         
         let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
             let () = unsafe {msg_send![av_audio_unit, retain]};
