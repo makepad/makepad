@@ -15,6 +15,12 @@ pub use self::_snd_pcm_access as snd_pcm_access_t;
 pub const SND_PCM_ACCESS_RW_INTERLEAVED: _snd_pcm_access = 3;
 pub type snd_pcm_uframes_t = ::std::os::raw::c_ulong;
 pub type snd_pcm_sframes_t = ::std::os::raw::c_long;
+pub type snd_output_t = _snd_output;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct _snd_output {
+    _unused: [u8; 0],
+}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -156,5 +162,7 @@ extern "C" {
         buffer: *const ::std::os::raw::c_void,
         size: snd_pcm_uframes_t,
     ) -> snd_pcm_sframes_t;
+    
+    pub fn snd_output_flush(output: *mut snd_output_t) -> ::std::os::raw::c_int;
 }
 
