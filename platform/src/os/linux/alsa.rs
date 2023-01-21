@@ -51,7 +51,9 @@ impl AlsaDevice {
             alsa_error!(snd_pcm_hw_params_set_format(handle, hw_params, SND_PCM_FORMAT_FLOAT_LE)) ?;
             alsa_error!(snd_pcm_hw_params_set_rate_near(handle, hw_params, &mut rate, 0 as *mut _)) ?;
             alsa_error!(snd_pcm_hw_params_set_channels(handle, hw_params, 2)) ?;
+            alsa_error!(snd_pcm_hw_params_set_periods(handle, hw_params, 2, 0)) ?;
             alsa_error!(snd_pcm_hw_params(handle, hw_params)) ?;
+            
             //alsa_error!(snd_pcm_hw_params_set_rate_resample(handle, hw_params, 1))?;
             let mut buffer_size = 0;
             alsa_error!(snd_pcm_hw_params_get_buffer_size( hw_params, &mut buffer_size ))?;
