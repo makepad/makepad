@@ -65,7 +65,7 @@ impl AlsaDevice {
             //let mut period_time = 0;
             //alsa_error!(snd_pcm_hw_params_get_period_time(hw_params, &mut period_time,  0 as *mut _))?;
             snd_pcm_hw_params_free(hw_params);
-            alsa_error!(snd_pcm_prepare(handle)) ?;
+            //alsa_error!(snd_pcm_prepare(handle)) ?;
             
             // alright device is prepared.
             Ok((Self {
