@@ -16,7 +16,7 @@ live_design!{
         texture wave_texture: texture2d
         texture fft_texture: texture2d
         fn pixel(self) -> vec4 {
-            let wave = sample2d(self.wave_texture, vec2(self.pos.x, 0.5));
+             let wave = sample2d(self.wave_texture, vec2(self.pos.x, 0.5));
             
             let fft = sample2d(
                 self.fft_texture,
@@ -31,6 +31,7 @@ live_design!{
             
             let sdf = Sdf2d::viewport(self.pos * self.rect_size * vec2(1.0, 0.5));
             let color = Pal::iq1(self.layer + 0.25) * 0.5;
+            
             if left < 0.0 {
                 sdf.rect(0., self.rect_size.y * 0.25, self.rect_size.x, -left * self.rect_size.y + 0.5);
             }
@@ -132,14 +133,14 @@ impl DisplayAudioLayer {
         }
         // alright we have a texture. lets write the audio somewhere
         //return;
-        let mut buf = Vec::new();
-        self.wave_texture.swap_image_u32(cx, &mut buf);
-        buf.resize(WAVE_SIZE_X * WAVE_SIZE_Y, 0);
-        
+        let mut wave_buf = Vec::new();
+        self.wave_texture.swap_image_u32(cx, &mut wave_buf);
+        wave_buf.resize(WAVE_SIZE_X * WAVE_SIZE_Y, 0);
+
         if !self.active {
             let left_u16 = ((0.0 + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
             let right_u16 = ((0.0 + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
-            for i in 0..buf.len() {buf[i] = left_u16 << 16 | right_u16}
+            for i in 0..wave_buf.len() {wave_buf[i] = left_u16 << 16 | right_u16}
             // clear the texture
             self.data_offset = 0;
             // clear the fft
@@ -165,7 +166,9 @@ impl DisplayAudioLayer {
         for i in 0..frames {
             let left_u16 = ((left[i] + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
             let right_u16 = ((right[i] + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
-            buf[(wave_off + i) & (WAVE_SIZE_X - 1)] = left_u16 << 16 | right_u16;
+            
+            wave_buf[(wave_off + i) & (WAVE_SIZE_X - 1)] = left_u16 << 16 | right_u16;
+            
             let fft_now = (fft_off + i) & (FFT_SIZE_T - 1);
             self.fft_buffer[0][fft_now] = cf32(left[i], 0.0);
             self.fft_buffer[1][fft_now] = cf32(right[i], 0.0);
@@ -177,9 +180,9 @@ impl DisplayAudioLayer {
             }
             // if the fft buffer is full, emit a new fftline
             if fft_now == FFT_SIZE_T - 1 {
-                let mut buf = Vec::new();
-                self.fft_texture.swap_image_u32(cx, &mut buf);
-                buf.resize(FFT_SIZE_X * FFT_SIZE_Y, 0);
+                let mut fft_buf = Vec::new();
+                self.fft_texture.swap_image_u32(cx, &mut fft_buf);
+                fft_buf.resize(FFT_SIZE_X * FFT_SIZE_Y, 0);
                 if self.fft_empty_count < FFT_SIZE_T {
                     fft_f32_recursive_pow2_forward(&mut self.fft_buffer[0], &mut self.fft_scratch);
                     fft_f32_recursive_pow2_forward(&mut self.fft_buffer[1], &mut self.fft_scratch);
@@ -191,14 +194,14 @@ impl DisplayAudioLayer {
                     let right = self.fft_buffer[1][i].magnitude();
                     let left_u16 = (left * 10000.0).max(0.0).min(65535.0) as u32;
                     let right_u16 = (right * 10000.0).max(0.0).min(65535.0) as u32;
-                    buf[self.fft_slot * FFT_SIZE_X + i] = left_u16 << 16 | right_u16;
+                    fft_buf[self.fft_slot * FFT_SIZE_X + i] = left_u16 << 16 | right_u16;
                 }
                 self.fft_slot = (self.fft_slot + 1) & (FFT_SIZE_Y - 1);
-                self.fft_texture.swap_image_u32(cx, &mut buf);
+                self.fft_texture.swap_image_u32(cx, &mut fft_buf);
             }
         }
         // every time we wrap around we should feed it to the FFT
-        self.wave_texture.swap_image_u32(cx, &mut buf);
+        self.wave_texture.swap_image_u32(cx, &mut wave_buf);
         self.data_offset = (self.data_offset + frames) & (WAVE_SIZE_X - 1);
         self.fft_empty_count < FFT_SIZE_T * FFT_SIZE_Y
     }
