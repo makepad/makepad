@@ -164,7 +164,7 @@ extern "C" {
     ) -> snd_pcm_sframes_t;
     pub fn snd_pcm_hw_params_set_periods_near(
         pcm: *mut snd_pcm_t,
-        params: *mut snd_pcm_hw_params_t,
+        params: *mut snd_pcm_hw_params_t, 
         val: *mut ::std::os::raw::c_uint,
         dir: *mut ::std::os::raw::c_int,
     ) -> ::std::os::raw::c_int;
