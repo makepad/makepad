@@ -98,7 +98,11 @@ impl LiveHook for DesktopWindow {
             log!("VR IS SUPPORTED");
         }
         if let OsType::MsWindows = cx.platform_type() {
+            self.ui.get_frame(id!(caption_bar)).set_visible(true);
             self.ui.get_frame(id!(windows_buttons)).set_visible(true);
+        }
+        if let OsType::Linux{..} = cx.platform_type(){
+            self.ui.get_frame(id!(caption_bar)).set_visible(false);
         }
     }
 }
