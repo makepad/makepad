@@ -174,13 +174,11 @@ impl Cx {
                     
                     // lets set our textures
                     for i in 0..sh.mapping.textures.len() {
-                        
                         let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
                             texture_id
                         }else {
                             continue;
                         };
-                        
                         let cxtexture = &mut self.textures[texture_id];
                         if cxtexture.update_image {
                             cxtexture.update_image = false;
@@ -190,6 +188,14 @@ impl Cx {
                                 &cxtexture.image_u32
                             );
                         }
+                    }
+                    for i in 0..sh.mapping.textures.len() {
+                         let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
+                            texture_id
+                        }else {
+                            continue;
+                        };
+                        let cxtexture = &mut self.textures[texture_id];
                         // get the loc
                         gl_sys::ActiveTexture(gl_sys::TEXTURE0 + i as u32);
                         if let Some(texture) = cxtexture.os.gl_texture {
@@ -198,6 +204,7 @@ impl Cx {
                         else {
                             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
                         }
+                        gl_sys::Uniform1i(shp.textures[i].loc, i as i32);
                     }
                     
                     gl_sys::DrawElementsInstanced(
@@ -716,7 +723,7 @@ impl CxOsDrawShader {
             #version 100
             precision highp float;
             precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y)).zyxw;}} 
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}} 
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
@@ -728,7 +735,7 @@ impl CxOsDrawShader {
             #extension GL_OES_standard_derivatives : enable
             precision highp float;
             precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y)).zyxw;}}
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
@@ -790,7 +797,7 @@ impl CxOsDrawShader {
         unsafe {
             OpenglUniform {
                 loc: gl_sys::GetUniformLocation(program, name0.as_ptr() as *const _),
-                name: name.to_string(),
+                //name: name.to_string(),
             }
         }
     }
@@ -886,22 +893,19 @@ impl CxOsDrawShader {
     }
     
     
-    pub fn opengl_get_texture_slots(_program: u32, _texture_slots: &Vec<DrawShaderTextureInput>) -> Vec<OpenglUniform> {
-        let gl_texture_slots = Vec::new();
-        /*
+    pub fn opengl_get_texture_slots(program: u32, texture_slots: &Vec<DrawShaderTextureInput>) -> Vec<OpenglUniform> {
+        let mut gl_texture_slots = Vec::new();
+        
         for slot in texture_slots {
-            let mut name0 = "".to_string();
-            name0.push_str(&slot.name);
+            let mut name0 = "ds_".to_string();
+            name0.push_str(&slot.id.to_string());
             name0.push_str("\0");
             unsafe {
                 gl_texture_slots.push(OpenglUniform {
                     loc: gl_sys::GetUniformLocation(program, name0.as_ptr() as *const _),
-                    name: slot.name.clone(),
-                    size: 0
-                    //,sampler:sam.sampler.clone()
                 })
             }
-        }*/
+        }
         gl_texture_slots
     }
     
@@ -971,7 +975,7 @@ pub struct OpenglAttribute {
 #[derive(Debug, Default, Clone)]
 pub struct OpenglUniform {
     pub loc: i32,
-    pub name: String,
+    //pub name: String,
 }
 
 
@@ -1038,8 +1042,10 @@ impl CxOsTexture {
         }
         unsafe {
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, self.gl_texture.unwrap());
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+            gl_sys::TexParameteri(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
             gl_sys::TexImage2D(
                 gl_sys::TEXTURE_2D,
                 0,

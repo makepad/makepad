@@ -54,6 +54,9 @@ pub const UNSIGNED_BYTE: types::GLenum = 0x1401;
 pub const DEPTH_COMPONENT32F: types::GLenum = 0x8CAC;
 pub const STATIC_DRAW: types::GLenum = 0x88E4;
 pub const NEAREST: types::GLenum = 0x2600;
+pub const TEXTURE_WRAP_S: types::GLenum = 0x2802;
+pub const TEXTURE_WRAP_T: types::GLenum = 0x2803;
+pub const CLAMP_TO_EDGE: types::GLenum = 0x812F;
 
 #[inline] pub unsafe fn GenVertexArrays(n: types::GLsizei, arrays: *mut types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenVertexArrays.f)(n, arrays)}
 #[inline] pub unsafe fn BindVertexArray(array: types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::BindVertexArray.f)(array)}
@@ -101,6 +104,8 @@ pub const NEAREST: types::GLenum = 0x2600;
 #[inline] pub unsafe fn DeleteTextures(n: types::GLsizei, textures: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteTextures.f)(n, textures) }
 #[inline] pub unsafe fn GenBuffers(n: types::GLsizei, buffers: *mut types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenBuffers.f)(n, buffers) }
 #[inline] pub unsafe fn BufferData(target: types::GLenum, size: types::GLsizeiptr, data: *const raw::c_void, usage: types::GLenum) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLsizeiptr, *const raw::c_void, types::GLenum) -> ()>(storage::BufferData.f)(target, size, data, usage) }
+#[inline] pub unsafe fn Uniform1i(location: types::GLint, v0: types::GLint) -> () { mem::transmute::<_, extern "system" fn(types::GLint, types::GLint) -> ()>(storage::Uniform1i.f)(location, v0) }
+#[inline] pub unsafe fn GetError() -> types::GLenum { mem::transmute::<_, extern "system" fn() -> types::GLenum>(storage::GetError.f)() }
 
 mod storage {
     use super::FnPtr;
@@ -150,6 +155,8 @@ mod storage {
     pub static mut DeleteTextures: FnPtr = FnPtr::default();
     pub static mut GenBuffers: FnPtr = FnPtr::default();
     pub static mut BufferData: FnPtr = FnPtr::default();
+    pub static mut Uniform1i: FnPtr = FnPtr::default();
+    pub static mut GetError: FnPtr = FnPtr::default();
 }
 
 pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const raw::c_void {
@@ -199,6 +206,8 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::DeleteTextures = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteTextures", &[]));
     storage::GenBuffers = FnPtr::new(metaloadfn(&mut loadfn, "glGenBuffers", &["glGenBuffersARB"]));
     storage::BufferData = FnPtr::new(metaloadfn(&mut loadfn, "glBufferData", &["glBufferDataARB"]));
+    storage::Uniform1i = FnPtr::new(metaloadfn(&mut loadfn, "glUniform1i", &["glUniform1iARB"]));
+    storage::GetError = FnPtr::new(metaloadfn(&mut loadfn, "glGetError", &[]));
 }
 
 #[inline(never)]
