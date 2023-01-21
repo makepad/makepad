@@ -162,11 +162,16 @@ extern "C" {
         buffer: *const ::std::os::raw::c_void,
         size: snd_pcm_uframes_t,
     ) -> snd_pcm_sframes_t;
-    pub fn snd_pcm_hw_params_set_periods(
+    pub fn snd_pcm_hw_params_set_periods_near(
         pcm: *mut snd_pcm_t,
         params: *mut snd_pcm_hw_params_t,
-        val: ::std::os::raw::c_uint,
-        dir: ::std::os::raw::c_int,
+        val: *mut ::std::os::raw::c_uint,
+        dir: *mut ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
+    pub fn snd_pcm_hw_params_set_buffer_size_near(
+        pcm: *mut snd_pcm_t,
+        params: *mut snd_pcm_hw_params_t,
+        val: *mut snd_pcm_uframes_t,
     ) -> ::std::os::raw::c_int;
 }
 
