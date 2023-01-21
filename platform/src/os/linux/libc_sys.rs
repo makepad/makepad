@@ -26,6 +26,7 @@ type c_ulong = std::os::raw::c_ulong;
 type c_void = std::os::raw::c_void;
 
 pub const FD_SETSIZE: usize = 1024;
+pub const EPIPE: c_int = 32;
 
 #[repr(C)]
 pub struct fd_set {

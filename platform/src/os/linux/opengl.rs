@@ -1025,7 +1025,7 @@ impl CxOsTexture {
     pub fn update_platform_texture_image2d(&mut self, width: u32, height: u32, image_u32: &Vec<u32>) {
         
         if image_u32.len() != (width * height) as usize {
-            println!("update_platform_texture_image2d with wrong buffer_u32 size!");
+            println!("update_platform_texture_image2d with wrong buffer_u32 size! {} {} {}", image_u32.len(), width, height);
             return;
         }
         
