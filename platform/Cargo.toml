@@ -9,9 +9,6 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "wxHZD_56sR__1P12uohe4SoyRR8="
 
-[features]
-nightly = ["makepad-shader-compiler/nightly"]
-
 [dependencies]
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.3.0" }
 

@@ -14,9 +14,6 @@ makepad-audio-graph = { path = "../../audio_graph", version = "0.3.0" }
 #makepad-miniz = { path = "../../libs/miniz", version = "0.3.0" }
 #makepad-base64 = { path = "../../libs/base64", version = "0.3.0" }
 
-[features]
-nightly = ["makepad-audio-graph/nightly"]
-
 [[bin]]
 name = "makepad-example-ironfish"
 path = "src/main.rs"
