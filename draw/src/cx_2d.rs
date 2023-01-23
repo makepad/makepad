@@ -144,8 +144,6 @@ impl<'a> Cx2d<'a> {
         
     }
     
- 
-    
     pub fn set_pass_area(&mut self, pass:&Pass, area: Area){
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Area(area));
     }

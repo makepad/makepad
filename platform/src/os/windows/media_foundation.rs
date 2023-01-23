@@ -148,7 +148,7 @@ impl MediaFoundationAccess {
         }
     }
     
-    pub fn update_inputs_list(&mut self) {
+    pub fn get_updated_descs(&mut self) -> Vec<VideoInputDesc> {
         unsafe {
             let mut attributes = None;
             MFCreateAttributes(&mut attributes, 1).unwrap();
@@ -267,9 +267,6 @@ impl MediaFoundationAccess {
                 }
             }
         }
-    }
-    
-    pub fn get_descs(&mut self) -> Vec<VideoInputDesc> {
         let mut out = Vec::new();
         for input in &self.inputs {
             out.push(input.desc.clone());
