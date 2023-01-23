@@ -6,6 +6,7 @@ use {
         event::Event,
         thread::Signal,
         os::linux::alsa_audio::AlsaAudioAccess,
+        os::linux::alsa_midi::AlsaMidiAccess,
         audio::*,
         midi::*,
         video::*,
@@ -13,28 +14,29 @@ use {
     }
 };
 
-
 impl Cx {
     pub (crate) fn handle_media_signals(&mut self) {
         if self.os.media.alsa_audio_change.check_and_clear(){
-            let descs = {
-                let alsa = self.os.media.alsa_audio();
-                let mut alsa = alsa.lock().unwrap();
-                alsa.update_device_list();
-                alsa.get_descs()
-            };
+            let descs = self.os.media.alsa_audio().lock().unwrap().get_updated_descs();
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
                 descs
             }));
         }
+        if self.os.media.alsa_midi_change.check_and_clear(){
+            let descs = self.os.media.alsa_midi().lock().unwrap().get_updated_descs();
+            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent{
+                descs,
+            }));
+        }
     }
-    
 }
 
 #[derive(Default)]
 pub struct CxLinuxMedia{
     pub (crate) alsa_audio: Option<Arc<Mutex<AlsaAudioAccess >> >,
     pub (crate) alsa_audio_change: Signal,
+    pub (crate) alsa_midi: Option<Arc<Mutex<AlsaMidiAccess >> >,
+    pub (crate) alsa_midi_change: Signal,
 }
 
 impl CxLinuxMedia {
@@ -45,7 +47,13 @@ impl CxLinuxMedia {
         }
         self.alsa_audio.as_ref().unwrap().clone()
     }
-        
+
+    pub fn alsa_midi(&mut self) -> Arc<Mutex<AlsaMidiAccess >> {
+        if self.alsa_midi.is_none() {
+            self.alsa_midi = Some(AlsaMidiAccess::new(self.alsa_midi_change.clone()));
+        }
+        self.alsa_midi.as_ref().unwrap().clone()
+    }        
 }
 
 pub struct OsMidiOutput();
@@ -69,10 +77,12 @@ impl CxMediaApi for Cx {
     fn midi_reset(&mut self){
     }
 
-    fn use_midi_inputs(&mut self, _ports: &[MidiPortId]) {
+    fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
+        self.os.media.alsa_midi().lock().unwrap().use_midi_inputs(ports);
     }
     
-    fn use_midi_outputs(&mut self, _ports: &[MidiPortId]) {
+    fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
+        self.os.media.alsa_midi().lock().unwrap().use_midi_outputs(ports);
     }
 
     fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
@@ -91,7 +101,6 @@ impl CxMediaApi for Cx {
     where F: FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static {
         *self.os.media.alsa_audio().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
-
     
     fn video_input<F>(&mut self, _index:usize, _f: F)
     where F: FnMut(VideoFrame) + Send + 'static {
@@ -99,7 +108,6 @@ impl CxMediaApi for Cx {
 
     fn use_video_input(&mut self, _inputs:&[(VideoInputId, VideoFormatId)]){
     }
-
 }
 
 

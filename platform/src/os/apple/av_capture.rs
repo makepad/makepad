@@ -58,19 +58,19 @@ impl AvCaptureSession {
             OSError::from_nserror(err).unwrap();
             
             let callback = AvVideoCaptureCallback::new(Box::new(move | sample_buffer | {
-                if let Some(cb) = &mut *capture_cb.lock().unwrap(){
+                if let Some(cb) = &mut *capture_cb.lock().unwrap() {
                     let image_buffer = CMSampleBufferGetImageBuffer(sample_buffer);
                     CVPixelBufferLockBaseAddress(image_buffer, 0);
                     let len = CVPixelBufferGetDataSize(image_buffer);
-                    let ptr =  CVPixelBufferGetBaseAddress(image_buffer);
+                    let ptr = CVPixelBufferGetBaseAddress(image_buffer);
                     let height = CVPixelBufferGetHeight(image_buffer) as usize;
-                    let width = CVPixelBufferGetWidth(image_buffer) as usize; 
+                    let width = CVPixelBufferGetWidth(image_buffer) as usize;
                     let data = std::slice::from_raw_parts_mut(ptr as *mut u8, len as usize);
-                    if width != video_format.width || height != video_format.height{
+                    if width != video_format.width || height != video_format.height {
                         println!("Video format not correct got {} x {} for {:?}", width, height, video_format);
                     }
-                    cb(VideoFrame{
-                        video_format, 
+                    cb(VideoFrame {
+                        video_format,
                         data
                     });
                     CVPixelBufferUnlockBaseAddress(image_buffer, 0);
@@ -84,13 +84,13 @@ impl AvCaptureSession {
             let () = msg_send![device.as_id(), lockForConfiguration: &mut err];
             OSError::from_nserror(err).unwrap();
             
-            let format_ref: CMFormatDescriptionRef = msg_send![ format.format_obj.as_id(), formatDescription];
+            let format_ref: CMFormatDescriptionRef = msg_send![format.format_obj.as_id(), formatDescription];
             let res = CMVideoFormatDescriptionGetDimensions(format_ref);
             
             let () = msg_send![device.as_id(), setActiveFormat: format.format_obj.as_id()];
             let () = msg_send![device.as_id(), setActiveVideoMinFrameDuration: format.min_frame_duration];
             let () = msg_send![device.as_id(), setActiveVideoMaxFrameDuration: format.min_frame_duration];
-             
+            
             let () = msg_send![device.as_id(), unlockForConfiguration];
             
             let dict: ObjcId = msg_send![class!(NSMutableDictionary), dictionary];
@@ -135,7 +135,7 @@ impl AvCaptureSession {
 }
 
 impl AvCaptureAccess {
-    pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
+    pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
         
         Self::observe_device_changes(change_signal.clone());
         
@@ -191,7 +191,7 @@ impl AvCaptureAccess {
         }
     }
     
-    pub fn update_input_list(&mut self) {
+    pub fn get_updated_descs(&mut self) -> Vec<VideoInputDesc> {
         unsafe {
             let types: ObjcId = msg_send![class!(NSMutableArray), array];
             let () = msg_send![types, addObject: str_to_nsstring("AVCaptureDeviceTypeBuiltInDualCamera")];
@@ -227,7 +227,7 @@ impl AvCaptureAccess {
                     let format_ref: CMFormatDescriptionRef = msg_send![format_obj, formatDescription];
                     let res = CMVideoFormatDescriptionGetDimensions(format_ref);
                     let fcc = CMFormatDescriptionGetMediaSubType(format_ref);
-
+                    
                     #[allow(non_upper_case_globals)]
                     let pixel_format = match fcc {
                         kCMPixelFormat_422YpCbCr8 | kCMPixelFormat_422YpCbCr8_yuvs => VideoPixelFormat::YUY2,
@@ -246,7 +246,7 @@ impl AvCaptureAccess {
                     let min_frame_duration: CMTime = msg_send![range, minFrameDuration];
                     let max_frame_duration: CMTime = msg_send![range, maxFrameDuration];
                     
-                    if min_frame_rate != max_frame_rate{ // this is not really what you'd want. but ok.
+                    if min_frame_rate != max_frame_rate { // this is not really what you'd want. but ok.
                         let frame_rate = min_frame_rate;
                         let format_id = LiveId::from_str_unchecked(&format!("{} {} {:?} {}", res.width, res.height, pixel_format, frame_rate)).into();
                         av_formats.push(AvFormatObj {
@@ -290,9 +290,6 @@ impl AvCaptureAccess {
             }
             self.inputs = inputs;
         }
-    }
-    
-    pub fn get_descs(&mut self) -> Vec<VideoInputDesc> {
         let mut out = Vec::new();
         for input in &self.inputs {
             out.push(input.desc.clone());
@@ -300,7 +297,7 @@ impl AvCaptureAccess {
         out
     }
     
-    pub fn observe_device_changes(change_signal:Signal) {
+    pub fn observe_device_changes(change_signal: Signal) {
         let center: ObjcId = unsafe {msg_send![class!(NSNotificationCenter), defaultCenter]};
         let block = objc_block!(move | _note: ObjcId | {
             change_signal.set();

@@ -305,7 +305,7 @@ impl WinRTMidiAccess {
         self.event_sender.send(WinRTMidiEvent::UseMidiInputs(ports.to_vec())).unwrap();
     }
     
-    pub fn get_descs(&self) -> Vec<MidiPortDesc> {
+    pub fn get_updated_descs(&self) -> Vec<MidiPortDesc> {
         self.descs.clone()
     }
     

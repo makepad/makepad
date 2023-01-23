@@ -28,33 +28,19 @@ pub struct CxWindowsMedia{
 impl Cx {
     pub (crate) fn handle_media_signals(&mut self) {
         if self.os.media.winrt_midi_change.check_and_clear(){
-            let descs = {
-                let winrt_midi = self.os.media.winrt_midi();
-                let winrt_midi = winrt_midi.lock().unwrap();
-                winrt_midi.get_descs()
-            };
+            let descs = self.os.media.winrt_midi().lock().unwrap().get_updated_descs();
             self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
                 descs,
             }));
         }
         if self.os.media.wasapi_change.check_and_clear(){
-            let descs = {
-                let wasapi = self.os.media.wasapi();
-                let mut wasapi = wasapi.lock().unwrap();
-                wasapi.update_device_list();
-                wasapi.get_descs()
-            };
+            let descs = self.os.media.wasapi().lock().unwrap().get_updated_descs();
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
                 descs
             }));
         }
         if self.os.media.media_foundation_change.check_and_clear(){
-            let descs = {
-                let media_foundation = self.os.media.media_foundation();
-                let mut media_foundation = media_foundation.lock().unwrap();
-                media_foundation.update_inputs_list();
-                media_foundation.get_descs()
-            };
+            let descs = self.os.media.media_foundation().lock().unwrap().get_updated_descs();
             self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
                 descs
             }));
