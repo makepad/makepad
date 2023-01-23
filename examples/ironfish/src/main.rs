@@ -1,7 +1,8 @@
-pub use makepad_audio_graph::makepad_widgets;
+pub use makepad_audio_widgets::makepad_widgets;
 pub use makepad_widgets::makepad_platform;
 pub use makepad_platform::makepad_math;
-pub use makepad_audio_graph;
+pub use makepad_synth_ironfish;
+pub use makepad_synth_ironfish::makepad_audio_graph;
 
 use makepad_widgets::*;
 use makepad_draw::*;
@@ -9,13 +10,11 @@ use makepad_audio_graph::*;
 use makepad_platform::midi::*;
 
 mod sequencer;
-mod ironfish;
-mod waveguide;
 
-use crate::ironfish::*;
-use crate::piano::*;
+use makepad_synth_ironfish::ironfish::*;
+use makepad_audio_widgets::piano::*;
 use crate::sequencer::*;
-use crate::display_audio::*;
+use makepad_audio_widgets::display_audio::*;
 
 //use std::fs::File;
 //use std::io::prelude::*;
@@ -1243,8 +1242,9 @@ impl LiveHook for App {
 
 impl App {
     pub fn live_design(cx: &mut Cx) {
+        makepad_audio_widgets::live_design(cx);
         makepad_audio_graph::live_design(cx);
-        crate::ironfish::live_design(cx);
+        makepad_synth_ironfish::live_design(cx);
         crate::sequencer::live_design(cx);
     }
     
