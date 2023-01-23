@@ -7,7 +7,7 @@ use {
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         os::{
             web_midi::WebMidiAccess,
-            web_browser::{
+            web::{
                 from_wasm::*,
                 to_wasm::*,
             },
@@ -35,6 +35,7 @@ use {
             WindowGeom,
             WindowGeomChangeEvent
         },
+        pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx},
     }
