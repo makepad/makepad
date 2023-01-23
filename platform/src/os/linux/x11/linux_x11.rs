@@ -1,25 +1,26 @@
 use {
     std::cell::RefCell,
     std::rc::Rc,
+    self::super::super::{
+        opengl::{OpenglCx, OpenglWindow},
+        x11::xlib_event::*,
+        x11::xlib_app::*,
+        linux_media::CxLinuxMedia
+    },
     crate::{
-        cx_api::{CxOsOp,CxOsApi},
+        cx_api::{CxOsOp, CxOsApi},
         makepad_math::{dvec2},
         makepad_live_id::*,
         event::{
             WebSocket,
-            WebSocketAutoReconnect,
+            WebSocketAutoReconnect, 
             Event,
         },
         pass::CxPassParent,
-        cx::{Cx, OsType, },
+        cx::{Cx, OsType,},
         gpu_info::GpuPerformance,
         os::cx_desktop::EventFlow,
-        os::linux::{
-            opengl::{OpenglCx,OpenglWindow},
-            xlib_event::*,
-            xlib_app::*,
-            linux_media::CxLinuxMedia
-        }
+        
     }
 };
 
@@ -64,7 +65,7 @@ impl Cx {
         }
         
         let mut paint_dirty = false;
-    
+        
         //self.process_desktop_pre_event(&mut event);
         match event {
             XlibEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus

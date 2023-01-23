@@ -1,6 +1,6 @@
 #![allow(non_upper_case_globals)]
-use crate::os::linux::x11_sys::*;
-use crate::os::linux::gl_sys::*;
+use self::super::x11_sys::*;
+use self::super::super::gl_sys::*;
 
 pub type GLXDrawable = XID;
 pub type GLXContext = *mut __GLXcontextRec;
