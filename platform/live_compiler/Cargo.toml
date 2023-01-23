@@ -14,5 +14,3 @@ makepad-derive-live = { path = "../derive_live", version = "0.3.0" }
 makepad-math = { path = "../../libs/math", version = "0.3.0" }
 makepad-live-tokenizer = { path = "../live_tokenizer", version = "0.3.0" }
 
-[features]
-nightly = ["makepad-derive-live/nightly"]

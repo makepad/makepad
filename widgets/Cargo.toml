@@ -13,6 +13,3 @@ metadata.makepad-auto-version = "3wXZ4mCWrFtrkr38MyxIpOySFgU="
 makepad-draw = { path = "../draw", version = "0.3.0" }
 makepad-derive-widget = {path = "./derive_widget", version="0.3.0"}
 
-[features]
-nightly = ["makepad-draw/nightly"]
-

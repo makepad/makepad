@@ -34,6 +34,21 @@ pub struct LiveBody {
     pub live_type_infos: Vec<LiveTypeInfo>
 }
 
+#[cfg(not(lines))]
+use std::sync::atomic::{AtomicBool,Ordering};
+#[cfg(not(lines))]
+pub (crate) static LINE_NR_ONCE: AtomicBool = AtomicBool::new(false);
+#[cfg(not(lines))]
+const LINE_NR_ERROR: &'static str = "\n#############################################\n\nMakepad needs the nightly only proc_macro_span feature for accurate line information in errors\nTo install nightly use rustup:\n\nrustup install nightly\n\nPlease build your makepad application in this way on Unix:\n\nMAKEPAD=lines cargo +nightly build yourapp_etc\n\nAnd on Windows:\n\nset MAKEPAD=lines&cargo +nightly build yourapp_etc'\n\n#############################################\n";
+#[cfg(not(lines))]
+fn line_nr_error_once(){
+    if !LINE_NR_ONCE.load(Ordering::SeqCst) {
+        LINE_NR_ONCE.store(true,Ordering::SeqCst);
+        error!("{}", LINE_NR_ERROR);
+    }
+}
+
+
 impl Cx {
     
     pub fn apply_error_tuple_enum_arg_not_found(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], enum_id: LiveId, base: LiveId, arg: usize) {
@@ -67,7 +82,7 @@ impl Cx {
     pub fn apply_error_expected_array(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode]) {
         self.apply_error(origin, index, nodes, format!("expected array, but got {} {:?}", nodes[index].id, nodes[index].value))
     }
-
+    
     pub fn apply_error_no_matching_field(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode]) {
         self.apply_error(origin, index, nodes, format!("no matching field: {}", nodes[index].id))
     }
@@ -141,6 +156,8 @@ impl Cx {
                 message,
                 span: (*token_id).into()
             };
+            #[cfg(not(lines))]
+            line_nr_error_once();
             error!("Apply error: {} {:?}", live_registry.live_error_to_live_file_error(err), nodes[index].value);
         }
         else {
@@ -181,7 +198,6 @@ impl Cx {
     }
     
     
-    
     pub fn register_live_body(&mut self, live_body: LiveBody) {
         //println!("START");
         let result = self.live_registry.borrow_mut().register_live_file(
@@ -194,6 +210,8 @@ impl Cx {
         );
         //println!("END");
         if let Err(err) = result {
+            #[cfg(not(lines))]
+            line_nr_error_once();
             error!("Error parsing live file {}", err);
         }
     }

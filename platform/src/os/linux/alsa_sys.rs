@@ -173,5 +173,11 @@ extern "C" {
         params: *mut snd_pcm_hw_params_t,
         val: *mut snd_pcm_uframes_t,
     ) -> ::std::os::raw::c_int;
+
+    pub fn snd_pcm_readi(
+        pcm: *mut snd_pcm_t,
+        buffer: *mut ::std::os::raw::c_void,
+        size: snd_pcm_uframes_t,
+    ) -> snd_pcm_sframes_t;
 }
 

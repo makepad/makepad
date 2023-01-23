@@ -11,7 +11,3 @@ metadata.makepad-auto-version = "BZrCFUdHD-c7Y5Djp5iaKagMxBE="
 
 [dependencies]
 makepad-widgets = { path = "../widgets", version = "0.3.0" }
-
-[features] 
-nightly = ["makepad-widgets/nightly"]
-
