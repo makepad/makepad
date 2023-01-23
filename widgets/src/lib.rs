@@ -20,8 +20,11 @@ pub mod scroll_bars;
 pub mod splitter;
 pub mod fold_header;
 pub mod fold_button;
+#[cfg(ide_widgets)]
 pub mod dock;
+#[cfg(ide_widgets)]
 pub mod tab;
+#[cfg(ide_widgets)]
 pub mod tab_bar;
 pub mod tab_close_button;
 pub mod bare_window;
@@ -30,11 +33,17 @@ pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
 
+#[cfg(ide_widgets)]
 pub mod list_box;
+#[cfg(ide_widgets)]
 pub mod file_tree;
+#[cfg(ide_widgets)]
 pub mod slides_view;
+#[cfg(ide_widgets)]
 pub mod log_list;
+#[cfg(ide_widgets)]
 pub mod log_icon;
+#[cfg(ide_widgets)]
 pub mod color_picker;
 
 #[macro_use]
@@ -85,8 +94,17 @@ pub use crate::{
 
 pub fn live_design(cx: &mut Cx) {
     makepad_draw::live_design(cx);
-    crate::log_list::live_design(cx);
-    crate::log_icon::live_design(cx);
+    #[cfg(ide_widgets)]{
+        crate::log_list::live_design(cx);
+        crate::log_icon::live_design(cx);
+        crate::tab::live_design(cx);
+        crate::tab_bar::live_design(cx);
+        crate::dock::live_design(cx);
+        crate::color_picker::live_design(cx);
+        crate::file_tree::live_design(cx);
+        crate::slides_view::live_design(cx);
+        crate::list_box::live_design(cx);
+    }
     crate::debug_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
@@ -109,13 +127,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::check_box::live_design(cx);
     crate::radio_button::live_design(cx);
     crate::tab_close_button::live_design(cx);
-    crate::tab::live_design(cx);
-    crate::tab_bar::live_design(cx);
-    crate::dock::live_design(cx);
-    crate::color_picker::live_design(cx);
-    crate::file_tree::live_design(cx);
-    crate::slides_view::live_design(cx);
-    crate::list_box::live_design(cx);
     crate::popup_menu::live_design(cx);
     crate::drop_down::live_design(cx);
 }
