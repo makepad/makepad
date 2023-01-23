@@ -5,6 +5,12 @@ use {
         ptr,
         ffi::{CStr, CString},
     },
+    self::super::x11::{
+        x11_sys,
+        glx_sys,
+        xlib_window::XlibWindow,
+    },
+    self::super::gl_sys,
     crate::{
         makepad_error_log::*,
         makepad_shader_compiler::{
@@ -18,10 +24,6 @@ use {
         draw_list::DrawListId,
         draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput},
         event::*,
-        os::linux::x11_sys,
-        os::linux::glx_sys,
-        os::linux::gl_sys,
-        os::linux::xlib_window::XlibWindow,
     },
 };
 

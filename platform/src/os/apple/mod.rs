@@ -6,7 +6,6 @@ pub mod cocoa_window;
 pub mod apple_sys;
 pub mod metal;
 pub mod macos;
-pub mod macos_stdin;
 pub mod cocoa_event;
 pub mod metal_xpc;
 pub mod audio_unit;
@@ -14,7 +13,7 @@ pub mod core_audio;
 pub mod core_midi;
 pub mod apple_media;
 pub mod av_capture;
-pub(crate) use crate::os::apple::metal::*;
-pub(crate) use crate::os::apple::macos::*;
-pub(crate) use crate::os::apple::core_midi::{OsMidiOutput};
+pub(crate) use self::metal::*;
+pub(crate) use self::macos::*;
+pub(crate) use self::core_midi::{OsMidiOutput};
 
