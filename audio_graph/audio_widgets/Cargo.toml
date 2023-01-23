@@ -1,13 +1,13 @@
 [package]
-name = "makepad-audio-graph" 
+name = "makepad-audio-widgets" 
 version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad audio graph"
+description = "Makepad audio widgets"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "BZrCFUdHD-c7Y5Djp5iaKagMxBE="
 
-[dependencies]
-makepad-platform = { path = "../platform", version = "0.3.0" }
+[dependencies] 
+makepad-widgets = { path = "../../widgets", version = "0.3.0" }
