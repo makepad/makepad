@@ -7,14 +7,14 @@ use {
         makepad_wasm_bridge::*,
         makepad_math::*,
         os::{
-            web_browser::{
+            web::{
                 from_wasm::*
             }
         },
         draw_vars::DRAW_CALL_TEXTURE_SLOTS,
         cx::Cx,
         draw_list::DrawListId,
-        pass::{PassId, CxPassParent, PassClearColor, PassClearDepth},
+        pass::{PassId, PassClearColor, PassClearDepth},
     },
 };
 
@@ -182,18 +182,18 @@ impl Cx {
         }*/
     }
     
-    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f64) {
-        let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_matrix(DVec2::default(), pass_size);
+    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f64)->DVec2{
         self.passes[pass_id].paint_dirty = false;
-        
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
         }
         else {
             inherit_dpi_factor
         };
+        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         self.passes[pass_id].set_dpi_factor(dpi_factor);
+        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
+        pass_rect.size
     }
     
     pub fn draw_pass_to_canvas(
@@ -239,10 +239,9 @@ impl Cx {
     }
     
     pub fn draw_pass_to_texture(&mut self, pass_id: PassId, dpi_factor: f64) {
-        let pass_size = self.passes[pass_id].pass_size;
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
-        self.setup_render_pass(pass_id, dpi_factor);
+        let pass_size = self.setup_render_pass(pass_id, dpi_factor);
         
         /*
         self.platform.from_wasm(FromWasmBeginRenderTargets {
