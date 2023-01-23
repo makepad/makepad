@@ -4,7 +4,7 @@ use {
     crate::{
         implement_com,
         makepad_live_id::*,
-        os::mswindows::win32_app::{FALSE},
+        os::windows::win32_app::{FALSE},
         audio::{
             AudioBuffer,
             AudioDeviceId,

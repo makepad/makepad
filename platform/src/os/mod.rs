@@ -17,13 +17,13 @@ pub use crate::os::apple::*;
 pub use crate::os::apple::apple_media::*;
 
 #[cfg(target_os = "windows")]
-pub mod mswindows;
+pub mod windows;
 
 #[cfg(target_os = "windows")]
-pub use crate::os::mswindows::*;
+pub use crate::os::windows::*;
 
 #[cfg(target_os = "windows")]
-pub use crate::os::mswindows::win32_media::*;
+pub use crate::os::windows::windows_media::*;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
