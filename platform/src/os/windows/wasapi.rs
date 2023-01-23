@@ -112,7 +112,7 @@ impl WasapiAccess {
         }
     }
     
-    pub fn update_device_list(&mut self) {
+    pub fn get_updated_descs(&mut self) -> Vec<AudioDeviceDesc> {
         unsafe {
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
             let mut out = Vec::new();
@@ -120,11 +120,9 @@ impl WasapiAccess {
             Self::enumerate_devices(AudioDeviceType::Output, &enumerator, &mut out);
             self.descs = out;
         }
-    }
-    
-    pub fn get_descs(&self) -> Vec<AudioDeviceDesc> {
         self.descs.clone()
     }
+    
     
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {

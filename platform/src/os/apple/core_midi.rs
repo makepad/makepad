@@ -189,7 +189,7 @@ impl CoreMidiAccess {
         self.change_signal.set();
     }
     
-    pub fn update_port_list(&mut self) {
+    pub fn get_updated_descs(&mut self)-> Vec<MidiPortDesc> {
         self.ports.clear();
         unsafe {
             for i in 0..MIDIGetNumberOfSources() {
@@ -201,9 +201,6 @@ impl CoreMidiAccess {
                 self.ports.push(CoreMidiPort::new(MidiPortType::Output, ep).unwrap());
             }
         }
-    }
-    
-    pub fn get_descs(&self) -> Vec<MidiPortDesc> {
         let mut out = Vec::new();
         for port in &self.ports {
             out.push(port.desc.clone())

@@ -55,7 +55,8 @@ impl AudioUnitAccess {
         }))
     }
     
-    pub fn get_descs(&self) -> Vec<AudioDeviceDesc> {
+    pub fn get_updated_descs(&mut self) -> Vec<AudioDeviceDesc> {
+        let _ = self.update_device_list();
         let mut out = Vec::new();
         for dev in &self.device_descs {
             out.push(dev.desc.clone());

@@ -50,6 +50,7 @@ impl AlsaMidiAccess {
     
     pub fn new(change_signal:Signal) -> Arc<Mutex<Self >> {
         let (watch_sender, watch_receiver) = mpsc::channel();
+        let _ = watch_sender.send(AlsaMidiEvent::UpdateDevices);
         let input_senders = InputSenders::default();
         
         let midi_access = Arc::new(Mutex::new(Self {
@@ -66,7 +67,14 @@ impl AlsaMidiAccess {
             while let Ok(msg) = watch_receiver.recv() {
                 match msg {
                     AlsaMidiEvent::UpdateDevices => {
+                        
+                        
+                        
+                        
                         //midi_access_clone.lock().unwrap().descs = descs;
+                        
+                        
+                        
                         change_signal_clone.set();
                     }
                     AlsaMidiEvent::UseMidiOutputs(_ports) => {
@@ -109,7 +117,7 @@ impl AlsaMidiAccess {
         self.event_sender.send(AlsaMidiEvent::UseMidiInputs(ports.to_vec())).unwrap();
     }
     
-    pub fn get_descs(&self) -> Vec<MidiPortDesc> {
+    pub fn get_updated_descs(&self) -> Vec<MidiPortDesc> {
         self.descs.clone()
     }
     

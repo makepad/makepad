@@ -15,46 +15,6 @@ use {
     }
 };
 
-
-impl Cx{
-    pub(crate) fn handle_media_signals(&mut self){
-        if self.os.media.core_midi_change.check_and_clear(){
-            let descs = {
-                let core_midi = self.os.media.core_midi();
-                let mut core_midi = core_midi.lock().unwrap();
-                core_midi.update_port_list();
-                core_midi.get_descs()
-            };
-            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent{
-                descs,
-            }));
-        }
-        if self.os.media.core_audio_change.check_and_clear(){
-            let descs = {
-                let audio_unit = self.os.media.audio_unit();
-                let mut audio_unit = audio_unit.lock().unwrap();
-                audio_unit.update_device_list().unwrap();
-                audio_unit.get_descs()
-            };
-            self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
-                descs
-            }));
-        }
-        if self.os.media.av_capture_change.check_and_clear(){
-            let descs = {
-                let av_capture = self.os.media.av_capture();
-                let mut av_capture = av_capture.lock().unwrap();
-                av_capture.update_input_list();
-                av_capture.get_descs()
-            };
-            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
-                descs
-            }));
-        }
-    }
-    
-}
-
 #[derive(Default)]
 pub struct CxAppleMedia{
     pub (crate) core_midi: Option<Arc<Mutex<CoreMidiAccess>>>,
@@ -63,6 +23,30 @@ pub struct CxAppleMedia{
     pub (crate) core_audio_change: Signal,
     pub (crate) core_midi_change: Signal,
     pub (crate) av_capture_change: Signal,
+}
+
+impl Cx{
+    pub(crate) fn handle_media_signals(&mut self){
+        if self.os.media.core_midi_change.check_and_clear(){
+            let descs = self.os.media.core_midi().lock().unwrap().get_updated_descs();
+            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent{
+                descs,
+            }));
+        }
+        if self.os.media.core_audio_change.check_and_clear(){
+            let descs = self.os.media.audio_unit().lock().unwrap().get_updated_descs();
+            self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent{
+                descs
+            }));
+        }
+        if self.os.media.av_capture_change.check_and_clear(){
+            let descs = self.os.media.av_capture().lock().unwrap().get_updated_descs();
+            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
+                descs
+            }));
+        }
+    }
+    
 }
 
 impl CxAppleMedia{
@@ -137,6 +121,5 @@ impl CxMediaApi for Cx {
     fn use_video_input(&mut self, inputs:&[(VideoInputId, VideoFormatId)]){
         self.os.media.av_capture().lock().unwrap().use_video_input(inputs);
     }
-
 }
 
