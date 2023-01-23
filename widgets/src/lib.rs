@@ -26,6 +26,7 @@ pub mod dock;
 pub mod tab;
 #[cfg(ide_widgets)]
 pub mod tab_bar;
+#[cfg(ide_widgets)]
 pub mod tab_close_button;
 pub mod bare_window;
 
@@ -104,6 +105,7 @@ pub fn live_design(cx: &mut Cx) {
         crate::file_tree::live_design(cx);
         crate::slides_view::live_design(cx);
         crate::list_box::live_design(cx);
+        crate::tab_close_button::live_design(cx);
     }
     crate::debug_view::live_design(cx);
     crate::fold_header::live_design(cx);
@@ -126,7 +128,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::scroll_bars::live_design(cx);
     crate::check_box::live_design(cx);
     crate::radio_button::live_design(cx);
-    crate::tab_close_button::live_design(cx);
     crate::popup_menu::live_design(cx);
     crate::drop_down::live_design(cx);
 }
