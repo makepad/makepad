@@ -57,7 +57,6 @@ live_design!{
     // WIDGETS
     ElementBox = <Frame> {
         draw_bg: {color: #0000}
-        blarp/10
         walk: {width: Fill, height: Fit}
         layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
     }
