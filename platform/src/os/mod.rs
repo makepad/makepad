@@ -34,12 +34,11 @@ pub use crate::os::linux::*;
 #[cfg(target_os = "linux")]
 pub use crate::os::linux::linux_media::*;
 
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 
 #[cfg(target_arch = "wasm32")]
-pub mod web_browser;
-
-#[cfg(target_arch = "wasm32")]
-pub use crate::os::web_browser::*;
+pub use crate::os::web::*;
 
 
 

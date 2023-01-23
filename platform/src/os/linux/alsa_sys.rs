@@ -55,7 +55,7 @@ extern "C" {
     
     pub fn snd_ctl_open(
         ctl: *mut *mut snd_ctl_t,
-        name: *const ::std::os::raw::c_char,
+        name: *const u8,
         mode: ::std::os::raw::c_int,
     ) -> ::std::os::raw::c_int;
     
@@ -66,18 +66,18 @@ extern "C" {
     
     pub fn snd_device_name_hint(
         card: ::std::os::raw::c_int,
-        iface: *const ::std::os::raw::c_char,
+        iface: *const u8,
         hints: *mut *mut *mut ::std::os::raw::c_void,
     ) -> ::std::os::raw::c_int;
     
     pub fn snd_device_name_get_hint(
         hint: *const ::std::os::raw::c_void,
-        id: *const ::std::os::raw::c_char,
+        id: *const u8,
     ) -> *mut ::std::os::raw::c_char;
     
     pub fn snd_pcm_open(
         pcm: *mut *mut snd_pcm_t,
-        name: *const ::std::os::raw::c_char,
+        name: *const u8,
         stream: snd_pcm_stream_t,
         mode: ::std::os::raw::c_int,
     ) -> ::std::os::raw::c_int;

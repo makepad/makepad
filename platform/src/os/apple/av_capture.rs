@@ -148,6 +148,7 @@ impl AvCaptureAccess {
         
         let capture_access_clone = capture_access.clone();
         let request_cb = objc_block!(move | accept: BOOL | {
+            let accept = accept == YES;
             capture_access_clone.lock().unwrap().access_granted = accept;
             if !accept {
                 return
