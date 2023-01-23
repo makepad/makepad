@@ -9,9 +9,9 @@ use {
         thread::Signal,
         event::Event,
         media_api::CxMediaApi,
-        os::mswindows::winrt_midi::*,
-        os::mswindows::wasapi::*,
-        os::mswindows::media_foundation::*,
+        os::windows::winrt_midi::*,
+        os::windows::wasapi::*,
+        os::windows::media_foundation::*,
     }
 };
 

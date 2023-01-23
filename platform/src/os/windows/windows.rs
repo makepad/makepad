@@ -9,8 +9,8 @@ use {
         event::*,
         thread::Signal,
         os::{
-            mswindows::{
-                win32_media::CxWindowsMedia,
+            windows::{
+                windows_media::CxWindowsMedia,
                 win32_event::*,
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,

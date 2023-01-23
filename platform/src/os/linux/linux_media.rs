@@ -5,7 +5,7 @@ use {
         cx::Cx,
         event::Event,
         thread::Signal,
-        os::linux::alsa::AlsaAccess,
+        os::linux::alsa_audio::AlsaAudioAccess,
         audio::*,
         midi::*,
         video::*,
@@ -16,9 +16,9 @@ use {
 
 impl Cx {
     pub (crate) fn handle_media_signals(&mut self) {
-        if self.os.media.alsa_change.check_and_clear(){
+        if self.os.media.alsa_audio_change.check_and_clear(){
             let descs = {
-                let alsa = self.os.media.alsa();
+                let alsa = self.os.media.alsa_audio();
                 let mut alsa = alsa.lock().unwrap();
                 alsa.update_device_list();
                 alsa.get_descs()
@@ -33,17 +33,17 @@ impl Cx {
 
 #[derive(Default)]
 pub struct CxLinuxMedia{
-    pub (crate) alsa: Option<Arc<Mutex<AlsaAccess >> >,
-    pub (crate) alsa_change: Signal,
+    pub (crate) alsa_audio: Option<Arc<Mutex<AlsaAudioAccess >> >,
+    pub (crate) alsa_audio_change: Signal,
 }
 
 impl CxLinuxMedia {
 
-    pub fn alsa(&mut self) -> Arc<Mutex<AlsaAccess >> {
-        if self.alsa.is_none() {
-            self.alsa = Some(AlsaAccess::new(self.alsa_change.clone()));
+    pub fn alsa_audio(&mut self) -> Arc<Mutex<AlsaAudioAccess >> {
+        if self.alsa_audio.is_none() {
+            self.alsa_audio = Some(AlsaAudioAccess::new(self.alsa_audio_change.clone()));
         }
-        self.alsa.as_ref().unwrap().clone()
+        self.alsa_audio.as_ref().unwrap().clone()
     }
         
 }
@@ -76,20 +76,20 @@ impl CxMediaApi for Cx {
     }
 
     fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
-        self.os.media.alsa().lock().unwrap().use_audio_inputs(devices);
+        self.os.media.alsa_audio().lock().unwrap().use_audio_inputs(devices);
     }
     
     fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
-        self.os.media.alsa().lock().unwrap().use_audio_outputs(devices);
+        self.os.media.alsa_audio().lock().unwrap().use_audio_outputs(devices);
     }
     
     fn audio_output<F>(&mut self, index:usize, f: F) where F: FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static {
-        *self.os.media.alsa().lock().unwrap().audio_output_cb[index].lock().unwrap() = Some(Box::new(f));
+        *self.os.media.alsa_audio().lock().unwrap().audio_output_cb[index].lock().unwrap() = Some(Box::new(f));
     }
     
     fn audio_input<F>(&mut self, index:usize, f: F)
     where F: FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static {
-        *self.os.media.alsa().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
+        *self.os.media.alsa_audio().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
     }
 
     
