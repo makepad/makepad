@@ -21,8 +21,7 @@ struct AlsaDevice {
     channel_count: usize,
     frame_count: usize,
     interleaved: Vec<f32>,
-    //rate: usize,
-    //period_time: usize
+    _buffer_size: usize,
 }
 
 struct AlsaDeviceRef {
@@ -30,126 +29,51 @@ struct AlsaDeviceRef {
     is_terminated: bool,
 }
 
+pub struct AlsaAccess {
+    pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
+    pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
+    audio_outputs: Arc<Mutex<Vec<AlsaDeviceRef >> >,
+    audio_inputs: Arc<Mutex<Vec<AlsaDeviceRef >> >,
+    device_descs: Vec<AlsaDeviceDesc>,
+}
+
+#[derive(Debug)]
+struct AlsaError(String);
+
 macro_rules!alsa_error {
     ( $ call: expr) => {
         AlsaError::from(stringify!( $ call), $ call)
     }
 }
 
-impl AlsaDevice {
-    fn new(device_name: &str, device_id: AudioDeviceId, direction:snd_pcm_stream_t) -> Result<(AlsaDevice,AlsaDeviceRef),
-    AlsaError> {
-        unsafe {
-            let mut handle: *mut snd_pcm_t = 0 as *mut _;
-            let mut hw_params: *mut snd_pcm_hw_params_t = 0 as *mut _;
-            let name0 = format!("{}\0", device_name);
-            let mut rate = 48000;
-            alsa_error!(snd_pcm_open(&mut handle, name0.as_ptr(), direction, 0)) ?;
-            alsa_error!(snd_pcm_hw_params_malloc(&mut hw_params)) ?;
-            alsa_error!(snd_pcm_hw_params_any(handle, hw_params)) ?;
-            alsa_error!(snd_pcm_hw_params_set_access(handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED)) ?;
-            alsa_error!(snd_pcm_hw_params_set_format(handle, hw_params, SND_PCM_FORMAT_FLOAT_LE)) ?;
-            alsa_error!(snd_pcm_hw_params_set_rate_near(handle, hw_params, &mut rate, 0 as *mut _)) ?;
-            alsa_error!(snd_pcm_hw_params_set_channels(handle, hw_params, 2)) ?;
-            let mut periods = 2;
-            let mut dir = 0;
-            alsa_error!(snd_pcm_hw_params_set_periods_near(handle, hw_params, &mut periods, &mut dir)) ?;
-            let mut buffer_size = 512;
-            alsa_error!(snd_pcm_hw_params_set_buffer_size_near( handle, hw_params, &mut buffer_size ))?;
-            //println!("GOT BUFFER SIZE {}",buffer_size);
-            //println!("PERIODS {}", 2);
-            alsa_error!(snd_pcm_hw_params(handle, hw_params)) ?;
-            
-            //alsa_error!(snd_pcm_hw_params_set_rate_resample(handle, hw_params, 1))?;
-            let mut buffer_size = 0;
-            alsa_error!(snd_pcm_hw_params_get_buffer_size( hw_params, &mut buffer_size ))?;
-            let mut channel_count = 0;
-            alsa_error!(snd_pcm_hw_params_get_channels(hw_params, &mut channel_count))?;
-            //let mut rate = 0;
-            //alsa_error!( snd_pcm_hw_params_get_rate(hw_params, &mut rate, 0 as *mut _))?;
-            let mut frame_count = 0;
-            alsa_error!(snd_pcm_hw_params_get_period_size(hw_params, &mut frame_count, 0 as *mut _))?;
-            //let mut period_time = 0;
-            //alsa_error!(snd_pcm_hw_params_get_period_time(hw_params, &mut period_time,  0 as *mut _))?;
-            snd_pcm_hw_params_free(hw_params);
-            //alsa_error!(snd_pcm_prepare(handle)) ?;
-            
-            // alright device is prepared.
-            Ok((Self {
-                interleaved:{let mut n = Vec::new();n.resize(frame_count as usize * channel_count as usize, 0.0);n},
-                device_handle: handle,
-                channel_count: channel_count as usize,
-                //rate: rate as usize,
-                frame_count: frame_count as usize,
-                //period_time: period_time as usize,
-            },AlsaDeviceRef{
-                device_id,
-                is_terminated: false,
-            }))
-        } 
-    }
-    
-    fn allocate_matching_buffer(&self)->AudioBuffer{
-        AudioBuffer::new_with_size(self.frame_count, self.channel_count)
-    }
-    
-    fn write_output_buffer(&mut self, buffer:&AudioBuffer)->Result<(),AlsaError>{
-        unsafe{
-            // interleave the audio buffer
-            let data = &buffer.data;
-            for i in 0..self.frame_count{
-                self.interleaved[i*2] = data[i];
-                self.interleaved[i*2+1] = data[i+self.frame_count];
-            }
-            let result = snd_pcm_writei(self.device_handle, self.interleaved.as_ptr() as * mut _, self.frame_count as _);
-            if result == -libc_sys::EPIPE as _{
-                snd_pcm_prepare(self.device_handle);
-                return Ok(())
-            }
-            //println!("buffer {:?}", buffer.data.as_ptr()); 
-            AlsaError::from("snd_pcm_writei",result as _)
-        }
-    }
-}
-
-pub struct AlsaAccess {
-    pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
-    pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
-    audio_outputs: Arc<Mutex<Vec<AlsaDeviceRef >> >,
-    device_descs: Vec<AlsaDeviceDesc>,
-}
- 
-#[derive(Debug)]
-struct AlsaError(String);
-
-impl AlsaError {
-    pub fn from(prefix: &str, err: i32) -> Result<(), Self> {
-        if err < 0 {
-            Err(AlsaError(format!("{} - {}", prefix, unsafe {CStr::from_ptr(snd_strerror(err)).to_str().unwrap().to_string()})))
-        }
-        else {
-            Ok(())
-        }
-    }
-}
-
-fn from_alsa_string(s: *mut c_char) -> Option<String> {
-    if s.is_null() {return None};
-    unsafe {
-        let c = CStr::from_ptr(s).to_str().unwrap().to_string();
-        libc_sys::free(s as *mut c_void);
-        Some(c)
-    }
-}
-
 impl AlsaAccess {
     pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
-        change_signal.set();
+        std::thread::spawn(move || {
+            let mut last_card_count = 0;
+            loop {
+                let mut card_count = 0;
+                let mut card_num = -1;
+                loop {
+                    unsafe{snd_card_next(&mut card_num);}
+                    if card_num <0 {
+                        break;
+                    }
+                    card_count += 1;
+                }
+                if card_count != last_card_count{
+                    last_card_count = card_count;
+                    change_signal.set();
+                }
+                let _ = std::thread::sleep(std::time::Duration::new(1, 0));
+            }
+        });
+        
         Arc::new(Mutex::new(
             AlsaAccess {
                 audio_input_cb: Default::default(),
                 audio_output_cb: Default::default(),
                 device_descs: Default::default(),
+                audio_inputs: Default::default(),
                 audio_outputs: Default::default(),
             }
         ))
@@ -169,7 +93,7 @@ impl AlsaAccess {
                     
                     let mut hints: *mut *mut c_void = 0 as *mut _;
                     alsa_error!(snd_device_name_hint(card_num, "pcm\0".as_ptr(), &mut hints)) ?;
-
+                    
                     
                     let mut index = 0;
                     while *hints.offset(index) != std::ptr::null_mut() {
@@ -241,14 +165,13 @@ impl AlsaAccess {
         out
     }
     
-    pub fn use_audio_inputs(&mut self, _devices: &[AudioDeviceId]) {
-        /*let new = {
+    pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
+        let new = {
             let mut audio_inputs = self.audio_inputs.lock().unwrap();
             // lets shut down the ones we dont use
             audio_inputs.iter_mut().for_each( | v | {
                 if !devices.contains(&v.device_id) {
-                    //v.signal_termination();
-                    // terminate
+                    v.is_terminated = true;
                 }
             });
             // create the new ones
@@ -263,32 +186,36 @@ impl AlsaAccess {
         for (index, device_id) in new {
             let audio_input_cb = self.audio_input_cb[index].clone();
             let audio_inputs = self.audio_inputs.clone();
-            
+            let name = self.device_descs.iter().find( | v | v.desc.device_id == device_id).unwrap().name.clone();
             std::thread::spawn(move || {
-                let mut wasapi = WasapiInput::new(device_id, 2);
-                audio_inputs.lock().unwrap().push(wasapi.base.get_ref());
-                while let Ok(buffer) = wasapi.wait_for_buffer() {
+                let (mut device, device_ref) = AlsaDevice::new(&name, device_id, SND_PCM_STREAM_CAPTURE).unwrap();
+                audio_inputs.lock().unwrap().push(device_ref);
+                let mut audio_buffer = device.allocate_matching_buffer();
+                loop {
                     if audio_inputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
                         break;
                     }
+                    match device.read_input_buffer(&mut audio_buffer) {
+                        Err(e) => {
+                            println!("Write output buffer error {}", e.0);
+                            break;
+                        }
+                        Ok(()) => ()
+                    }
                     if let Some(fbox) = &mut *audio_input_cb.lock().unwrap() {
-                        let ret_buffer = fbox(
+                        audio_buffer = fbox(
                             AudioInfo {
                                 device_id,
-                                time: None
+                                time: None,
                             },
-                            buffer
+                            audio_buffer
                         );
-                        wasapi.release_buffer(ret_buffer);
-                    }
-                    else {
-                        wasapi.release_buffer(buffer);
                     }
                 }
                 let mut audio_inputs = audio_inputs.lock().unwrap();
                 audio_inputs.retain( | v | v.device_id != device_id);
             });
-        }*/
+        }
     }
     
     pub fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
@@ -320,7 +247,7 @@ impl AlsaAccess {
                 audio_outputs.lock().unwrap().push(device_ref);
                 // lets allocate an output buffer
                 let mut audio_buffer = device.allocate_matching_buffer();
-                loop{
+                loop {
                     if audio_outputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
                         break;
                     }
@@ -332,18 +259,126 @@ impl AlsaAccess {
                             },
                             &mut audio_buffer
                         );
-                        match device.write_output_buffer(&audio_buffer){
-                            Err(e)=>{
-                                println!("Write output buffer error {}", e.0);
-                                break;
-                            }
-                            Ok(())=>()
+                    }
+                    match device.write_output_buffer(&audio_buffer) {
+                        Err(e) => {
+                            println!("Write output buffer error {}", e.0);
+                            break;
                         }
+                        Ok(()) => ()
                     }
                 }
-
+                
                 audio_outputs.lock().unwrap().retain( | v | v.device_id != device_id);
             });
         }
     }
 }
+
+
+impl AlsaDevice {
+    fn new(device_name: &str, device_id: AudioDeviceId, direction: snd_pcm_stream_t) -> Result<(AlsaDevice, AlsaDeviceRef),
+        AlsaError> {
+        unsafe {
+            let mut handle: *mut snd_pcm_t = 0 as *mut _;
+            let mut hw_params: *mut snd_pcm_hw_params_t = 0 as *mut _;
+            let name0 = format!("{}\0", device_name);
+            let mut rate = 48000;
+            alsa_error!(snd_pcm_open(&mut handle, name0.as_ptr(), direction, 0)) ?;
+            alsa_error!(snd_pcm_hw_params_malloc(&mut hw_params)) ?;
+            alsa_error!(snd_pcm_hw_params_any(handle, hw_params)) ?;
+            alsa_error!(snd_pcm_hw_params_set_access(handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED)) ?;
+            alsa_error!(snd_pcm_hw_params_set_format(handle, hw_params, SND_PCM_FORMAT_FLOAT_LE)) ?;
+            alsa_error!(snd_pcm_hw_params_set_rate_near(handle, hw_params, &mut rate, 0 as *mut _)) ?;
+            alsa_error!(snd_pcm_hw_params_set_channels(handle, hw_params, 2)) ?;
+            let mut periods = 2;
+            let mut dir = 0;
+            alsa_error!(snd_pcm_hw_params_set_periods_near(handle, hw_params, &mut periods, &mut dir)) ?;
+            let mut buffer_size = 512;
+            alsa_error!(snd_pcm_hw_params_set_buffer_size_near(handle, hw_params, &mut buffer_size)) ?;
+            alsa_error!(snd_pcm_hw_params(handle, hw_params)) ?;
+            alsa_error!(snd_pcm_hw_params_set_rate_resample(handle, hw_params, 1)) ?;
+            let mut buffer_size = 0;
+            alsa_error!(snd_pcm_hw_params_get_buffer_size(hw_params, &mut buffer_size)) ?;
+            let mut channel_count = 0;
+            alsa_error!(snd_pcm_hw_params_get_channels(hw_params, &mut channel_count)) ?;
+            let mut frame_count = 0;
+            alsa_error!(snd_pcm_hw_params_get_period_size(hw_params, &mut frame_count, 0 as *mut _)) ?;
+            snd_pcm_hw_params_free(hw_params);
+            
+            // alright device is prepared.
+            Ok((Self {
+                interleaved: {let mut n = Vec::new(); n.resize(frame_count as usize * channel_count as usize, 0.0); n},
+                device_handle: handle,
+                channel_count: channel_count as usize,
+                frame_count: frame_count as usize,
+                _buffer_size: buffer_size as usize,
+            }, AlsaDeviceRef {
+                device_id,
+                is_terminated: false,
+            }))
+        }
+    }
+    
+    fn allocate_matching_buffer(&self) -> AudioBuffer {
+        AudioBuffer::new_with_size(self.frame_count, self.channel_count)
+    }
+    
+    fn write_output_buffer(&mut self, buffer: &AudioBuffer) -> Result<(), AlsaError> {
+        unsafe {
+            // interleave the audio buffer
+            let data = &buffer.data;
+            for i in 0..self.frame_count {
+                self.interleaved[i * 2] = data[i];
+                self.interleaved[i * 2 + 1] = data[i + self.frame_count];
+            }
+            let result = snd_pcm_writei(self.device_handle, self.interleaved.as_ptr() as *mut _, self.frame_count as _);
+            if result == -libc_sys::EPIPE as _ {
+                snd_pcm_prepare(self.device_handle);
+                return Ok(())
+            }
+            //println!("buffer {:?}", buffer.data.as_ptr());
+            AlsaError::from("snd_pcm_writei", result as _)
+        }
+    }
+    
+    fn read_input_buffer(&mut self, buffer: &mut AudioBuffer) -> Result<(), AlsaError> {
+        buffer.resize(self.frame_count, self.channel_count);
+        unsafe {
+            // interleave the audio buffer
+            let result = snd_pcm_readi(self.device_handle, self.interleaved.as_ptr() as *mut _, self.frame_count as _);
+            if result == -libc_sys::EPIPE as _ {
+                snd_pcm_prepare(self.device_handle);
+                return Ok(())
+            }
+            for i in 0..self.frame_count {
+                buffer.data[i] = self.interleaved[i * 2];
+                buffer.data[i + self.frame_count] = self.interleaved[i * 2 + 1];
+            }
+            //println!("buffer {:?}", buffer.data.as_ptr());
+            AlsaError::from("snd_pcm_writei", result as _)
+        }
+    }
+}
+
+
+impl AlsaError {
+    pub fn from(prefix: &str, err: i32) -> Result<(), Self> {
+        if err < 0 {
+            Err(AlsaError(format!("{} - {}", prefix, unsafe {CStr::from_ptr(snd_strerror(err)).to_str().unwrap().to_string()})))
+        }
+        else {
+            Ok(())
+        }
+    }
+}
+
+fn from_alsa_string(s: *mut c_char) -> Option<String> {
+    if s.is_null() {return None};
+    unsafe {
+        let c = CStr::from_ptr(s).to_str().unwrap().to_string();
+        libc_sys::free(s as *mut c_void);
+        Some(c)
+    }
+}
+
