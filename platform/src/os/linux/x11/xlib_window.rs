@@ -7,15 +7,17 @@ use {
         ptr,
         ffi::{CStr,CString}, 
     },
+    self::super::{
+        x11_sys,
+        xlib_event::XlibEvent,
+        xlib_app::*,
+    },
     crate::{
         area::Area,
         window::WindowId,
         makepad_math::{DVec2},
         event::*,
         cursor::MouseCursor,
-        os::linux::xlib_event::*,
-        os::linux::xlib_app::*,
-        os::linux::x11_sys,
     },
 };
 

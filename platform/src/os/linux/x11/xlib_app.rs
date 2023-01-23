@@ -8,16 +8,18 @@ use {
         os::raw::{c_char, c_int, c_uint, c_ulong, c_void, c_uchar, c_long},
         ptr,
     },
+    self::super::{
+        x11_sys,
+        xlib_event::XlibEvent,
+        xlib_window::*,
+        super::libc_sys,
+    },
     crate::{
         makepad_math::DVec2,
-        os::linux::libc_sys,
         event::*,
         thread::Signal,
         cursor::MouseCursor,
         os::cx_desktop::EventFlow,
-        os::linux::x11_sys,
-        os::linux::xlib_event::XlibEvent,
-        os::linux::xlib_window::*,
     },
 };
 
