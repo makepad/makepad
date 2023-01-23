@@ -4,7 +4,7 @@ use {
         //makepad_wasm_bridge::*,
         midi::*,
         thread::Signal,
-        os::web_browser::CxOs,
+        os::web::CxOs,
         //event::Event,
         //os::web_browser::{
             //to_wasm::{ToWasmMidiInputList, ToWasmMidiInputData},
