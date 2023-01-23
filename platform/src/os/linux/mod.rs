@@ -10,7 +10,8 @@ pub mod xlib_event;
 pub mod linux_media;
 pub mod linux; 
 pub mod opengl;
-pub mod alsa;
+pub mod alsa_audio;
+pub mod alsa_midi;
 
 pub(crate) use crate::os::linux::opengl::*; 
 pub(crate) use crate::os::linux::linux::*;

@@ -5,7 +5,7 @@ use {
         thread::Signal,
         video::*,
         os::{
-            mswindows::win32_app::{TRUE},
+            windows::win32_app::{TRUE},
         },
         windows_crate::{
             core::{

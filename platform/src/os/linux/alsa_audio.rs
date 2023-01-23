@@ -10,13 +10,13 @@ use {
         os::linux::alsa_sys::*
     }
 };
-
-struct AlsaDeviceDesc {
+ 
+struct AlsaAudioDesc {
     name: String,
     desc: AudioDeviceDesc,
 }
 
-struct AlsaDevice {
+struct AlsaAudioDevice {
     device_handle: *mut snd_pcm_t,
     channel_count: usize,
     frame_count: usize,
@@ -24,17 +24,17 @@ struct AlsaDevice {
     _buffer_size: usize,
 }
 
-struct AlsaDeviceRef {
+struct AlsaAudioDeviceRef {
     device_id: AudioDeviceId,
     is_terminated: bool,
 }
 
-pub struct AlsaAccess {
+pub struct AlsaAudioAccess {
     pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
-    audio_outputs: Arc<Mutex<Vec<AlsaDeviceRef >> >,
-    audio_inputs: Arc<Mutex<Vec<AlsaDeviceRef >> >,
-    device_descs: Vec<AlsaDeviceDesc>,
+    audio_outputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
+    audio_inputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
+    device_descs: Vec<AlsaAudioDesc>,
 }
 
 #[derive(Debug)]
@@ -46,7 +46,7 @@ macro_rules!alsa_error {
     }
 }
 
-impl AlsaAccess {
+impl AlsaAudioAccess {
     pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
         std::thread::spawn(move || {
             let mut last_card_count = 0;
@@ -69,7 +69,7 @@ impl AlsaAccess {
         });
         
         Arc::new(Mutex::new(
-            AlsaAccess {
+            AlsaAudioAccess {
                 audio_input_cb: Default::default(),
                 audio_output_cb: Default::default(),
                 device_descs: Default::default(),
@@ -81,7 +81,7 @@ impl AlsaAccess {
     
     pub fn update_device_list(&mut self) {
         // alright lets do it
-        fn inner() -> Result<Vec<AlsaDeviceDesc>, AlsaError> {
+        fn inner() -> Result<Vec<AlsaAudioDesc>, AlsaError> {
             let mut device_descs = Vec::new();
             let mut card_num = -1;
             unsafe {
@@ -110,13 +110,13 @@ impl AlsaAccess {
                             name: desc_str
                         };
                         if ioid == "" || ioid == "Input" {
-                            device_descs.push(AlsaDeviceDesc {
+                            device_descs.push(AlsaAudioDesc {
                                 name: name_str.clone(),
                                 desc: desc.clone()
                             });
                         }
                         if ioid == "" || ioid == "Output" {
-                            device_descs.push(AlsaDeviceDesc {
+                            device_descs.push(AlsaAudioDesc {
                                 name: name_str,
                                 desc: AudioDeviceDesc {device_type: AudioDeviceType::Output, ..desc}
                             });
@@ -188,7 +188,7 @@ impl AlsaAccess {
             let audio_inputs = self.audio_inputs.clone();
             let name = self.device_descs.iter().find( | v | v.desc.device_id == device_id).unwrap().name.clone();
             std::thread::spawn(move || {
-                let (mut device, device_ref) = AlsaDevice::new(&name, device_id, SND_PCM_STREAM_CAPTURE).unwrap();
+                let (mut device, device_ref) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_CAPTURE).unwrap();
                 audio_inputs.lock().unwrap().push(device_ref);
                 let mut audio_buffer = device.allocate_matching_buffer();
                 loop {
@@ -243,7 +243,7 @@ impl AlsaAccess {
             let name = self.device_descs.iter().find( | v | v.desc.device_id == device_id).unwrap().name.clone();
             std::thread::spawn(move || {
                 
-                let (mut device, device_ref) = AlsaDevice::new(&name, device_id, SND_PCM_STREAM_PLAYBACK).unwrap();
+                let (mut device, device_ref) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_PLAYBACK).unwrap();
                 audio_outputs.lock().unwrap().push(device_ref);
                 // lets allocate an output buffer
                 let mut audio_buffer = device.allocate_matching_buffer();
@@ -276,8 +276,8 @@ impl AlsaAccess {
 }
 
 
-impl AlsaDevice {
-    fn new(device_name: &str, device_id: AudioDeviceId, direction: snd_pcm_stream_t) -> Result<(AlsaDevice, AlsaDeviceRef),
+impl AlsaAudioDevice {
+    fn new(device_name: &str, device_id: AudioDeviceId, direction: snd_pcm_stream_t) -> Result<(AlsaAudioDevice, AlsaAudioDeviceRef),
         AlsaError> {
         unsafe {
             let mut handle: *mut snd_pcm_t = 0 as *mut _;
@@ -313,7 +313,7 @@ impl AlsaDevice {
                 channel_count: channel_count as usize,
                 frame_count: frame_count as usize,
                 _buffer_size: buffer_size as usize,
-            }, AlsaDeviceRef {
+            }, AlsaAudioDeviceRef {
                 device_id,
                 is_terminated: false,
             }))

@@ -83,8 +83,8 @@ use {
         event::{TimerEvent},
         cursor::MouseCursor,
         os::cx_desktop::EventFlow,
-        os::mswindows::win32_event::Win32Event,
-        os::mswindows::win32_window::Win32Window,
+        os::windows::win32_event::Win32Event,
+        os::windows::win32_window::Win32Window,
     },
 };
 pub const FALSE: BOOL = BOOL(0);
