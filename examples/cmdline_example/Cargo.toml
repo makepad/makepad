@@ -10,5 +10,3 @@ metadata.makepad-auto-version = "MWwHZkXy15VfJLvQ2nKLG37W_rY="
 [dependencies]
 makepad-error-log = {path="../../libs/error_log", version="0.3.0"}
 
-[features]
-nightly = ["makepad-error-log/nightly"]

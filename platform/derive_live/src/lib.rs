@@ -1,4 +1,4 @@
-#![cfg_attr(feature = "nightly", feature(proc_macro_span))]
+#![cfg_attr(lines, feature(proc_macro_span))]
 
 use proc_macro::{TokenStream};
 

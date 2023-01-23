@@ -12,5 +12,3 @@ metadata.makepad-auto-version = "AJiFe0mfdrUVcKeKSaW1C3R-oCA="
 [dependencies]
 makepad-live-compiler = { path = "../live_compiler", version = "0.3.0" }
 
-[features]
-nightly = ["makepad-live-compiler/nightly"]
