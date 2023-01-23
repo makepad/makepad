@@ -79,7 +79,7 @@ impl AlsaAudioAccess {
         ))
     }
     
-    pub fn update_device_list(&mut self) {
+    pub fn get_updated_descs(&mut self)-> Vec<AudioDeviceDesc> {
         // alright lets do it
         fn inner() -> Result<Vec<AlsaAudioDesc>, AlsaError> {
             let mut device_descs = Vec::new();
@@ -155,15 +155,13 @@ impl AlsaAudioAccess {
                 self.device_descs = descs;
             }
         }
-    }
-    
-    pub fn get_descs(&self) -> Vec<AudioDeviceDesc> {
         let mut out = Vec::new();
         for dev in &self.device_descs {
             out.push(dev.desc.clone());
         }
         out
     }
+    
     
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
         let new = {
