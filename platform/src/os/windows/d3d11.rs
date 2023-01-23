@@ -6,8 +6,8 @@ use {
         makepad_math::*,
         makepad_error_log::*,
         os::{
-            mswindows::win32_app::{TRUE, FALSE},
-            mswindows::win32_window::Win32Window,
+            windows::win32_app::{TRUE, FALSE},
+            windows::win32_window::Win32Window,
         },
         draw_list::DrawListId,
         event::WindowGeom,

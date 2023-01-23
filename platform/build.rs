@@ -1,6 +1,4 @@
-use std::process::Command;
 use std::env;
-use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     if let Ok(configs) = env::var("MAKEPAD"){
@@ -13,6 +11,8 @@ fn main() {
         }
     }
     #[cfg(target_os = "macos")]{
+    use std::process::Command;
+    use std::path::Path;
         let out_dir = env::var("OUT_DIR").unwrap();
         if !Command::new("clang").args(&["src/os/apple/metal_xpc.m", "-c", "-o"])
             .arg(&format!("{}/metal_xpc.o", out_dir))
@@ -34,7 +34,5 @@ fn main() {
         
     }
     #[cfg(any(target_os = "linux", target_os="windows"))]{
-        
-        //panic!("Linux and windows support coming soon")
     }
 }
