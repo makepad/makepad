@@ -7,7 +7,6 @@ use {
         audio::*,
         midi::*,
         os::apple::apple_sys::*,
-        os::apple::core_audio::*,
         os::apple::cocoa_delegate::*,
         os::apple::cocoa_app::*,
         os::apple::apple_util::*,
