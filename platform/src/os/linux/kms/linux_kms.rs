@@ -5,6 +5,8 @@ use {
         kms_event::*,
     },
     self::super::super::{
+        libc_sys,
+        select_timer::SelectTimers,
         linux_media::CxLinuxMedia
     },
     crate::{
@@ -12,12 +14,13 @@ use {
         makepad_live_id::*,
         thread::Signal,
         event::{
+            TimerEvent,
             WebSocket,
-            WebSocketAutoReconnect, 
+            WebSocketAutoReconnect,
             Event,
         },
         pass::CxPassParent,
-        cx::{Cx, OsType,}, 
+        cx::{Cx, OsType,},
         gpu_info::GpuPerformance,
         os::cx_desktop::EventFlow,
         
@@ -25,12 +28,13 @@ use {
 };
 
 pub struct KmsApp {
-    pub timers: VecDeque<XlibTimer>,
-    pub free_timers: Vec<usize>,
-    pub event_flow: EventFlow,
-    pub current_cursor: MouseCursor,
-    pub atoms: XlibAtoms,
-    pub dnd: Dnd,
+    pub timers: SelectTimers,
+}
+
+impl KmsApp {
+    fn new() -> Self {Self {
+        timers: SelectTimers::new()
+    }}
 }
 
 impl Cx {
@@ -38,18 +42,37 @@ impl Cx {
         self.platform_type = OsType::Linux {custom_window_chrome: false};
         self.gpu_info.performance = GpuPerformance::Tier1;
         
-        let cx = Rc::new(RefCell::new(self));
-        cx.borrow_mut().call_event_handler(&Event::Construct);
-        cx.borrow_mut().redraw_all()
+        self.call_event_handler(&Event::Construct);
+        self.redraw_all();
+        let mut kms_app = KmsApp::new();
         
         // lets run the kms eventloop
+        let mut event_flow = EventFlow::Poll;
+        let mut timer_ids = Vec::new();
+        let mut signal_fds = [0, 0];
+        unsafe{libc_sys::pipe(signal_fds.as_mut_ptr());}
+        
+        while event_flow != EventFlow::Exit {
+            if event_flow == EventFlow::Wait{
+                kms_app.timers.select(signal_fds[0]);
+            }
+            kms_app.timers.update_timers(&mut timer_ids);
+            for timer_id in &timer_ids {
+                self.kms_event_callback(
+                    &mut kms_app,
+                    KmsEvent::Timer(TimerEvent {timer_id: *timer_id})
+                );
+            }
+            event_flow = self.kms_event_callback(&mut kms_app, KmsEvent::Paint);
+        }
     }
     
     fn kms_event_callback(
         &mut self,
+        kms_app: &mut KmsApp,
         event: KmsEvent,
     ) -> EventFlow {
-        if let EventFlow::Exit = self.handle_platform_ops() {
+        if let EventFlow::Exit = self.handle_platform_ops(kms_app) {
             return EventFlow::Exit
         }
         
@@ -59,11 +82,11 @@ impl Cx {
         match event {
             KmsEvent::Paint => {
                 if self.new_next_frames.len() != 0 {
-                    self.call_next_frame_event(xlib_app.time_now());
+                    self.call_next_frame_event(kms_app.timers.time_now());
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
-                    ///opengl_cx.make_current();
+                    //opengl_cx.make_current();
                     self.opengl_compile_shaders();
                 }
                 // ok here we send out to all our childprocesses
@@ -100,13 +123,13 @@ impl Cx {
                 self.call_event_handler(&Event::KeyUp(e))
             }
             KmsEvent::Timer(e) => {
-                if e.timer_id == 0{
-                    if Signal::check_and_clear_ui_signal(){
+                if e.timer_id == 0 {
+                    if Signal::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
                 }
-                else{
+                else {
                     self.call_event_handler(&Event::Timer(e))
                 }
             }
@@ -125,7 +148,7 @@ impl Cx {
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(window_id) => {
+                CxPassParent::Window(_window_id) => {
                     /*if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                         let dpi_factor = window.window_geom.dpi_factor;
                         window.resize_buffers(&opengl_cx);
@@ -144,7 +167,7 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self) -> EventFlow {
+    fn handle_platform_ops(&mut self, kms_app: &mut KmsApp) -> EventFlow {
         let mut ret = EventFlow::Poll;
         while let Some(op) = self.platform_ops.pop() {
             match op {
@@ -155,19 +178,19 @@ impl Cx {
                 CxOsOp::RestoreWindow(_) => {},
                 CxOsOp::FullscreenWindow(_) => {},
                 CxOsOp::NormalizeWindow(_window_id) => {},
-                CxOsOp::SetTopmost(_window_id, _is_topmost)=> {},
+                CxOsOp::SetTopmost(_window_id, _is_topmost) => {},
                 CxOsOp::XrStartPresenting => {},
                 CxOsOp::XrStopPresenting => {},
                 CxOsOp::ShowTextIME(_area, _pos) => {},
                 CxOsOp::HideTextIME => {},
-                CxOsOp::SetCursor(cursor) => {
+                CxOsOp::SetCursor(_cursor) => {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats} => {
-                    //xlib_app.start_timer(timer_id, interval, repeats);
+                    kms_app.timers.start_timer(timer_id, interval, repeats);
                 },
                 CxOsOp::StopTimer(timer_id) => {
-                    //xlib_app.stop_timer(timer_id);
+                    kms_app.timers.stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(_dragged_item) => {
                 }

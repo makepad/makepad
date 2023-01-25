@@ -8,6 +8,7 @@ use {
     }
 };
 
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum EventFlow{
     Poll,
     Wait,
