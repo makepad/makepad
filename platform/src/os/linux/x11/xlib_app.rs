@@ -17,7 +17,6 @@ use {
     crate::{
         makepad_math::DVec2,
         event::*,
-        thread::Signal,
         cursor::MouseCursor,
         os::cx_desktop::EventFlow,
     },
@@ -559,6 +558,7 @@ impl XlibApp {
             
             self.do_callback(XlibEvent::Paint);
             
+            let mut select_time = self.time_now();
             while self.event_loop_running {
                 match self.event_flow {
                     EventFlow::Exit => {
@@ -573,7 +573,7 @@ impl XlibApp {
                         // of the first timer that should be fired. Otherwise, we set the timeout to
                         // None, so that select will block indefinitely.
                         let timeout = if let Some(timer) = self.timers.front() {
-                            // println!("Select wait {}",(timer.delta_timeout.fract() * 1000000.0) as i64);
+                           
                             Some(libc_sys::timeval {
                                 // `tv_sec` is in seconds, so take the integer part of `delta_timeout`
                                 tv_sec: timer.delta_timeout.trunc() as libc_sys::time_t,
@@ -583,32 +583,27 @@ impl XlibApp {
                             })
                         }
                         else {
+                            
                             None
                         };
                         let _nfds = libc_sys::select(
                             self.display_fd.max(self.signal_fds[0]) + 1,
                             fds.as_mut_ptr(),
-                            ptr::null_mut(),
+                            ptr::null_mut(), 
                             ptr::null_mut(),
                             if let Some(mut timeout) = timeout {&mut timeout} else {ptr::null_mut()}
                         );
                         self.event_flow = EventFlow::Poll;
                     }
-                    EventFlow::Poll => {
-                        let mut select_time = self.time_now();
+                    EventFlow::Poll => { 
                         let last_select_time = select_time;
                         select_time = self.time_now();
                         let mut select_time_used = select_time - last_select_time;
-                        
-                        if Signal::check_and_clear_ui_signal() {
-                            self.do_callback(
-                                XlibEvent::Signal
-                            );
-                        }
-                        
+                        //println!("{}", self.timers.len());
                         while let Some(timer) = self.timers.front_mut() {
                             // If the amount of time that elapsed is less than `delta_timeout` for the
                             // next timer, then no more timers need to be fired.
+                            //  println!("TIMER COMPARE {} {}", select_time_used, timer.delta_timeout);
                             if select_time_used < timer.delta_timeout {
                                 timer.delta_timeout -= select_time_used;
                                 break;
@@ -623,6 +618,7 @@ impl XlibApp {
                             if timer.repeats {
                                 self.start_timer(timer.id, timer.timeout, timer.repeats);
                             }
+                            
                             // Fire the timer, and allow the callback to cancel the repeat
                             self.do_callback(
                                 XlibEvent::Timer(TimerEvent {timer_id: timer.id})
@@ -646,7 +642,7 @@ impl XlibApp {
         }
     }
     
-    pub fn terminate_event_loop(&mut self){
+    pub fn terminate_event_loop(&mut self) {
         self.event_loop_running = false;
         unsafe {x11_sys::XCloseIM(self.xim)};
         unsafe {x11_sys::XCloseDisplay(self.display)};
@@ -786,7 +782,7 @@ impl XlibApp {
                 }
             }
         }
-    } 
+    }
     
     fn xkeystate_to_modifiers(&self, state: c_uint) -> KeyModifiers {
         KeyModifiers {

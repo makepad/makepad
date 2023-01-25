@@ -11,13 +11,14 @@ use {
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::{dvec2},
         makepad_live_id::*,
+        thread::Signal,
         event::{
             WebSocket,
             WebSocketAutoReconnect, 
             Event,
         },
         pass::CxPassParent,
-        cx::{Cx, OsType,},
+        cx::{Cx, OsType,}, 
         gpu_info::GpuPerformance,
         os::cx_desktop::EventFlow,
         
@@ -49,7 +50,7 @@ impl Cx {
         
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
-        //get_xlib_app_global().start_signal_poll();
+        get_xlib_app_global().start_timer(0,0.008,true);
         get_xlib_app_global().event_loop();
     }
     
@@ -77,7 +78,7 @@ impl Cx {
                 paint_dirty = true;
                 self.call_event_handler(&Event::AppGotFocus);
             }
-            XlibEvent::AppLostFocus => {
+            XlibEvent::AppLostFocus => { 
                 self.call_event_handler(&Event::AppLostFocus);
             }
             XlibEvent::WindowGeomChange(re) => { // do this here because mac
@@ -170,11 +171,16 @@ impl Cx {
                 self.call_event_handler(&Event::TextCopy(e))
             }
             XlibEvent::Timer(e) => {
-                self.call_event_handler(&Event::Timer(e))
-            }
-            XlibEvent::Signal => {
-                self.handle_media_signals();
-                self.call_event_handler(&Event::Signal);
+                //println!("TIMER! {:?}", std::time::Instant::now());
+                if e.timer_id == 0{
+                    if Signal::check_and_clear_ui_signal(){
+                        self.handle_media_signals();
+                        self.call_event_handler(&Event::Signal);
+                    }
+                }
+                else{
+                    self.call_event_handler(&Event::Timer(e))
+                }
             }
         }
         
