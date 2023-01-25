@@ -9,7 +9,6 @@ pub mod macos;
 pub mod cocoa_event;
 pub mod metal_xpc;
 pub mod audio_unit;
-pub mod core_audio;
 pub mod core_midi;
 pub mod apple_media;
 pub mod av_capture;

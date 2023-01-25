@@ -6,7 +6,6 @@ use {
         makepad_live_id::{LiveId},
         midi::*,
         os::apple::apple_sys::*,
-        os::apple::core_audio::*,
         os::apple::apple_util::*,
         objc_block,
     },

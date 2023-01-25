@@ -166,18 +166,6 @@ impl Cx {
     fn handle_platform_ops(&mut self, kms_app: &mut KmsApp) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
-                CxOsOp::CreateWindow(_) => {},
-                CxOsOp::CloseWindow(_) => {},
-                CxOsOp::MinimizeWindow(_) => {},
-                CxOsOp::MaximizeWindow(_) => {},
-                CxOsOp::RestoreWindow(_) => {},
-                CxOsOp::FullscreenWindow(_) => {},
-                CxOsOp::NormalizeWindow(_window_id) => {},
-                CxOsOp::SetTopmost(_window_id, _is_topmost) => {},
-                CxOsOp::XrStartPresenting => {},
-                CxOsOp::XrStopPresenting => {},
-                CxOsOp::ShowTextIME(_area, _pos) => {},
-                CxOsOp::HideTextIME => {},
                 CxOsOp::SetCursor(_cursor) => {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
@@ -187,10 +175,7 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     kms_app.timers.stop_timer(timer_id);
                 },
-                CxOsOp::StartDragging(_dragged_item) => {
-                }
-                CxOsOp::UpdateMenu(_menu) => {
-                }
+                _=>()
             }
         }
          EventFlow::Poll
