@@ -352,8 +352,6 @@ impl AlsaMidiAccess {
                 }
             }
         });
-        //output_watcher.Start().unwrap();
-        // alrighty lets initialize midi.
         change_signal.set();
         midi_access
     }
