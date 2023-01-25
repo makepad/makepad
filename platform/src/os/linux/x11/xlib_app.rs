@@ -1,7 +1,6 @@
 use {
     std::{
-        collections::{HashMap, VecDeque},
-        time::Instant,
+        collections::{HashMap},
         mem,
         rc::Rc,
         cell::{Cell, RefCell},
@@ -12,7 +11,7 @@ use {
         x11_sys,
         xlib_event::XlibEvent,
         xlib_window::*,
-        super::libc_sys,
+        super::select_timer::SelectTimers,
     },
     crate::{
         makepad_math::DVec2,
@@ -42,27 +41,20 @@ pub struct XlibApp {
     pub xim: x11_sys::XIM,
     pub clipboard: String,
     pub display_fd: c_int,
-    pub signal_fds: [c_int; 2],
+    //pub signal_fds: [c_int; 2],
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
-    pub time_start: Instant,
+
+    pub timers: SelectTimers,
+
     pub last_scroll_time: f64,
     pub last_click_time: f64,
     pub last_click_pos: (i32, i32),
     pub event_callback: Option<Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow >>,
-    pub timers: VecDeque<XlibTimer>,
-    pub free_timers: Vec<usize>,
+    //pub free_timers: Vec<usize>,
     pub event_flow: EventFlow,
     pub current_cursor: MouseCursor,
     pub atoms: XlibAtoms,
     pub dnd: Dnd,
-}
-
-#[derive(Clone, Copy)]
-pub struct XlibTimer {
-    id: u64,
-    timeout: f64,
-    repeats: bool,
-    delta_timeout: f64,
 }
 
 impl XlibApp {
@@ -71,8 +63,8 @@ impl XlibApp {
             let display = x11_sys::XOpenDisplay(ptr::null());
             let display_fd = x11_sys::XConnectionNumber(display);
             let xim = x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
-            let mut signal_fds = [0, 0];
-            libc_sys::pipe(signal_fds.as_mut_ptr());
+            //let mut signal_fds = [0, 0];
+            //libc_sys::pipe(signal_fds.as_mut_ptr());
             x11_sys::XrmInitialize();
             XlibApp {
                 event_loop_running: true,
@@ -81,16 +73,15 @@ impl XlibApp {
                 xim,
                 display,
                 display_fd,
-                signal_fds,
+                //signal_fds,
                 clipboard: String::new(),
                 last_scroll_time: 0.0,
                 last_click_time: 0.0,
                 last_click_pos: (0, 0),
                 window_map: HashMap::new(),
-                time_start: Instant::now(),
+                timers: SelectTimers::new(),
                 event_flow: EventFlow::Poll,
-                timers: VecDeque::new(),
-                free_timers: Vec::new(),
+                //free_timers: Vec::new(),
                 current_cursor: MouseCursor::Default,
                 dnd: Dnd::new(display),
             }
@@ -558,73 +549,29 @@ impl XlibApp {
             
             self.do_callback(XlibEvent::Paint);
             
-            let mut select_time = self.time_now();
+            let mut timer_ids = Vec::new();
             while self.event_loop_running {
                 match self.event_flow {
                     EventFlow::Exit => {
                         break;
                     }
                     EventFlow::Wait => {
-                        let mut fds = mem::MaybeUninit::uninit();
-                        libc_sys::FD_ZERO(fds.as_mut_ptr());
-                        libc_sys::FD_SET(self.display_fd, fds.as_mut_ptr());
-                        libc_sys::FD_SET(self.signal_fds[0], fds.as_mut_ptr());
-                        // If there are any timers, we set the timeout for select to the `delta_timeout`
-                        // of the first timer that should be fired. Otherwise, we set the timeout to
-                        // None, so that select will block indefinitely.
-                        let timeout = if let Some(timer) = self.timers.front() {
-                           
-                            Some(libc_sys::timeval {
-                                // `tv_sec` is in seconds, so take the integer part of `delta_timeout`
-                                tv_sec: timer.delta_timeout.trunc() as libc_sys::time_t,
-                                // `tv_usec` is in microseconds, so take the fractional part of
-                                // `delta_timeout` 1000000.0.
-                                tv_usec: (timer.delta_timeout.fract() * 1000000.0) as libc_sys::time_t,
-                            })
+                        self.timers.update_timers(&mut timer_ids);
+                        for timer_id in &timer_ids{
+                            self.do_callback(
+                                XlibEvent::Timer(TimerEvent {timer_id:*timer_id})
+                            );
                         }
-                        else {
-                            
-                            None
-                        };
-                        let _nfds = libc_sys::select(
-                            self.display_fd.max(self.signal_fds[0]) + 1,
-                            fds.as_mut_ptr(),
-                            ptr::null_mut(), 
-                            ptr::null_mut(),
-                            if let Some(mut timeout) = timeout {&mut timeout} else {ptr::null_mut()}
-                        );
+                        self.timers.select(self.display_fd);
                         self.event_flow = EventFlow::Poll;
                     }
                     EventFlow::Poll => { 
-                        let last_select_time = select_time;
-                        select_time = self.time_now();
-                        let mut select_time_used = select_time - last_select_time;
-                        //println!("{}", self.timers.len());
-                        while let Some(timer) = self.timers.front_mut() {
-                            // If the amount of time that elapsed is less than `delta_timeout` for the
-                            // next timer, then no more timers need to be fired.
-                            //  println!("TIMER COMPARE {} {}", select_time_used, timer.delta_timeout);
-                            if select_time_used < timer.delta_timeout {
-                                timer.delta_timeout -= select_time_used;
-                                break;
-                            }
-                            
-                            let timer = *self.timers.front().unwrap();
-                            select_time_used -= timer.delta_timeout;
-                            
-                            // Stop the timer to remove it from the list.
-                            self.stop_timer(timer.id);
-                            // If the timer is repeating, simply start it again.
-                            if timer.repeats {
-                                self.start_timer(timer.id, timer.timeout, timer.repeats);
-                            }
-                            
-                            // Fire the timer, and allow the callback to cancel the repeat
+                        self.timers.update_timers(&mut timer_ids);
+                        for timer_id in &timer_ids{
                             self.do_callback(
-                                XlibEvent::Timer(TimerEvent {timer_id: timer.id})
+                                XlibEvent::Timer(TimerEvent {timer_id:*timer_id})
                             );
                         }
-                        
                         self.event_loop_poll();
                     }
                 }
@@ -650,78 +597,15 @@ impl XlibApp {
     }
     
     pub fn start_timer(&mut self, id: u64, timeout: f64, repeats: bool) {
-        //println!("STARTING TIMER {:?} {:?} {:?}", id, timeout, repeats);
-        
-        // Timers are stored in an ordered list. Each timer stores the amount of time between
-        // when its predecessor in the list should fire and when the timer itself should fire
-        // in `delta_timeout`.
-        
-        // Since we are starting a new timer, our first step is to find where in the list this
-        // new timer should be inserted. `delta_timeout` is initially set to `timeout`. As we move
-        // through the list, we subtract the `delta_timeout` of the timers preceding the new timer
-        // in the list. Once this subtraction would cause an overflow, we have found the correct
-        // position in the list. The timer should fire after the one preceding it in the list, and
-        // before the one succeeding it in the list. Moreover `delta_timeout` is now set to the
-        // correct value.
-        let mut delta_timeout = timeout;
-        let index = self.timers.iter().position( | timer | {
-            if delta_timeout < timer.delta_timeout {
-                return true;
-            }
-            delta_timeout -= timer.delta_timeout;
-            false
-        }).unwrap_or(self.timers.len());
-        
-        // Insert the timer in the list.
-        //
-        // We also store the original `timeout` with each timer. This is necessary if the timer is
-        // repeatable and we want to restart it later on.
-        self.timers.insert(
-            index,
-            XlibTimer {
-                id,
-                timeout,
-                repeats,
-                delta_timeout,
-            },
-        );
-        
-        // The timer succeeding the newly inserted timer now has a new timer preceding it, so we
-        // need to adjust its `delta_timeout`.
-        //
-        // Note that by construction, `timer.delta_timeout < delta_timeout`. Otherwise, the newly
-        // inserted timer would have been inserted *after* the timer succeeding it, not before it.
-        if index < self.timers.len() - 1 {
-            let timer = &mut self.timers[index + 1];
-            // This computation should never underflow (see above)
-            timer.delta_timeout -= delta_timeout;
-        }
+        self.timers.start_timer(id, timeout, repeats);
     }
     
     pub fn stop_timer(&mut self, id: u64) {
-        //println!("STOPPING TIMER {:?}", id);
-        
-        // Since we are stopping an existing timer, our first step is to find where in the list this
-        // timer should be removed.
-        let index = if let Some(index) = self.timers.iter().position( | timer | timer.id == id) {
-            index
-        } else {
-            return;
-        };
-        
-        // Remove the timer from the list.
-        let delta_timeout = self.timers.remove(index).unwrap().delta_timeout;
-        
-        // The timer succeeding the removed timer now has a different timer preceding it, so we need
-        // to adjust its `delta timeout`.
-        if index < self.timers.len() {
-            self.timers[index].delta_timeout += delta_timeout;
-        }
+        self.timers.stop_timer(id);
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+        self.timers.time_now()
     }
     
     pub fn load_first_cursor(&self, names: &[&[u8]]) -> Option<c_ulong> {
