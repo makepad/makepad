@@ -1,8 +1,10 @@
 use {
     std::cell::RefCell,
     std::rc::Rc,
+    self::super::{
+        opengl_x11::{OpenglWindow,OpenglCx},
+    },
     self::super::super::{
-        opengl::{OpenglCx, OpenglWindow},
         x11::xlib_event::*,
         x11::xlib_app::*,
         linux_media::CxLinuxMedia
@@ -114,7 +116,8 @@ impl Cx {
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
-                    self.opengl_compile_shaders(&opengl_cx);
+                    opengl_cx.make_current();
+                    self.opengl_compile_shaders();
                 }
                 // ok here we send out to all our childprocesses
                 
@@ -193,6 +196,7 @@ impl Cx {
     }
     
     pub (crate) fn handle_repaint(&mut self, opengl_windows: &mut Vec<OpenglWindow>, opengl_cx: &mut OpenglCx) {
+        opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -207,10 +211,10 @@ impl Cx {
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, dpi_factor, opengl_cx);
+                    self.draw_pass_to_texture(*pass_id, dpi_factor);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, 1.0, opengl_cx);
+                    self.draw_pass_to_texture(*pass_id, 1.0);
                 }
             }
         }
