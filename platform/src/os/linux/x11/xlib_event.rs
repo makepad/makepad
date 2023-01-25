@@ -42,5 +42,4 @@ pub enum XlibEvent {
     KeyUp(KeyEvent),
     TextCopy(TextCopyEvent),
     Timer(TimerEvent),
-    Signal,
 }
