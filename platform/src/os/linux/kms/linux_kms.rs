@@ -1,6 +1,4 @@
 use {
-    std::cell::RefCell,
-    std::rc::Rc,
     self::super::{
         kms_event::*,
     },
@@ -76,8 +74,6 @@ impl Cx {
             return EventFlow::Exit
         }
         
-        let mut paint_dirty = false;
-        
         //self.process_desktop_pre_event(&mut event);
         match event {
             KmsEvent::Paint => {
@@ -134,7 +130,7 @@ impl Cx {
                 }
             }
         }
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0  {
             EventFlow::Poll
         } else {
             EventFlow::Wait
@@ -168,7 +164,6 @@ impl Cx {
     }
     
     fn handle_platform_ops(&mut self, kms_app: &mut KmsApp) -> EventFlow {
-        let mut ret = EventFlow::Poll;
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(_) => {},
@@ -198,7 +193,7 @@ impl Cx {
                 }
             }
         }
-        ret
+         EventFlow::Poll
     }
 }
 
