@@ -17,7 +17,6 @@ live_design!{
     Frame = {{Frame}} {}
     
     Solid = <Frame> {show_bg: true, draw_bg: {
-        
         fn get_color(self) -> vec4 {
             return self.color
         }

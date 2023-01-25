@@ -22,6 +22,7 @@ mod libc_64{
 pub use libc_64::*;
 
 type c_int =  std::os::raw::c_int;
+type c_uint =  std::os::raw::c_uint;
 type c_ulong = std::os::raw::c_ulong;
 type c_void = std::os::raw::c_void;
 
@@ -32,6 +33,8 @@ pub const EPIPE: c_int = 32;
 pub struct fd_set {
     fds_bits: [c_ulong; FD_SETSIZE / ULONG_SIZE],
 }
+
+pub type nfds_t = c_uint;
 
 extern "C"{
     pub fn free(arg1: *mut c_void);
@@ -63,3 +66,4 @@ pub struct timeval {
     pub tv_sec: time_t,
     pub tv_usec: suseconds_t,
 }
+
