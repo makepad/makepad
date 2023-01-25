@@ -35,6 +35,10 @@ pub const SND_SEQ_KERNEL_CLIENT: snd_seq_client_type = 2;
 pub type snd_seq_client_type = ::std::os::raw::c_uint;
 pub use self::snd_seq_client_type as snd_seq_client_type_t;
 
+pub const SND_SEQ_ADDRESS_SUBSCRIBERS: ::std::os::raw::c_uint = 254;
+pub const SND_SEQ_ADDRESS_UNKNOWN: ::std::os::raw::c_uint =	253;
+pub const SND_SEQ_QUEUE_DIRECT: ::std::os::raw::c_uint =	253;
+
 pub type snd_seq_event_type = u8;
 pub const SND_SEQ_EVENT_NOTEON: snd_seq_event_type = 6;
 pub const SND_SEQ_EVENT_NOTEOFF: snd_seq_event_type = 7;
@@ -56,6 +60,13 @@ pub const SND_SEQ_EVENT_PORT_UNSUBSCRIBED: snd_seq_event_type = 67;
 pub type snd_seq_event_type_t = ::std::os::raw::c_uchar;
 pub type snd_seq_tick_time_t = ::std::os::raw::c_uint;
 pub type snd_seq_port_subscribe_t = _snd_seq_port_subscribe;
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct snd_midi_event {
+    _unused: [u8; 0],
+}
+pub type snd_midi_event_t = snd_midi_event;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -491,6 +502,23 @@ extern "C" {
     pub fn snd_seq_event_input(
         handle: *mut snd_seq_t,
         ev: *mut *mut snd_seq_event_t,
+    ) -> ::std::os::raw::c_int;
+    pub fn snd_midi_event_new(
+        bufsize: usize,
+        rdev: *mut *mut snd_midi_event_t,
+    ) -> ::std::os::raw::c_int;
+    pub fn snd_midi_event_free(dev: *mut snd_midi_event_t);
+    pub fn snd_midi_event_init(dev: *mut snd_midi_event_t);
+    pub fn snd_midi_event_reset_encode(dev: *mut snd_midi_event_t);
+    pub fn snd_midi_event_encode(
+        dev: *mut snd_midi_event_t,
+        buf: *const ::std::os::raw::c_uchar,
+        count: ::std::os::raw::c_long,
+        ev: *mut snd_seq_event_t,
+    ) -> ::std::os::raw::c_long;
+    pub fn snd_seq_event_output_direct(
+        handle: *mut snd_seq_t,
+        ev: *mut snd_seq_event_t,
     ) -> ::std::os::raw::c_int;
 }
 

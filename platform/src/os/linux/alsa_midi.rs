@@ -18,9 +18,10 @@ use {
 pub struct OsMidiOutput(pub (crate) Arc<Mutex<AlsaMidiAccess >>);
 
 impl OsMidiOutput {
-    pub fn send(&self, _port_id: Option<MidiPortId>, _d: MidiData) {
+    pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
+        // alright lets send some midi.
         // send some midi here
-        //let _ = self.0.lock().unwrap().event_sender.send(AlsaMidiEvent::SendMidi(port_id, d));
+        let _ = self.0.lock().unwrap().send_midi(port_id, d);
     }
 }
 
@@ -37,31 +38,38 @@ pub struct AlsaMidiAccess {
     client: Result<AlsaClient, AlsaError>,
 }
 
+
+
 macro_rules!alsa_error {
     ( $ call: expr) => {
         AlsaError::from(stringify!( $ call), $ call)
     }
 }
 
-
 #[derive(Clone)]
 struct AlsaClientPtr(pub *mut snd_seq_t);
 unsafe impl Send for AlsaClientPtr {}
 
+#[derive(Clone)]
+struct AlsaMidiSendPtr(pub *mut snd_midi_event_t);
+unsafe impl Send for AlsaMidiSendPtr {}
+
 
 struct AlsaClient {
     in_client: AlsaClientPtr,
-    _out_client: AlsaClientPtr,
     in_client_id: i32,
     in_port_id: i32,
+    midi_send: AlsaMidiSendPtr,
+    out_client: AlsaClientPtr,
     out_client_id: i32,
+    out_port_id: i32,
 }
 
 const kRequiredInputPortCaps: ::std::os::raw::c_uint =
 SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ;
 const kRequiredOutputPortCaps: ::std::os::raw::c_uint =
 SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_SUBS_WRITE;
-const _kCreateOutputPortCaps: ::std::os::raw::c_uint =
+const kCreateOutputPortCaps: ::std::os::raw::c_uint =
 SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_NO_EXPORT;
 const kCreateInputPortCaps: ::std::os::raw::c_uint =
 SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_NO_EXPORT;
@@ -95,21 +103,42 @@ impl AlsaMidiPort {
     unsafe fn config_port(&self, client: &AlsaClient, subscribe: bool) {
         let mut subs: *mut snd_seq_port_subscribe_t = 0 as *mut _;
         snd_seq_port_subscribe_malloc(&mut subs);
-        let sender = snd_seq_addr_t {
-            client: self.client_id as _,
-            port: self.port_id as _
-        };
-        snd_seq_port_subscribe_set_sender(subs, &sender);
-        let dest = snd_seq_addr_t {
-            client: client.in_client_id as _,
-            port: client.in_port_id as _
-        };
-        snd_seq_port_subscribe_set_dest(subs, &dest);
-        if subscribe {
-            alsa_error!(snd_seq_subscribe_port(client.in_client.0, subs)).unwrap();
+        
+        if self.desc.port_type.is_input() {
+            let sender = snd_seq_addr_t {
+                client: self.client_id as _,
+                port: self.port_id as _
+            };
+            snd_seq_port_subscribe_set_sender(subs, &sender);
+            let dest = snd_seq_addr_t {
+                client: client.in_client_id as _,
+                port: client.in_port_id as _
+            };
+            snd_seq_port_subscribe_set_dest(subs, &dest);
+            if subscribe {
+                alsa_error!(snd_seq_subscribe_port(client.in_client.0, subs)).unwrap();
+            }
+            else {
+                snd_seq_unsubscribe_port(client.in_client.0, subs);
+            }
         }
         else {
-            snd_seq_unsubscribe_port(client.in_client.0, subs);
+            let sender = snd_seq_addr_t {
+                client: client.out_client_id as _,
+                port: client.out_port_id as _
+            };
+            snd_seq_port_subscribe_set_sender(subs, &sender);
+            let dest = snd_seq_addr_t {
+                client: self.client_id as _,
+                port: self.port_id as _
+            };
+            snd_seq_port_subscribe_set_dest(subs, &dest);
+            if subscribe {
+                alsa_error!(snd_seq_subscribe_port(client.in_client.0, subs)).unwrap();
+            }
+            else {
+                snd_seq_unsubscribe_port(client.in_client.0, subs);
+            }
         }
     }
 }
@@ -148,21 +177,26 @@ impl AlsaClient {
         snd_seq_port_subscribe_set_dest(subs, &announce_dest);
         
         alsa_error!(snd_seq_subscribe_port(in_client, subs)) ?;
-        /*
-        let output_portid = alsa_error!(snd_seq_create_simple_port(
-            output_handle,
+        
+        let out_port_id = alsa_error!(snd_seq_create_simple_port(
+            out_client,
             "Makepad Midi Out\0".as_ptr(),
-            SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_NO_EXPORT,
+            kCreateOutputPortCaps,
             SND_SEQ_PORT_TYPE_APPLICATION
-        )) ?; */
+        )) ?;
         //println!("HERE!");
+        
+        let mut midi_send: *mut snd_midi_event_t = 0 as * mut _;
+        alsa_error!(snd_midi_event_new(256, &mut midi_send))?;
         
         Ok(AlsaClient {
             in_client: AlsaClientPtr(in_client),
             in_client_id,
             in_port_id,
-            _out_client: AlsaClientPtr(out_client),
-            out_client_id
+            midi_send: AlsaMidiSendPtr(midi_send),
+            out_client: AlsaClientPtr(out_client),
+            out_client_id,
+            out_port_id,
         })
     }
     
@@ -324,6 +358,31 @@ impl AlsaMidiAccess {
         midi_access
     }
     
+    pub fn send_midi(&mut self, port_id: Option<MidiPortId>, d: MidiData) {
+        if self.client.is_err() {
+            return
+        }
+        let client = self.client.as_ref().unwrap();
+        unsafe {
+            for port in &self.ports {
+                if port_id.is_none() || Some(port.desc.port_id) == port_id {
+                    // send to port
+                    let mut event: snd_seq_event_t = std::mem::zeroed();
+                    snd_midi_event_reset_encode(client.midi_send.0);
+                    let r = snd_midi_event_encode(client.midi_send.0, d.data.as_ptr(), 3, &mut event);
+                    if r!= 1{
+                        panic!("Unexpected result");
+                    }
+                    event.source.port = port.port_id as _;
+                    event.dest.client = SND_SEQ_ADDRESS_SUBSCRIBERS as _;
+                    event.dest.port = SND_SEQ_ADDRESS_UNKNOWN as _;
+                    event.queue = SND_SEQ_QUEUE_DIRECT as _;
+                    snd_seq_event_output_direct(client.out_client.0, &mut event);                    
+                }
+            }
+        }
+    }
+    
     pub fn find_port(&self, client_id: i32, port_id: i32) -> Option<MidiPortId> {
         for port in &self.ports {
             if port.client_id == client_id && port.port_id == port_id {
@@ -333,7 +392,6 @@ impl AlsaMidiAccess {
         None
     }
     
-    
     pub fn create_midi_input(&self) -> MidiInput {
         let senders = self.input_senders.clone();
         let (send, recv) = mpsc::channel();
@@ -341,13 +399,31 @@ impl AlsaMidiAccess {
         MidiInput(Some(recv))
     }
     
-    pub fn midi_reset(&mut self) { 
+    pub fn midi_reset(&mut self) {
         self.get_updated_descs();
     }
     
-    pub fn use_midi_outputs(&mut self, _ports: &[MidiPortId]) {
+    pub fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
         if self.client.is_err() {
             return
+        }
+        // enable the ones we use
+        for port_id in ports {
+            if let Some(port) = self.ports.iter_mut().find( | p | p.desc.port_id == *port_id && p.desc.port_type.is_output()) {
+                unsafe {
+                    port.subscribe(self.client.as_ref().unwrap())
+                }
+            }
+        }
+        // disable the ones not in the set
+        for port in &mut self.ports {
+            if ports.iter().find( | p | **p == port.desc.port_id).is_none() {
+                if port.desc.port_type.is_output() {
+                    unsafe {
+                        port.unsubscribe(self.client.as_ref().unwrap())
+                    }
+                }
+            }
         }
         //self.event_sender.send(AlsaMidiEvent::UseMidiOutputs(ports.to_vec())).unwrap();
     }
