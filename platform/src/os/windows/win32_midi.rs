@@ -175,7 +175,6 @@ pub struct Win32MidiAccess {
     ports: Vec<Win32MidiPort>,
 }
 
-
 impl Win32MidiAccess {
     
     pub fn create_midi_input(&self) -> MidiInput {

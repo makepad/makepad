@@ -9,4 +9,5 @@ pub mod alsa_midi;
 
 pub(crate) use self::opengl::*; 
 pub(crate) use self::x11::linux_x11::*;
+pub(crate) use self::alsa_midi::{OsMidiOutput};
 

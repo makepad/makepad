@@ -5,8 +5,8 @@ helicopter-headset experience, silent disco, and so on.
 */
 
 pub use makepad_audio_graph;
-pub use makepad_audio_graph::makepad_widgets;
-pub use makepad_audio_graph::makepad_platform;
+pub use makepad_widgets;
+pub use makepad_widgets::makepad_platform;
 pub use makepad_micro_serde;
 use {
     crate::{
@@ -58,6 +58,7 @@ enum TeamTalkWire {
 
 impl App {
     pub fn live_design(cx: &mut Cx) {
+        makepad_widgets::live_design(cx);
         makepad_audio_graph::live_design(cx);
     }
     
