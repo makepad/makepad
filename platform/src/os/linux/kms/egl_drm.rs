@@ -74,7 +74,7 @@ impl Drm {
             let drm_mode = (*drm_connector).modes.offset(i as _);
             let name = CStr::from_ptr((*drm_mode).name.as_ptr()).to_str().unwrap();
             let mode_name = format!("{}-{}", name, (*drm_mode).vrefresh);
-            //println!("{}", mode_name); 
+            //println!("{}", mode_name);
             if mode_name == mode_want {
                 found_drm_mode = Some(drm_mode);
             }
@@ -153,7 +153,7 @@ impl Drm {
         let handle = gbm_bo_get_handle(what_bo);
         let stride = gbm_bo_get_stride(what_bo);
         let mut fb_id = 0;
-        
+
         if drmModeAddFB2(
             self.drm_fd,
             self.width,
@@ -200,21 +200,27 @@ impl Drm {
         let fb_id = self.get_fb_id_for_bo(next_bo);
         let crtc_id = (*self.drm_encoder).crtc_id;
         let mut waiting_for_flip: u32 = 1;
-        if drmModePageFlip(self.drm_fd, crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, &mut waiting_for_flip as *mut _ as *mut _) != 0 {
+        if drmModePageFlip(
+            self.drm_fd,
+            crtc_id,
+            fb_id,
+            DRM_MODE_PAGE_FLIP_EVENT,
+            &mut waiting_for_flip as *mut _ as *mut _
+        ) != 0 {
             println!("Error running drmModePageFlip");
         }
         
         let mut fds = std::mem::MaybeUninit::uninit();
         
         unsafe extern "C" fn handle_page_flip(
-                _fd: ::std::os::raw::c_int,
-                _sequence: ::std::os::raw::c_uint,
-                _tv_sec: ::std::os::raw::c_uint,
-                _tv_usec: ::std::os::raw::c_uint,
-                user_data: *mut ::std::os::raw::c_void,
-            ) {
-                *(user_data as *mut u32) = 0;
-            }
+            _fd: ::std::os::raw::c_int,
+            _sequence: ::std::os::raw::c_uint,
+            _tv_sec: ::std::os::raw::c_uint,
+            _tv_usec: ::std::os::raw::c_uint,
+            user_data: *mut ::std::os::raw::c_void,
+        ) {
+            *(user_data as *mut u32) = 0;
+        }
         
         let mut event_context = drmEventContext {
             version: 2,
@@ -240,7 +246,7 @@ impl Drm {
                 println!("Select error in flip");
                 return
             }
-            else if ret == 0{
+            else if ret == 0 {
                 println!("select timeout");
                 return
             }
