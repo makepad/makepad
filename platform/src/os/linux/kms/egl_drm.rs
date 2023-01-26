@@ -196,10 +196,12 @@ impl Drm {
     
     pub unsafe fn flip_buffers_and_wait(&mut self, egl: &Egl) {
         egl.swap_buffers();
+        
         let next_bo = gbm_surface_lock_front_buffer(self.gbm_surface);
         let fb_id = self.get_fb_id_for_bo(next_bo);
         let crtc_id = (*self.drm_encoder).crtc_id;
         let mut waiting_for_flip: u32 = 1;
+        
         if drmModePageFlip(
             self.drm_fd,
             crtc_id,
@@ -219,6 +221,7 @@ impl Drm {
             _tv_usec: ::std::os::raw::c_uint,
             user_data: *mut ::std::os::raw::c_void,
         ) {
+           // println!("FLIP!");
             *(user_data as *mut u32) = 0;
         }
         
@@ -231,7 +234,7 @@ impl Drm {
         }; 
         while waiting_for_flip != 0 {
             libc_sys::FD_ZERO(fds.as_mut_ptr());
-            libc_sys::FD_SET(0, fds.as_mut_ptr());
+            //libc_sys::FD_SET(0, fds.as_mut_ptr());
             libc_sys::FD_SET(self.drm_fd, fds.as_mut_ptr());
             
             let ret = libc_sys::select(
