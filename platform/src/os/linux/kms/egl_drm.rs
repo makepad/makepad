@@ -100,7 +100,7 @@ impl Drm {
             drmModeFreeResources(drm_resources);
             return None
         }
-        
+        println!("FOUND ENCODER");
         let drm_encoder = found_drm_encoder.unwrap();
         let mut crtc_index = 0;
         for i in 0..(*drm_resources).count_crtcs {
@@ -115,13 +115,15 @@ impl Drm {
         let width = (*drm_mode).hdisplay as u32;
         let height = (*drm_mode).vdisplay as u32;
         
+        println!("CREATING DEVICE");
         let gbm_dev = gbm_create_device(drm_fd);
-        
+
         if gbm_dev == std::ptr::null_mut() {
             println!("Cannot create gbm device");
             return None
         }
         
+        println!("CREATING SURFACE");
         let gbm_surface = gbm_surface_create(
             gbm_dev,
             width,
