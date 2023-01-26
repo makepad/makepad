@@ -39,6 +39,7 @@ pub type nfds_t = c_uint;
 
 extern "C"{
     pub fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
+    pub fn close(fd: c_int) -> c_int;
     pub fn free(arg1: *mut c_void);
     pub fn pipe(fds: *mut c_int) -> c_int;
     pub fn select(
