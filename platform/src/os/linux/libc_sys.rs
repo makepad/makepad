@@ -24,9 +24,11 @@ type c_int =  std::os::raw::c_int;
 type c_uint =  std::os::raw::c_uint;
 type c_ulong = std::os::raw::c_ulong;
 type c_void = std::os::raw::c_void;
+type c_char = std::os::raw::c_char;
 
 pub const FD_SETSIZE: usize = 1024;
 pub const EPIPE: c_int = 32;
+pub const O_RDWR: c_int = 2;
 
 #[repr(C)]
 pub struct fd_set {
@@ -36,6 +38,7 @@ pub struct fd_set {
 pub type nfds_t = c_uint;
 
 extern "C"{
+    pub fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
     pub fn free(arg1: *mut c_void);
     pub fn pipe(fds: *mut c_int) -> c_int;
     pub fn select(
