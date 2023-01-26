@@ -1,6 +1,7 @@
 use {
     self::super::{
         kms_event::*,
+        drm_sys::*,
     },
     self::super::super::{
         libc_sys,
@@ -30,9 +31,21 @@ pub struct KmsApp {
 }
 
 impl KmsApp {
-    fn new() -> Self {Self {
-        timers: SelectTimers::new()
-    }}
+    fn new() -> Self {
+        // ok so. lets do some drm devices things
+        unsafe{
+            let mut devices:[drmDevicePtr;MAX_DRM_DEVICES] = std::mem::zeroed();
+            let num_devices = drmGetDevices2(0, devices.as_mut_ptr(), MAX_DRM_DEVICES as _);
+            for i in 0..num_devices{
+                
+            }
+            println!("HERE! {}", num_devices);
+        }
+        
+        Self {
+            timers: SelectTimers::new()
+        }
+    }
 }
 
 impl Cx {
@@ -48,10 +61,10 @@ impl Cx {
         let mut event_flow = EventFlow::Poll;
         let mut timer_ids = Vec::new();
         let mut signal_fds = [0, 0];
-        unsafe{libc_sys::pipe(signal_fds.as_mut_ptr());}
+        unsafe {libc_sys::pipe(signal_fds.as_mut_ptr());}
         
         while event_flow != EventFlow::Exit {
-            if event_flow == EventFlow::Wait{
+            if event_flow == EventFlow::Wait {
                 kms_app.timers.select(signal_fds[0]);
             }
             kms_app.timers.update_timers(&mut timer_ids);
@@ -130,7 +143,7 @@ impl Cx {
                 }
             }
         }
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0  {
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             EventFlow::Poll
         } else {
             EventFlow::Wait
@@ -175,10 +188,10 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     kms_app.timers.stop_timer(timer_id);
                 },
-                _=>()
+                _ => ()
             }
         }
-         EventFlow::Poll
+        EventFlow::Poll
     }
 }
 
