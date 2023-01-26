@@ -59,18 +59,17 @@ impl Cx {
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
         let mut kms_app = KmsApp::new();
-        
+        kms_app.timers.start_timer(0,0.008,true);
         // lets run the kms eventloop
         let mut event_flow = EventFlow::Poll;
         let mut timer_ids = Vec::new();
         let mut signal_fds = [0, 0];
         unsafe {libc_sys::pipe(signal_fds.as_mut_ptr());}
-        
-        while event_flow != EventFlow::Exit {
-            
+         
+        while event_flow != EventFlow::Exit { 
             if event_flow == EventFlow::Wait {
                 kms_app.timers.select(signal_fds[0]);
-            }
+            } 
             kms_app.timers.update_timers(&mut timer_ids);
             for timer_id in &timer_ids {
                 self.kms_event_callback(
@@ -140,7 +139,7 @@ impl Cx {
                     if Signal::check_and_clear_ui_signal() {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
-                    }
+                    } 
                 }
                 else {
                     self.call_event_handler(&Event::Timer(e))
@@ -149,7 +148,7 @@ impl Cx {
         }
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             EventFlow::Poll
-        } else {
+        } else { 
             EventFlow::Wait
         }
     }
@@ -174,7 +173,7 @@ impl Cx {
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
             self.passes[pass_id].clear_color
         }
-        else {
+        else { 
             match self.passes[pass_id].color_textures[0].clear_color {
                 PassClearColor::InitWith(color) => color,
                 PassClearColor::ClearWith(color) => color

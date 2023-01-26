@@ -229,7 +229,7 @@ impl Drm {
             page_flip_handler2: None,
             sequence_handler: None
         };
-        
+        println!("HERE");
         while waiting_for_flip != 0 {
             libc_sys::FD_ZERO(fds.as_mut_ptr());
             libc_sys::FD_SET(0, fds.as_mut_ptr());
