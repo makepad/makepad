@@ -74,7 +74,7 @@ impl Drm {
             let drm_mode = (*drm_connector).modes.offset(i as _);
             let name = CStr::from_ptr((*drm_mode).name.as_ptr()).to_str().unwrap();
             let mode_name = format!("{}-{}", name, (*drm_mode).vrefresh);
-            //println!("{}", mode_name);
+            //println!("{}", mode_name); 
             if mode_name == mode_want {
                 found_drm_mode = Some(drm_mode);
             }
@@ -257,7 +257,6 @@ pub struct Egl {
     egl_display: EGLDisplay,
     egl_surface: EGLSurface,
     egl_context: EGLContext,
-    eglCreateImageKHR: PFNEGLCREATEIMAGEKHRPROC,
 }
 
 impl Egl {
@@ -275,8 +274,6 @@ impl Egl {
         let eglChooseConfig: PFNEGLCHOOSECONFIGPROC = std::mem::transmute(eglGetProcAddress("eglChooseConfig\0".as_ptr()));
         #[allow(non_snake_case)]
         let eglGetConfigAttrib: PFNEGLGETCONFIGATTRIBPROC = std::mem::transmute(eglGetProcAddress("eglGetConfigAttrib\0".as_ptr()));
-        #[allow(non_snake_case)]
-        let eglCreateImageKHR: PFNEGLCREATEIMAGEKHRPROC = std::mem::transmute(eglGetProcAddress("eglCreateImageKHR\0".as_ptr()));
         
         let egl_display = (eglGetPlatformDisplayEXT.unwrap())(EGL_PLATFORM_GBM_KHR, drm.gbm_dev as *mut _, std::ptr::null());
         if egl_display == std::ptr::null_mut() {
@@ -313,6 +310,8 @@ impl Egl {
             1,
             EGL_ALPHA_SIZE,
             0,
+            EGL_DEPTH_SIZE,
+            24,
             EGL_RENDERABLE_TYPE,
             EGL_OPENGL_ES2_BIT,
             EGL_NONE
@@ -382,7 +381,6 @@ impl Egl {
         });
         
         Some(Self {
-            eglCreateImageKHR,
             egl_display,
             egl_surface,
             egl_context
