@@ -1,4 +1,5 @@
 use {
+    std::ffi::CStr,
     self::super::{
         kms_event::*,
         drm_sys::*,
@@ -28,20 +29,97 @@ use {
 
 pub struct KmsApp {
     pub timers: SelectTimers,
-}
+} 
 
 impl KmsApp {
     fn new() -> Self {
         // ok so. lets do some drm devices things
-        unsafe{
-            let mut devices:[drmDevicePtr;MAX_DRM_DEVICES] = std::mem::zeroed();
-            let num_devices = drmGetDevices2(0, devices.as_mut_ptr(), MAX_DRM_DEVICES as _);
-            for i in 0..num_devices{
-                
-            }
-            println!("HERE! {}", num_devices);
+        struct Drm{
+            drm_fd: std::os::raw::c_int,
+            mode:drmModeModeInfoPtr,
+            resources:drmModeResPtr,
+            connector:drmModeConnectorPtr,
+            encoder:drmModeEncoderPtr,
         }
         
+        impl Drm{
+            unsafe fn new(mode_want:&str)->Option<Self>{
+                let mut devices:[drmDevicePtr;MAX_DRM_DEVICES] = std::mem::zeroed();
+                let num_devices = drmGetDevices2(0, devices.as_mut_ptr(), MAX_DRM_DEVICES as _) as usize;
+                
+                let mut found_connector = None;
+                'outer: for i in 0..num_devices{
+                    let device = *devices[i];
+                    if device.available_nodes & (1<<DRM_NODE_PRIMARY) == 0{
+                        continue;
+                    }
+                    // alright lets get the resources
+                    let drm_fd = libc_sys::open(*device.nodes.offset(DRM_NODE_PRIMARY as _), libc_sys::O_RDWR);
+                    let resources = drmModeGetResources(drm_fd);
+                    if resources == std::ptr::null_mut(){
+                        continue;
+                    }
+                    for j in 0..(*resources).count_connectors{
+                        let connector_idx = *(*resources).connectors.offset(j as _);
+                        let connector = drmModeGetConnector(drm_fd, connector_idx);
+                        if connector == std::ptr::null_mut(){
+                            continue;
+                        }
+                        if (*connector).connection == DRM_MODE_CONNECTED {
+                            found_connector = Some((drm_fd,resources,connector));
+                            break 'outer;
+                        }
+                        drmModeFreeConnector(connector);
+                    }
+                    drmModeFreeResources(resources);
+                }
+                if found_connector.is_none(){
+                    return None
+                }
+                let (drm_fd,resources,connector) = found_connector.unwrap();
+                // find a mode
+                let mut found_mode = None;
+                for i in 0..(*connector).count_modes{
+                    let mode_info = (*connector).modes.offset(i as _);
+                    let name = CStr::from_ptr((*mode_info).name.as_ptr()).to_str().unwrap();
+                    let mode_name= format!("{}-{}", name, (*mode_info).vrefresh);
+                    println!("{}", mode_name);
+                    if mode_name == mode_want{
+                        found_mode = Some(mode_info);
+                    }
+                }
+                if found_mode.is_none(){
+                    drmModeFreeConnector(connector);
+                    drmModeFreeResources(resources);
+                    return None
+                }
+                let mut found_encoder = None;
+                for i in 0..(*resources).count_encoders{
+                    let encoder = drmModeGetEncoder(drm_fd, *(*resources).encoders.offset(i as _));
+                    if (*encoder).encoder_id == (*connector).encoder_id{
+                        found_encoder = Some(encoder);
+                        break;
+                    }
+                    drmModeFreeEncoder(encoder);
+                }
+                if found_encoder.is_none(){
+                    drmModeFreeConnector(connector);
+                    drmModeFreeResources(resources);
+                    return None
+                }
+                Some(Drm{
+                    encoder:found_encoder.unwrap(),
+                    mode: found_mode.unwrap(),
+                    drm_fd,
+                    resources,
+                    connector
+                })
+            }
+        }
+            
+        if let Some(_drm) = unsafe{Drm::new("1920x1080-60")}{
+            println!("HERE");
+        }
         Self {
             timers: SelectTimers::new()
         }

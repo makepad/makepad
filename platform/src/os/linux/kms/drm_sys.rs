@@ -1,4 +1,5 @@
 #![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
 
 #[link(name = "drm")]
 extern "C" {
@@ -7,10 +8,17 @@ extern "C" {
         devices: *mut drmDevicePtr,
         max_devices: ::std::os::raw::c_int,
     ) -> ::std::os::raw::c_int;
-
+    pub fn drmModeGetResources(fd: ::std::os::raw::c_int) -> drmModeResPtr;
+    pub fn drmModeGetConnector(fd: ::std::os::raw::c_int, connectorId: u32) -> drmModeConnectorPtr;
+    pub fn drmModeFreeConnector(ptr: drmModeConnectorPtr);
+    pub fn drmModeFreeResources(ptr: drmModeResPtr);
+    pub fn drmModeGetEncoder(fd: ::std::os::raw::c_int, encoder_id: u32) -> drmModeEncoderPtr;
+    pub fn drmModeFreeEncoder(ptr: drmModeEncoderPtr);
 }
 
 pub const MAX_DRM_DEVICES:usize = 64;
+pub const DRM_NODE_PRIMARY: u32 = 0;
+pub const DRM_MODE_CONNECTED: drmModeConnection = 1;
 
 pub type drmDevice = _drmDevice;
 pub type drmDevicePtr = *mut _drmDevice;
@@ -30,6 +38,26 @@ pub type drmPlatformDeviceInfo = _drmPlatformDeviceInfo;
 pub type drmPlatformDeviceInfoPtr = *mut _drmPlatformDeviceInfo;
 pub type drmHost1xDeviceInfo = _drmHost1xDeviceInfo;
 pub type drmHost1xDeviceInfoPtr = *mut _drmHost1xDeviceInfo;
+pub type drmModeRes = _drmModeRes;
+pub type drmModeResPtr = *mut _drmModeRes;
+pub type drmModeConnector = _drmModeConnector;
+pub type drmModeConnectorPtr = *mut _drmModeConnector;
+pub type drmModeConnection = ::std::os::raw::c_uint;
+pub type drmModeSubPixel = ::std::os::raw::c_uint;
+pub type drmModeModeInfo = _drmModeModeInfo;
+pub type drmModeModeInfoPtr = *mut _drmModeModeInfo;
+pub type drmModeEncoder = _drmModeEncoder;
+pub type drmModeEncoderPtr = *mut _drmModeEncoder;
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct _drmModeEncoder {
+    pub encoder_id: u32,
+    pub encoder_type: u32,
+    pub crtc_id: u32,
+    pub possible_crtcs: u32,
+    pub possible_clones: u32,
+}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -112,4 +140,61 @@ pub struct _drmPciDeviceInfo {
     pub subvendor_id: u16,
     pub subdevice_id: u16,
     pub revision_id: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct _drmModeRes {
+    pub count_fbs: ::std::os::raw::c_int,
+    pub fbs: *mut u32,
+    pub count_crtcs: ::std::os::raw::c_int,
+    pub crtcs: *mut u32,
+    pub count_connectors: ::std::os::raw::c_int,
+    pub connectors: *mut u32,
+    pub count_encoders: ::std::os::raw::c_int,
+    pub encoders: *mut u32,
+    pub min_width: u32,
+    pub max_width: u32,
+    pub min_height: u32,
+    pub max_height: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct _drmModeConnector {
+    pub connector_id: u32,
+    pub encoder_id: u32,
+    pub connector_type: u32,
+    pub connector_type_id: u32,
+    pub connection: drmModeConnection,
+    pub mmWidth: u32,
+    pub mmHeight: u32,
+    pub subpixel: drmModeSubPixel,
+    pub count_modes: ::std::os::raw::c_int,
+    pub modes: drmModeModeInfoPtr,
+    pub count_props: ::std::os::raw::c_int,
+    pub props: *mut u32,
+    pub prop_values: *mut u64,
+    pub count_encoders: ::std::os::raw::c_int,
+    pub encoders: *mut u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct _drmModeModeInfo {
+    pub clock: u32,
+    pub hdisplay: u16,
+    pub hsync_start: u16,
+    pub hsync_end: u16,
+    pub htotal: u16,
+    pub hskew: u16,
+    pub vdisplay: u16,
+    pub vsync_start: u16,
+    pub vsync_end: u16,
+    pub vtotal: u16,
+    pub vscan: u16,
+    pub vrefresh: u32,
+    pub flags: u32,
+    pub type_: u32,
+    pub name: [::std::os::raw::c_char; 32usize],
 }
