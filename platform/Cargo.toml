@@ -23,8 +23,8 @@ makepad-objc-sys = { path = "./bind/objc-sys", version = "0.3.0" }
 
 # other platforms will be fixed soon 
 [target.aarch64-unknown-linux-gnu.dependencies] 
-[target.aarch64-unknown-linux-gnu.dependencies.libdrm-sys] 
-path = "./bind/libdrm-sys"
+#[target.aarch64-unknown-linux-gnu.dependencies.libdrm-sys] 
+#path = "./bind/libdrm-sys"
  
 [target.x86_64-unknown-linux-gnu.dependencies] 
 # libc = "0.2"
