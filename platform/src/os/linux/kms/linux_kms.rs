@@ -12,12 +12,14 @@ use {
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_live_id::*,
+        makepad_math::*,
         thread::Signal,
         event::{
             TimerEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Event,
+            WindowGeom,
         },
         pass::CxPassParent,
         cx::{Cx, OsType,},
@@ -240,6 +242,21 @@ impl Cx {
     fn handle_platform_ops(&mut self, kms_app: &mut KmsApp) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
+                CxOsOp::CreateWindow(window_id) => {
+                    let window = &mut self.windows[window_id];
+                    let size =  dvec2(kms_app.drm.width as f64,kms_app.drm.height as f64);
+                    window.window_geom = WindowGeom{
+                        dpi_factor: 1.0,
+                        can_fullscreen: false,
+                        xr_is_presenting: false,
+                        is_fullscreen: true, 
+                        is_topmost: true,
+                        position: dvec2(0.0,0.0),
+                        inner_size: size,
+                        outer_size: size
+                    };
+                    window.is_created = true;
+                },
                 CxOsOp::SetCursor(_cursor) => {
                     //xlib_app.set_mouse_cursor(cursor);
                 },
