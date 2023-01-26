@@ -34,12 +34,24 @@ extern "C" {
         connectors: *mut u32,
         count: ::std::os::raw::c_int,
         mode: drmModeModeInfoPtr,
-    ) -> ::std::os::raw::c_int; 
+    ) -> ::std::os::raw::c_int;
+    pub fn drmModePageFlip(
+        fd: ::std::os::raw::c_int,
+        crtc_id: u32,
+        fb_id: u32,
+        flags: u32,
+        user_data: *mut ::std::os::raw::c_void,
+    ) -> ::std::os::raw::c_int;
+    pub fn drmHandleEvent(
+        fd: ::std::os::raw::c_int,
+        evctx: drmEventContextPtr,
+    ) -> ::std::os::raw::c_int;
 }
 
 pub const MAX_DRM_DEVICES: usize = 64;
 pub const DRM_NODE_PRIMARY: u32 = 0;
 pub const DRM_MODE_CONNECTED: drmModeConnection = 1;
+pub const DRM_MODE_PAGE_FLIP_EVENT: u32 = 1;
 
 pub type drmDevice = _drmDevice;
 pub type drmDevicePtr = *mut _drmDevice;
@@ -69,6 +81,8 @@ pub type drmModeModeInfo = _drmModeModeInfo;
 pub type drmModeModeInfoPtr = *mut _drmModeModeInfo;
 pub type drmModeEncoder = _drmModeEncoder;
 pub type drmModeEncoderPtr = *mut _drmModeEncoder;
+pub type drmEventContext = _drmEventContext;
+pub type drmEventContextPtr = *mut _drmEventContext;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -218,4 +232,41 @@ pub struct _drmModeModeInfo {
     pub flags: u32,
     pub type_: u32,
     pub name: [::std::os::raw::c_char; 32usize],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct _drmEventContext {
+    pub version: ::std::os::raw::c_int,
+    pub vblank_handler: ::std::option::Option<
+        unsafe extern "C" fn(
+            fd: ::std::os::raw::c_int,
+            sequence: ::std::os::raw::c_uint,
+            tv_sec: ::std::os::raw::c_uint,
+            tv_usec: ::std::os::raw::c_uint,
+            user_data: *mut ::std::os::raw::c_void,
+        ),
+    >,
+    pub page_flip_handler: ::std::option::Option<
+        unsafe extern "C" fn(
+            fd: ::std::os::raw::c_int,
+            sequence: ::std::os::raw::c_uint,
+            tv_sec: ::std::os::raw::c_uint,
+            tv_usec: ::std::os::raw::c_uint,
+            user_data: *mut ::std::os::raw::c_void,
+        ),
+    >,
+    pub page_flip_handler2: ::std::option::Option<
+        unsafe extern "C" fn(
+            fd: ::std::os::raw::c_int,
+            sequence: ::std::os::raw::c_uint,
+            tv_sec: ::std::os::raw::c_uint,
+            tv_usec: ::std::os::raw::c_uint,
+            crtc_id: ::std::os::raw::c_uint,
+            user_data: *mut ::std::os::raw::c_void,
+        ),
+    >,
+    pub sequence_handler: ::std::option::Option<
+        unsafe extern "C" fn(fd: ::std::os::raw::c_int, sequence: u64, ns: u64, user_data: u64),
+    >,
 }
