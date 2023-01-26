@@ -102,7 +102,6 @@ impl Cx {
                     self.opengl_compile_shaders();
                 }
                 // ok here we send out to all our childprocesses
-                
                 self.handle_repaint(kms_app);
             }
             KmsEvent::MouseDown(e) => {
