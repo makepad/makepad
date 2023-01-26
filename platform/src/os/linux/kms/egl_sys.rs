@@ -6,6 +6,7 @@ pub const EGL_RED_SIZE: u32 = 12324;
 pub const EGL_GREEN_SIZE: u32 = 12323;
 pub const EGL_BLUE_SIZE: u32 = 12322;
 pub const EGL_ALPHA_SIZE: u32 = 12321;
+pub const EGL_DEPTH_SIZE: u32 = 12325;
 pub const EGL_RENDERABLE_TYPE: u32 = 12352;
 pub const EGL_OPENGL_ES2_BIT: u32 = 4;
 pub const EGL_NONE: u32 = 12344;
