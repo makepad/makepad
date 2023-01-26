@@ -68,7 +68,7 @@ impl Cx {
          
         while event_flow != EventFlow::Exit { 
             if event_flow == EventFlow::Wait {
-                kms_app.timers.select(signal_fds[0]);
+            //    kms_app.timers.select(signal_fds[0]);
             } 
             kms_app.timers.update_timers(&mut timer_ids);
             for timer_id in &timer_ids {
