@@ -16,7 +16,7 @@ use {
 pub struct Drm {
     pub width: u32,
     pub height: u32,
-    crtc_index: i32,
+    bo_fb_ids: Vec<(*mut gbm_bo, u32)>,
     fourcc_format: u32,
     drm_fd: std::os::raw::c_int,
     drm_mode: drmModeModeInfoPtr,
@@ -25,7 +25,7 @@ pub struct Drm {
     drm_encoder: drmModeEncoderPtr,
     gbm_dev: *mut gbm_device,
     gbm_surface: *mut gbm_surface,
-    gbm_bo: Option<*mut gbm_bo>,
+    current_bo: Option<*mut gbm_bo>,
 }
 
 impl Drm {
@@ -95,35 +95,27 @@ impl Drm {
             }
             drmModeFreeEncoder(drm_encoder);
         }
+        
         if found_drm_encoder.is_none() {
             drmModeFreeConnector(drm_connector);
             drmModeFreeResources(drm_resources);
             return None
         }
-        println!("FOUND ENCODER");
-        let drm_encoder = found_drm_encoder.unwrap();
-        let mut crtc_index = 0;
-        for i in 0..(*drm_resources).count_crtcs {
-            if *(*drm_resources).crtcs.offset(i as _) == (*drm_encoder).crtc_id {
-                crtc_index = i;
-            }
-        }
         
+        let drm_encoder = found_drm_encoder.unwrap();
         let drm_mode = found_drm_mode.unwrap();
         
         // init gbm
         let width = (*drm_mode).hdisplay as u32;
         let height = (*drm_mode).vdisplay as u32;
         
-        println!("CREATING DEVICE");
         let gbm_dev = gbm_create_device(drm_fd);
-
+        
         if gbm_dev == std::ptr::null_mut() {
             println!("Cannot create gbm device");
             return None
         }
         
-        println!("CREATING SURFACE");
         let gbm_surface = gbm_surface_create(
             gbm_dev,
             width,
@@ -139,11 +131,11 @@ impl Drm {
         println!("Initialized drm/gbm at {} {}", width, height);
         
         Some(Drm {
-            gbm_bo: None,
+            bo_fb_ids: Vec::new(),
+            current_bo: None,
             width,
             height,
             fourcc_format,
-            crtc_index,
             drm_encoder,
             drm_mode,
             drm_fd,
@@ -154,10 +146,12 @@ impl Drm {
         })
     }
     
-    pub unsafe fn set_mode(&mut self) {
-        let bo = gbm_surface_lock_front_buffer(self.gbm_surface);
-        let handle = gbm_bo_get_handle(bo);
-        let stride = gbm_bo_get_stride(bo);
+    pub unsafe fn get_fb_id_for_bo(&mut self, what_bo: *mut gbm_bo) -> u32 {
+        if let Some((_, fb_id)) = self.bo_fb_ids.iter().find( | (bo, _) | *bo == what_bo) {
+            return *fb_id
+        }
+        let handle = gbm_bo_get_handle(what_bo);
+        let stride = gbm_bo_get_stride(what_bo);
         let mut fb_id = 0;
         
         if drmModeAddFB2(
@@ -171,41 +165,89 @@ impl Drm {
             &mut fb_id,
             0
         ) != 0 {
-            println!("Error running drmModeAddFB2");
-            return
+            panic!("Error running drmModeAddFB2");
         }
         
-        self.gbm_bo = Some(bo);
-        
-        println!("GOT FB {}", fb_id);
+        self.bo_fb_ids.push((what_bo, fb_id));
+        fb_id
+    }
+    
+    pub unsafe fn first_mode(&mut self) {
+        let first_bo = gbm_surface_lock_front_buffer(self.gbm_surface);
+        let fb_id = self.get_fb_id_for_bo(first_bo);
+        self.current_bo = Some(first_bo);
         
         let mut connector_id = (*self.drm_connector).connector_id;
-        
-        let ret = drmModeSetCrtc(
+        let crtc_id = (*self.drm_encoder).crtc_id;
+        if drmModeSetCrtc(
             self.drm_fd,
-            self.crtc_index as _,
+            crtc_id,
             fb_id,
             0,
             0,
             &mut connector_id,
             1,
             self.drm_mode
-        );
-        if ret != 0 {
-            println!("Error running drmModeSetCrtc {}", ret);
+        ) != 0 {
+            println!("Error running drmModeSetCrtc");
             return
         }
-        // lets get a fb_id
-        //let handles =
-        //drmModeAddFB2()
-        
-        //let fb = drm_fb_get_from_bo(bo);
     }
     
-    pub unsafe fn flip_buffers_and_wait(&mut self, egl: &Egl){
-        //egl.swap_buffers();
-        //let next_bo = gbm_surface_lock_front_buffer(self.gbm_surface);
+    pub unsafe fn flip_buffers_and_wait(&mut self, egl: &Egl) {
+        egl.swap_buffers();
+        let next_bo = gbm_surface_lock_front_buffer(self.gbm_surface);
+        let fb_id = self.get_fb_id_for_bo(next_bo);
+        let crtc_id = (*self.drm_encoder).crtc_id;
+        let mut waiting_for_flip: u32 = 1;
+        if drmModePageFlip(self.drm_fd, crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, &mut waiting_for_flip as *mut _ as *mut _) != 0 {
+            println!("Error running drmModePageFlip");
+        }
         
+        let mut fds = std::mem::MaybeUninit::uninit();
+        
+        unsafe extern "C" fn handle_page_flip(
+                _fd: ::std::os::raw::c_int,
+                _sequence: ::std::os::raw::c_uint,
+                _tv_sec: ::std::os::raw::c_uint,
+                _tv_usec: ::std::os::raw::c_uint,
+                user_data: *mut ::std::os::raw::c_void,
+            ) {
+                *(user_data as *mut u32) = 0;
+            }
+        
+        let mut event_context = drmEventContext {
+            version: 2,
+            vblank_handler: None,
+            page_flip_handler: Some(handle_page_flip),
+            page_flip_handler2: None,
+            sequence_handler: None
+        };
+        
+        while waiting_for_flip != 0 {
+            libc_sys::FD_ZERO(fds.as_mut_ptr());
+            libc_sys::FD_SET(0, fds.as_mut_ptr());
+            libc_sys::FD_SET(self.drm_fd, fds.as_mut_ptr());
+            
+            let ret = libc_sys::select(
+                self.drm_fd + 1,
+                fds.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            if ret < 0 {
+                println!("Select error in flip");
+                return
+            }
+            else if ret == 0{
+                println!("select timeout");
+                return
+            }
+            drmHandleEvent(self.drm_fd, &mut event_context);
+        }
+        gbm_surface_release_buffer(self.gbm_surface, self.current_bo.take().unwrap());
+        self.current_bo = Some(next_bo);
     }
 }
 
