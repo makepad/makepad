@@ -14,9 +14,30 @@ extern "C" {
     pub fn drmModeFreeResources(ptr: drmModeResPtr);
     pub fn drmModeGetEncoder(fd: ::std::os::raw::c_int, encoder_id: u32) -> drmModeEncoderPtr;
     pub fn drmModeFreeEncoder(ptr: drmModeEncoderPtr);
+    pub fn drmModeAddFB2(
+        fd: ::std::os::raw::c_int,
+        width: u32,
+        height: u32,
+        pixel_format: u32,
+        bo_handles: *const u32,
+        pitches: *const u32,
+        offsets: *const u32,
+        buf_id: *mut u32,
+        flags: u32,
+    ) -> ::std::os::raw::c_int;
+    pub fn drmModeSetCrtc(
+        fd: ::std::os::raw::c_int,
+        crtcId: u32,
+        bufferId: u32,
+        x: u32,
+        y: u32,
+        connectors: *mut u32,
+        count: ::std::os::raw::c_int,
+        mode: drmModeModeInfoPtr,
+    ) -> ::std::os::raw::c_int; 
 }
 
-pub const MAX_DRM_DEVICES:usize = 64;
+pub const MAX_DRM_DEVICES: usize = 64;
 pub const DRM_NODE_PRIMARY: u32 = 0;
 pub const DRM_MODE_CONNECTED: drmModeConnection = 1;
 
