@@ -58,7 +58,7 @@ impl Cx {
     
     fn xlib_event_callback(
         &mut self,
-        xlib_app: &mut XlibApp,
+        xlib_app: &mut XlibApp, 
         event: XlibEvent,
         opengl_cx: &mut OpenglCx,
         opengl_windows: &mut Vec<OpenglWindow>
