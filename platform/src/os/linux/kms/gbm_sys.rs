@@ -50,6 +50,7 @@ extern "C" {
     ) -> *mut gbm_surface;
     pub fn gbm_bo_get_stride(bo: *mut gbm_bo) -> u32;
     pub fn gbm_surface_lock_front_buffer(surface: *mut gbm_surface) -> *mut gbm_bo;
+    pub fn gbm_surface_release_buffer(surface: *mut gbm_surface, bo: *mut gbm_bo);
     pub fn gbm_bo_get_user_data(bo: *mut gbm_bo) -> *mut ::std::os::raw::c_void;
     pub fn gbm_bo_get_handle(bo: *mut gbm_bo) -> gbm_bo_handle;
 }
