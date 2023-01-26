@@ -1,10 +1,10 @@
 use {
-    std::ffi::CStr,
     self::super::{
         kms_event::*,
-        drm_sys::*,
+        egl_drm::*,
     },
     self::super::super::{
+        gl_sys,
         libc_sys,
         select_timer::SelectTimers,
         linux_media::CxLinuxMedia
@@ -23,104 +23,27 @@ use {
         cx::{Cx, OsType,},
         gpu_info::GpuPerformance,
         os::cx_desktop::EventFlow,
-        
+        pass::{PassClearColor, PassClearDepth, PassId},
     }
 };
 
+
 pub struct KmsApp {
-    pub timers: SelectTimers,
-} 
+    timers: SelectTimers,
+    drm: Drm,
+    egl: Egl,
+}
 
 impl KmsApp {
     fn new() -> Self {
         // ok so. lets do some drm devices things
-        struct Drm{
-            drm_fd: std::os::raw::c_int,
-            mode:drmModeModeInfoPtr,
-            resources:drmModeResPtr,
-            connector:drmModeConnectorPtr,
-            encoder:drmModeEncoderPtr,
-        }
-        
-        impl Drm{
-            unsafe fn new(mode_want:&str)->Option<Self>{
-                let mut devices:[drmDevicePtr;MAX_DRM_DEVICES] = std::mem::zeroed();
-                let num_devices = drmGetDevices2(0, devices.as_mut_ptr(), MAX_DRM_DEVICES as _) as usize;
-                
-                let mut found_connector = None;
-                'outer: for i in 0..num_devices{
-                    let device = *devices[i];
-                    if device.available_nodes & (1<<DRM_NODE_PRIMARY) == 0{
-                        continue;
-                    }
-                    // alright lets get the resources
-                    let drm_fd = libc_sys::open(*device.nodes.offset(DRM_NODE_PRIMARY as _), libc_sys::O_RDWR);
-                    let resources = drmModeGetResources(drm_fd);
-                    if resources == std::ptr::null_mut(){
-                        continue;
-                    }
-                    for j in 0..(*resources).count_connectors{
-                        let connector_idx = *(*resources).connectors.offset(j as _);
-                        let connector = drmModeGetConnector(drm_fd, connector_idx);
-                        if connector == std::ptr::null_mut(){
-                            continue;
-                        }
-                        if (*connector).connection == DRM_MODE_CONNECTED {
-                            found_connector = Some((drm_fd,resources,connector));
-                            break 'outer;
-                        }
-                        drmModeFreeConnector(connector);
-                    }
-                    drmModeFreeResources(resources);
-                }
-                if found_connector.is_none(){
-                    return None
-                }
-                let (drm_fd,resources,connector) = found_connector.unwrap();
-                // find a mode
-                let mut found_mode = None;
-                for i in 0..(*connector).count_modes{
-                    let mode_info = (*connector).modes.offset(i as _);
-                    let name = CStr::from_ptr((*mode_info).name.as_ptr()).to_str().unwrap();
-                    let mode_name= format!("{}-{}", name, (*mode_info).vrefresh);
-                    println!("{}", mode_name);
-                    if mode_name == mode_want{
-                        found_mode = Some(mode_info);
-                    }
-                }
-                if found_mode.is_none(){
-                    drmModeFreeConnector(connector);
-                    drmModeFreeResources(resources);
-                    return None
-                }
-                let mut found_encoder = None;
-                for i in 0..(*resources).count_encoders{
-                    let encoder = drmModeGetEncoder(drm_fd, *(*resources).encoders.offset(i as _));
-                    if (*encoder).encoder_id == (*connector).encoder_id{
-                        found_encoder = Some(encoder);
-                        break;
-                    }
-                    drmModeFreeEncoder(encoder);
-                }
-                if found_encoder.is_none(){
-                    drmModeFreeConnector(connector);
-                    drmModeFreeResources(resources);
-                    return None
-                }
-                Some(Drm{
-                    encoder:found_encoder.unwrap(),
-                    mode: found_mode.unwrap(),
-                    drm_fd,
-                    resources,
-                    connector
-                })
-            }
-        }
-            
-        if let Some(_drm) = unsafe{Drm::new("1920x1080-60")}{
-            println!("HERE");
-        }
+        let mut drm =  unsafe {Drm::new("1920x1080-60")}.unwrap();
+        let egl = unsafe {Egl::new(&drm)}.unwrap();
+        egl.swap_buffers();
+        unsafe{drm.set_mode()};
         Self {
+            egl,
+            drm,
             timers: SelectTimers::new()
         }
     }
@@ -142,6 +65,7 @@ impl Cx {
         unsafe {libc_sys::pipe(signal_fds.as_mut_ptr());}
         
         while event_flow != EventFlow::Exit {
+            
             if event_flow == EventFlow::Wait {
                 kms_app.timers.select(signal_fds[0]);
             }
@@ -153,9 +77,10 @@ impl Cx {
                 );
             }
             event_flow = self.kms_event_callback(&mut kms_app, KmsEvent::Paint);
+            // alright so.. how do we do things
         }
     }
-    
+     
     fn kms_event_callback(
         &mut self,
         kms_app: &mut KmsApp,
@@ -173,12 +98,12 @@ impl Cx {
                 }
                 if self.need_redrawing() {
                     self.call_draw_event();
-                    //opengl_cx.make_current();
+                    kms_app.egl.make_current();
                     self.opengl_compile_shaders();
                 }
                 // ok here we send out to all our childprocesses
                 
-                self.handle_repaint();
+                self.handle_repaint(kms_app);
             }
             KmsEvent::MouseDown(e) => {
                 self.fingers.process_tap_count(
@@ -228,7 +153,63 @@ impl Cx {
         }
     }
     
-    pub (crate) fn handle_repaint(&mut self) {
+    pub fn draw_pass_to_fullscreen(
+        &mut self,
+        pass_id: PassId,
+        kms_app:&mut KmsApp,
+        dpi_factor: f64,
+    ) {
+        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        
+        self.setup_render_pass(pass_id, dpi_factor);
+        
+        self.passes[pass_id].paint_dirty = false;
+
+        unsafe {
+            kms_app.egl.make_current();
+            gl_sys::Viewport(0, 0, kms_app.drm.width as i32, kms_app.drm.height as i32);
+        }
+        
+        let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
+            self.passes[pass_id].clear_color
+        }
+        else {
+            match self.passes[pass_id].color_textures[0].clear_color {
+                PassClearColor::InitWith(color) => color,
+                PassClearColor::ClearWith(color) => color
+            }
+        };
+        let clear_depth = match self.passes[pass_id].clear_depth {
+            PassClearDepth::InitWith(depth) => depth,
+            PassClearDepth::ClearWith(depth) => depth
+        };
+        
+        if !self.passes[pass_id].dont_clear {
+            unsafe {
+                gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
+                gl_sys::ClearDepth(clear_depth as f64);
+                gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
+                gl_sys::Clear(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
+            }
+        }
+        Self::set_default_depth_and_blend_mode();
+        
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+        
+        self.render_view(
+            pass_id,
+            draw_list_id,
+            &mut zbias,
+            zbias_step,
+        );
+        
+        unsafe {
+            kms_app.drm.flip_buffers_and_wait(&kms_app.egl);
+        }
+    }
+    
+    pub (crate) fn handle_repaint(&mut self, kms_app:&mut KmsApp) {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
@@ -236,6 +217,9 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
+                    self.draw_pass_to_fullscreen(*pass_id, kms_app, 1.0);
+                    // lets run a paint pass here
+                    
                     /*if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
                         let dpi_factor = window.window_geom.dpi_factor;
                         window.resize_buffers(&opengl_cx);
