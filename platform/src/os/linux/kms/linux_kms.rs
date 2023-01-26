@@ -40,7 +40,7 @@ impl KmsApp {
         let mut drm =  unsafe {Drm::new("1920x1080-60")}.unwrap();
         let egl = unsafe {Egl::new(&drm)}.unwrap();
         egl.swap_buffers();
-        unsafe{drm.set_mode()};
+        unsafe{drm.first_mode()};
         Self {
             egl,
             drm,
