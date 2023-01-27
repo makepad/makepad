@@ -41,8 +41,15 @@ pub struct DirectApp {
 
 impl DirectApp {
     fn new() -> Self {
+        let mut mode = "1920x1080-60".to_string();
+        for arg in std::env::args() {
+            if arg.starts_with("-m=") {
+                mode = arg.trim_start_matches("-m=").to_string();
+            }
+        }
+        
         // ok so. lets do some drm devices things
-        let mut drm = unsafe {Drm::new("1920x1080-60")}.unwrap();
+        let mut drm = unsafe {Drm::new(&mode)}.unwrap();
         let egl = unsafe {Egl::new(&drm)}.unwrap();
         egl.swap_buffers();
         unsafe {drm.first_mode()};
