@@ -363,7 +363,7 @@ impl Egl {
         let ctx_attribs = [
             EGL_CONTEXT_CLIENT_VERSION,
             2,
-            EGL_NONE
+            EGL_NONE 
         ];
         
         let egl_context = eglCreateContext(egl_display, egl_config, EGL_NO_CONTEXT, ctx_attribs.as_ptr());
