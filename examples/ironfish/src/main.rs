@@ -1387,12 +1387,12 @@ impl App {
         }
         
         if let Event::MidiPorts(ports) = event {
-            println!("MidiPorts:\n{}", ports);
+            println!("{}", ports);
             cx.use_midi_inputs(&ports.all_inputs());
         }
          
         if let Event::AudioDevices(devices) = event {
-            println!("Audio Devices:\n{}", devices);
+            println!("{}", devices);
             cx.use_audio_outputs(&devices.default_output());
         }
         
