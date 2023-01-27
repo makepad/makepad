@@ -68,6 +68,17 @@ impl AudioDevicesEvent{
     }
 }
 
+impl std::fmt::Display for AudioDevicesEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let _ = write!(f,"Audio Devices:\n");
+        for d in &self.descs{
+           let _ = write!(f, "{}\n", d);
+        }
+        Ok(())
+    }
+}
+
+
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum AudioDeviceType {
     Input,
