@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 
 #[link(name = "drm")]
-extern "C" {
+extern "C" { 
     pub fn drmGetDevices2(
         flags: u32,
         devices: *mut drmDevicePtr,
