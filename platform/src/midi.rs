@@ -8,7 +8,7 @@ use {
 };
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MidiPortsEvent {
     pub descs: Vec<MidiPortDesc>,
 }
@@ -34,7 +34,7 @@ impl MidiPortsEvent {
     }
 }
 
-impl std::fmt::Debug for MidiPortsEvent {
+impl std::fmt::Display for MidiPortsEvent {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         for desc in &self.descs {
             if desc.port_type.is_input() {
