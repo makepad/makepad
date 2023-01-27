@@ -29,7 +29,7 @@ use {
 
 impl Cx {
     pub fn event_loop(mut self) {
-        self.platform_type = OsType::Linux {custom_window_chrome: false};
+        self.platform_type = OsType::LinuxWindow {custom_window_chrome: false};
         self.gpu_info.performance = GpuPerformance::Tier1;
         
         let opengl_cx = Rc::new(RefCell::new(None));
