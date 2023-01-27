@@ -331,7 +331,7 @@ impl Cx {
             }
         }
         else {
-            unsafe { // BUGFIX. we have to create a depthbuffer for rtt without depthbuffer use otherwise it fails if there is another pass with depth
+           /* unsafe { // BUGFIX. we have to create a depthbuffer for rtt without depthbuffer use otherwise it fails if there is another pass with depth
                 if self.passes[pass_id].os.gl_bugfix_depthbuffer.is_none() {
                     let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
                     gl_sys::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
@@ -350,7 +350,7 @@ impl Cx {
                 clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
                 gl_sys::Disable(gl_sys::DEPTH_TEST);
                 gl_sys::FramebufferRenderbuffer(gl_sys::FRAMEBUFFER, gl_sys::DEPTH_ATTACHMENT, gl_sys::RENDERBUFFER, self.passes[pass_id].os.gl_bugfix_depthbuffer.unwrap());
-            }
+            }*/
         }
         
         
