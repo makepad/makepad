@@ -72,7 +72,6 @@ impl RawInput {
         let mut evts = Vec::new();
         let mut mouse_moved = false;
         while let Ok(new) = self.receiver.try_recv() {
-            println!("{} {} {}", new.ty, new.code, new.value);
             if new.ty == 2 { // relative mouse
                 if new.code == 0{
                     self.abs.x += new.value as f64;
