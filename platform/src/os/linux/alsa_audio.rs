@@ -241,7 +241,7 @@ impl AlsaAudioAccess {
             let name = self.device_descs.iter().find( | v | v.desc.device_id == device_id).unwrap().name.clone();
             std::thread::spawn(move || {
                 
-                let (mut device, device_ref) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_PLAYBACK).unwrap();
+                let (mut device, device_ref) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_PLAYBACK).expect("Alsa device failure ");
                 audio_outputs.lock().unwrap().push(device_ref);
                 // lets allocate an output buffer
                 let mut audio_buffer = device.allocate_matching_buffer();
