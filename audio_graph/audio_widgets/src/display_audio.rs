@@ -2,7 +2,6 @@
 use {
     crate::{
         makepad_draw::*,
-        makepad_math::complex::*,
         makepad_widgets::*,
         makepad_platform::audio::*,
     }
@@ -96,7 +95,6 @@ impl DisplayAudio {
         
         let (left, right) = audio.stereo();
         let wave_off = self.data_offset[voice];
-        println!("{}", voice);
         let voice_offset = voice * WAVE_SIZE_X;
         for i in 0..frames {
             let left_u16 = ((left[i] + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
@@ -106,7 +104,6 @@ impl DisplayAudio {
         // every time we wrap around we should feed it to the FFT
         self.wave_texture.swap_image_u32(cx, &mut wave_buf);
         self.data_offset[voice] = (self.data_offset[voice] + frames) & (WAVE_SIZE_X - 1);
-
     }
 }
 
@@ -135,13 +132,13 @@ impl DisplayAudio {
 pub struct DisplayAudioRef(WidgetRef);
 
 impl DisplayAudioRef {
-    pub fn process_buffer(&self, cx: &mut Cx, active: bool, voice: usize, buffer: &AudioBuffer) {
+    pub fn process_buffer(&self, cx: &mut Cx, _active: bool, voice: usize, buffer: &AudioBuffer) {
         if let Some(mut inner) = self.inner_mut() {
             inner.process_buffer(cx, voice, buffer);
             inner.area.redraw(cx);
         }
     }
     
-    pub fn voice_off(&self, _cx: &mut Cx, voice: usize,) {
+    pub fn voice_off(&self, _cx: &mut Cx, _voice: usize,) {
     }
 }
