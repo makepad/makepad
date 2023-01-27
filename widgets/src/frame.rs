@@ -758,7 +758,7 @@ impl Frame {
                             color_texture: Texture::new(cx)
                         });
                         let cache = self.cache.as_mut().unwrap();
-                        cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
+                        //cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
                         cache.pass.add_color_texture(cx, &cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
                     }
                     let cache = self.cache.as_mut().unwrap();
