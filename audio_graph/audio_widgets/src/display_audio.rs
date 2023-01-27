@@ -136,7 +136,6 @@ impl DisplayAudioRef {
         if let Some(mut inner) = self.inner_mut() {
             inner.process_buffer(cx, voice, buffer);
             if active{
-                println!("REDARW");
                 inner.area.redraw(cx);
             }
         }
