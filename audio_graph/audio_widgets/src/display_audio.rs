@@ -135,7 +135,7 @@ impl DisplayAudioRef {
     pub fn process_buffer(&self, cx: &mut Cx, active: bool, voice: usize, buffer: &AudioBuffer) {
         if let Some(mut inner) = self.inner_mut() {
             inner.process_buffer(cx, voice, buffer);
-            if active{
+            if active{ 
                 inner.area.redraw(cx);
             }
         }
