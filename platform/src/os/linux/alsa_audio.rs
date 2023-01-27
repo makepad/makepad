@@ -282,6 +282,7 @@ impl AlsaAudioDevice {
             let mut hw_params: *mut snd_pcm_hw_params_t = 0 as *mut _;
             let name0 = format!("{}\0", device_name);
             let mut rate = 48000;
+            println!("### TRYING TO OPEN ALSA DEVICE {} ###", device_name);
             alsa_error!(snd_pcm_open(&mut handle, name0.as_ptr(), direction, 0)) ?;
             alsa_error!(snd_pcm_hw_params_malloc(&mut hw_params)) ?;
             alsa_error!(snd_pcm_hw_params_any(handle, hw_params)) ?;
