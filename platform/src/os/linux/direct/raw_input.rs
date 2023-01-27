@@ -15,7 +15,7 @@ use {
         cell::Cell,
         fs::File,
         io::Read,
-        sync::mpsc,
+        sync::mpsc, 
     }
 };
 
@@ -43,19 +43,20 @@ impl RawInput {
         for i in 0..12 {
             let device = format!("/dev/input/event{}", i);
             let send = send.clone();
-            std::thread::spawn(move || {
-                if let Ok(mut kb) = File::open(&device) {
-                    loop {
-                        let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
-                        if let Ok(len) = kb.read(&mut buf) {
-                            if len == std::mem::size_of::<InputEvent>() {
-                                let buf = unsafe {std::mem::transmute(buf)};
-                                send.send(buf).unwrap();
-                            }
+            if let Ok(mut kb) = File::open(&device) {
+                std::thread::spawn(move || loop {
+                    let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
+                    if let Ok(len) = kb.read(&mut buf) {
+                        if len == std::mem::size_of::<InputEvent>() {
+                            let buf = unsafe {std::mem::transmute(buf)};
+                            send.send(buf).unwrap();
                         }
                     }
-                }
-            });
+                    else{
+                        return
+                    }
+                });
+            }
         }
         
         Self {
@@ -86,7 +87,7 @@ impl RawInput {
                     mouse_moved = true;
                 }
             }
-            else if new.ty == 3 { // mouse
+            else if new.ty == 3 { // absolute mouse
                 if new.code == 0 {
                     self.abs.x = (new.value as f64 / 32767.0) * self.width;
                     mouse_moved = true;
@@ -97,7 +98,9 @@ impl RawInput {
                 }
             }
             else if new.ty == 1 { // key press
-                let key_down = new.value > 0;
+                let key_up = new.value == 0;
+                let key_down = new.value == 1;
+                let key_repeat = new.value == 2;
                 let key_code = match new.code {
                     30 => KeyCode::KeyA,
                     48 => KeyCode::KeyB,
@@ -208,7 +211,7 @@ impl RawInput {
                     KeyCode::Alt => self.modifiers.alt = key_down,
                     _ => ()
                 };
-                if !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
+                if key_down && !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
                     let uc = self.modifiers.shift;
                     let inp = match key_code {
                         KeyCode::KeyA => if uc {Some('A')}else {Some('a')},
@@ -286,9 +289,6 @@ impl RawInput {
                         }));
                     }
                 }
-                
-                println!("{}", new.code);
-
                 if new.code == 272 || new.code == 273 || new.code == 274 { // mouse
                     if key_down{
                         evts.push(DirectEvent::MouseDown(MouseDownEvent {
@@ -300,7 +300,7 @@ impl RawInput {
                             handled: Cell::new(Area::Empty),
                         }));
                     }
-                    else{
+                    else if key_up{
                         evts.push(DirectEvent::MouseUp(MouseUpEvent {
                             button: (new.code - 272) as usize,
                             abs: self.abs,
@@ -311,15 +311,15 @@ impl RawInput {
                     }
                 }
                 else {
-                    if key_down {
+                    if key_down || key_repeat{
                         evts.push(DirectEvent::KeyDown(KeyEvent {
                             key_code,
-                            is_repeat: new.value == 2,
+                            is_repeat: key_repeat,
                             modifiers: self.modifiers,
                             time
                         }));
                     }
-                    else {
+                    else if key_up{
                         evts.push(DirectEvent::KeyUp(KeyEvent {
                             key_code,
                             is_repeat: false,
