@@ -36,12 +36,13 @@ impl MidiPortsEvent {
 
 impl std::fmt::Display for MidiPortsEvent {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        write!(f, "MIDI ports:\n").unwrap();
         for desc in &self.descs {
             if desc.port_type.is_input() {
-                write!(f, "MIDI Input: {}\n", desc.name).unwrap()
+                write!(f, "[Input] {}\n", desc.name).unwrap()
             }
             else {
-                write!(f, "MIDI Output: {}\n", desc.name).unwrap()
+                write!(f, "[Output] {}\n", desc.name).unwrap()
             }
         }
         Ok(())
