@@ -74,13 +74,13 @@ impl RawInput {
             println!("{} {} {}", new.ty, new.code, new.value);
             if new.ty == 2 { // relative mouse
                 if new.code == 0{
-                    self.abs.x += (new.value as f64 / 3200.0) * self.width;
+                    self.abs.x += new.value as f64;
                     if self.abs.x < 0.0{ self.abs.x = 0.0}
                     if self.abs.x > self.width{ self.abs.x = self.width}
                     mouse_moved = true;
                 }
                 else if new.code == 1{
-                    self.abs.y += (new.value as f64 / 3200.0) * self.height;
+                    self.abs.y += new.value as f64;
                     if self.abs.y < 0.0{ self.abs.y = 0.0}
                     if self.abs.y > self.height{ self.abs.y = self.height}
                     mouse_moved = true;
