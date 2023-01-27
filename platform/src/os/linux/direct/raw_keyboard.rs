@@ -31,22 +31,25 @@ pub struct RawKeyboard {
 
 
 impl RawKeyboard {
-    pub fn new(device: &str) -> Self {
+    pub fn new() -> Self {
         let (send, receiver) = mpsc::channel();
-        let device = format!("/dev/input/{}", device);
-        std::thread::spawn(move || {
-            
-            let mut kb = File::open(&device).expect("cannot open /dev/input/event0, make sure we are in the 'input' group");
-            loop {
-                let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
-                if let Ok(len) = kb.read(&mut buf) {
-                    if len == std::mem::size_of::<InputEvent>() {
-                        let buf = unsafe {std::mem::transmute(buf)};
-                        send.send(buf).unwrap();
+        for i in 0..5{
+            let device = format!("/dev/input/event{}", i);
+            let send = send.clone();
+            std::thread::spawn(move || {
+                if let Ok(mut kb) = File::open(&device){
+                    loop {
+                        let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
+                        if let Ok(len) = kb.read(&mut buf) {
+                            if len == std::mem::size_of::<InputEvent>() {
+                                let buf = unsafe {std::mem::transmute(buf)};
+                                send.send(buf).unwrap();
+                            }
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
         
         Self {
             receiver,

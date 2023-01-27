@@ -51,7 +51,7 @@ impl DirectApp {
         Self {
             egl,
             raw_mouse: RawMouse::new(drm.width as f64, drm.height as f64, 2.0),
-            raw_keyboard: RawKeyboard::new("event4"),
+            raw_keyboard: RawKeyboard::new(),
             drm,
             timers: SelectTimers::new()
         }
