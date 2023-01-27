@@ -5,7 +5,7 @@ fn main() {
         for config in configs.split("+"){
             match config{
                 "lines"=>println!("cargo:rustc-cfg=lines"), 
-                "linux_kms"=>println!("cargo:rustc-cfg=linux_kms"), 
+                "linux_direct"=>println!("cargo:rustc-cfg=linux_direct"), 
                 _=>()
             }
         }

@@ -13,7 +13,7 @@ pub const EGL_NONE: u32 = 12344;
 pub const EGL_NATIVE_VISUAL_ID: u32 = 12334;
 pub const EGL_CONTEXT_CLIENT_VERSION: u32 = 12440;
 pub const EGL_NO_CONTEXT: EGLContext = 0 as *mut ::std::os::raw::c_void;
-
+ 
 pub type EGLint = i32;
 pub type EGLenum = ::std::os::raw::c_uint;
 pub type EGLDisplay = *mut ::std::os::raw::c_void;
