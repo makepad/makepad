@@ -52,6 +52,7 @@ pub const MAX_DRM_DEVICES: usize = 64;
 pub const DRM_NODE_PRIMARY: u32 = 0;
 pub const DRM_MODE_CONNECTED: drmModeConnection = 1;
 pub const DRM_MODE_PAGE_FLIP_EVENT: u32 = 1;
+pub const DRM_MODE_PAGE_FLIP_ASYNC: u32 = 2;
 
 pub type drmDevice = _drmDevice;
 pub type drmDevicePtr = *mut _drmDevice;
