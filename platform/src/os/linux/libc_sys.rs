@@ -17,14 +17,15 @@ pub const ULONG_SIZE: usize = 64;
 #[cfg(target_pointer_width = "64")]
 pub use libc_64::*;
 
-pub type time_t = i32;
-pub type suseconds_t = i32;
+pub type time_t = usize;
+pub type suseconds_t = usize;
 
 type c_int =  std::os::raw::c_int;
 type c_uint =  std::os::raw::c_uint;
 type c_ulong = std::os::raw::c_ulong;
 type c_void = std::os::raw::c_void;
 type c_char = std::os::raw::c_char;
+type size_t = usize;
 
 pub const FD_SETSIZE: usize = 1024;
 pub const EPIPE: c_int = 32;
@@ -49,6 +50,7 @@ extern "C"{
         errorfds: *mut fd_set,
         timeout: *mut timeval,
     ) -> c_int;
+    pub fn read(fd: c_int, buf: *mut c_void, count: size_t) -> c_int;
 }
 
 pub unsafe fn FD_SET(fd: c_int, set: *mut fd_set) -> () {
@@ -64,6 +66,7 @@ pub unsafe fn FD_ZERO(set: *mut fd_set) -> () {
     }
 }
 
+#[derive(Default, Clone, Copy, Debug)]
 #[repr(C)]
 pub struct timeval {
     pub tv_sec: time_t,
