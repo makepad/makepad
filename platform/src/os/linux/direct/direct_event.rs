@@ -8,11 +8,11 @@ use {
             KeyEvent,
             TimerEvent,
         },
-    }
+    } 
 };
 
 #[derive(Debug)]
-pub enum KmsEvent {
+pub enum DirectEvent {
     Paint,
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),

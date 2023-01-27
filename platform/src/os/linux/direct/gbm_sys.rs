@@ -14,7 +14,7 @@ pub struct gbm_surface {
 #[derive(Debug, Copy, Clone)]
 pub struct gbm_bo {
     _unused: [u8; 0],
-}
+} 
 
 #[repr(C)]
 #[derive(Copy, Clone)]
