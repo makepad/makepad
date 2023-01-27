@@ -2,8 +2,7 @@ use {
     self::super::{
         direct_event::*,
         egl_drm::{Egl,Drm},
-        raw_mouse::RawMouse,
-        raw_keyboard::RawInput,
+        raw_input::RawInput,
     },
     self::super::super::{
         gl_sys,
