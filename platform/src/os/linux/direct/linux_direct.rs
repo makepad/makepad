@@ -3,7 +3,7 @@ use {
         direct_event::*,
         egl_drm::{Egl,Drm},
         raw_mouse::RawMouse,
-        raw_keyboard::RawKeyboard,
+        raw_keyboard::RawInput,
     },
     self::super::super::{
         gl_sys,
@@ -37,8 +37,7 @@ pub struct DirectApp {
     timers: SelectTimers,
     drm: Drm,
     egl: Egl,
-    raw_mouse: RawMouse,
-    raw_keyboard: RawKeyboard,
+    raw_input: RawInput,
 }
 
 impl DirectApp {
@@ -50,8 +49,7 @@ impl DirectApp {
         unsafe {drm.first_mode()};
         Self {
             egl,
-            raw_mouse: RawMouse::new(drm.width as f64, drm.height as f64, 2.0),
-            raw_keyboard: RawKeyboard::new(),
+            raw_input: RawInput::new(drm.width as f64, drm.height as f64),
             drm,
             timers: SelectTimers::new()
         }
@@ -84,27 +82,16 @@ impl Cx {
                     DirectEvent::Timer(TimerEvent {timer_id: *timer_id})
                 );
             }
-            let keyboard_events = direct_app.raw_keyboard.poll_keyboard(
+            let input_events = direct_app.raw_input.poll_raw_input(
                 direct_app.timers.time_now(),
-            );
-            for event in keyboard_events {
-                self.kms_event_callback(
-                    &mut direct_app,
-                    event
-                );
-            }
-            let mouse_events = direct_app.raw_mouse.poll_mouse(
-                direct_app.timers.time_now(),
-                direct_app.raw_keyboard.modifiers,
                 CxWindowPool::id_zero()
             );
-            for event in mouse_events {
+            for event in input_events {
                 self.kms_event_callback(
                     &mut direct_app,
                     event
                 );
             }
-            
             event_flow = self.kms_event_callback(&mut direct_app, DirectEvent::Paint);
             // alright so.. how do we do things
         }
