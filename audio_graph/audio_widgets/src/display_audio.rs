@@ -131,7 +131,7 @@ impl DisplayAudioLayer {
     
     
     pub fn process_buffer(&mut self, cx: &mut Cx, active: bool, audio: &AudioBuffer) -> bool {
-        if self.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y && !active {
+        if /*self.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y &&*/ !active {
             return false
         }
         // alright we have a texture. lets write the audio somewhere
