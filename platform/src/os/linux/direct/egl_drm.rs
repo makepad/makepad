@@ -348,6 +348,7 @@ impl Egl {
             if (eglGetConfigAttrib.unwrap())(egl_display, configs[i], EGL_NATIVE_VISUAL_ID, &mut native_id) == 0 {
                 continue;
             }
+            println!("{}", std::str::from_utf8_unchecked(&native_id.to_le_bytes()));
             if native_id == drm.fourcc_format {
                 egl_config = Some(configs[i]);
                 break;
