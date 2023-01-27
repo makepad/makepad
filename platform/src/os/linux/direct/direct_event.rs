@@ -6,9 +6,10 @@ use {
             MouseMoveEvent,
             ScrollEvent,
             KeyEvent,
+            TextInputEvent,
             TimerEvent,
         },
-    } 
+    }
 };
 
 #[derive(Debug)]
@@ -20,5 +21,6 @@ pub enum DirectEvent {
     Scroll(ScrollEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
+    TextInput(TextInputEvent),
     Timer(TimerEvent),
 }
