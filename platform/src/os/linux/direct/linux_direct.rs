@@ -57,7 +57,7 @@ impl DirectApp {
 
 impl Cx {
     pub fn event_loop(mut self) {
-        self.platform_type = OsType::Linux {custom_window_chrome: false};
+        self.platform_type = OsType::LinuxDirect;
         self.gpu_info.performance = GpuPerformance::Tier1;
         
         self.call_event_handler(&Event::Construct);
