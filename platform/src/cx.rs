@@ -129,9 +129,12 @@ pub struct CxDependency {
 #[derive(Clone, Debug)]
 pub enum OsType {
     Unknown,
-    MsWindows,
+    Windows,
     OSX,
-    Linux {custom_window_chrome: bool},
+    IOS,
+    Android,
+    LinuxWindow {custom_window_chrome: bool},
+    LinuxDirect,
     WebBrowser {protocol: String, host: String, hostname: String, pathname: String, search: String, hash: String}
 }
 
@@ -142,13 +145,10 @@ pub struct XrCapabilities{
 }
 
 impl OsType {
-    pub fn is_desktop(&self) -> bool {
+    pub fn is_web(&self) -> bool {
         match self {
-            OsType::Unknown => true,
-            OsType::MsWindows => true,
-            OsType::OSX => true,
-            OsType::Linux {..} => true,
-            OsType::WebBrowser {..} => false
+            OsType::WebBrowser {..} => true,
+            _=>false
         }
     }
 }
