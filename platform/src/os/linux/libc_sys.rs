@@ -17,8 +17,8 @@ pub const ULONG_SIZE: usize = 64;
 #[cfg(target_pointer_width = "64")]
 pub use libc_64::*;
 
-pub type time_t = usize;
-pub type suseconds_t = usize;
+pub type time_t = c_ulong;
+pub type suseconds_t = c_ulong;
 
 type c_int =  std::os::raw::c_int;
 type c_uint =  std::os::raw::c_uint;
