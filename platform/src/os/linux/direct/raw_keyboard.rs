@@ -6,9 +6,13 @@ use {
         direct_event::*,
     },
     crate::{
+        makepad_math::*,
+        window::{WindowId},
         event::*,
+        area::Area,
     },
     std::{
+        cell::Cell,
         fs::File,
         io::Read,
         sync::mpsc,
@@ -24,20 +28,23 @@ struct InputEvent {
     value: i32,
 }
 
-pub struct RawKeyboard {
+pub struct RawInput {
     pub modifiers: KeyModifiers,
     receiver: mpsc::Receiver<InputEvent>,
+    width: f64,
+    height: f64,
+    abs: DVec2,
 }
 
 
-impl RawKeyboard {
-    pub fn new() -> Self {
+impl RawInput {
+    pub fn new(width: f64, height: f64) -> Self {
         let (send, receiver) = mpsc::channel();
-        for i in 0..5{
+        for i in 0..12 {
             let device = format!("/dev/input/event{}", i);
             let send = send.clone();
             std::thread::spawn(move || {
-                if let Ok(mut kb) = File::open(&device){
+                if let Ok(mut kb) = File::open(&device) {
                     loop {
                         let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
                         if let Ok(len) = kb.read(&mut buf) {
@@ -53,14 +60,29 @@ impl RawKeyboard {
         
         Self {
             receiver,
+            width,
+            height,
+            abs: dvec2(0.0, 0.0),
             modifiers: Default::default(),
         }
     }
     
-    pub fn poll_keyboard(&mut self, time: f64) -> Vec<DirectEvent> {
+    pub fn poll_raw_input(&mut self, time: f64, window_id: WindowId) -> Vec<DirectEvent> {
         let mut evts = Vec::new();
+        let mut mouse_moved = false;
         while let Ok(new) = self.receiver.try_recv() {
-            if new.ty > 0 { // key press
+            println!("{} {} {}", new.ty, new.code, new.value);
+            if new.ty == 3 { // mouse
+                if new.code == 0 {
+                    self.abs.x = (new.value as f64 / 32767.0) * self.width;
+                    mouse_moved = true;
+                }
+                else if new.code == 1 {
+                    self.abs.y = (new.value as f64 / 32767.0) * self.height;
+                    mouse_moved = true;
+                }
+            }
+            else if new.ty == 1 { // key press
                 let key_down = new.value > 0;
                 let key_code = match new.code {
                     30 => KeyCode::KeyA,
@@ -172,7 +194,7 @@ impl RawKeyboard {
                     KeyCode::Alt => self.modifiers.alt = key_down,
                     _ => ()
                 };
-                if  !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
+                if !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
                     let uc = self.modifiers.shift;
                     let inp = match key_code {
                         KeyCode::KeyA => if uc {Some('A')}else {Some('a')},
@@ -211,38 +233,38 @@ impl RawKeyboard {
                         KeyCode::Key7 => if uc {Some('&')}else {Some('7')},
                         KeyCode::Key8 => if uc {Some('*')}else {Some('8')},
                         KeyCode::Key9 => if uc {Some('(')}else {Some('9')},
-                        KeyCode::Equals =>if uc {Some('+')}else {Some('=')},
-                        KeyCode::Minus =>if uc {Some('_')}else {Some('-')},
-                        KeyCode::RBracket =>if uc {Some('{')}else {Some('[')},
-                        KeyCode::LBracket =>if uc {Some('}')}else {Some(']')},
-                        KeyCode::ReturnKey =>Some('\n'),
-                        KeyCode::Backtick =>if uc {Some('~')}else {Some('`')},
-                        KeyCode::Semicolon =>if uc {Some(':')}else {Some(';')},
-                        KeyCode::Backslash =>if uc {Some('|')}else {Some('\\')},
-                        KeyCode::Comma =>if uc {Some('<')}else {Some(',')},
-                        KeyCode::Slash =>if uc {Some('?')}else {Some('/')},
-                        KeyCode::Period =>if uc {Some('>')}else {Some('.')},
-                        KeyCode::Tab =>Some('\t'),
-                        KeyCode::Space =>Some(' '),
-                        KeyCode::NumpadDecimal =>Some('.'),
-                        KeyCode::NumpadMultiply =>Some('*'),
-                        KeyCode::NumpadAdd =>Some('+'),
-                        KeyCode::NumpadDivide =>Some('/'),
-                        KeyCode::NumpadEnter =>Some('\n'),
-                        KeyCode::NumpadSubtract =>Some('-'),
-                        KeyCode::Numpad0 =>Some('0'),
-                        KeyCode::Numpad1 =>Some('1'),
-                        KeyCode::Numpad2 =>Some('2'),
-                        KeyCode::Numpad3 =>Some('3'),
-                        KeyCode::Numpad4 =>Some('4'),
-                        KeyCode::Numpad5 =>Some('5'),
-                        KeyCode::Numpad6 =>Some('6'),
-                        KeyCode::Numpad7 =>Some('7'),
-                        KeyCode::Numpad8 =>Some('8'),
-                        KeyCode::Numpad9 =>Some('9'),
+                        KeyCode::Equals => if uc {Some('+')}else {Some('=')},
+                        KeyCode::Minus => if uc {Some('_')}else {Some('-')},
+                        KeyCode::RBracket => if uc {Some('{')}else {Some('[')},
+                        KeyCode::LBracket => if uc {Some('}')}else {Some(']')},
+                        KeyCode::ReturnKey => Some('\n'),
+                        KeyCode::Backtick => if uc {Some('~')}else {Some('`')},
+                        KeyCode::Semicolon => if uc {Some(':')}else {Some(';')},
+                        KeyCode::Backslash => if uc {Some('|')}else {Some('\\')},
+                        KeyCode::Comma => if uc {Some('<')}else {Some(',')},
+                        KeyCode::Slash => if uc {Some('?')}else {Some('/')},
+                        KeyCode::Period => if uc {Some('>')}else {Some('.')},
+                        KeyCode::Tab => Some('\t'),
+                        KeyCode::Space => Some(' '),
+                        KeyCode::NumpadDecimal => Some('.'),
+                        KeyCode::NumpadMultiply => Some('*'),
+                        KeyCode::NumpadAdd => Some('+'),
+                        KeyCode::NumpadDivide => Some('/'),
+                        KeyCode::NumpadEnter => Some('\n'),
+                        KeyCode::NumpadSubtract => Some('-'),
+                        KeyCode::Numpad0 => Some('0'),
+                        KeyCode::Numpad1 => Some('1'),
+                        KeyCode::Numpad2 => Some('2'),
+                        KeyCode::Numpad3 => Some('3'),
+                        KeyCode::Numpad4 => Some('4'),
+                        KeyCode::Numpad5 => Some('5'),
+                        KeyCode::Numpad6 => Some('6'),
+                        KeyCode::Numpad7 => Some('7'),
+                        KeyCode::Numpad8 => Some('8'),
+                        KeyCode::Numpad9 => Some('9'),
                         _ => None
                     };
-                    if let Some(inp) = inp{
+                    if let Some(inp) = inp {
                         evts.push(DirectEvent::TextInput(TextInputEvent {
                             input: format!("{}", inp),
                             was_paste: false,
@@ -251,24 +273,59 @@ impl RawKeyboard {
                     }
                 }
                 
-                if key_down {
-                    evts.push(DirectEvent::KeyDown(KeyEvent { 
-                        key_code,
-                        is_repeat: new.value == 2,
-                        modifiers: self.modifiers,
-                        time
-                    }));
+                println!("{}", new.code);
+
+                if new.code == 272 || new.code == 273 || new.code == 274 { // mouse
+                    if key_down{
+                        evts.push(DirectEvent::MouseDown(MouseDownEvent {
+                            button: (new.code - 272) as usize,
+                            abs: self.abs,
+                            window_id,
+                            modifiers: self.modifiers,
+                            time,
+                            handled: Cell::new(Area::Empty),
+                        }));
+                    }
+                    else{
+                        evts.push(DirectEvent::MouseUp(MouseUpEvent {
+                            button: (new.code - 272) as usize,
+                            abs: self.abs,
+                            window_id,
+                            modifiers: self.modifiers,
+                            time,
+                        }));
+                    }
                 }
                 else {
-                    evts.push(DirectEvent::KeyUp(KeyEvent {
-                        key_code,
-                        is_repeat: false,
-                        modifiers: self.modifiers,
-                        time
-                    }));
+                    if key_down {
+                        evts.push(DirectEvent::KeyDown(KeyEvent {
+                            key_code,
+                            is_repeat: new.value == 2,
+                            modifiers: self.modifiers,
+                            time
+                        }));
+                    }
+                    else {
+                        evts.push(DirectEvent::KeyUp(KeyEvent {
+                            key_code,
+                            is_repeat: false,
+                            modifiers: self.modifiers,
+                            time
+                        }));
+                    }
                 }
             }
         }
+        if mouse_moved {
+            evts.push(DirectEvent::MouseMove(MouseMoveEvent {
+                abs: self.abs,
+                window_id,
+                modifiers: self.modifiers,
+                time,
+                handled: Cell::new(Area::Empty),
+            }));
+        }
+        
         evts
     }
 }
