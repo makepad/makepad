@@ -12,8 +12,9 @@ live_design!{
     import crate::theme::*;
     registry Widget::*;
     import makepad_widgets::frame::*;
-    
-    DesktopWindow = {{DesktopWindow}} {
+    import makepad_draw::shader::std::*;
+   
+     DesktopWindow = {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
         var caption = "Makepad"
         ui: {
@@ -51,7 +52,33 @@ live_design!{
             }
             inner_view = <Frame> {user_draw: true}
         }
-        mouse_cursor_size: vec2(20,20),
+        mouse_cursor_size: vec2(20, 20),
+        draw_cursor: {
+            instance border_width: 1.5
+            instance color: #000
+            instance border_color: #fff
+            
+            fn get_color(self) -> vec4 {
+                return self.color
+            }
+            
+            fn get_border_color(self) -> vec4 {
+                return self.border_color
+            }
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.move_to(1.0,1.0);
+                sdf.line_to(self.rect_size.x-1.0, self.rect_size.y*0.5)
+                sdf.line_to(self.rect_size.x*0.5, self.rect_size.y-1.0)
+                sdf.close_path();
+                sdf.fill_keep(self.get_color())
+                if self.border_width > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_width)
+                }
+                return sdf.result
+            }
+        }
         window: {
             inner_size: vec2(1024, 768)
         }
@@ -220,10 +247,10 @@ impl DesktopWindow {
             if let OsType::LinuxDirect = cx.platform_type() {
                 // ok move our mouse cursor
                 self.last_mouse_pos = ev.abs;
-                self.draw_cursor.update_abs(cx,Rect{
-                    pos:ev.abs,
-                    size:self.mouse_cursor_size
-                } )
+                self.draw_cursor.update_abs(cx, Rect {
+                    pos: ev.abs,
+                    size: self.mouse_cursor_size
+                })
             }
         }
     }
