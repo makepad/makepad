@@ -1791,7 +1791,7 @@ impl IronFishState {
         
         for (i, dp) in self.display_buffers.iter_mut().enumerate() {
             if let Some(dp) = dp.take() {
-                display.send_buffer(true, i, dp);
+                display.send_buffer(self.voices[i].active()>-1, i, dp);
             }
         }
         self.apply_bitcrush(buffer);
