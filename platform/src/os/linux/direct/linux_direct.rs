@@ -17,7 +17,6 @@ use {
         makepad_math::*,
         thread::Signal,
         event::{
-            KeyModifiers,
             TimerEvent,
             WebSocket,
             WebSocketAutoReconnect,
@@ -52,7 +51,7 @@ impl DirectApp {
         Self {
             egl,
             raw_mouse: RawMouse::new(drm.width as f64, drm.height as f64, 2.0),
-            raw_keyboard: RawKeyboard::new(),
+            raw_keyboard: RawKeyboard::new("event4"),
             drm,
             timers: SelectTimers::new()
         }
@@ -96,7 +95,7 @@ impl Cx {
             }
             let mouse_events = direct_app.raw_mouse.poll_mouse(
                 direct_app.timers.time_now(),
-                direct_app.raw_keyboard.key_modifiers,
+                direct_app.raw_keyboard.modifiers,
                 CxWindowPool::id_zero()
             );
             for event in mouse_events {
@@ -162,6 +161,9 @@ impl Cx {
             DirectEvent::KeyUp(e) => {
                 self.keyboard.process_key_up(e.clone());
                 self.call_event_handler(&Event::KeyUp(e))
+            }
+            DirectEvent::TextInput(e) => {
+                self.call_event_handler(&Event::TextInput(e))
             }
             DirectEvent::Timer(e) => {
                 if e.timer_id == 0 {
