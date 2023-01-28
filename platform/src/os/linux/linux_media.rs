@@ -3,6 +3,7 @@ use {
     std::sync::{Arc, Mutex},
     self::super::{
         alsa_audio::AlsaAudioAccess,
+        pulse_audio::PulseAudioAccess,
         alsa_midi::*,
     },
     crate::{
@@ -18,8 +19,10 @@ use {
 
 impl Cx {
     pub (crate) fn handle_media_signals(&mut self) {
-        if self.os.media.alsa_audio_change.check_and_clear() {
-            let descs = self.os.media.alsa_audio().lock().unwrap().get_updated_descs();
+        if self.os.media.audio_change.check_and_clear() {
+            let mut descs = self.os.media.pulse_audio().lock().unwrap().get_updated_descs();
+            let descs2 = self.os.media.alsa_audio().lock().unwrap().get_updated_descs();
+            descs.extend(descs2);
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent {
                 descs
             }));
@@ -35,17 +38,24 @@ impl Cx {
 
 #[derive(Default)]
 pub struct CxLinuxMedia {
+    pub (crate) pulse_audio: Option<Arc<Mutex<PulseAudioAccess >> >,
     pub (crate) alsa_audio: Option<Arc<Mutex<AlsaAudioAccess >> >,
-    pub (crate) alsa_audio_change: Signal,
+    pub (crate) audio_change: Signal,
     pub (crate) alsa_midi: Option<Arc<Mutex<AlsaMidiAccess >> >,
     pub (crate) alsa_midi_change: Signal,
 }
 
 impl CxLinuxMedia {
+    pub fn pulse_audio(&mut self) -> Arc<Mutex<AlsaAudioAccess >> {
+        if self.pulse_audio.is_none() {
+            self.pulse_audio = Some(PulseAudioAccess::new(self.audio_change.clone(), &self.alsa_audio().lock().unwrap()));
+        }
+        self.alsa_audio.as_ref().unwrap().clone()
+    }
     
     pub fn alsa_audio(&mut self) -> Arc<Mutex<AlsaAudioAccess >> {
         if self.alsa_audio.is_none() {
-            self.alsa_audio = Some(AlsaAudioAccess::new(self.alsa_audio_change.clone()));
+            self.alsa_audio = Some(AlsaAudioAccess::new(self.audio_change.clone()));
         }
         self.alsa_audio.as_ref().unwrap().clone()
     }
@@ -82,10 +92,12 @@ impl CxMediaApi for Cx {
     
     fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
         self.os.media.alsa_audio().lock().unwrap().use_audio_inputs(devices);
+        self.os.media.pulse_audio().lock().unwrap().use_audio_inputs(devices);
     }
     
     fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
         self.os.media.alsa_audio().lock().unwrap().use_audio_outputs(devices);
+        self.os.media.pulse_audio().lock().unwrap().use_audio_outputs(devices);
     }
     
     fn audio_output<F>(&mut self, index: usize, f: F) where F: FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static {
