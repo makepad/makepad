@@ -69,7 +69,7 @@ impl AudioDevicesEvent{
     
     pub fn device_match(&self, matches: &[&'static str])->Vec<AudioDeviceId>{
         for d in &self.descs{
-            if d.is_default && d.device_type.is_output(){
+            if d.device_type.is_output(){
                 let mut mismatch  = false;
                 for m in matches{
                     if d.name.find(m).is_none(){
