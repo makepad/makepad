@@ -107,7 +107,7 @@ impl AlsaAudioAccess {
                             device_type: AudioDeviceType::Input,
                             is_default: false,
                             channels: 2,
-                            name: desc_str
+                            name: format!("ALSA {}",desc_str)
                         };
                         if ioid == "" || ioid == "Input" {
                             device_descs.push(AlsaAudioDesc {

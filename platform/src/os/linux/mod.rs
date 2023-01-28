@@ -12,6 +12,8 @@ pub mod opengl;
 pub mod alsa_audio;
 pub mod alsa_midi;
 pub mod select_timer;
+pub mod pulse_audio;
+pub mod pulse_sys;
 
 #[cfg(not(linux_direct))]
 pub(crate) use self::x11::linux_x11::*;
