@@ -366,7 +366,7 @@ pub struct Frame { // draw info per UI element
 
 struct FrameTextureCache {
     pass: Pass,
-    depth_texture: Texture,
+    _depth_texture: Texture,
     color_texture: Texture,
 }
 
@@ -754,7 +754,7 @@ impl Frame {
                     if self.cache.is_none() {
                         self.cache = Some(FrameTextureCache {
                             pass: Pass::new(cx),
-                            depth_texture: Texture::new(cx),
+                            _depth_texture: Texture::new(cx),
                             color_texture: Texture::new(cx)
                         });
                         let cache = self.cache.as_mut().unwrap();
