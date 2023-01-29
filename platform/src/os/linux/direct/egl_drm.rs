@@ -1,5 +1,10 @@
 use {
     std::ffi::{CStr, CString},
+    std::os::raw::{
+        c_void,
+        c_uint,
+        c_int,
+    },
     self::super::{
         drm_sys::*,
         gbm_sys::*,
@@ -10,7 +15,7 @@ use {
         libc_sys,
     },
 };
- 
+
 
 #[allow(dead_code)]
 pub struct Drm {
@@ -153,7 +158,7 @@ impl Drm {
         let handle = gbm_bo_get_handle(what_bo);
         let stride = gbm_bo_get_stride(what_bo);
         let mut fb_id = 0;
-
+        
         if drmModeAddFB2(
             self.drm_fd,
             self.width,
@@ -215,13 +220,13 @@ impl Drm {
         let mut fds = std::mem::MaybeUninit::uninit();
         
         unsafe extern "C" fn handle_page_flip(
-            _fd: ::std::os::raw::c_int,
-            _sequence: ::std::os::raw::c_uint,
-            _tv_sec: ::std::os::raw::c_uint,
-            _tv_usec: ::std::os::raw::c_uint,
-            user_data: *mut ::std::os::raw::c_void,
+            _fd: c_int,
+            _sequence: c_uint,
+            _tv_sec: c_uint,
+            _tv_usec: c_uint,
+            user_data: *mut c_void,
         ) {
-           // println!("FLIP!");
+            // println!("FLIP!");
             *(user_data as *mut u32) = 0;
         }
         
@@ -231,7 +236,7 @@ impl Drm {
             page_flip_handler: Some(handle_page_flip),
             page_flip_handler2: None,
             sequence_handler: None
-        }; 
+        };
         while waiting_for_flip != 0 {
             libc_sys::FD_ZERO(fds.as_mut_ptr());
             //libc_sys::FD_SET(0, fds.as_mut_ptr());
@@ -363,7 +368,7 @@ impl Egl {
         let ctx_attribs = [
             EGL_CONTEXT_CLIENT_VERSION,
             2,
-            EGL_NONE 
+            EGL_NONE
         ];
         
         let egl_context = eglCreateContext(egl_display, egl_config, EGL_NO_CONTEXT, ctx_attribs.as_ptr());

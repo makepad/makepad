@@ -1387,12 +1387,12 @@ impl App {
         }
         
         if let Event::MidiPorts(ports) = event {
-            println!("{}", ports);
+            //println!("{}", ports);
             cx.use_midi_inputs(&ports.all_inputs());
         }
          
         if let Event::AudioDevices(devices) = event {
-            println!("{}", devices);
+            //println!("{}", devices);
             cx.use_audio_outputs(&devices.device_match(&["vc4-hdmi-0","all software conversions"]));
         }
         

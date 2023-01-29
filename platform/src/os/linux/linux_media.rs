@@ -46,11 +46,11 @@ pub struct CxLinuxMedia {
 }
 
 impl CxLinuxMedia {
-    pub fn pulse_audio(&mut self) -> Arc<Mutex<AlsaAudioAccess >> {
+    pub fn pulse_audio(&mut self) -> Arc<Mutex<PulseAudioAccess >> {
         if self.pulse_audio.is_none() {
             self.pulse_audio = Some(PulseAudioAccess::new(self.audio_change.clone(), &self.alsa_audio().lock().unwrap()));
         }
-        self.alsa_audio.as_ref().unwrap().clone()
+        self.pulse_audio.as_ref().unwrap().clone()
     }
     
     pub fn alsa_audio(&mut self) -> Arc<Mutex<AlsaAudioAccess >> {
@@ -66,9 +66,9 @@ impl CxLinuxMedia {
         }
         self.alsa_midi.as_ref().unwrap().clone()
     }
-}
+} 
 
-impl CxMediaApi for Cx {
+impl CxMediaApi for Cx { 
     
     fn midi_input(&mut self) -> MidiInput {
         self.os.media.alsa_midi().lock().unwrap().create_midi_input()
