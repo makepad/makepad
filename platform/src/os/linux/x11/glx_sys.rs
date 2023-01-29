@@ -2,10 +2,16 @@
 use self::super::x11_sys::*;
 use self::super::super::gl_sys::*;
 
+use std::os::raw::{
+    c_int,
+    c_char,
+};
+
+
 pub type GLXDrawable = XID;
 pub type GLXContext = *mut __GLXcontextRec;
 
-pub const GLX_DOUBLEBUFFER: u32 = 5;
+pub const GLX_DOUBLEBUFFER: u32 = 5; 
 pub const GLX_RED_SIZE: u32 = 8;
 pub const GLX_GREEN_SIZE: u32 = 9;
 pub const GLX_BLUE_SIZE: u32 = 10;
@@ -38,8 +44,8 @@ pub type PFNGLXCREATECONTEXTATTRIBSARBPROC = ::std::option::Option<
         dpy: *mut Display,
         config: GLXFBConfig,
         share_context: GLXContext,
-        direct: ::std::os::raw::c_int,
-        attrib_list: *const ::std::os::raw::c_int,
+        direct: c_int,
+        attrib_list: *const c_int,
     ) -> GLXContext,
 >;
 
@@ -49,29 +55,29 @@ extern "C" {
     
     pub fn glXChooseFBConfig(
         dpy: *mut Display,
-        screen: ::std::os::raw::c_int,
-        attribList: *const ::std::os::raw::c_int,
-        nitems: *mut ::std::os::raw::c_int,
+        screen: c_int,
+        attribList: *const c_int,
+        nitems: *mut c_int,
     ) -> *mut GLXFBConfig;
         
     pub fn glXMakeCurrent(
         dpy: *mut Display,
         drawable: GLXDrawable,
         ctx: GLXContext,
-    ) -> ::std::os::raw::c_int;
+    ) -> c_int;
 
     pub fn glXSwapBuffers(dpy: *mut Display, drawable: GLXDrawable);
     
     pub fn glXQueryVersion(
         dpy: *mut Display,
-        maj: *mut ::std::os::raw::c_int,
-        min: *mut ::std::os::raw::c_int,
-    ) -> ::std::os::raw::c_int;    
+        maj: *mut c_int,
+        min: *mut c_int,
+    ) -> c_int;    
 
     pub fn glXQueryExtensionsString(
         dpy: *mut Display,
-        screen: ::std::os::raw::c_int,
-    ) -> *const ::std::os::raw::c_char;
+        screen: c_int,
+    ) -> *const c_char;
 
     pub fn glXGetVisualFromFBConfig(dpy: *mut Display, config: GLXFBConfig) -> *mut XVisualInfo;
 } 
