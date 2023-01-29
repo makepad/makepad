@@ -1,51 +1,58 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+use std::os::raw::{
+    c_void,
+    c_uint,
+    c_char,
+    c_int,
+ };
+ 
 #[link(name = "drm")]
 extern "C" { 
     pub fn drmGetDevices2(
         flags: u32,
         devices: *mut drmDevicePtr,
-        max_devices: ::std::os::raw::c_int,
-    ) -> ::std::os::raw::c_int;
-    pub fn drmModeGetResources(fd: ::std::os::raw::c_int) -> drmModeResPtr;
-    pub fn drmModeGetConnector(fd: ::std::os::raw::c_int, connectorId: u32) -> drmModeConnectorPtr;
+        max_devices: c_int,
+    ) -> c_int;
+    pub fn drmModeGetResources(fd: c_int) -> drmModeResPtr;
+    pub fn drmModeGetConnector(fd: c_int, connectorId: u32) -> drmModeConnectorPtr;
     pub fn drmModeFreeConnector(ptr: drmModeConnectorPtr);
     pub fn drmModeFreeResources(ptr: drmModeResPtr);
-    pub fn drmModeGetEncoder(fd: ::std::os::raw::c_int, encoder_id: u32) -> drmModeEncoderPtr;
+    pub fn drmModeGetEncoder(fd: c_int, encoder_id: u32) -> drmModeEncoderPtr;
     pub fn drmModeFreeEncoder(ptr: drmModeEncoderPtr);
     pub fn drmModeAddFB2(
-        fd: ::std::os::raw::c_int,
+        fd: c_int,
         width: u32,
         height: u32,
-        pixel_format: u32,
+        pixel_format: u32, 
         bo_handles: *const u32,
         pitches: *const u32,
         offsets: *const u32,
         buf_id: *mut u32,
         flags: u32,
-    ) -> ::std::os::raw::c_int;
+    ) -> c_int;
     pub fn drmModeSetCrtc(
-        fd: ::std::os::raw::c_int,
+        fd: c_int,
         crtcId: u32,
         bufferId: u32,
         x: u32,
         y: u32,
         connectors: *mut u32,
-        count: ::std::os::raw::c_int,
+        count: c_int,
         mode: drmModeModeInfoPtr,
-    ) -> ::std::os::raw::c_int;
+    ) -> c_int;
     pub fn drmModePageFlip(
-        fd: ::std::os::raw::c_int,
+        fd: c_int,
         crtc_id: u32,
         fb_id: u32,
         flags: u32,
-        user_data: *mut ::std::os::raw::c_void,
-    ) -> ::std::os::raw::c_int;
+        user_data: *mut c_void,
+    ) -> c_int;
     pub fn drmHandleEvent(
-        fd: ::std::os::raw::c_int,
+        fd: c_int,
         evctx: drmEventContextPtr,
-    ) -> ::std::os::raw::c_int;
+    ) -> c_int;
 }
 
 pub const MAX_DRM_DEVICES: usize = 64;
@@ -76,8 +83,8 @@ pub type drmModeRes = _drmModeRes;
 pub type drmModeResPtr = *mut _drmModeRes;
 pub type drmModeConnector = _drmModeConnector;
 pub type drmModeConnectorPtr = *mut _drmModeConnector;
-pub type drmModeConnection = ::std::os::raw::c_uint;
-pub type drmModeSubPixel = ::std::os::raw::c_uint;
+pub type drmModeConnection = c_uint;
+pub type drmModeSubPixel = c_uint;
 pub type drmModeModeInfo = _drmModeModeInfo;
 pub type drmModeModeInfoPtr = *mut _drmModeModeInfo;
 pub type drmModeEncoder = _drmModeEncoder;
@@ -98,13 +105,13 @@ pub struct _drmModeEncoder {
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct _drmHost1xDeviceInfo {
-    pub compatible: *mut *mut ::std::os::raw::c_char,
+    pub compatible: *mut *mut c_char,
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct _drmPlatformDeviceInfo {
-    pub compatible: *mut *mut ::std::os::raw::c_char,
+    pub compatible: *mut *mut c_char,
 }
 
 #[repr(C)]
@@ -117,13 +124,13 @@ pub struct _drmUsbDeviceInfo {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct _drmHost1xBusInfo {
-    pub fullname: [::std::os::raw::c_char; 512usize],
+    pub fullname: [c_char; 512usize],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct _drmPlatformBusInfo {
-    pub fullname: [::std::os::raw::c_char; 512usize],
+    pub fullname: [c_char; 512usize],
 }
 
 #[repr(C)]
@@ -145,9 +152,9 @@ pub struct _drmPciBusInfo {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct _drmDevice {
-    pub nodes: *mut *mut ::std::os::raw::c_char,
-    pub available_nodes: ::std::os::raw::c_int,
-    pub bustype: ::std::os::raw::c_int,
+    pub nodes: *mut *mut c_char,
+    pub available_nodes: c_int,
+    pub bustype: c_int,
     pub businfo: _drmDevice__bindgen_ty_1,
     pub deviceinfo: _drmDevice__bindgen_ty_2,
 }
@@ -181,13 +188,13 @@ pub struct _drmPciDeviceInfo {
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct _drmModeRes {
-    pub count_fbs: ::std::os::raw::c_int,
+    pub count_fbs: c_int,
     pub fbs: *mut u32,
-    pub count_crtcs: ::std::os::raw::c_int,
+    pub count_crtcs: c_int,
     pub crtcs: *mut u32,
-    pub count_connectors: ::std::os::raw::c_int,
+    pub count_connectors: c_int,
     pub connectors: *mut u32,
-    pub count_encoders: ::std::os::raw::c_int,
+    pub count_encoders: c_int,
     pub encoders: *mut u32,
     pub min_width: u32,
     pub max_width: u32,
@@ -206,12 +213,12 @@ pub struct _drmModeConnector {
     pub mmWidth: u32,
     pub mmHeight: u32,
     pub subpixel: drmModeSubPixel,
-    pub count_modes: ::std::os::raw::c_int,
+    pub count_modes: c_int,
     pub modes: drmModeModeInfoPtr,
-    pub count_props: ::std::os::raw::c_int,
+    pub count_props: c_int,
     pub props: *mut u32,
     pub prop_values: *mut u64,
-    pub count_encoders: ::std::os::raw::c_int,
+    pub count_encoders: c_int,
     pub encoders: *mut u32,
 }
 
@@ -232,42 +239,42 @@ pub struct _drmModeModeInfo {
     pub vrefresh: u32,
     pub flags: u32,
     pub type_: u32,
-    pub name: [::std::os::raw::c_char; 32usize],
+    pub name: [c_char; 32usize],
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct _drmEventContext {
-    pub version: ::std::os::raw::c_int,
+    pub version: c_int,
     pub vblank_handler: ::std::option::Option<
         unsafe extern "C" fn(
-            fd: ::std::os::raw::c_int,
-            sequence: ::std::os::raw::c_uint,
-            tv_sec: ::std::os::raw::c_uint,
-            tv_usec: ::std::os::raw::c_uint,
-            user_data: *mut ::std::os::raw::c_void,
+            fd: c_int,
+            sequence: c_uint,
+            tv_sec: c_uint,
+            tv_usec: c_uint,
+            user_data: *mut c_void,
         ),
     >,
     pub page_flip_handler: ::std::option::Option<
         unsafe extern "C" fn(
-            fd: ::std::os::raw::c_int,
-            sequence: ::std::os::raw::c_uint,
-            tv_sec: ::std::os::raw::c_uint,
-            tv_usec: ::std::os::raw::c_uint,
-            user_data: *mut ::std::os::raw::c_void,
+            fd: c_int,
+            sequence: c_uint,
+            tv_sec: c_uint,
+            tv_usec: c_uint,
+            user_data: *mut c_void,
         ),
     >,
     pub page_flip_handler2: ::std::option::Option<
         unsafe extern "C" fn(
-            fd: ::std::os::raw::c_int,
-            sequence: ::std::os::raw::c_uint,
-            tv_sec: ::std::os::raw::c_uint,
-            tv_usec: ::std::os::raw::c_uint,
-            crtc_id: ::std::os::raw::c_uint,
-            user_data: *mut ::std::os::raw::c_void,
+            fd: c_int,
+            sequence: c_uint,
+            tv_sec: c_uint,
+            tv_usec: c_uint,
+            crtc_id: c_uint,
+            user_data: *mut c_void,
         ),
     >,
     pub sequence_handler: ::std::option::Option<
-        unsafe extern "C" fn(fd: ::std::os::raw::c_int, sequence: u64, ns: u64, user_data: u64),
+        unsafe extern "C" fn(fd: c_int, sequence: u64, ns: u64, user_data: u64),
     >,
 }

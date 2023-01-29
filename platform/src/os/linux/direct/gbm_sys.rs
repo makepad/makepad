@@ -1,3 +1,8 @@
+use std::os::raw::{
+    c_void,
+    c_int,
+};
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct gbm_device {
@@ -14,12 +19,12 @@ pub struct gbm_surface {
 #[derive(Debug, Copy, Clone)]
 pub struct gbm_bo {
     _unused: [u8; 0],
-} 
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union gbm_bo_handle {
-    pub ptr: *mut ::std::os::raw::c_void,
+    pub ptr: *mut c_void,
     pub s32: i32,
     pub u32_: u32,
     pub s64: i64,
@@ -40,7 +45,7 @@ pub const GBM_BO_USE_RENDERING: u32 = 1 << 2;
 
 #[link(name = "gbm")]
 extern "C" {
-    pub fn gbm_create_device(fd: ::std::os::raw::c_int) -> *mut gbm_device;
+    pub fn gbm_create_device(fd: c_int) -> *mut gbm_device;
     pub fn gbm_surface_create(
         gbm: *mut gbm_device,
         width: u32,
@@ -51,7 +56,7 @@ extern "C" {
     pub fn gbm_bo_get_stride(bo: *mut gbm_bo) -> u32;
     pub fn gbm_surface_lock_front_buffer(surface: *mut gbm_surface) -> *mut gbm_bo;
     pub fn gbm_surface_release_buffer(surface: *mut gbm_surface, bo: *mut gbm_bo);
-    pub fn gbm_bo_get_user_data(bo: *mut gbm_bo) -> *mut ::std::os::raw::c_void;
+    pub fn gbm_bo_get_user_data(bo: *mut gbm_bo) -> *mut c_void;
     pub fn gbm_bo_get_handle(bo: *mut gbm_bo) -> gbm_bo_handle;
 }
 

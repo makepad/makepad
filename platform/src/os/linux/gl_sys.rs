@@ -18,7 +18,7 @@ pub mod types {
     pub type GLubyte = raw::c_uchar;
     pub type GLsizeiptr = isize; 
 }
-pub use types::*;
+pub use types::*; 
 
 pub const TRUE: types::GLboolean = 1;
 pub const ARRAY_BUFFER: types::GLenum = 0x8892;
