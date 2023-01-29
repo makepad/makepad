@@ -714,7 +714,7 @@ impl CxOsTexture {
         let width = desc.width.unwrap_or(default_size.x as usize) as u32;
         let height = desc.height.unwrap_or(default_size.y as usize) as u32;
         
-        if self.width == width && self.height == height {
+        if self.width == width && self.height == height || width == 0 || height == 0{
             return false
         }
         
