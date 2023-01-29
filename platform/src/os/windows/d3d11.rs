@@ -314,6 +314,9 @@ impl Cx {
         unsafe {
             d3d11_cx.context.RSSetViewports(Some(&[viewport]));
         }
+        if viewport.Width < 1.0 || viewport.Height < 1.0{
+            return
+        }
         // set up the color texture array
         let mut color_textures = Vec::new();
         
