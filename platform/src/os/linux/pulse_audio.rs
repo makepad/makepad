@@ -100,24 +100,19 @@ impl PulseAudioAccess {
             if pa_threaded_mainloop_start(main_loop) != 0 {
                 panic!("Pulse audio pa_threaded_mainloop_start failed");
             }
-             
-            println!("pre lock");
             
             pa_threaded_mainloop_lock(main_loop);
              
-            println!("post lock");
-            
-            while let ContextState::Connecting = pself.lock().unwrap().context_state {
-                println!("LOOP");
+            loop  {
+                if let ContextState::Connecting = pself.lock().unwrap().context_state{}
+                else{
+                    break;
+                }
                 pa_threaded_mainloop_wait(main_loop);
             }
              
-            println!("end loop");
-            
             pa_threaded_mainloop_unlock(main_loop);
-             
-            println!("unlocked");
-            
+            println!("DONE"); 
             pself
         }
     }
@@ -135,7 +130,7 @@ impl PulseAudioAccess {
         _index: u32,
         pself: *mut c_void
     ) {
-        let pself: &Mutex<PulseAudioAccess> = &*(pself as *mut _);
+        let pself: &Mutex<PulseAudioAccess> = &*(pself as *const _);
         let pself = pself.lock().unwrap();
         pself.change_signal.set();
         pa_threaded_mainloop_signal(pself.main_loop, 0);
@@ -146,26 +141,19 @@ impl PulseAudioAccess {
         pself: *mut c_void
     ) {
         let pself: &Mutex<PulseAudioAccess> = &*(pself as *mut _);
-        let mut pself = pself.lock().unwrap();
         let state =  pa_context_get_state(c);
-        println!("HERE CONTEXT {}", state); 
-
+        
         match state{
             PA_CONTEXT_READY => {
-                pself.context_state = ContextState::Ready;
-                pa_threaded_mainloop_signal(pself.main_loop, 0);
+                pself.lock().unwrap().context_state = ContextState::Ready;
+                let main_loop = pself.lock().unwrap().main_loop;
+                pa_threaded_mainloop_signal(main_loop, 0);
             }
             PA_CONTEXT_FAILED | PA_CONTEXT_TERMINATED => {
-                pself.context_state = ContextState::Failed;
-                pa_threaded_mainloop_signal(pself.main_loop, 0);
+                pself.lock().unwrap().context_state = ContextState::Failed;
+                let main_loop = pself.lock().unwrap().main_loop;
+                pa_threaded_mainloop_signal(main_loop, 0);
             },
-            PA_CONTEXT_UNCONNECTED => (),
-            PA_CONTEXT_CONNECTING => {
-                println!("CONNECTING"); 
-                pa_threaded_mainloop_signal(pself.main_loop, 0);
-            },
-            PA_CONTEXT_AUTHORIZING => (),
-            PA_CONTEXT_SETTING_NAME => (),
             _ => (),
         }
     }
