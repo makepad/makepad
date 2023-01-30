@@ -35,8 +35,12 @@ pub type pa_source_flags = c_uint;
 pub use self::pa_source_flags as pa_source_flags_t;
 pub type pa_operation_state = c_uint;
 pub use self::pa_operation_state as pa_operation_state_t;
+pub type pa_subscription_event_type = ::std::os::raw::c_uint;
+pub use self::pa_subscription_event_type as pa_subscription_event_type_t;
 
+pub const PA_OPERATION_RUNNING: pa_operation_state = 0;
 pub const PA_OPERATION_DONE: pa_operation_state = 1;
+pub const PA_OPERATION_CANCELLED: pa_operation_state = 2;
 
 pub const PA_CONTEXT_UNCONNECTED: pa_context_state = 0;
 pub const PA_CONTEXT_CONNECTING: pa_context_state = 1;
@@ -137,6 +141,22 @@ pub type pa_source_info_cb_t = ::std::option::Option<
     ),
 >;
 
+pub type pa_context_subscribe_cb_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        c: *mut pa_context,
+        t: pa_subscription_event_type_t,
+        idx: u32,
+        userdata: *mut ::std::os::raw::c_void,
+    ),
+>;
+
+pub type pa_server_info_cb_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        c: *mut pa_context,
+        i: *const pa_server_info,
+        userdata: *mut ::std::os::raw::c_void,
+    ),
+>;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -281,6 +301,20 @@ pub struct pa_operation {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct pa_server_info {
+    pub user_name: *const ::std::os::raw::c_char,
+    pub host_name: *const ::std::os::raw::c_char,
+    pub server_version: *const ::std::os::raw::c_char,
+    pub server_name: *const ::std::os::raw::c_char,
+    pub sample_spec: pa_sample_spec,
+    pub default_sink_name: *const ::std::os::raw::c_char,
+    pub default_source_name: *const ::std::os::raw::c_char,
+    pub cookie: u32,
+    pub channel_map: pa_channel_map,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct pa_mainloop_api {
     pub userdata: *mut c_void,
     pub io_new: ::std::option::Option<
@@ -380,4 +414,22 @@ extern "C" {
         m: *mut pa_threaded_mainloop,
         wait_for_accept:c_int,
     );
+
+    pub fn pa_threaded_mainloop_start(m: *mut pa_threaded_mainloop) -> ::std::os::raw::c_int;
+    pub fn pa_threaded_mainloop_lock(m: *mut pa_threaded_mainloop);
+    pub fn pa_threaded_mainloop_unlock(m: *mut pa_threaded_mainloop);
+    pub fn pa_threaded_mainloop_wait(m: *mut pa_threaded_mainloop);
+    pub fn pa_threaded_mainloop_stop(m: *mut pa_threaded_mainloop);
+    pub fn pa_threaded_mainloop_free(m: *mut pa_threaded_mainloop);
+    pub fn pa_context_get_server_info(
+        c: *mut pa_context,
+        cb: pa_server_info_cb_t,
+        userdata: *mut ::std::os::raw::c_void,
+    ) -> *mut pa_operation;
+    pub fn pa_proplist_new() -> *mut pa_proplist;
+    pub fn pa_context_new_with_proplist(
+        mainloop: *mut pa_mainloop_api,
+        name: *const ::std::os::raw::c_char,
+        proplist: *const pa_proplist,
+    ) -> *mut pa_context;
 }
