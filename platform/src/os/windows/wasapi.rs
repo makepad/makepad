@@ -5,14 +5,7 @@ use {
         implement_com,
         makepad_live_id::*,
         os::windows::win32_app::{FALSE},
-        audio::{
-            AudioBuffer,
-            AudioDeviceId,
-            AudioInfo,
-            AudioDeviceDesc,
-            AudioDeviceType,
-            MAX_AUDIO_DEVICE_INDEX
-        },
+        audio::*,
         thread::Signal,
         windows_crate::{
             core::{
@@ -81,8 +74,8 @@ use {
 
 pub struct WasapiAccess {
     pub change_listener: IMMNotificationClient,
-    pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
-    pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
+    pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >; MAX_AUDIO_DEVICE_INDEX],
+    pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     enumerator: IMMDeviceEnumerator,
     audio_inputs: Arc<Mutex<Vec<WasapiBaseRef >> >,
     audio_outputs: Arc<Mutex<Vec<WasapiBaseRef >> >,

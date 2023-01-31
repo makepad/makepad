@@ -32,24 +32,29 @@ struct AlsaAudioDeviceRef {
 
 enum ContextState {
     Connecting,
-    Ready,
+    Ready, 
     Failed
 }
 
+pub struct PulseAudioOutputStream{
+    output_fn_ptr: *const Mutex<Option<AudioOutputFn>>
+}
+
 pub struct PulseAudioAccess {
-    pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
-    pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
+    pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >; MAX_AUDIO_DEVICE_INDEX],
+    pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     
     //audio_outputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
     //audio_inputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
     device_query: Option<PulseDeviceQuery>,
     
     device_descs: Vec<PulseAudioDesc>,
-    change_signal: Signal,
+    change_signal: Signal, 
     context_state: ContextState,
     main_loop: *mut pa_threaded_mainloop,
     main_loop_api: *mut pa_mainloop_api,
     context: *mut pa_context,
+    self_ptr: *const Mutex<PulseAudioAccess>,
 }
 
 struct PulseDeviceDesc {
@@ -86,23 +91,21 @@ impl PulseAudioAccess {
                     audio_input_cb: alsa_audio.audio_input_cb.clone(),
                     audio_output_cb: alsa_audio.audio_output_cb.clone(),
                     device_descs: Default::default(),
-                    
+                    self_ptr: std::ptr::null()
                 }
             ));
             let self_ptr = Arc::into_raw(pself.clone());
+            (*self_ptr).lock().unwrap().self_ptr = self_ptr;
             
             pa_context_set_state_callback(context, Some(Self::context_state_callback), self_ptr as *mut _);
-            
             if pa_context_connect(context, std::ptr::null(), 0, std::ptr::null()) != 0 {
                 panic!("Pulse audio pa_context_connect failed");
             };
-            
             if pa_threaded_mainloop_start(main_loop) != 0 {
                 panic!("Pulse audio pa_threaded_mainloop_start failed");
             }
             
             pa_threaded_mainloop_lock(main_loop);
-             
             loop  {
                 if let ContextState::Connecting = pself.lock().unwrap().context_state{}
                 else{
@@ -112,7 +115,6 @@ impl PulseAudioAccess {
             }
              
             pa_threaded_mainloop_unlock(main_loop);
-            println!("DONE"); 
             pself
         }
     }
@@ -259,6 +261,7 @@ impl PulseAudioAccess {
             // lets shut down the ones we dont use
             audio_outputs.iter_mut().for_each( | v | {
                 if !devices.contains(&v.device_id) {
+                    // terminate stream
                     // v.is_terminated = true;
                 }
             });
