@@ -552,11 +552,4 @@ extern "C" {
         sync_stream: *mut pa_stream,
     ) -> c_int;
     pub fn pa_stream_writable_size(p: *const pa_stream) -> usize;
-
-    pub fn pa_channel_map_init_auto(
-        m: *mut pa_channel_map,
-        channels: ::std::os::raw::c_uint,
-        def: pa_channel_map_def_t,
-    ) -> *mut pa_channel_map;
-
 }
