@@ -35,8 +35,14 @@ pub type pa_source_flags = c_uint;
 pub use self::pa_source_flags as pa_source_flags_t;
 pub type pa_operation_state = c_uint;
 pub use self::pa_operation_state as pa_operation_state_t;
-pub type pa_subscription_event_type = ::std::os::raw::c_uint;
+pub type pa_subscription_event_type = c_uint;
 pub use self::pa_subscription_event_type as pa_subscription_event_type_t;
+pub type pa_stream_state = c_uint;
+pub use self::pa_stream_state as pa_stream_state_t;
+pub type pa_seek_mode = c_uint;
+pub use self::pa_seek_mode as pa_seek_mode_t;
+pub type pa_stream_flags = c_uint;
+pub use self::pa_stream_flags as pa_stream_flags_t;
 
 pub const PA_OPERATION_RUNNING: pa_operation_state = 0;
 pub const PA_OPERATION_DONE: pa_operation_state = 1;
@@ -49,6 +55,30 @@ pub const PA_CONTEXT_SETTING_NAME: pa_context_state = 3;
 pub const PA_CONTEXT_READY: pa_context_state = 4;
 pub const PA_CONTEXT_FAILED: pa_context_state = 5;
 pub const PA_CONTEXT_TERMINATED: pa_context_state = 6;
+
+pub const PA_SAMPLE_FLOAT32LE: pa_sample_format = 6;
+
+pub const PA_CHANNEL_POSITION_INVALID: pa_channel_position = -1;
+pub const PA_CHANNEL_POSITION_LEFT: pa_channel_position = 1;
+pub const PA_CHANNEL_POSITION_RIGHT: pa_channel_position = 2;
+
+pub const PA_STREAM_UNCONNECTED: pa_stream_state = 0;
+pub const PA_STREAM_CREATING: pa_stream_state = 1;
+pub const PA_STREAM_READY: pa_stream_state = 2;
+pub const PA_STREAM_FAILED: pa_stream_state = 3;
+pub const PA_STREAM_TERMINATED: pa_stream_state = 4;
+
+pub const PA_SEEK_RELATIVE: pa_seek_mode = 0;
+pub const PA_SEEK_RELATIVE_ON_READ: pa_seek_mode = 2;
+
+pub const PA_STREAM_START_CORKED: pa_stream_flags = 1;
+pub const PA_STREAM_INTERPOLATE_TIMING: pa_stream_flags = 2;
+pub const PA_STREAM_AUTO_TIMING_UPDATE: pa_stream_flags = 8;
+pub const PA_STREAM_ADJUST_LATENCY: pa_stream_flags = 8192;
+pub const PA_STREAM_START_UNMUTED: pa_stream_flags = 65536;
+
+pub const PA_CHANNEL_MAP_DEFAULT: pa_channel_map_def = 0;
+
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -146,7 +176,7 @@ pub type pa_context_subscribe_cb_t = ::std::option::Option<
         c: *mut pa_context,
         t: pa_subscription_event_type_t,
         idx: u32,
-        userdata: *mut ::std::os::raw::c_void,
+        userdata: *mut c_void,
     ),
 >;
 
@@ -154,9 +184,27 @@ pub type pa_server_info_cb_t = ::std::option::Option<
     unsafe extern "C" fn(
         c: *mut pa_context,
         i: *const pa_server_info,
-        userdata: *mut ::std::os::raw::c_void,
+        userdata: *mut c_void,
     ),
 >;
+
+pub type pa_stream_notify_cb_t = ::std::option::Option<
+    unsafe extern "C" fn(p: *mut pa_stream, userdata: *mut c_void),
+>;
+
+pub type pa_stream_success_cb_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        s: *mut pa_stream,
+        success: c_int,
+        userdata: *mut c_void,
+    ),
+>;
+
+pub type pa_stream_request_cb_t = ::std::option::Option<
+    unsafe extern "C" fn(p: *mut pa_stream, nbytes: usize, userdata: *mut c_void),
+>;
+
+pub type pa_free_cb_t = ::std::option::Option<unsafe extern "C" fn(p: *mut ::std::os::raw::c_void)>;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -299,6 +347,8 @@ pub struct pa_operation {
     _unused: [u8; 0],
 }
 
+
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct pa_server_info {
@@ -311,6 +361,22 @@ pub struct pa_server_info {
     pub default_source_name: *const ::std::os::raw::c_char,
     pub cookie: u32,
     pub channel_map: pa_channel_map,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct pa_stream {
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct pa_buffer_attr {
+    pub maxlength: u32,
+    pub tlength: u32,
+    pub prebuf: u32,
+    pub minreq: u32,
+    pub fragsize: u32,
 }
 
 #[repr(C)]
@@ -365,6 +431,7 @@ pub struct pa_mainloop_api {
     unsafe extern "C" fn(a: *mut pa_mainloop_api, retval: c_int),
     >,
 }
+
 
 #[link(name = "pulse")]
 extern "C" {
@@ -432,4 +499,76 @@ extern "C" {
         name: *const u8,
         proplist: *const pa_proplist,
     ) -> *mut pa_context;
+
+    pub fn pa_stream_new(
+        c: *mut pa_context,
+        name: *const u8,
+        ss: *const pa_sample_spec,
+        map: *const pa_channel_map,
+    ) -> *mut pa_stream;
+
+    pub fn pa_stream_set_state_callback(
+        s: *mut pa_stream,
+        cb: pa_stream_notify_cb_t,
+        userdata: *mut c_void,
+    );
+
+    pub fn pa_stream_get_state(p: *const pa_stream) -> pa_stream_state_t;
+
+   pub fn pa_stream_cork(
+        s: *mut pa_stream,
+        b: c_int,
+        cb: pa_stream_success_cb_t,
+        userdata: *mut c_void,
+    ) -> *mut pa_operation;
+    
+    pub fn pa_stream_set_write_callback(
+        p: *mut pa_stream,
+        cb: pa_stream_request_cb_t,
+        userdata: *mut ::std::os::raw::c_void,
+    );
+    pub fn pa_stream_disconnect(s: *mut pa_stream) -> ::std::os::raw::c_int;
+    pub fn pa_stream_unref(s: *mut pa_stream);
+    pub fn pa_stream_begin_write(
+        p: *mut pa_stream,
+        data: *mut *mut c_void,
+        nbytes: *mut usize,
+    ) -> c_int;
+    pub fn pa_stream_write(
+        p: *mut pa_stream,
+        data: *const c_void,
+        nbytes: usize,
+        free_cb: pa_free_cb_t,
+        offset: i64,
+        seek: pa_seek_mode_t,
+    ) -> c_int;
+
+    pub fn pa_stream_connect_playback(
+        s: *mut pa_stream,
+        dev: *const u8,
+        attr: *const pa_buffer_attr,
+        flags: pa_stream_flags_t,
+        volume: *const pa_cvolume,
+        sync_stream: *mut pa_stream,
+    ) -> c_int;
+    pub fn pa_stream_writable_size(p: *const pa_stream) -> usize;
+
+    pub fn pa_stream_set_underflow_callback(
+        p: *mut pa_stream,
+        cb: pa_stream_notify_cb_t,
+        userdata: *mut c_void,
+    );
+
+    pub fn pa_stream_set_overflow_callback(
+        p: *mut pa_stream,
+        cb: pa_stream_notify_cb_t,
+        userdata: *mut c_void,
+    );
+
+    pub fn pa_channel_map_init_auto(
+        m: *mut pa_channel_map,
+        channels: ::std::os::raw::c_uint,
+        def: pa_channel_map_def_t,
+    ) -> *mut pa_channel_map;
+
 }
