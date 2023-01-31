@@ -78,7 +78,7 @@ impl PulseOutputStream {
         pa_stream_set_state_callback(stream, Some(Self::playback_stream_state_callback), output_fn_raw as *mut _);
 
         let buffer_attr = pa_buffer_attr {
-            maxlength: (8 * pulse.buffer_frames) as u32,
+            maxlength: std::u32::MAX, 
             tlength: (8 * pulse.buffer_frames) as u32,
             prebuf: 0,
             minreq:std::u32::MAX,
