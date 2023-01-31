@@ -6,6 +6,9 @@ use {
 
 pub const MAX_AUDIO_DEVICE_INDEX: usize = 32;
 
+pub type AudioOutputFn = Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >;
+pub type AudioInputFn = Box<dyn FnMut(AudioInfo, AudioBuffer)->AudioBuffer + Send + 'static >;
+
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct AudioDeviceId(pub LiveId);
 
