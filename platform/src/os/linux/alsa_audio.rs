@@ -30,8 +30,8 @@ struct AlsaAudioDeviceRef {
 }
 
 pub struct AlsaAudioAccess {
-    pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
-    pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >> > >; MAX_AUDIO_DEVICE_INDEX],
+    pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >; MAX_AUDIO_DEVICE_INDEX],
+    pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     audio_outputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
     audio_inputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
     device_descs: Vec<AlsaAudioDesc>,

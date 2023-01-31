@@ -415,7 +415,7 @@ extern "C" {
         wait_for_accept:c_int,
     );
 
-    pub fn pa_threaded_mainloop_start(m: *mut pa_threaded_mainloop) -> ::std::os::raw::c_int;
+    pub fn pa_threaded_mainloop_start(m: *mut pa_threaded_mainloop) -> c_int;
     pub fn pa_threaded_mainloop_lock(m: *mut pa_threaded_mainloop);
     pub fn pa_threaded_mainloop_unlock(m: *mut pa_threaded_mainloop);
     pub fn pa_threaded_mainloop_wait(m: *mut pa_threaded_mainloop);
@@ -424,12 +424,12 @@ extern "C" {
     pub fn pa_context_get_server_info(
         c: *mut pa_context,
         cb: pa_server_info_cb_t,
-        userdata: *mut ::std::os::raw::c_void,
+        userdata: *mut c_void,
     ) -> *mut pa_operation;
     pub fn pa_proplist_new() -> *mut pa_proplist;
     pub fn pa_context_new_with_proplist(
         mainloop: *mut pa_mainloop_api,
-        name: *const ::std::os::raw::c_char,
+        name: *const u8,
         proplist: *const pa_proplist,
     ) -> *mut pa_context;
 }
