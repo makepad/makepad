@@ -56,7 +56,7 @@ pub const PA_CONTEXT_READY: pa_context_state = 4;
 pub const PA_CONTEXT_FAILED: pa_context_state = 5;
 pub const PA_CONTEXT_TERMINATED: pa_context_state = 6;
 
-pub const PA_SAMPLE_FLOAT32LE: pa_sample_format = 6;
+pub const PA_SAMPLE_FLOAT32LE: pa_sample_format = 5;
 
 pub const PA_CHANNEL_POSITION_INVALID: pa_channel_position = -1;
 pub const PA_CHANNEL_POSITION_LEFT: pa_channel_position = 1;
@@ -552,18 +552,6 @@ extern "C" {
         sync_stream: *mut pa_stream,
     ) -> c_int;
     pub fn pa_stream_writable_size(p: *const pa_stream) -> usize;
-
-    pub fn pa_stream_set_underflow_callback(
-        p: *mut pa_stream,
-        cb: pa_stream_notify_cb_t,
-        userdata: *mut c_void,
-    );
-
-    pub fn pa_stream_set_overflow_callback(
-        p: *mut pa_stream,
-        cb: pa_stream_notify_cb_t,
-        userdata: *mut c_void,
-    );
 
     pub fn pa_channel_map_init_auto(
         m: *mut pa_channel_map,

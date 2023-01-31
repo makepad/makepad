@@ -61,16 +61,10 @@ impl PulseOutputStream {
             rate: 48000,
             channels: 2
         };
-        
-        let mut channel_map = pa_channel_map {
-            channels: 0,
-            map: [0; 32]
-        };
-        pa_channel_map_init_auto(&mut channel_map, 2, PA_CHANNEL_MAP_DEFAULT);
-        
-        let stream = pa_stream_new(pulse.context, "makepad output stream\0".as_ptr(), &sample_spec, &channel_map);
+
+        let stream = pa_stream_new(pulse.context, "makepad output stream\0".as_ptr(), &sample_spec, std::ptr::null());
         if stream == std::ptr::null_mut() {
-            panic!("pa_stream_new failed");
+            panic!("pa_stream_new failed"); 
         }
         
         let output_fn_raw = Box::into_raw(Box::new(PulseOutputStruct {
@@ -78,25 +72,20 @@ impl PulseOutputStream {
             clear_on_read: true,
             output_fn: pulse.audio_output_cb[index].clone(),
             write_byte_count: 0,
-            ready_state: AtomicU32::new(0),
+            ready_state: AtomicU32::new(0), 
             audio_buffer: AudioBuffer::default()
         }));
         pa_stream_set_state_callback(stream, Some(Self::playback_stream_state_callback), output_fn_raw as *mut _);
-        pa_stream_set_underflow_callback(stream, Some(Self::playback_stream_underflow_callback), std::ptr::null_mut());
-        pa_stream_set_overflow_callback(stream, Some(Self::playback_stream_underflow_callback), std::ptr::null_mut());
-        
+
         let buffer_attr = pa_buffer_attr {
-            maxlength: (8 * pulse.buffer_frames) as u32,
+            maxlength: std::u32::MAX, 
             tlength: (8 * pulse.buffer_frames) as u32,
             prebuf: 0,
-            minreq:(8 * pulse.buffer_frames) as u32,
+            minreq:std::u32::MAX,
             fragsize: std::u32::MAX,
         }; 
         let flags = PA_STREAM_ADJUST_LATENCY|PA_STREAM_START_CORKED|PA_STREAM_START_UNMUTED;
-        /*
-        PA_STREAM_AUTO_TIMING_UPDATE | PA_STREAM_START_CORKED |
-        PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_ADJUST_LATENCY;
-        */
+
         pa_stream_connect_playback(
             stream,
             format!("{}\0", name).as_ptr(),
@@ -128,29 +117,18 @@ impl PulseOutputStream {
             panic!("pa_stream_cork failed"); 
         }
         pa_operation_unref(op);
-
+        
         Self {
             device_id,
             stream
         }
     }
     
-    unsafe extern "C" fn playback_stream_underflow_callback(_stream: *mut pa_stream,_output: *mut c_void) {
-        println!("UNDERFLOW!");
-    }
-    
-    unsafe extern "C" fn playback_stream_overflow_callback(_stream: *mut pa_stream,_output: *mut c_void) {
-        println!("OVERFLOW!");
-    }
-
-    
     pub unsafe fn terminate(self, pulse: &PulseAudioAccess) {
         pa_threaded_mainloop_lock(pulse.main_loop);
         
         pa_stream_set_write_callback(self.stream, None, std::ptr::null_mut());
         pa_stream_set_state_callback(self.stream, None, std::ptr::null_mut());
-        pa_stream_set_underflow_callback(self.stream, None, std::ptr::null_mut());
-        pa_stream_set_overflow_callback(self.stream, None, std::ptr::null_mut());
         pa_stream_disconnect(self.stream);
         pa_stream_unref(self.stream);
         pa_threaded_mainloop_unlock(pulse.main_loop);
@@ -179,15 +157,11 @@ impl PulseOutputStream {
                 let interleaved = std::slice::from_raw_parts_mut(write_ptr as *mut f32, output.write_byte_count / 4);
                 let data = &output.audio_buffer.data;
                 let frame_count = output.audio_buffer.frame_count();
-               // println!("{} {}", frame_count, output.write_byte_count);
+
                 for i in 0..frame_count{
                     interleaved[i * 2] = data[i];
                     interleaved[i * 2 + 1] = data[i + frame_count];
                 } 
-                //println!("{:?}", interleaved);
-                // alright lets output this stuff
-                //println!("OUTPUTTING BUFFER");
-                //output_fn()
             }
         }
         else{
@@ -273,7 +247,7 @@ impl PulseAudioAccess {
             
             let pulse = Arc::new(Mutex::new(
                 PulseAudioAccess {
-                    buffer_frames: 1024,
+                    buffer_frames: 512,
                     audio_outputs: Vec::new(),
                     change_signal,
                     device_query: None,
