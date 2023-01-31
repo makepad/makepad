@@ -107,7 +107,7 @@ impl AlsaAudioAccess {
                             device_type: AudioDeviceType::Input,
                             is_default: false,
                             channels: 2,
-                            name: format!("ALSA {}",desc_str)
+                            name: format!("[ALSA] {}",desc_str)
                         };
                         if ioid == "" || ioid == "Input" {
                             device_descs.push(AlsaAudioDesc {
@@ -132,8 +132,9 @@ impl AlsaAudioAccess {
             Err(e) => {
                 println!("ALSA ERROR {}", e.0)
             }
-            Ok(mut descs) => {
+            Ok(descs) => {
                 // pick a single default device
+                /*
                 if let Some(descs) = descs.iter_mut().find( | v | v.desc.device_type.is_output() && v.name.starts_with("plughw:")) {
                     descs.desc.is_default = true;
                 }
@@ -151,7 +152,8 @@ impl AlsaAudioAccess {
                 }
                 else if let Some(descs) = descs.iter_mut().find( | v | v.desc.device_type.is_input()) {
                     descs.desc.is_default = true;
-                }
+                }*/
+                
                 self.device_descs = descs;
             }
         }
@@ -176,15 +178,16 @@ impl AlsaAudioAccess {
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
                 if audio_inputs.iter().find( | v | v.device_id == *device_id).is_none() {
-                    new.push((index, *device_id))
+                    if let Some(v) = self.device_descs.iter().find( | v | v.desc.device_id == *device_id){
+                        new.push((index, *device_id, v.name.clone()))
+                    }
                 }
             }
             new
         };
-        for (index, device_id) in new {
+        for (index, device_id, name) in new {
             let audio_input_cb = self.audio_input_cb[index].clone();
             let audio_inputs = self.audio_inputs.clone();
-            let name = self.device_descs.iter().find( | v | v.desc.device_id == device_id).unwrap().name.clone();
             std::thread::spawn(move || {
                 let (mut device, device_ref) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_CAPTURE).unwrap();
                 audio_inputs.lock().unwrap().push(device_ref);
@@ -229,16 +232,17 @@ impl AlsaAudioAccess {
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
                 if audio_outputs.iter().find( | v | v.device_id == *device_id).is_none() {
-                    new.push((index, *device_id))
+                    if let Some(v) = self.device_descs.iter().find( | v | v.desc.device_id == *device_id){
+                        new.push((index, *device_id, v.name.clone()))
+                    }
                 }
             }
             new
             
         };
-        for (index, device_id) in new {
+        for (index, device_id, name) in new {
             let audio_output_cb = self.audio_output_cb[index].clone();
             let audio_outputs = self.audio_outputs.clone();
-            let name = self.device_descs.iter().find( | v | v.desc.device_id == device_id).unwrap().name.clone();
             std::thread::spawn(move || {
                 
                 let (mut device, device_ref) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_PLAYBACK).expect("Alsa device failure ");

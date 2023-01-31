@@ -60,7 +60,7 @@ impl AudioDevicesEvent{
             }
         }
         Vec::new()
-    }
+    } 
     pub fn default_output(&self)->Vec<AudioDeviceId>{
         for d in &self.descs{
             if d.is_default && d.device_type.is_output(){
