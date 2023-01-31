@@ -1392,7 +1392,7 @@ impl App {
         }
          
         if let Event::AudioDevices(devices) = event {
-            //println!("{}", devices);
+            println!("{}", devices);  
             cx.use_audio_outputs(&devices.device_match(&["vc4-hdmi-0","all software conversions"]));
         }
         
