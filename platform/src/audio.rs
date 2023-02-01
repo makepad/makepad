@@ -23,6 +23,7 @@ pub struct AudioDeviceDesc {
     pub device_id: AudioDeviceId,
     pub device_type: AudioDeviceType,
     pub is_default: bool,
+    pub has_failed: bool,
     pub channels: usize,
     pub name: String,
 }
@@ -55,6 +56,11 @@ pub struct AudioDevicesEvent{
 impl AudioDevicesEvent{
     pub fn default_input(&self)->Vec<AudioDeviceId>{
         for d in &self.descs{
+            if d.is_default && d.device_type.is_input() && !d.has_failed{
+                return vec![d.device_id]
+            }
+        }
+        for d in &self.descs{
             if d.is_default && d.device_type.is_input(){
                 return vec![d.device_id]
             }
@@ -63,6 +69,11 @@ impl AudioDevicesEvent{
     } 
     pub fn default_output(&self)->Vec<AudioDeviceId>{
         for d in &self.descs{
+            if d.is_default && d.device_type.is_output() && !d.has_failed{
+                return vec![d.device_id]
+            }
+        }
+        for d in &self.descs{
             if d.is_default && d.device_type.is_output(){
                 return vec![d.device_id]
             }
@@ -70,7 +81,7 @@ impl AudioDevicesEvent{
         Vec::new()
     }
     
-    pub fn device_match(&self, matches: &[&'static str])->Vec<AudioDeviceId>{
+    pub fn match_output(&self, matches: &[&'static str])->Vec<AudioDeviceId>{
         for d in &self.descs{
             if d.device_type.is_output(){
                 let mut mismatch  = false;

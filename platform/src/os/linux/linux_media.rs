@@ -20,8 +20,10 @@ use {
 impl Cx {
     pub (crate) fn handle_media_signals(&mut self) {
         if self.os.media.audio_change.check_and_clear() {
-            let mut descs = self.os.media.pulse_audio().lock().unwrap().get_updated_descs();
-            let descs2 = self.os.media.alsa_audio().lock().unwrap().get_updated_descs();
+            // alright so. if we 'failed' opening a device here
+            // what do we do. we could flag our device as 'failed' on the desc
+            let mut descs = self.os.media.alsa_audio().lock().unwrap().get_updated_descs();
+            let descs2 = self.os.media.pulse_audio().lock().unwrap().get_updated_descs();
             descs.extend(descs2);
             self.call_event_handler(&Event::AudioDevices(AudioDevicesEvent {
                 descs
