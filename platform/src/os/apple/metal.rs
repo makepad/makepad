@@ -257,9 +257,8 @@ impl Cx {
         
         let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
         
-        let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
+        let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some(){1.0}else{dpi_factor}).unwrap();
         
-        //println!("{:?}", pass_rect);
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5{
             return
         }
@@ -277,6 +276,7 @@ impl Cx {
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
         if let Some(drawable) = mode.is_drawable() {
+            
             let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
             let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
             let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
@@ -571,7 +571,7 @@ impl MetalWindow {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
         };
-        if self.cal_size != cal_size {
+        if self.cal_size != cal_size { 
             self.cal_size = cal_size;
             unsafe {
                 let () = msg_send![self.ca_layer, setDrawableSize: CGSize {width: cal_size.x, height: cal_size.y}];
