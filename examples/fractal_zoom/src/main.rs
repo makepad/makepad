@@ -26,7 +26,7 @@ main_app!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     ui: FrameRef,
-    window: BareWindow,
+    window: DesktopWindow,
 }
 
 impl App {
