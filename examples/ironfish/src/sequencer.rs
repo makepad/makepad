@@ -14,7 +14,7 @@ live_design!{
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.box(1, 1, self.rect_size.x - 5, self.rect_size.y - 5, 2);
+            sdf.box(1, 1, self.rect_size.x - 5, self.rect_size.y - 5, 1.5);
             sdf.stroke_keep(mix(#xFFFFFF80, #x00000040, pow(self.pos.y, 0.2)), 1.0);
             sdf.fill(
                 mix(
@@ -68,7 +68,7 @@ live_design!{
         grid_x: 16,
         grid_y: 16,
         walk: {
-            margin: 3,
+            margin: { top: 3, right: 10, bottom: 3, left: 10 },
             width: Fit,
             height: Fit
         }

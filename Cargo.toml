@@ -15,11 +15,16 @@ workspace.members = [
     "examples/ironfish",
     "examples/simple",
     "examples/touch",
+    "examples/teamtalk",
+    "examples/video_mixer",
     "libs/wasm_bridge/test",
     "studio",
+    "tools/windows_strip",
     "tools/auto_version",
     "tools/web_server", 
     "tools/file_router",
     "tools/wasm_strip",
 ]
+
+
 

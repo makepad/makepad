@@ -33,7 +33,7 @@ use {
 // Mouse events
 
 
-#[derive(Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,
