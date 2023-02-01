@@ -1,0 +1,1026 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'makepad-example-numbers'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-example-numbers",
+                    "--package=makepad-example-numbers"
+                ],
+                "filter": {
+                    "name": "makepad-example-numbers",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'makepad-example-numbers'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=makepad-example-numbers",
+                    "--package=makepad-example-numbers"
+                ],
+                "filter": {
+                    "name": "makepad-example-numbers",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-component'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-component"
+                ],
+                "filter": {
+                    "name": "makepad-component",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-live-id'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-live-id"
+                ],
+                "filter": {
+                    "name": "makepad-live-id",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-error-log'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-error-log"
+                ],
+                "filter": {
+                    "name": "makepad-error-log",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-micro-proc-macro'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-micro-proc-macro"
+                ],
+                "filter": {
+                    "name": "makepad-micro-proc-macro",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-draw-2d'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-draw-2d"
+                ],
+                "filter": {
+                    "name": "makepad-draw-2d",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-font'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-font"
+                ],
+                "filter": {
+                    "name": "makepad-font",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-geometry'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-geometry"
+                ],
+                "filter": {
+                    "name": "makepad-geometry",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-internal-iter'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-internal-iter"
+                ],
+                "filter": {
+                    "name": "makepad-internal-iter",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-path'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-path"
+                ],
+                "filter": {
+                    "name": "makepad-path",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-image-formats'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-image-formats"
+                ],
+                "filter": {
+                    "name": "makepad-image-formats",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-platform'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-platform"
+                ],
+                "filter": {
+                    "name": "makepad-platform",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-shader-compiler'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-shader-compiler"
+                ],
+                "filter": {
+                    "name": "makepad-shader-compiler",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'integration'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=integration",
+                    "--package=makepad-shader-compiler"
+                ],
+                "filter": {
+                    "name": "integration",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-live-compiler'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-live-compiler"
+                ],
+                "filter": {
+                    "name": "makepad-live-compiler",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'integration'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=integration",
+                    "--package=makepad-live-compiler"
+                ],
+                "filter": {
+                    "name": "integration",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-live-tokenizer'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-live-tokenizer"
+                ],
+                "filter": {
+                    "name": "makepad-live-tokenizer",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-math'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-math"
+                ],
+                "filter": {
+                    "name": "makepad-math",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-micro-serde'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-micro-serde"
+                ],
+                "filter": {
+                    "name": "makepad-micro-serde",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-objc-sys'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-objc-sys"
+                ],
+                "filter": {
+                    "name": "makepad-objc-sys",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-wasm-bridge'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-wasm-bridge"
+                ],
+                "filter": {
+                    "name": "makepad-wasm-bridge",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-trapezoidator'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-trapezoidator"
+                ],
+                "filter": {
+                    "name": "makepad-trapezoidator",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-ttf-parser'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-ttf-parser"
+                ],
+                "filter": {
+                    "name": "makepad-ttf-parser",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'test'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=test",
+                    "--package=makepad-ttf-parser"
+                ],
+                "filter": {
+                    "name": "test",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'makepad-example-fractal-zoom'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-example-fractal-zoom",
+                    "--package=makepad-example-fractal-zoom"
+                ],
+                "filter": {
+                    "name": "makepad-example-fractal-zoom",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'makepad-example-fractal-zoom'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=makepad-example-fractal-zoom",
+                    "--package=makepad-example-fractal-zoom"
+                ],
+                "filter": {
+                    "name": "makepad-example-fractal-zoom",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'makepad-example-cmdline'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-example-cmdline",
+                    "--package=makepad-example-cmdline"
+                ],
+                "filter": {
+                    "name": "makepad-example-cmdline",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'makepad-example-cmdline'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=makepad-example-cmdline",
+                    "--package=makepad-example-cmdline"
+                ],
+                "filter": {
+                    "name": "makepad-example-cmdline",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'makepad-example-ironfish'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-example-ironfish",
+                    "--package=makepad-example-ironfish"
+                ],
+                "filter": {
+                    "name": "makepad-example-ironfish",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Release executable 'makepad-example-ironfish'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-example-ironfish",
+                    "--release",
+                    "--package=makepad-example-ironfish"
+                ],
+                "filter": {
+                    "name": "makepad-example-ironfish",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'makepad-example-ironfish'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=makepad-example-ironfish",
+                    "--package=makepad-example-ironfish"
+                ],
+                "filter": {
+                    "name": "makepad-example-ironfish",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-base64'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-base64"
+                ],
+                "filter": {
+                    "name": "makepad-base64",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-media'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-media"
+                ],
+                "filter": {
+                    "name": "makepad-media",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-miniz'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-miniz"
+                ],
+                "filter": {
+                    "name": "makepad-miniz",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'makepad-example-shader'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-example-shader",
+                    "--package=makepad-example-shader"
+                ],
+                "filter": {
+                    "name": "makepad-example-shader",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'makepad-example-shader'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=makepad-example-shader",
+                    "--package=makepad-example-shader"
+                ],
+                "filter": {
+                    "name": "makepad-example-shader",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'makepad-wasm-bridge-test'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-wasm-bridge-test",
+                    "--package=makepad-wasm-bridge-test"
+                ],
+                "filter": {
+                    "name": "makepad-wasm-bridge-test",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'makepad-wasm-bridge-test'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=makepad-wasm-bridge-test",
+                    "--package=makepad-wasm-bridge-test"
+                ],
+                "filter": {
+                    "name": "makepad-wasm-bridge-test",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-studio'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-studio"
+                ],
+                "filter": {
+                    "name": "makepad-studio",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'makepad-studio'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-studio",
+                    "--package=makepad-studio"
+                ],
+                "filter": {
+                    "name": "makepad-studio",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'makepad-studio'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=makepad-studio",
+                    "--package=makepad-studio"
+                ],
+                "filter": {
+                    "name": "makepad-studio",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-collab-protocol'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-collab-protocol"
+                ],
+                "filter": {
+                    "name": "makepad-collab-protocol",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-editor-core'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-editor-core"
+                ],
+                "filter": {
+                    "name": "makepad-editor-core",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-collab-server'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-collab-server"
+                ],
+                "filter": {
+                    "name": "makepad-collab-server",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'makepad-auto-version'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-auto-version",
+                    "--package=makepad-auto-version"
+                ],
+                "filter": {
+                    "name": "makepad-auto-version",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'makepad-auto-version'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=makepad-auto-version",
+                    "--package=makepad-auto-version"
+                ],
+                "filter": {
+                    "name": "makepad-auto-version",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-digest'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-digest"
+                ],
+                "filter": {
+                    "name": "makepad-digest",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-toml-parser'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-toml-parser"
+                ],
+                "filter": {
+                    "name": "makepad-toml-parser",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'makepad-web-server'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=makepad-web-server",
+                    "--package=makepad-web-server"
+                ],
+                "filter": {
+                    "name": "makepad-web-server",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'makepad-web-server'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=makepad-web-server",
+                    "--package=makepad-web-server"
+                ],
+                "filter": {
+                    "name": "makepad-web-server",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'makepad-http'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=makepad-http"
+                ],
+                "filter": {
+                    "name": "makepad-http",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'wasm_strip'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=wasm_strip",
+                    "--package=wasm_strip"
+                ],
+                "filter": {
+                    "name": "wasm_strip",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'wasm_strip'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=wasm_strip",
+                    "--package=wasm_strip"
+                ],
+                "filter": {
+                    "name": "wasm_strip",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
