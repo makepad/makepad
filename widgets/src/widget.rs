@@ -50,6 +50,10 @@ pub trait Widget: LiveApply {
     fn get_walk(&self) -> Walk;
     fn redraw(&mut self, _cx: &mut Cx);
     
+    fn is_visible(&self)->bool{
+        true
+    }
+    
     fn draw_walk_widget(&mut self, cx: &mut Cx2d) -> WidgetDraw {
         self.draw_widget(cx, self.get_walk())
     }
@@ -300,6 +304,14 @@ impl WidgetRef {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.redraw(cx)
         }
+    }
+
+
+    pub fn is_visible(&self)->bool{
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.is_visible()
+        }
+        true
     }
     
     pub fn draw_walk_widget(&self, cx: &mut Cx2d) -> WidgetDraw {
