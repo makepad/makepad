@@ -103,19 +103,17 @@ impl CxMediaApi for Cx {
     fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
         self.os.media.audio_unit().lock().unwrap().use_audio_outputs(devices);
     }
-    
-    fn audio_output<F>(&mut self, index:usize, f: F) where F: FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static {
-        *self.os.media.audio_unit().lock().unwrap().audio_output_cb[index].lock().unwrap() = Some(Box::new(f));
+
+    fn audio_output_box(&mut self, index:usize, f: AudioOutputFn){
+        *self.os.media.audio_unit().lock().unwrap().audio_output_cb[index].lock().unwrap() = Some(f);
     }
-    
-    fn audio_input<F>(&mut self, index:usize, f: F)
-    where F: FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static {
-        *self.os.media.audio_unit().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(Box::new(f));
+
+    fn audio_input_box(&mut self, index:usize, f: AudioInputFn){
+        *self.os.media.audio_unit().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(f);
     }
-    
-    fn video_input<F>(&mut self, index:usize, f: F)
-    where F: FnMut(VideoFrame) + Send + 'static {
-        *self.os.media.av_capture().lock().unwrap().video_input_cb[index].lock().unwrap() = Some(Box::new(f));
+
+    fn video_input_box(&mut self, index:usize, f: VideoInputFn){
+        *self.os.media.av_capture().lock().unwrap().video_input_cb[index].lock().unwrap() = Some(f);
     }
 
     fn use_video_input(&mut self, inputs:&[(VideoInputId, VideoFormatId)]){

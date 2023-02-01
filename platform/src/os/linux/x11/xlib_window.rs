@@ -3,7 +3,7 @@ use {
         mem,
         cell::Cell,
         rc::Rc,
-        os::raw::{c_ulong, c_long, c_void},
+        os::raw::{c_ulong, c_long, c_void, c_char},
         ptr,
         ffi::{CStr,CString}, 
     },
@@ -148,7 +148,7 @@ impl XlibWindow {
             x11_sys::XFlush(display);
             
             let title_bytes = format!("{}\0", title);
-            x11_sys::XStoreName(display, window, title_bytes.as_bytes().as_ptr() as *const ::std::os::raw::c_char);
+            x11_sys::XStoreName(display, window, title_bytes.as_bytes().as_ptr() as *const c_char);
             
             let xic = x11_sys::XCreateIC(
                 get_xlib_app_global().xim,

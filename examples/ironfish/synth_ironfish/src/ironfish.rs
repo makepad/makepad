@@ -19,6 +19,7 @@
 #![allow(dead_code)]
 
 use crate::waveguide::Waveguide;
+use crate::delay_toys::DelayToy;
 
 use {
     std::sync::Arc,
@@ -180,7 +181,7 @@ pub struct DelaySettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct ArpSettings {
-    #[live(true)] enabled: boola,
+    #[live(false)] enabled: boola,
 }
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
@@ -228,7 +229,7 @@ pub struct IronFishSettings {
     pub sequencer: SequencerSettings,
     pub arp: ArpSettings,
     chorus: ChorusSettings,
-    #[live(44100.0)] sample_rate: f32a,
+    #[live(48000.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
     #[live(0.5)] sub_osc: f32a,
     #[live(0.0)] noise: f32a,
@@ -1530,10 +1531,10 @@ impl IronFishState {
         
         let leftoffs = (self.settings.delay.difference.get() * 15000.0) as usize;
         
-        let mut delayreadposl = self.delaywritepos + (44100 - 15000) - leftoffs;
-        let mut delayreadposr = self.delaywritepos + (44100 - 15000) + leftoffs;
-        while delayreadposl >= 44100 {delayreadposl -= 44100;};
-        while delayreadposr >= 44100 {delayreadposr -= 44100;};
+        let mut delayreadposl = self.delaywritepos + (48000 - 15000) - leftoffs;
+        let mut delayreadposr = self.delaywritepos + (48000 - 15000) + leftoffs;
+        while delayreadposl >= 48000 {delayreadposl -= 48000;};
+        while delayreadposr >= 48000 {delayreadposr -= 48000;};
         
         let fb = self.settings.delay.delayfeedback.get() * 0.98;
         let send = self.settings.delay.delaysend.get();
@@ -1557,11 +1558,11 @@ impl IronFishState {
             left[i] += l;
             right[i] += r;
             self.delaywritepos += 1;
-            if self.delaywritepos >= 44100 {self.delaywritepos = 0;}
+            if self.delaywritepos >= 48000 {self.delaywritepos = 0;}
             delayreadposl += 1;
-            if delayreadposl >= 44100 {delayreadposl = 0;}
+            if delayreadposl >= 48000 {delayreadposl = 0;}
             delayreadposr += 1;
-            if delayreadposr >= 44100 {delayreadposr = 0;}
+            if delayreadposr >= 48000 {delayreadposr = 0;}
         }
     }
     
@@ -1717,6 +1718,7 @@ impl IronFishState {
                     let rootnoteenum = self.settings.sequencer.rootnote.get();
                     
                     let mut rootnote = 12;
+
                     if rootnoteenum == RootNote::A {rootnote = 12 - 3;};
                     if rootnoteenum == RootNote::Asharp {rootnote = 12 - 2;};
                     if rootnoteenum == RootNote::B {rootnote = 12 - 1;};
@@ -1791,13 +1793,13 @@ impl IronFishState {
         
         for (i, dp) in self.display_buffers.iter_mut().enumerate() {
             if let Some(dp) = dp.take() {
-                display.send_buffer(true, i, dp);
+                display.send_buffer(self.voices[i].active()>-1, i, dp);
             }
         }
         self.apply_bitcrush(buffer);
-        self.chorus.apply_chorus(buffer, &self.settings.chorus, self.settings.sample_rate.get());
-        
+        self.chorus.apply_chorus(buffer, &self.settings.chorus, self.settings.sample_rate.get());        
         self.apply_delay(buffer);
+
     }
 }
 
@@ -1917,8 +1919,8 @@ impl AudioComponent for IronFish {
             osc1cache: self.settings.osc1.clone(),
             osc2cache: self.settings.osc2.clone(),
             touch: 0.0,
-            delaylineleft: vec![0.0f32; 44100],
-            delaylineright: vec![0.0f32; 44100],
+            delaylineleft: vec![0.0f32; 48000],
+            delaylineright: vec![0.0f32; 48000],
             delaywritepos: 15000,
             //delayreadpos: 0,
             sequencer: SequencerState::default(),

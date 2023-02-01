@@ -75,7 +75,7 @@ impl Overlay {
                 let cfp = cx.draw_lists[sub_id].codeflow_parent_id.unwrap();
                 if cx.draw_lists[cfp].redraw_id != cx.draw_lists[sub_id].redraw_id{
                     
-                    cx.draw_lists[self.draw_list.id()].remove_sub_list(sub_id);
+                    cx.draw_lists[self.draw_list.id()].clear_sub_list(sub_id);
                 }
             }
         }

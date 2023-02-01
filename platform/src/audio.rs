@@ -6,6 +6,9 @@ use {
 
 pub const MAX_AUDIO_DEVICE_INDEX: usize = 32;
 
+pub type AudioOutputFn = Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >;
+pub type AudioInputFn = Box<dyn FnMut(AudioInfo, AudioBuffer)->AudioBuffer + Send + 'static >;
+
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct AudioDeviceId(pub LiveId);
 
@@ -20,6 +23,7 @@ pub struct AudioDeviceDesc {
     pub device_id: AudioDeviceId,
     pub device_type: AudioDeviceType,
     pub is_default: bool,
+    pub has_failed: bool,
     pub channels: usize,
     pub name: String,
 }
@@ -52,13 +56,23 @@ pub struct AudioDevicesEvent{
 impl AudioDevicesEvent{
     pub fn default_input(&self)->Vec<AudioDeviceId>{
         for d in &self.descs{
+            if d.is_default && d.device_type.is_input() && !d.has_failed{
+                return vec![d.device_id]
+            }
+        }
+        for d in &self.descs{
             if d.is_default && d.device_type.is_input(){
                 return vec![d.device_id]
             }
         }
         Vec::new()
-    }
+    } 
     pub fn default_output(&self)->Vec<AudioDeviceId>{
+        for d in &self.descs{
+            if d.is_default && d.device_type.is_output() && !d.has_failed{
+                return vec![d.device_id]
+            }
+        }
         for d in &self.descs{
             if d.is_default && d.device_type.is_output(){
                 return vec![d.device_id]
@@ -66,7 +80,36 @@ impl AudioDevicesEvent{
         }
         Vec::new()
     }
+    
+    pub fn match_output(&self, matches: &[&'static str])->Vec<AudioDeviceId>{
+        for d in &self.descs{
+            if d.device_type.is_output(){
+                let mut mismatch  = false;
+                for m in matches{
+                    if d.name.find(m).is_none(){
+                        mismatch = true;
+                    }
+                }
+                if !mismatch{
+                    return vec![d.device_id]
+                }
+            }
+        }
+        return self.default_output()
+    }
+    
 }
+
+impl std::fmt::Display for AudioDevicesEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let _ = write!(f,"Audio Devices:\n");
+        for d in &self.descs{
+           let _ = write!(f, "{}\n", d);
+        }
+        Ok(())
+    }
+}
+
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum AudioDeviceType {
@@ -216,6 +259,27 @@ impl AudioBuffer {
     pub fn zero(&mut self) {
         for i in 0..self.data.len() {
             self.data[i] = 0.0;
+        }
+    }
+    
+    pub fn copy_from_interleaved(&mut self, channel_count:usize, interleaved:&[f32]){
+        let frame_count = interleaved.len() / channel_count;
+        self.resize(frame_count, channel_count);
+        for i in 0..frame_count {
+            for j in 0..channel_count{
+                self.data[i + j * frame_count] = interleaved[i * channel_count + j];
+            }
+        }
+    }
+
+    pub fn copy_to_interleaved(&self, interleaved:&mut [f32]){
+        if interleaved.len() != self.frame_count * self.channel_count{
+            panic!()
+        }
+        for i in 0..self.frame_count {
+            for j in 0..self.channel_count{
+                interleaved[i * self.channel_count + j] = self.data[i + j * self.frame_count];
+            }
         }
     }
 }
