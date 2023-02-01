@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 
 const MAX_DELAYTOY_BITS: usize = 16;
 const MAX_DELAYTOY_DELAY: usize = 1<<MAX_DELAYTOY_BITS;
@@ -51,10 +52,10 @@ impl DelayToy {
 
     pub fn LinearInterpolate(&mut self, index: usize, offset: f32 )
     {
-        let  adjustedindex = index + MAX_DELAYTOY_DELAY - (offset.floor() as usize);
+        let  _adjustedindex = index + MAX_DELAYTOY_DELAY - (offset.floor() as usize);
     }
 
-    pub fn AllPassWobble(&mut self, length: usize, lengthoffset: f32  ){
+    pub fn AllPassWobble(&mut self, length: usize, _lengthoffset: f32  ){
         let j = (self.localidx + length) & DELAYTOY_BUFFERMASK;
         let d = self.buffer[j];
 
