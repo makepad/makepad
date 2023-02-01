@@ -588,7 +588,7 @@ impl Mandelbrot {
             }
             
             // animate color cycle
-            self.draw_tile.color_cycle = (ne.time * 0.1).fract() as f32;
+            self.draw_tile.color_cycle = (ne.time * 0.02).fract() as f32;
             // this triggers a draw_walk call and another 'next frame' event
             self.view_area.redraw(cx);
             self.next_frame = cx.new_next_frame();
