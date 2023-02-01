@@ -552,4 +552,26 @@ extern "C" {
         sync_stream: *mut pa_stream,
     ) -> c_int;
     pub fn pa_stream_writable_size(p: *const pa_stream) -> usize;
+    
+    pub fn pa_stream_set_read_callback(
+        p: *mut pa_stream,
+        cb: pa_stream_request_cb_t,
+        userdata: *mut c_void,
+    );
+
+    pub fn pa_stream_connect_record(
+        s: *mut pa_stream,
+        dev: *const ::std::os::raw::c_char,
+        attr: *const pa_buffer_attr,
+        flags: pa_stream_flags_t,
+    ) -> c_int;
+    
+    pub fn pa_stream_peek(
+        p: *mut pa_stream,
+        data: *mut *const c_void,
+        nbytes: *mut usize,
+    ) -> c_int;
+
+    pub fn pa_stream_drop(p: *mut pa_stream) -> c_int;
+
 }

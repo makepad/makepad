@@ -38,6 +38,135 @@ enum ContextState {
     Failed
 }
 
+struct PulseInputStream {
+    device_id: AudioDeviceId,
+    stream: *mut pa_stream,
+}
+
+struct PulseInputStruct {
+    device_id: AudioDeviceId,
+    input_fn: Arc<Mutex<Option<AudioInputFn> > >,
+    audio_buffer: Option<AudioBuffer>,
+    ready_state: AtomicU32,
+}
+
+impl PulseInputStream {
+    unsafe fn new(device_id: AudioDeviceId, name: &str, index: usize, pulse: &PulseAudioAccess) -> PulseInputStream {
+        pa_threaded_mainloop_lock(pulse.main_loop);
+        let sample_spec = pa_sample_spec {
+            format: PA_SAMPLE_FLOAT32LE,
+            rate: 48000,
+            channels: 2
+        };
+        
+        let stream = pa_stream_new(pulse.context, "makepad input stream\0".as_ptr(), &sample_spec, std::ptr::null());
+        if stream == std::ptr::null_mut() {
+            panic!("pa_stream_new failed");
+        }
+        let input_ptr = Box::into_raw(Box::new(PulseInputStruct {
+            device_id,
+            ready_state: AtomicU32::new(0),
+            input_fn: pulse.audio_input_cb[index].clone(),
+            audio_buffer: Some(AudioBuffer::default())
+        }));
+        pa_stream_set_state_callback(stream, Some(Self::recording_stream_state_callback), input_ptr as *mut _);
+        pa_stream_set_read_callback(stream, Some(Self::recording_stream_read_callback), input_ptr as *mut _);
+        
+        let buffer_attr = pa_buffer_attr {
+            maxlength: std::u32::MAX,
+            tlength: (8 * pulse.buffer_frames) as u32,
+            prebuf: 0,
+            minreq: std::u32::MAX,
+            fragsize: std::u32::MAX,
+        };
+        let flags = PA_STREAM_ADJUST_LATENCY;
+        
+        pa_stream_connect_record(
+            stream,
+            format!("{}\0", name).as_ptr(),
+            &buffer_attr,
+            flags,
+        );
+        
+        pa_threaded_mainloop_unlock(pulse.main_loop);
+        
+        loop {
+            let ready_state = (*input_ptr).ready_state.load(Ordering::Relaxed);
+            if ready_state == 1 {
+                break;
+            }
+            if ready_state == 2 {
+                panic!("STREAM CANNOT BE STARTED");
+            }
+            pa_threaded_mainloop_wait(pulse.main_loop);
+        }
+        
+        Self {
+            device_id,
+            stream
+        }
+    }
+    
+    pub unsafe fn terminate(self, pulse: &PulseAudioAccess) {
+        pa_threaded_mainloop_lock(pulse.main_loop);
+        pa_stream_set_write_callback(self.stream, None, std::ptr::null_mut());
+        pa_stream_set_state_callback(self.stream, None, std::ptr::null_mut());
+        pa_stream_disconnect(self.stream);
+        pa_stream_unref(self.stream);
+        pa_threaded_mainloop_unlock(pulse.main_loop);
+    }
+    
+    unsafe extern "C" fn recording_stream_read_callback (
+        stream: *mut pa_stream,
+        _nbytes: usize,
+        input_ptr: *mut c_void
+    ) {
+        let input = &mut*(input_ptr as *mut PulseInputStruct);
+        let mut read_ptr: *mut f32 = std::ptr::null_mut();
+        let mut byte_count = 0;
+        if pa_stream_peek(stream, &mut read_ptr as *mut _ as *mut _, &mut byte_count) != 0{
+            println!("pa_stream_peek failed");
+            return
+        }
+        if byte_count == 0{
+            return
+        }
+        let mut input_fn = (*input).input_fn.lock().unwrap();
+        if let Some(input_fn) = &mut *input_fn {
+            let mut audio_buffer = input.audio_buffer.take().unwrap();
+            let interleaved = std::slice::from_raw_parts(read_ptr, byte_count / 4);
+            audio_buffer.copy_from_interleaved(2, interleaved);
+            input.audio_buffer = Some(input_fn(AudioInfo {
+                device_id: input.device_id,
+                time: None
+            }, audio_buffer));
+        }        
+        pa_stream_drop(stream);
+    }
+    
+    unsafe extern "C" fn recording_stream_state_callback (
+        stream: *mut pa_stream,
+        output_ptr: *mut c_void
+    ) {
+        let input_ptr = output_ptr as *mut PulseOutputStruct;
+        let state = pa_stream_get_state(stream);
+        match state {
+            PA_STREAM_UNCONNECTED => (),
+            PA_STREAM_CREATING => (),
+            PA_STREAM_READY => {
+                (*input_ptr).ready_state.store(1, Ordering::Relaxed)
+            },
+            PA_STREAM_FAILED => {
+                (*input_ptr).ready_state.store(2, Ordering::Relaxed)
+            },
+            PA_STREAM_TERMINATED => {
+                let _ = Box::from_raw(output_ptr);
+            },
+            _ => panic!()
+        }
+    }
+}
+
 struct PulseOutputStream {
     device_id: AudioDeviceId,
     stream: *mut pa_stream,
@@ -61,31 +190,31 @@ impl PulseOutputStream {
             rate: 48000,
             channels: 2
         };
-
+        
         let stream = pa_stream_new(pulse.context, "makepad output stream\0".as_ptr(), &sample_spec, std::ptr::null());
         if stream == std::ptr::null_mut() {
-            panic!("pa_stream_new failed"); 
+            panic!("pa_stream_new failed");
         }
         
-        let output_fn_raw = Box::into_raw(Box::new(PulseOutputStruct {
+        let output_ptr = Box::into_raw(Box::new(PulseOutputStruct {
             device_id,
             clear_on_read: true,
             output_fn: pulse.audio_output_cb[index].clone(),
             write_byte_count: 0,
-            ready_state: AtomicU32::new(0), 
+            ready_state: AtomicU32::new(0),
             audio_buffer: AudioBuffer::default()
         }));
-        pa_stream_set_state_callback(stream, Some(Self::playback_stream_state_callback), output_fn_raw as *mut _);
-
+        pa_stream_set_state_callback(stream, Some(Self::playback_stream_state_callback), output_ptr as *mut _);
+        
         let buffer_attr = pa_buffer_attr {
-            maxlength: std::u32::MAX, 
+            maxlength: std::u32::MAX,
             tlength: (8 * pulse.buffer_frames) as u32,
             prebuf: 0,
-            minreq:std::u32::MAX,
+            minreq: std::u32::MAX,
             fragsize: std::u32::MAX,
-        }; 
-        let flags = PA_STREAM_ADJUST_LATENCY|PA_STREAM_START_CORKED|PA_STREAM_START_UNMUTED;
-
+        };
+        let flags = PA_STREAM_ADJUST_LATENCY | PA_STREAM_START_CORKED | PA_STREAM_START_UNMUTED;
+        
         pa_stream_connect_playback(
             stream,
             format!("{}\0", name).as_ptr(),
@@ -98,9 +227,9 @@ impl PulseOutputStream {
         pa_threaded_mainloop_unlock(pulse.main_loop);
         
         loop {
-            let ready_state = (*output_fn_raw).ready_state.load(Ordering::Relaxed);
+            let ready_state = (*output_ptr).ready_state.load(Ordering::Relaxed);
             if ready_state == 1 {
-                break; 
+                break;
             }
             if ready_state == 2 {
                 panic!("STREAM CANNOT BE STARTED");
@@ -108,13 +237,13 @@ impl PulseOutputStream {
             pa_threaded_mainloop_wait(pulse.main_loop);
         }
         
-        (*output_fn_raw).write_byte_count = pa_stream_writable_size(stream);
+        (*output_ptr).write_byte_count = pa_stream_writable_size(stream);
         
-        pa_stream_set_write_callback(stream, Some(Self::playback_stream_write_callback), output_fn_raw as *mut _);
+        pa_stream_set_write_callback(stream, Some(Self::playback_stream_write_callback), output_ptr as *mut _);
         
         let op = pa_stream_cork(stream, 0, None, std::ptr::null_mut());
         if op == std::ptr::null_mut() {
-            panic!("pa_stream_cork failed"); 
+            panic!("pa_stream_cork failed");
         }
         pa_operation_unref(op);
         
@@ -126,7 +255,6 @@ impl PulseOutputStream {
     
     pub unsafe fn terminate(self, pulse: &PulseAudioAccess) {
         pa_threaded_mainloop_lock(pulse.main_loop);
-        
         pa_stream_set_write_callback(self.stream, None, std::ptr::null_mut());
         pa_stream_set_state_callback(self.stream, None, std::ptr::null_mut());
         pa_stream_disconnect(self.stream);
@@ -137,41 +265,35 @@ impl PulseOutputStream {
     unsafe extern "C" fn playback_stream_write_callback (
         stream: *mut pa_stream,
         _nbytes: usize,
-        output: *mut c_void
+        output_ptr: *mut c_void
     ) {
-        let output = &mut*(output as *mut PulseOutputStruct);
+        let output = &mut*(output_ptr as *mut PulseOutputStruct);
         let mut write_ptr = std::ptr::null_mut();
         let mut write_byte_count = output.write_byte_count;
         if pa_stream_begin_write(stream, &mut write_ptr, &mut write_byte_count) != 0 {
             panic!("pa_stream_begin_write");
         }
-        if write_byte_count == output.write_byte_count{
+        if write_byte_count == output.write_byte_count {
             let mut output_fn = (*output).output_fn.lock().unwrap();
             output.audio_buffer.resize(output.write_byte_count / 8, 2);
             if let Some(output_fn) = &mut *output_fn {
-                output_fn(AudioInfo{
+                output_fn(AudioInfo {
                     device_id: output.device_id,
                     time: None
                 }, &mut output.audio_buffer);
                 // lets copy it to interleaved format
                 let interleaved = std::slice::from_raw_parts_mut(write_ptr as *mut f32, output.write_byte_count / 4);
-                let data = &output.audio_buffer.data;
-                let frame_count = output.audio_buffer.frame_count();
-
-                for i in 0..frame_count{
-                    interleaved[i * 2] = data[i];
-                    interleaved[i * 2 + 1] = data[i + frame_count];
-                } 
+                output.audio_buffer.copy_to_interleaved(interleaved);
             }
         }
-        else{
+        else {
             println!("Pulse audio buffer size unexpected");
         }
-        let flags = if output.clear_on_read{
+        let flags = if output.clear_on_read {
             output.clear_on_read = false;
             PA_SEEK_RELATIVE_ON_READ
-        } 
-        else{
+        }
+        else {
             PA_SEEK_RELATIVE
         };
         
@@ -182,21 +304,21 @@ impl PulseOutputStream {
     
     unsafe extern "C" fn playback_stream_state_callback (
         stream: *mut pa_stream,
-        output: *mut c_void
+        output_ptr: *mut c_void
     ) {
-        let output = output as *mut PulseOutputStruct;
+        let output_ptr = output_ptr as *mut PulseOutputStruct;
         let state = pa_stream_get_state(stream);
         match state {
             PA_STREAM_UNCONNECTED => (),
             PA_STREAM_CREATING => (),
             PA_STREAM_READY => {
-                (*output).ready_state.store(1, Ordering::Relaxed)
+                (*output_ptr).ready_state.store(1, Ordering::Relaxed)
             },
             PA_STREAM_FAILED => {
-                (*output).ready_state.store(2, Ordering::Relaxed)
+                (*output_ptr).ready_state.store(2, Ordering::Relaxed)
             },
             PA_STREAM_TERMINATED => {
-                let _ = Box::from_raw(output);
+                let _ = Box::from_raw(output_ptr);
             },
             _ => panic!()
         }
@@ -210,7 +332,7 @@ pub struct PulseAudioAccess {
     buffer_frames: usize,
     
     audio_outputs: Vec<PulseOutputStream>,
-    //audio_inputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
+    audio_inputs: Vec<PulseInputStream>,
     device_query: Option<PulseDeviceQuery>,
     
     device_descs: Vec<PulseAudioDesc>,
@@ -248,6 +370,7 @@ impl PulseAudioAccess {
             let pulse = Arc::new(Mutex::new(
                 PulseAudioAccess {
                     buffer_frames: 256,
+                    audio_inputs: Vec::new(),
                     audio_outputs: Vec::new(),
                     change_signal,
                     device_query: None,
@@ -297,9 +420,9 @@ impl PulseAudioAccess {
         _c: *mut pa_context,
         _event_bits: pa_subscription_event_type_t,
         _index: u32,
-        pulse: *mut c_void
+        pulse_ptr: *mut c_void
     ) {
-        let pulse: &Mutex<PulseAudioAccess> = &*(pulse as *const _);
+        let pulse: &Mutex<PulseAudioAccess> = &*(pulse_ptr as *const _);
         let pulse = pulse.lock().unwrap();
         pulse.change_signal.set();
         pa_threaded_mainloop_signal(pulse.main_loop, 0);
@@ -307,9 +430,9 @@ impl PulseAudioAccess {
     
     unsafe extern "C" fn context_state_callback (
         c: *mut pa_context,
-        pulse: *mut c_void
+        pulse_ptr: *mut c_void
     ) {
-        let pulse: &Mutex<PulseAudioAccess> = &*(pulse as *mut _);
+        let pulse: &Mutex<PulseAudioAccess> = &*(pulse_ptr as *mut _);
         let state = pa_context_get_state(c);
         
         match state {
@@ -331,9 +454,9 @@ impl PulseAudioAccess {
         _ctx: *mut pa_context,
         info: *const pa_sink_info,
         eol: c_int,
-        query: *mut c_void,
+        query_ptr: *mut c_void,
     ) {
-        let query: &mut PulseDeviceQuery = &mut *(query as *mut _);
+        let query: &mut PulseDeviceQuery = &mut *(query_ptr as *mut _);
         if eol>0 {
             pa_threaded_mainloop_signal(query.main_loop.unwrap(), 0);
             return
@@ -349,9 +472,9 @@ impl PulseAudioAccess {
         _ctx: *mut pa_context,
         info: *const pa_source_info,
         eol: c_int,
-        query: *mut c_void,
+        query_ptr: *mut c_void,
     ) {
-        let query: &mut PulseDeviceQuery = &mut *(query as *mut _);
+        let query: &mut PulseDeviceQuery = &mut *(query_ptr as *mut _);
         if eol>0 {
             pa_threaded_mainloop_signal(query.main_loop.unwrap(), 0);
             return
@@ -366,9 +489,9 @@ impl PulseAudioAccess {
     unsafe extern "C" fn server_info_callback(
         _ctx: *mut pa_context,
         info: *const pa_server_info,
-        query: *mut c_void,
+        query_ptr: *mut c_void,
     ) {
-        let query: &mut PulseDeviceQuery = &mut *(query as *mut _);
+        let query: &mut PulseDeviceQuery = &mut *(query_ptr as *mut _);
         query.default_sink = Some(CStr::from_ptr((*info).default_sink_name).to_str().unwrap().to_string());
         query.default_source = Some(CStr::from_ptr((*info).default_source_name).to_str().unwrap().to_string());
     }
@@ -424,27 +547,34 @@ impl PulseAudioAccess {
         
     }
     
-    pub fn use_audio_inputs(&mut self, _devices: &[AudioDeviceId]) {
-        /*let new = {
-            let mut audio_inputs = self.audio_inputs.lock().unwrap();
-            // lets shut down the ones we dont use
-            audio_inputs.iter_mut().for_each( | v | {
-                if !devices.contains(&v.device_id) {
-                    //v.is_terminated = true;
+    pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
+        let new = {
+            let mut i = 0;
+            while i < self.audio_inputs.len() {
+                if !devices.contains(&self.audio_inputs[i].device_id) {
+                    let item = self.audio_inputs.remove(i);
+                    unsafe {item.terminate(self)};
                 }
-            });
+                else {
+                    i += 1;
+                }
+            }
             // create the new ones
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
-                if audio_inputs.iter().find( | v | v.device_id == *device_id).is_none() {
-                    new.push((index, *device_id))
+                if self.audio_outputs.iter().find( | v | v.device_id == *device_id).is_none() {
+                    if let Some(v) = self.device_descs.iter().find( | v | v.desc.device_id == *device_id) {
+                        new.push((index, *device_id, &v.name))
+                    }
                 }
             }
             new
-        };
-        for (_index, _device_id) in new {
             
-        }*/
+        };
+        for (index, device_id, name) in new {
+            let new_input = unsafe {PulseInputStream::new(device_id, name, index, self)};
+            self.audio_inputs.push(new_input);
+        }
     }
     
     pub fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
