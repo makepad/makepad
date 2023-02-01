@@ -28,11 +28,12 @@ live_design!{
     
     const SPACING_PANELS = 10.0
     const SPACING_CONTROLS = 3.0
-    const SPACING_BASE_PADDING = 6.0
+    const SPACING_BASE_PADDING = 8.0
     const HEIGHT_AUDIOVIZ = 200 
     const COLOR_OSC = #xFFFF99FF // yellow
     const COLOR_MUSIC = #xC // gray
-    const COLOR_ENV = #xF2BA8C // light red
+    const COLOR_ENV = #xF9A894 // light red
+    const COLOR_SEQ = #xFFFFFFAA // light red
     const COLOR_FILTER = #x88FF88 // green
     const COLOR_LFO = #xFF9999 // red
     const COLOR_TOUCH = #xBBFF99 // light green
@@ -48,7 +49,7 @@ live_design!{
     const COLOR_CONTROL_INSET = #x00000066
     const COLOR_CONTROL_INSET_HOVER = #x00000088
     const COLOR_TODO = #xFF1493FF
-    const COLOR_BG_GRADIENT_BRIGHT = #xFFFFFF10
+    const COLOR_BG_GRADIENT_BRIGHT = #xFFFFFF20
     const COLOR_BG_GRADIENT_DARK = #xFFFFFF0A
     const FONT_SIZE_H1 = 11.0
     const FONT_SIZE_H2 = 9.5
@@ -354,7 +355,6 @@ live_design!{
     
     GraphPaper = <Box> {
         walk: {width: Fill, height: 150}
-        
         draw_bg: {
             color: #x44,
             instance color2: #x0,
@@ -489,10 +489,10 @@ live_design!{
     }
     
     // PANELS
-    EnvelopePanel = <Frame> {
+    EnvelopePanel = <Box> {
         layout: {flow: Down, padding: 0.0}
         walk: {width: Fill, height: Fit}
-        
+
         display = <GraphPaper> {}
         
         <Frame> { // TODO: REPLACE WITH DEDICATED WIDGET?
@@ -554,19 +554,42 @@ live_design!{
     }
     
     ModEnvelopePanel = <Frame> {
+        walk: {width: Fill, height: Fit}
+        layout: {flow: Down}
+
+        <Frame> {
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fit}
+            <Frame> {
+                layout: {flow: Right, align: { x: 0.0, y: 0.0 } }
+                walk: {width: Fill, height: Fit}
+
+                <FishSubTitle> {
+                    walk: { width: Fill }
+                    label = {
+                        text: "Cutoff Modulation",
+                        draw_label: {color: (COLOR_ENV)},
+                    }
+                }
+
+                modamount = <InstrumentBipolarSlider> {
+                    walk: { width: Fill }
+                    slider = {
+                        draw_slider: {line_color: (COLOR_ENV)}
+                        min: -1.0
+                        max: 1.0
+                        label: "Amount"
+                    }
+                }
+
+            }
+        }        
+
         mod_env = <EnvelopePanel> {
             layout: {flow: Down, padding: 0.0}
             walk: {width: Fill, height: Fit}
         }
-        
-        modamount = <InstrumentBipolarSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_ENV)}
-                min: -1.0
-                max: 1.0
-                label: "Modulation Cutoff Amount"
-            }
-        }
+
     }
     
     
@@ -634,7 +657,7 @@ live_design!{
     
     PianoControls = <GradientY> {
         layout: {flow: Right, padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
-        walk: {height: Fit, width: Fill}
+        walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: 0, left: (SPACING_BASE_PADDING * 2)} }
         draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
         
         porta = <InstrumentSlider> {
@@ -668,35 +691,41 @@ live_design!{
     }
     }
     
-    CrushFXPanel = <FishPanelContainer> {
-        <FishSubTitle> {
-            label = {
-                text: "Bitcrush",
-                draw_label: {color: (COLOR_FX)},
-            }
-        }
+    CrushFXPanel = <Frame> {
+        walk: {width: Fill, height: Fit}
+        layout: {flow: Down}
+
+
         <Frame> {
-            layout: {flow: Right}
+            layout: {flow: Down}
             walk: {width: Fill, height: Fit}
-        
             <Frame> {
+                layout: {flow: Right, align: {x: 0.0, y: 0.5}}
                 walk: {width: Fill, height: Fit}
-                crushamount = <InstrumentSlider> {
-                    walk: {width: Fill, height: Fit}
-                    slider = {
-                        draw_slider: {line_color: (COLOR_FX)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Amount"
-                        
+
+                <FishSubTitle> {
+                    label = {
+                        text: "Bitcrush",
+                        draw_label: {color: (COLOR_FX)},
                     }
                 }
-            }
-            <Frame> {
-                walk: {width: Fill, height: Fit}
                 crushenable = <InstrumentCheckbox> {
                     checkbox = {label: "On"}
-                    walk: {width: Fit, height: Fit, margin: {top: 9.0}}
+                    walk: {width: Fit, height: Fit}
+                }
+            }
+        }
+
+        <Frame> {
+            walk: {width: Fill, height: Fit}
+            crushamount = <InstrumentSlider> {
+                walk: {width: Fill, height: Fit}
+                slider = {
+                    draw_slider: {line_color: (COLOR_FX)}
+                    min: 0.0
+                    max: 1.0
+                    label: "Amount"
+                    
                 }
             }
         }
@@ -855,6 +884,11 @@ live_design!{
             menu = <Box> {
                 draw_bg: { color: (COLOR_FILTER) }
                 filter_type = <InstrumentDropdown> {
+                    label = {
+                        draw_label: {
+                            color: #x000000 // TODO: COLOR IS NOT ACCEPTED
+                        }
+                    }
                     dropdown = {
                         labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
                         values: [LowPass, HighPass, BandPass, BandReject]
@@ -912,7 +946,7 @@ live_design!{
     }
     
     Divider = <Frame> {
-        walk: {width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING * 1.5), right: 0, bottom: (SPACING_BASE_PADDING * 2), left: 0}}
+        walk: {width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING * 2), right: 0, bottom: (SPACING_BASE_PADDING * 2.5), left: 0}}
         layout: {flow: Down}
         <Box> {
             walk: {width: Fill, height: 1.0}
@@ -1156,13 +1190,6 @@ live_design!{
         
             <Divider> {} 
 
-            <FishSubTitle> {
-                label = {
-                    text: "Modulation",
-                    draw_label: {color: (COLOR_ENV)},
-                }
-            }
-
             <ModEnvelopePanel> {
                 layout: {flow: Down, clip_y: true}
                 walk: {width: Fill, height: Fit}
@@ -1196,7 +1223,7 @@ live_design!{
     
     // APP
     App = {{App}} {
-        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: #3}}
+        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: #2A}}
         
         audio_graph: {
             root: <Mixer> {
@@ -1227,7 +1254,7 @@ live_design!{
             }
             <GradientY> {
                 walk: {width: Fill, height: (HEIGHT_AUDIOVIZ)}
-                draw_bg: {color: #100A, color2: #0034}
+                draw_bg: { color: #0004, color2: #000C }
                 display_audio = <DisplayAudio> {
                     walk: {height: Fill, width: Fill}
                 }
@@ -1273,7 +1300,7 @@ live_design!{
                             label = {
                                 text: "Sequencer",
                             },
-                            draw_bg: {color: #ffffff}
+                            draw_bg: {color: (COLOR_SEQ) }
                         }
                         menu = {
                             walk: { width: Fit }
@@ -1286,7 +1313,7 @@ live_design!{
 
             <PianoControls> {}
             piano = <Piano> {
-                walk: {width: Fill, height: Fit}
+                walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
             }
             
         }
