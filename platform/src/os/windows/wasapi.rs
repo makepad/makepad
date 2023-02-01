@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use {
     std::sync::{Arc, Mutex},
+    std::collections::HashSet,
     crate::{
         implement_com,
         makepad_live_id::*,
@@ -73,6 +74,7 @@ use {
 
 
 pub struct WasapiAccess {
+    change_signal: Signal,
     pub change_listener: IMMNotificationClient,
     pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >; MAX_AUDIO_DEVICE_INDEX],
@@ -80,6 +82,7 @@ pub struct WasapiAccess {
     audio_inputs: Arc<Mutex<Vec<WasapiBaseRef >> >,
     audio_outputs: Arc<Mutex<Vec<WasapiBaseRef >> >,
     descs: Vec<AudioDeviceDesc>,
+    failed_devices: Arc<Mutex<HashSet<AudioDeviceId>>>,
 }
 
 impl WasapiAccess {
@@ -93,12 +96,14 @@ impl WasapiAccess {
             change_signal.set();
             Arc::new(Mutex::new(
                 WasapiAccess {
+                    change_signal,
                     enumerator: enumerator,
                     change_listener: change_listener,
                     audio_input_cb: Default::default(),
                     audio_output_cb: Default::default(),
                     audio_inputs: Default::default(),
                     audio_outputs: Default::default(),
+                    failed_devices: Default::default(),
                     descs: Default::default(),
                 }
             ))
@@ -138,30 +143,37 @@ impl WasapiAccess {
         for (index, device_id) in new {
             let audio_input_cb = self.audio_input_cb[index].clone();
             let audio_inputs = self.audio_inputs.clone();
-            
+            let failed_devices = self.failed_devices.clone();
+            let change_signal = self.change_signal.clone();
             std::thread::spawn(move || {
-                let mut wasapi = WasapiInput::new(device_id, 2);
-                audio_inputs.lock().unwrap().push(wasapi.base.get_ref());
-                while let Ok(buffer) = wasapi.wait_for_buffer() {
-                    if audio_inputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
-                        break;
+                if let Ok(mut wasapi) = WasapiInput::new(device_id, 2){
+                    audio_inputs.lock().unwrap().push(wasapi.base.get_ref());
+                    while let Ok(buffer) = wasapi.wait_for_buffer() {
+                        if audio_inputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
+                            break;
+                        }
+                        if let Some(fbox) = &mut *audio_input_cb.lock().unwrap() {
+                            let ret_buffer = fbox(
+                                AudioInfo {
+                                    device_id,
+                                    time: None
+                                },
+                                buffer
+                            );
+                            wasapi.release_buffer(ret_buffer);
+                        }
+                        else {
+                            wasapi.release_buffer(buffer);
+                        }
                     }
-                    if let Some(fbox) = &mut *audio_input_cb.lock().unwrap() {
-                        let ret_buffer = fbox(
-                            AudioInfo {
-                                device_id,
-                                time: None
-                            },
-                            buffer
-                        );
-                        wasapi.release_buffer(ret_buffer);
-                    }
-                    else {
-                        wasapi.release_buffer(buffer);
-                    }
+                    let mut audio_inputs = audio_inputs.lock().unwrap();
+                    audio_inputs.retain( | v | v.device_id != device_id);
                 }
-                let mut audio_inputs = audio_inputs.lock().unwrap();
-                audio_inputs.retain( | v | v.device_id != device_id);
+                else{
+                    println!("Error opening wasapi input device");
+                    failed_devices.lock().unwrap().insert(device_id);
+                    change_signal.set();
+                }
             });
         }
     }
@@ -188,30 +200,38 @@ impl WasapiAccess {
         for (index, device_id) in new {
             let audio_output_cb = self.audio_output_cb[index].clone();
             let audio_outputs = self.audio_outputs.clone();
+            let failed_devices = self.failed_devices.clone();
+            let change_signal = self.change_signal.clone();
             
             std::thread::spawn(move || {
-                let mut wasapi = WasapiOutput::new(device_id, 2);
-                audio_outputs.lock().unwrap().push(wasapi.base.get_ref());
-                while let Ok(mut buffer) = wasapi.wait_for_buffer() {
-                    if audio_outputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
-                        break;
+                if let Ok(mut wasapi) = WasapiOutput::new(device_id, 2){
+                    audio_outputs.lock().unwrap().push(wasapi.base.get_ref());
+                    while let Ok(mut buffer) = wasapi.wait_for_buffer() {
+                        if audio_outputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
+                            break;
+                        }
+                        if let Some(fbox) = &mut *audio_output_cb.lock().unwrap() {
+                            fbox(
+                                AudioInfo {
+                                    device_id,
+                                    time: None,
+                                },
+                                &mut buffer.audio_buffer
+                            );
+                            wasapi.release_buffer(buffer);
+                        }
+                        else {
+                            wasapi.release_buffer(buffer);
+                        }
                     }
-                    if let Some(fbox) = &mut *audio_output_cb.lock().unwrap() {
-                        fbox(
-                            AudioInfo {
-                                device_id,
-                                time: None,
-                            },
-                            &mut buffer.audio_buffer
-                        );
-                        wasapi.release_buffer(buffer);
-                    }
-                    else {
-                        wasapi.release_buffer(buffer);
-                    }
+                    let mut audio_outputs = audio_outputs.lock().unwrap();
+                    audio_outputs.retain( | v | v.device_id != device_id);
                 }
-                let mut audio_outputs = audio_outputs.lock().unwrap();
-                audio_outputs.retain( | v | v.device_id != device_id);
+                else{
+                    println!("Error opening wasapi output device");
+                    failed_devices.lock().unwrap().insert(device_id);
+                    change_signal.set();
+                }
             });
         }
     }
@@ -244,6 +264,7 @@ impl WasapiAccess {
             let (dev_name, dev_id) = Self::get_device_descs(&device);
             let device_id = AudioDeviceId(LiveId::from_str_unchecked(&dev_id));
             out.push(AudioDeviceDesc {
+                has_failed: false,
                 device_id,
                 device_type,
                 is_default: def_id == dev_id,
@@ -338,40 +359,47 @@ impl WasapiBase {
         }
     }
     
-    pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Self {
+    pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self,()> {
         unsafe {
             
             CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
             
             let device = WasapiAccess::find_device_by_id(device_id).unwrap();
-            let client: IAudioClient = device.Activate(CLSCTX_ALL, None).unwrap();
+            let client: IAudioClient = if let Ok(client) = device.Activate(CLSCTX_ALL, None){
+                client
+            }
+            else{
+                return Err(())
+            };
             
             let mut def_period = 0i64;
             let mut min_period = 0i64;
             client.GetDevicePeriod(Some(&mut def_period), Some(&mut min_period)).unwrap();
             let wave_format = WasapiAccess::new_float_waveformatextensible(48000, channel_count);
             
-            client.Initialize(
+            if client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 def_period,
                 def_period,
                 &wave_format as *const _ as *const crate::windows_crate::Win32::Media::Audio::WAVEFORMATEX,
                 None
-            ).unwrap();
+            ).is_err(){
+                return Err(())
+            }
             
             let event = CreateEventA(None, FALSE, FALSE, None).unwrap();
             client.SetEventHandle(event).unwrap();
             client.Start().unwrap();
             
-            Self {
+            Ok(Self {
                 device_id,
                 device,
                 channel_count,
                 audio_buffer: Some(Default::default()),
                 event,
                 client,
-            }
+            })
         }
     }
 }
@@ -390,13 +418,13 @@ pub struct WasapiAudioOutputBuffer {
 
 impl WasapiOutput {
     
-    pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Self {
-        let base = WasapiBase::new(device_id, channel_count);
+    pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self,()> {
+        let base = WasapiBase::new(device_id, channel_count)?;
         let render_client = unsafe {base.client.GetService().unwrap()};
-        Self {
+        Ok(Self {
             render_client,
             base
-        }
+        })
     }
     
     pub fn wait_for_buffer(&mut self) -> Result<WasapiAudioOutputBuffer, ()> {
@@ -451,13 +479,13 @@ pub struct WasapiAudioInputBuffer {
 }
 
 impl WasapiInput {
-    pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Self {
-        let base = WasapiBase::new(device_id, channel_count);
+    pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self,()> {
+        let base = WasapiBase::new(device_id, channel_count)?;
         let capture_client = unsafe {base.client.GetService().unwrap()};
-        Self {
+        Ok(Self {
             capture_client,
             base
-        }
+        })
     }
     
     pub fn wait_for_buffer(&mut self) -> Result<AudioBuffer, ()> {
