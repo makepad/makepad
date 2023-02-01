@@ -525,9 +525,13 @@ impl Widget for Frame {
             }
         }
         
+        // ok so if a child is not visible
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
-                child.handle_widget_event_fn(cx, event, dispatch_action);
+                // if a child is not visible, we should 
+                if child.is_visible() || !event.requires_visibility(){
+                    child.handle_widget_event_fn(cx, event, dispatch_action);
+                }
             }
         }
         
@@ -546,6 +550,10 @@ impl Widget for Frame {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.handle_scroll_event(cx, event, &mut | _, _ | {});
         }
+    }
+    
+    fn is_visible(&self)->bool{
+        self.visible
     }
     
     fn get_walk(&self) -> Walk {
