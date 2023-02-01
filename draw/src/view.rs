@@ -83,8 +83,16 @@ impl View {
         
         set_view_transform_recur(self.draw_list.id(), cx, mat);
     }
+
+    pub fn begin_overlay_last(&mut self, cx: &mut Cx2d) {
+        self.begin_overlay_inner(cx, true)
+    }
     
-    pub fn begin_overlay(&mut self, cx: &mut Cx2d) {
+    pub fn begin_overlay_reuse(&mut self, cx: &mut Cx2d) {
+        self.begin_overlay_inner(cx, false)
+    }
+    
+    pub fn begin_overlay_inner(&mut self, cx: &mut Cx2d, always_last:bool) {
         let pass_id = cx.pass_stack.last().unwrap().pass_id;
         let redraw_id = cx.cx.redraw_id;
         
@@ -93,7 +101,12 @@ impl View {
         let codeflow_parent_id = cx.draw_list_stack.last().cloned().unwrap();
         
         let overlay_id = cx.overlay_id.unwrap();
-        cx.draw_lists[overlay_id].insert_sub_list(redraw_id, self.draw_list.id());
+        if always_last{
+            cx.draw_lists[overlay_id].store_sub_list_last(redraw_id, self.draw_list.id());
+        }
+        else{
+            cx.draw_lists[overlay_id].store_sub_list(redraw_id, self.draw_list.id());
+        }
         
         cx.nav_list_item_push(codeflow_parent_id, NavItem::Child(self.draw_list.id()));
         
@@ -108,6 +121,7 @@ impl View {
         
         cx.draw_list_stack.push(self.draw_list.id());
     }
+    
     
     pub fn begin_always(&mut self, cx: &mut Cx2d) {
         self.begin_maybe(cx, None).expect_redraw();
