@@ -330,11 +330,7 @@ impl AlsaAudioDevice {
     fn write_output_buffer(&mut self, buffer: &AudioBuffer) -> Result<i32, AlsaError> {
         unsafe {
             // interleave the audio buffer
-            let data = &buffer.data;
-            for i in 0..self.frame_count {
-                self.interleaved[i * 2] = data[i];
-                self.interleaved[i * 2 + 1] = data[i + self.frame_count];
-            }
+            buffer.copy_to_interleaved(&mut self.interleaved);
             let result = snd_pcm_writei(self.device_handle, self.interleaved.as_ptr() as *mut _, self.frame_count as _);
             if result == -libc_sys::EPIPE as _ {
                 snd_pcm_prepare(self.device_handle);
@@ -346,7 +342,6 @@ impl AlsaAudioDevice {
     }
     
     fn read_input_buffer(&mut self, buffer: &mut AudioBuffer) -> Result<i32, AlsaError> {
-        buffer.resize(self.frame_count, self.channel_count);
         unsafe {
             // interleave the audio buffer
             let result = snd_pcm_readi(self.device_handle, self.interleaved.as_ptr() as *mut _, self.frame_count as _);
@@ -354,10 +349,7 @@ impl AlsaAudioDevice {
                 snd_pcm_prepare(self.device_handle);
                 return Ok(0)
             }
-            for i in 0..self.frame_count {
-                buffer.data[i] = self.interleaved[i * 2];
-                buffer.data[i + self.frame_count] = self.interleaved[i * 2 + 1];
-            }
+            buffer.copy_from_interleaved(self.channel_count, &self.interleaved);
             //println!("buffer {:?}", buffer.data.as_ptr());
             AlsaError::from("snd_pcm_writei", result as _)
         }
