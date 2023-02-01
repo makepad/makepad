@@ -282,15 +282,15 @@ impl DesktopWindow {
         while self.ui.draw(cx).is_not_done() {}
         self.debug_view.draw(cx);
         // lets draw our cursor
+        self.overlay.end(cx);
+        
+        cx.end_overlay_turtle();
         if let OsType::LinuxDirect = cx.platform_type() {
             self.draw_cursor.draw_abs(cx, Rect {
                 pos: self.last_mouse_pos,
                 size: self.mouse_cursor_size
             });
         }
-        self.overlay.end(cx);
-        
-        cx.end_overlay_turtle();
         
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
