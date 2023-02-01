@@ -90,7 +90,10 @@ pub struct DesktopWindow {
     #[rust] pub caption_size: DVec2,
     last_mouse_pos: DVec2,
     mouse_cursor_size: DVec2,
+    
+    cursor_view: View,
     draw_cursor: DrawQuad,
+    
     debug_view: DebugView,
     nav_control: NavControl,
     window: Window,
@@ -281,16 +284,19 @@ impl DesktopWindow {
     pub fn end(&mut self, cx: &mut Cx2d) {
         while self.ui.draw(cx).is_not_done() {}
         self.debug_view.draw(cx);
-        // lets draw our cursor
-        self.overlay.end(cx);
         
-        cx.end_overlay_turtle();
+        // lets draw our cursor
         if let OsType::LinuxDirect = cx.platform_type() {
+            self.cursor_view.begin_overlay(cx);
             self.draw_cursor.draw_abs(cx, Rect {
                 pos: self.last_mouse_pos,
                 size: self.mouse_cursor_size
             });
+            self.cursor_view.end(cx);
         }
+        
+        self.overlay.end(cx);
+        cx.end_overlay_turtle();
         
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
