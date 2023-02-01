@@ -1,7 +1,8 @@
-pub use makepad_audio_graph::makepad_widgets;
+pub use makepad_audio_widgets::makepad_widgets;
 pub use makepad_widgets::makepad_platform;
 pub use makepad_platform::makepad_math;
-pub use makepad_audio_graph;
+pub use makepad_synth_ironfish;
+pub use makepad_synth_ironfish::makepad_audio_graph;
 
 use makepad_widgets::*;
 use makepad_draw::*;
@@ -9,13 +10,11 @@ use makepad_audio_graph::*;
 use makepad_platform::midi::*;
 
 mod sequencer;
-mod ironfish;
-mod waveguide;
 
-use crate::ironfish::*;
-use crate::piano::*;
+use makepad_synth_ironfish::ironfish::*;
+use makepad_audio_widgets::piano::*;
 use crate::sequencer::*;
-use crate::display_audio::*;
+use makepad_audio_widgets::display_audio::*;
 
 //use std::fs::File;
 //use std::io::prelude::*;
@@ -27,38 +26,62 @@ import makepad_widgets::theme::*;
 import makepad_widgets::frame::*;
 import makepad_draw::shader::std::*;
 
-const SPACING_PANELS = 10.0
-const SPACING_OS = 40.0
-const SPACING_CONTROLS = 7.5
-const SPACING_BASE_PADDING = 6.0
-const HEIGHT_AUDIOVIZ = 125
-const COLOR_OSC = #xFFFF99FF // yellow
-const COLOR_MUSIC = #xC // gray
-const COLOR_AMOUNT = #xFFFFFF30
-const COLOR_ENV = #xFF8888 // light red
-const COLOR_FILTER = #x88FF88 // green
-const COLOR_LFO = #xFF9999 // red
-const COLOR_TOUCH = #xBBFF99 // light green
-const COLOR_FX = #x99EEFF // light green
-const COLOR_TEXT_H1 = #x000000CC
-const COLOR_TEXT_H2 = #xFFFFFF66
-const COLOR_DIVIDER = #x000000AA
-const COLOR_TEXT_H2_HOVER = #xD
-const COLOR_BEVEL_SHADOW = #x00000066
-const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF44
-const COLOR_CONTROL_OUTSET = #xFFFFFF66
-const COLOR_HIDDEN_WHITE = #xFFFFFF00
-const COLOR_CONTROL_INSET = #x00000066
-const COLOR_CONTROL_INSET_HOVER = #x00000088
-const COLOR_TODO = #xFF1493FF
-const COLOR_BG_GRADIENT_BRIGHT = #xFFFFFF20
-const COLOR_BG_GRADIENT_DARK = #xFFFFFF10
-const FONT_SIZE_H1 = 17.5
-const FONT_SIZE_H2 = 12.0
+const SPACING_OS = 40.0;
+const SPACING_CONTROLS = 7.5;
+const SPACING_BASE_PADDING = 6.0;
+
+const COLOR_CLEAR = #x3;
+
+const COLOR_PLAYARROW_INNER = #xFFFDDDFF;
+
+const COLOR_DOWN_OFF = #x00000000;
+const COLOR_DOWN_1 = #x00000022;
+const COLOR_DOWN_2 = #x00000044;
+const COLOR_DOWN_3 = #x00000066;
+const COLOR_DOWN_4 = #x00000088;
+const COLOR_DOWN_5 = #x000000AA;
+const COLOR_DOWN_FULL = #x000000FF;
+
+const COLOR_UP_OFF = #xFFFFFF00;
+const COLOR_UP_2 = #xFFFFFF11;
+const COLOR_UP_3 = #xFFFFFF22;
+const COLOR_UP_4 = #xFFFFFF33;
+const COLOR_UP_5 = #xFFFFFF44;
+const COLOR_UP_6 = #xFFFFFF66;
+const COLOR_UP_7 = #xFFFFFF88;
+const COLOR_UP_8 = #xFFFFFFCC;
+const COLOR_UP_FULL = #xFFFFFFFF;
+
+const GRADIENT_A = #x08221D;
+const GRADIENT_B = #x3F3769;
+
+const FONT_SIZE_H1 = 17.5;
+const FONT_SIZE_H2 = 12.0;
 
 // WIDGETS
+
+Divider = <Frame> {
+    walk: {width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
+    layout: { flow: Down }
+    <Box> {
+        walk: { width: Fill, height: 1.0 }
+        draw_bg: { color: (COLOR_DOWN_5) }
+    }
+    <Box> {
+        walk: { width: Fill, height: 1.0 }
+        draw_bg: { color: (COLOR_UP_5) }
+    }
+}
+
+FillerX = <Frame> {
+    walk: { width: Fill, height: Fit }
+}
+
+FillerY = <Frame> {
+    walk: { width: Fit, height: Fill }
+}
+
 ElementBox = <Frame> {
-    draw_bg: {color: #4}
     walk: {width: Fill, height: Fit}
     layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
 }
@@ -73,25 +96,19 @@ FishTab = <RadioButton> {
     layout: {align: {x: 0.0, y: 0.5}}
     draw_radio: {
         radio_type: Tab,
-        color_inactive: (COLOR_HIDDEN_WHITE),
-        color_active: (COLOR_HIDDEN_WHITE)
+        color_inactive: (COLOR_UP_OFF),
+        COLOR_UP_3: (COLOR_UP_OFF)
     }
     draw_label: {
-        color_selected: (COLOR_TEXT_H2_HOVER),
-        color_unselected: (COLOR_TEXT_H2),
-        color_unselected_hover: (COLOR_TEXT_H2_HOVER),
+        color_selected: (COLOR_UP_8),
+        color_unselected: (COLOR_UP_6),
+        color_unselected_hover: (COLOR_UP_8),
         text_style:
         {
             font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"},
             font_size: (FONT_SIZE_H2)
         }
     }
-}
-
-FishPanel = <GradientY> {
-    layout: {flow: Down, padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
-    walk: {width: Fill, height: Fit}
-    draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
 }
 
 FishDropDown = <DropDown> {
@@ -103,11 +120,11 @@ FishDropDown = <DropDown> {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
-                    (COLOR_TEXT_H2),
-                    (COLOR_TEXT_H2),
+                    (COLOR_UP_6),
+                    (COLOR_UP_6),
                     self.focus
                 ),
-                (COLOR_TEXT_H2),
+                (COLOR_UP_6),
                 self.pressed
             )
         }
@@ -132,9 +149,9 @@ FishDropDown = <DropDown> {
                 3
             )
             sdf.stroke_keep(
-                mix((COLOR_HIDDEN_WHITE), (COLOR_HIDDEN_WHITE), pow(self.pos.y, .25)),
+                mix((COLOR_UP_OFF), (COLOR_UP_OFF), pow(self.pos.y, .25)),
             1.);
-            sdf.fill(#FFFFFF00);
+            sdf.fill((COLOR_UP_OFF));
         }
     }
 }
@@ -150,11 +167,11 @@ FishButton = <Button> {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
-                    (COLOR_TEXT_H2),
-                    (COLOR_TEXT_H2),
+                    (COLOR_UP_6),
+                    (COLOR_UP_6),
                     self.hover
                 ),
-                (COLOR_TEXT_H2),
+                (COLOR_UP_6),
                 self.pressed
             )
         }
@@ -175,8 +192,8 @@ FishButton = <Button> {
             
             sdf.fill(
                 mix(
-                    #FFFFFF00, 
-                    #FFFFFF20, 
+                    (COLOR_UP_OFF), 
+                    (COLOR_UP_3),
                     self.pressed
                 )
             );
@@ -187,13 +204,12 @@ FishButton = <Button> {
     
 }
 
-
 FishSlider = <Slider> {
     walk: {
         height: 36,
     }
     label: "Change Me"
-    label_text: {text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_TEXT_H2)}
+    label_text: {text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_UP_6)}
     text_input: {
         cursor_margin_bottom: 3.0,
         cursor_margin_top: 4.0,
@@ -203,16 +219,14 @@ FishSlider = <Slider> {
         numeric_only: true,
         draw_bg: {
             shape: None
-            color: #5
+            color: (COLOR_UP_OFF);
             radius: 2.0
         },
     }
     draw_slider: {
-        instance line_color: (COLOR_AMOUNT)
+        instance line_color: (COLOR_UP_4)
         instance bipolar: 0.0
         fn pixel(self) -> vec4 {
-            let nub_size = 3
-            
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             let top = 25.0;
             
@@ -222,13 +236,13 @@ FishSlider = <Slider> {
             sdf.move_to(mix(in_side + x_offset, self.rect_size.x, self.bipolar), top);
 
             sdf.box(in_side, top - 5, self.rect_size.x - 2 - 2 * in_side, 10, 2) // ridge
-            sdf.fill(mix(#x00000020, #00000040, self.drag)); // ridge color
+            sdf.fill(mix((COLOR_DOWN_1), (COLOR_DOWN_2), self.drag)); // ridge color
             
-            let fill_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 9) + x_offset;
-            sdf.line_to(fill_x + in_side + nub_size * 0.5, top);
+            let fill_x = self.slide_pos * (self.rect_size.x - in_side * 2 - 9) + x_offset;
+            sdf.line_to(fill_x + in_side, top);
 
-            sdf.stroke_keep(mix((COLOR_HIDDEN_WHITE), self.line_color, self.drag), 3.0);
-            sdf.stroke(mix(self.line_color, #xFFFFFF80, self.drag), 2.0 )
+            sdf.stroke_keep(mix((COLOR_UP_OFF), self.line_color, self.drag), 3.0);
+            sdf.stroke(mix(self.line_color, (COLOR_UP_4), self.drag), 2.0 )
             
             return sdf.result
         }
@@ -238,7 +252,7 @@ FishSlider = <Slider> {
 TextSlider = <ElementBox> {
     slider = <FishSlider> {
         draw_slider: {
-            instance line_color: (COLOR_AMOUNT)
+            instance line_color: (COLOR_UP_4)
             instance bipolar: 0.0
             fn pixel(self) -> vec4 {
                 let nub_size = 3
@@ -281,20 +295,20 @@ InstrumentCheckbox = <ElementBox> {
                 let c = vec2(left + sz, self.rect_size.y * 0.5);
                 sdf.box(left, c.y - sz, sz * 2.0, sz * 2.2, 1.5); // rounding = 3rd value
                 sdf.fill_keep(mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 1.)))
-                sdf.stroke(mix((COLOR_BEVEL_SHADOW), #xfff, pow(self.pos.y, 3.0)), 1.0) // outline
+                sdf.stroke(mix((COLOR_DOWN_3), (COLOR_UP_FULL), pow(self.pos.y, 3.0)), 1.0) // outline
 
                 let szs = sz * 0.5;
                 let dx = 1.0;
                 sdf.move_to(left + 4.0, c.y);
                 sdf.line_to(c.x, c.y + szs);
                 sdf.line_to(c.x + szs, c.y - szs);
-                sdf.stroke(mix((COLOR_HIDDEN_WHITE), (COLOR_TEXT_H2), self.selected), 1.25); // CHECKMARK
+                sdf.stroke(mix((COLOR_UP_OFF), (COLOR_UP_6), self.selected), 1.25); // CHECKMARK
                 return sdf.result
             }
         }
         draw_label: {
             text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-            color: (COLOR_TEXT_H2)
+            color: (COLOR_UP_6)
         }
     }
 }
@@ -304,7 +318,7 @@ InstrumentDropdown = <ElementBox> {
     label = <Label> {
         walk: { width: Fit }
         draw_label: {
-            color: (COLOR_TEXT_H2)
+            color: (COLOR_UP_6)
             text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
         }
     }
@@ -313,103 +327,10 @@ InstrumentDropdown = <ElementBox> {
     }
 }
 
-GraphPaper = <Box> {
-    walk: {width: Fill, height: 150}
-
-    draw_bg: {
-        color: #x44,
-        color2: #x0,
-        
-        instance attack: 0.05
-        instance hold: 0.0
-        instance decay: 0.2
-        instance sustain: 0.5
-        instance release: 0.2
-        
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size); //mod (self.pos * self.rect_size, 15))
-            let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 2.0));
-            let darker = base_color * 0.85;
-            let pos = self.pos * self.rect_size;
-            sdf.clear(mix(base_color, darker, pow(abs(sin(pos.x * 0.5)), 24) + pow(abs(sin(pos.y * 0.5)), 32.0))); // Grid
-            sdf.rect(1.0, 1.0, 16, 16)
-            sdf.stroke(darker, 1)
-            let pad_b = 8
-            let pad_s = 8
-            let width = self.rect_size.x - 2 * pad_s
-            let height = self.rect_size.y - 2 * pad_b
-            let total = self.attack + self.decay + self.release + 0.5 + self.hold
-            let sustain = self.rect_size.y - pad_b - height * self.sustain;
-            sdf.pos = self.pos * self.rect_size;
-            sdf.move_to(pad_s, self.rect_size.y - pad_b)
-            sdf.line_to(pad_s + width * (self.attack / total), pad_b)
-            sdf.line_to(pad_s + width * ((self.attack + self.hold) / total), pad_b)
-            sdf.line_to(pad_s + width * ((self.attack + self.decay + self.hold) / total), sustain)
-            sdf.line_to(pad_s + width * (1.0 - self.release / total), sustain)
-            sdf.line_to(pad_s + width, self.rect_size.y - pad_b)
-            sdf.stroke_keep(#xFFC49910, 8.0);
-            sdf.stroke_keep(#xFFC49910, 6.0);
-            sdf.stroke_keep(#xFFC49920, 4.0);
-            sdf.stroke_keep(#xFFC49980, 2.0);
-            sdf.stroke(#xFFFFFFFF, 1.0);
-            return sdf.result
-        }
-    }
-}
-
-FishTitle = <Solid> {
-    walk: {width: Fit, height: Fit, margin: {bottom: -2}}
-    layout: {padding: {left: (SPACING_BASE_PADDING), top: (SPACING_BASE_PADDING + 1), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING + 2)}}
-    draw_bg: {
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            let edge = 5.0;
-            sdf.move_to(1.0 + edge, 1.0);
-            sdf.line_to(self.rect_size.x - 2.0, 1.0);
-            sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - 2.0)
-            sdf.line_to(1.0, self.rect_size.y - 2.0);
-            sdf.line_to(1.0, 1.0 + edge);
-            sdf.close_path();
-            sdf.fill(self.color);
-            return sdf.result
-        }
-    }
-    label = <Label> {
-        draw_label: {
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-            color: (COLOR_TEXT_H1)
-        }
-        text: "replace me!"
-    }
-}
-
-FishHeader = <Frame> {
-    layout: {flow: Right }
-    walk: { height: Fit, width: Fill }
-    title = <FishTitle> {}
-    menu = <Frame> {
-        layout: { flow: Right }
-        walk: { height: Fit, width: Fill }
-    }
-}
-
-FishSubTitle = <Frame> {
-    walk: {width: Fit, height: Fit}
-    layout: {padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
-
-    label = <Label> {
-        draw_label: {
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-            color: (COLOR_TEXT_H2)
-        }
-        text: "replace me!"
-    }
-}
-
 PlayPause = <InstrumentCheckbox> {
     walk: {width: Fit, height: Fit, margin: {top: 10, right: 0, bottom: 0, left: 0}}
     layout: {align: {x: 0.0, y: 0.5}}
-    draw_bg: { color: (COLOR_HIDDEN_WHITE) }
+    draw_bg: { color: (COLOR_UP_OFF) }
     checkbox = {
         walk: {width: 20, height: 20}
         label: ""
@@ -417,23 +338,19 @@ PlayPause = <InstrumentCheckbox> {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let left = 3;
-                let sz = 20.0;
-                let c = vec2(left + sz, self.rect_size.y);
+                let sz = 15.0;
+                let c = vec2(left + sz, sz);
+                // let c = vec2(left + sz, self.rect_size.y);
+
                 sdf.move_to(0.0, 0.0);
                 sdf.line_to(c.x * 0.75, c.y * 0.5);
                 sdf.line_to(0.0, c.y);
                 sdf.close_path();
-                sdf.fill_keep(
-                    mix(
-                        (COLOR_TEXT_H2) * 0.75,
-                        mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
-                        self.selected
-                    )
-                )
+                sdf.fill_keep(mix((COLOR_UP_5), (COLOR_UP_FULL), self.selected))
                 sdf.stroke_keep(
                     mix(
-                        mix(#xFFFFFF66, #xFFFFFF10, pow(self.pos.y, 0.5)),
-                        #xFFFFFF80,
+                        mix((COLOR_UP_6), (COLOR_UP_2), pow(self.pos.y, 0.5)),
+                        (COLOR_UP_7),
                         self.selected
                     ),
                     1.
@@ -444,97 +361,6 @@ PlayPause = <InstrumentCheckbox> {
     }
 }
 
-// PANELS   
-EnvelopePanel = <Frame> {
-    layout: {flow: Down, padding: 0.0}
-    walk: {width: Fill, height: Fit}
-    
-    display = <GraphPaper> {}
-    
-    <Frame> { // TODO: REPLACE WITH DEDICATED WIDGET?
-        walk: {width: Fill, height: Fit}
-        attack = <InstrumentSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_ENV)}
-                min: 0.0
-                max: 1.0
-                label: "A"
-            }
-        }
-        
-        hold = <InstrumentSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_ENV)}
-                min: 0.0
-                max: 1.0
-                label: "H"
-            }
-        }
-
-        decay = <InstrumentSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_ENV)}
-                min: 0.0
-                max: 1.0
-                label: "D"
-            }
-        }
-        
-        sustain = <InstrumentSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_ENV)}
-                min: 0.0
-                max: 1.0
-                label: "S"
-            }
-        }
-
-        release = <InstrumentSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_ENV)}
-                min: 0.0
-                max: 1.0
-                label: "R"
-            }
-        }
-    
-    }
-    
-}
-
-VolumeEnvelopePanel = <Frame> {
-    vol_env = <EnvelopePanel> {
-        layout: {flow: Down}
-        walk: {width: Fill, height: Fit}
-    }
-}
-
-ModEnvelopePanel = <Frame> {
-    modamount = <InstrumentBipolarSlider> {
-        slider = {
-            draw_slider: {line_color: (COLOR_ENV)}
-            min: -1.0
-            max: 1.0
-            label: "Modulation Cutoff Amount"
-        }
-    }
-    
-    mod_env = <EnvelopePanel> {
-        layout: {flow: Down, padding: 0.0}
-        walk: {width: Fill, height: Fit }
-    }
-    
-}
-
-
-FillerX = <Frame> {
-    walk: { width: Fill, height: Fit }
-}
-FillerY = <Frame> {
-    walk: { width: Fit, height: Fill }
-}
-
-
 SequencerControls = <Box> {
     layout: {flow: Right, padding: 0, spacing: (SPACING_CONTROLS), align: {x: 0.0, y: 0.5} }
     walk: { width: Fill, height: Fit, margin: { top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS) }}
@@ -542,7 +368,7 @@ SequencerControls = <Box> {
     
     speed = <TextSlider> {
         walk: { width: 110, height: 35 }
-        draw_bg: { color: (COLOR_HIDDEN_WHITE) }
+        draw_bg: { color: (COLOR_UP_OFF) }
         slider = {
             min: 0.0
             max: 240.0
@@ -559,7 +385,7 @@ SequencerControls = <Box> {
         rootnote = <InstrumentDropdown> {
             walk: {height: Fill, width: Fit, margin: 0}
             layout: {align: {x: 0.0, y: 0.5}, padding: 0}
-            draw_bg: { color: (COLOR_HIDDEN_WHITE) }
+            draw_bg: { color: (COLOR_UP_OFF) }
             dropdown = {
                 walk: { margin: 5 }
                 labels: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
@@ -570,7 +396,7 @@ SequencerControls = <Box> {
         scaletype = <InstrumentDropdown> {
             walk: {height: Fill, width: Fit}
             layout: {align: {x: 0.0, y: 0.5}}
-            draw_bg: { color: (COLOR_HIDDEN_WHITE) }
+            draw_bg: { color: (COLOR_UP_OFF) }
             dropdown = {
                 walk: { margin: 5 }
                 labels: ["Minor", "Major", "Dorian", "Pentatonic"]
@@ -604,25 +430,6 @@ SequencerControls = <Box> {
 
 }
 
-PianoControls = <GradientY> {
-    layout: {flow: Right, padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
-    walk: {height: Fit, width: Fill}
-    draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
-
-    porta = <InstrumentSlider> {
-        walk: { width: 200 }
-        slider = {
-            draw_slider: {line_color: (COLOR_MUSIC)}
-            min: 0.0
-            max: 1.0
-            label: "Portamento"
-        }
-    }
-
-    <Frame> { walk: {width: Fill} }
-
-} 
-
 SequencerPanel = <Frame> {
     walk: {width: Fill, height: Fill}
     layout: {flow: Down, spacing: 0.0}
@@ -637,26 +444,26 @@ SequencerPanel = <Frame> {
                     sdf.box(1, 1, self.rect_size.x - 5, self.rect_size.y - 5, 2);
                     sdf.glow_keep(
                         mix(
-                            #FFFFFF00,
-                            #FFFFFF40,
+                            (COLOR_UP_OFF),
+                            (COLOR_UP_4),
                             self.active
                         ),
                         1.0);
                     sdf.glow_keep(
                         mix(
-                            #FFFFFF00,
-                            #FFFFFF20,
+                            (COLOR_UP_OFF),
+                            (COLOR_UP_3),
                             self.active
                         ),
                         1.5);
                     sdf.glow_keep(
                         mix(
-                            #FFFFFF00,
-                            #FFFFFF10,
+                            (COLOR_UP_OFF),
+                            (COLOR_UP_2),
                             self.active
                         ),
                         2.0);
-                    sdf.fill(mix(#FFFFFF10, #FFFFFFFF, self.active ))
+                    sdf.fill(mix((COLOR_UP_2), (COLOR_UP_FULL), self.active ))
                     return sdf.result
                 }
                 
@@ -665,506 +472,12 @@ SequencerPanel = <Frame> {
     }
 }
 
-CrushFXPanel = <FishPanelContainer> {
-    <Frame> {
-        layout: { flow: Right },
-        walk: { width: Fill, height: Fit }
-
-        crushamount = <InstrumentSlider> {
-            walk: {width: Fill, height: Fit}
-            slider = {
-                draw_slider: {line_color: (COLOR_FX)}
-                min: 0.0
-                max: 1.0
-                label: "Amount"
-                
-            }
-        }
-
-        crushenable = <InstrumentCheckbox> {
-            checkbox = { label: "On" }
-            walk: { width: Fit, height: Fit, margin: {top: 9.0} }
-        }
-        
-    }
-}
-
-DelayFXPanel = <FishPanelContainer> {
-    <Frame> {
-        layout: { flow: Down}
-        walk: { width: Fill, height: Fit }
-
-        <Frame> {
-            layout: {flow: Right}
-            walk: {width: Fill, height: Fit}
-
-            delaysend = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Delay Send"
-                }
-            }
-
-            delayfeedback = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Delay Feedback"
-                    
-                }
-            }
-        }
-
-        <Frame> {
-            layout: { flow: Right}
-            walk: { width: Fill, height: Fit }
-
-            delaydifference = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Delay Stereo"
-                }
-            }
-
-            delaycross = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Delay Cross"
-                }
-            }
-
-        }
-    }
-}
-
-ChorusFXPanel = <FishPanelContainer> {
-    <Frame> {
-        layout: {flow: Down}
-        walk: {width: Fill, height: Fit}
-
-        <Frame> {
-            layout: { flow: Right }
-            walk: { width: Fill, height: Fit }
-            
-            chorusmix = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Mix"
-                }
-            }
-            chorusdelay = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Pre"
-                }
-            }
-        }
-        <Frame> {
-            layout: {flow: Right}
-            walk: {width: Fill, height: Fit}
-            chorusmod = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Depth"
-                }
-            }
-            chorusrate = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Rate"
-                    
-                }
-            }
-        }
-        <Frame> {
-            layout: {flow: Right}
-            walk: {width: Fill, height: Fit}
-            chorusphase = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Phasing"
-                }
-            }
-            
-            chorusfeedback = <InstrumentBipolarSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FX)}
-                    min: -1
-                    max: 1
-                    label: "Feedback"
-                }
-            }
-        }
-
-    }
-}
-
-FishPanelFilter = <FishPanelContainer> {
-    <FishHeader> {
-        title = {
-            label = {
-                text: "Filter",
-            },
-            draw_bg: {color: (COLOR_FILTER)}
-        }
-        menu = <Frame> {
-            filter_type = <InstrumentDropdown> {
-                dropdown = {
-                    labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
-                    values: [LowPass, HighPass, BandPass, BandReject]
-                }
-            }
-        }
-    }
-
-    <FishPanel> {
-        <Frame> {
-            layout: { flow: Right }
-            walk: {width: Fill, height: Fit}
-            cutoff = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FILTER)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Cutoff"
-                }
-            }
-            
-            resonance = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FILTER)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Resonance"
-                }
-            }
-        }
-        <Frame> {
-            layout: {flow: Right}
-            walk: {width: Fill, height: Fit}
-
-            lfoamount = <InstrumentBipolarSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FILTER)}
-                    min: -1.0
-                    max: 1.0
-                    label: "Cutoff LFO Amount"
-                }
-            }
-            rate = <InstrumentSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_FILTER)}
-                    max: 1.0
-                    label: "Cutoff LFO Rate"
-                }
-            }
-        }
-
-        sync = <InstrumentCheckbox> { checkbox = { label: "LFO Key sync" } }
-    }
-}
-    
-Divider = <Frame> {
-    walk: {width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
-    layout: { flow: Down }
-    <Box> {
-        walk: { width: Fill, height: 1.0 }
-        draw_bg: { color: (COLOR_DIVIDER) }
-    }
-    <Box> {
-        walk: { width: Fill, height: 1.0 }
-        draw_bg: { color: (COLOR_BEVEL_HIGHLIGHT) }
-    }
-}
-
-OscPanel = <Frame> {
-    walk: {width: Fill, height: Fit}
-    layout: {flow: Down}
-
-    <Frame> {
-        layout: {flow: Down}
-        walk: {width: Fill, height: Fit}
-        <Frame> {
-            layout: {flow: Right}
-            walk: {width: Fill, height: Fit}
-
-            <FishSubTitle> {label = {text: "Oscillator", draw_label: {color: (COLOR_OSC)}, walk: {width: Fit}}}
-            type = <InstrumentDropdown> {
-                layout: {flow: Down}
-                dropdown = {
-                    walk: {width: Fit, height: Fit}
-                    values: [DPWSawPulse, BlampTri, Pure, SuperSaw, HyperSaw, HarmonicSeries]
-                    labels: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
-                }
-            }
-        }
-
-        <Frame> {
-            layout: {flow: Down}
-            walk: {width: Fill, height: Fit}
-            supersaw = <Frame> {
-                layout: {flow: Right}
-                walk: {width: Fill, height: Fit}
-                spread = <InstrumentSlider> {
-                    slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Spread"
-                    }
-                }
-                diffuse = <InstrumentSlider> {
-                    slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Diffuse"
-                    }
-                }
-            }
-            
-            hypersaw = <Frame> {
-                layout: {flow: Right}
-                walk: {width: Fill, height: Fit}
-                spread = <InstrumentSlider> {
-                    slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Spread"
-                    }
-                }
-                diffuse = <InstrumentSlider> {
-                    slider = {
-                        draw_slider: {line_color: (COLOR_OSC)}
-                        min: 0.0
-                        max: 1.0
-                        label: "Diffuse"
-                    }
-                }
-            }
-            
-            harmonic = <Frame> {
-                layout: {flow: Down}
-                walk: {width: Fill, height: Fit}
-                <Frame> {
-                    layout: {flow: Right}
-                    walk: {width: Fill, height: Fit}
-                    harmonicshift = <InstrumentSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: 0
-                            max: 1.0
-                            label: "Shift"
-                        }
-                    }
-                    harmonicenv = <InstrumentBipolarSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: -1.0
-                            max: 1.0
-                            label: "Env mod"
-                        }
-                    }
-                }
-                <Frame> {
-                    layout: {flow: Right}
-                    walk: {width: Fill, height: Fit}
-                    harmoniclfo = <InstrumentBipolarSlider> {
-                        slider = {
-                            draw_slider: {line_color: (COLOR_OSC)}
-                            min: -1.0
-                            max: 1.0
-                            label: "LFO mod"
-                        }
-                    }
-                    <Frame> {}
-                }
-            }
-        }
-    }
-
-    
-    twocol = <Frame> {
-        layout: {flow: Right}
-        walk: {width: Fill, height: Fit}
-        transpose = <InstrumentBipolarSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_OSC)}
-                min: -24.0
-                max: 24.0
-                label: "Transpose"
-            }
-        }
-        
-        detune = <InstrumentBipolarSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_OSC)}
-                min: -1.0
-                max: 1.0
-                label: "Detune"
-            }
-        }
-    }
-        
-}
-
-MixerPanel = <Frame> {
-    walk: {width: Fill, height: Fit}
-    layout: { flow: Down }
-    <Frame> {
-        layout: {flow: Right}
-        walk: {width: Fill, height: Fit}
-        balance = <InstrumentBipolarSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_OSC)}
-                min: 0.0
-                max: 1.0
-                label: "Oscillator Balance"
-            }
-        }
-    }
-    <Frame> {
-        layout: {flow: Right}
-        walk: {width: Fill, height: Fit}
-        noise = <InstrumentSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_OSC)}
-                min: 0.0
-                max: 1.0
-                label: "Noise"
-            }
-        }
-        sub = <InstrumentSlider> {
-            slider = {
-                draw_slider: {line_color: (COLOR_OSC)}
-                min: 0.0
-                max: 1.0
-                label: "Sub"
-            }
-        }
-    }
-}
-
-FishPanelSoundSources = <FishPanelContainer> {
-
-    <FishHeader> {
-        title = {
-            label = {
-                text: "Sound Sources",
-            },
-            draw_bg: {color: (COLOR_OSC)}
-        }
-    }
-
-    <FishPanel> {
-        osc1 = <OscPanel> {}
-        <Divider> {}
-        osc2 = <OscPanel> {}
-        <Divider> {}
-
-        <FishSubTitle> {
-            label = {
-                text: "Mixer",
-                draw_label: {color: (COLOR_OSC)},
-            }
-        }
-
-        <MixerPanel> {walk: {width: Fill, height: Fit}}
-    }
-}
-
-
-// TABS
-FishPanelEnvelopes = <FishPanelContainer> {
-    <FishHeader> {
-        title = {
-            label = {
-                text: "Envelopes",
-            },
-            draw_bg: {color: (COLOR_ENV)}
-        }
-        menu = <Frame> {
-            tab1 = <FishTab> {
-                label: "Volume",
-                state: {selected = {default: on}},
-                draw_label: {color_selected: (COLOR_ENV)}
-            }
-            tab2 = <FishTab> {
-                label: "Modulation",
-                draw_label: {color_selected: (COLOR_ENV)}
-            }
-        }
-    }
-
-    <FishPanel> {
-        tab1_frame = <VolumeEnvelopePanel> {
-            visible: true, 
-            layout: {flow: Down}
-            walk: {width: Fill, height: Fit}
-        }
-        tab2_frame = <ModEnvelopePanel> {
-            visible: false,
-            layout: {flow: Down, clip_y: true}
-            walk: {width: Fill, height: Fit}
-        }
-    }
-}
-
-FishPanelEffects = <FishPanelContainer> {
-    <FishHeader> {
-        title = {
-            label = {
-                text: "Effects",
-            },
-            draw_bg: {color: (COLOR_FX)}
-        }
-        menu = <Frame> {
-            tab1 = <FishTab> {label: "Bitcrush", state: {selected = {default: on}}, draw_label: {color_selected: (COLOR_FX)}}
-            tab2 = <FishTab> {label: "Chorus", draw_label: {color_selected: (COLOR_FX)}}
-            tab3 = <FishTab> {label: "Delay", draw_label: {color_selected: (COLOR_FX)}}
-        }
-    }
-    
-    <FishPanel> {     
-        tab1_frame = <CrushFXPanel> {visible: true}
-        tab2_frame = <ChorusFXPanel> {visible: false}
-        tab3_frame = <DelayFXPanel> {visible: false}
-    }
-}
-
-
 ModeSequencer = <Frame> {
     visible: true 
     walk: { width: Fill, height: Fill, margin: { top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS) }}
     layout: {flow: Down}
 
     <SequencerPanel> { walk: {height: Fill, width: Fill} }
-
-    <Box> {
-        walk: { width: Fit, height: Fit }
-        layout: {flow: Right}
-
-        draw_bg: { color: #x00FFFFFF }
-
-    }
 
     PresetNavigation = <Frame> {
         walk: { width: Fill, height: Fit }
@@ -1173,7 +486,6 @@ ModeSequencer = <Frame> {
         <FishButton> {
             text: "<"
             walk: {width: 40, height: 40}
-            color: (COLOR_TEXT_H2)
             draw_label: { text_style: {font_size: (FONT_SIZE_H1)} }
         }
 
@@ -1186,7 +498,7 @@ ModeSequencer = <Frame> {
             label = <Label> {
                 draw_label: {
                     text_style: {font_size: (FONT_SIZE_H1)},
-                    color: (COLOR_TEXT_H2)
+                    color: (COLOR_UP_6)
                 }
                 text: "Preset Name"
             }
@@ -1194,7 +506,6 @@ ModeSequencer = <Frame> {
             <FishButton> {
                 text: "Edit"
                 walk: {width: Fit, height: Fit}
-                color: (COLOR_TEXT_H2)
                 draw_label: { text_style: {font_size: (FONT_SIZE_H2)} }
             }
         }
@@ -1204,12 +515,10 @@ ModeSequencer = <Frame> {
         <FishButton> {
             text: ">"
             walk: {width: 40, height: 40}
-            color: (COLOR_TEXT_H2)
             draw_label: { text_style: {font_size: (FONT_SIZE_H1)} }
         }
     }
 }
-
 
 ChordButton = <Button> {
     walk: {width: Fill, height: Fill}
@@ -1223,11 +532,11 @@ ChordButton = <Button> {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
-                    (COLOR_TEXT_H2),
-                    (COLOR_TEXT_H2),
+                    (COLOR_UP_6),
+                    (COLOR_UP_6),
                     self.hover
                 ),
-                (COLOR_TEXT_H2),
+                (COLOR_UP_6),
                 self.pressed
             )
         }
@@ -1236,7 +545,7 @@ ChordButton = <Button> {
     draw_bg: {
         instance pressed: 0.0
         instance color_default: 0.0
-        instance color_active: 0.0
+        instance COLOR_UP_3: 0.0
 
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1251,7 +560,7 @@ ChordButton = <Button> {
             sdf.fill(
                 mix(
                     self.color_default,
-                    self.color_active, 
+                    self.COLOR_UP_3, 
                     self.pressed
                 )
             );
@@ -1259,17 +568,16 @@ ChordButton = <Button> {
             return sdf.result
         }
 
-        color_default: #xFFFFFF10, color_active: #xFFFFFF20;
+        color_default: (COLOR_UP_2), COLOR_UP_3: (COLOR_UP_3);
     }
     
 }
         
-
 ChordStrip = <Box> {
     walk: {width: Fill, height: Fill}
     layout: { flow: Right, spacing: (SPACING_CONTROLS / 2), padding: 5 }
     draw_bg: {
-        color: #xFFFFFF10,
+        color: (COLOR_UP_2),
         radius: 5.0
     }
 
@@ -1278,7 +586,7 @@ ChordStrip = <Box> {
         walk: { width: Fill, height: Fill, margin: 10 }
         draw_label: {
             text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-            color: (COLOR_TEXT_H2)
+            color: (COLOR_UP_6)
         }
         text: "change me"
     }
@@ -1313,7 +621,6 @@ ModePlay = <Frame> {
     visible: true,
     layout: {flow: Down, spacing: 20}
     walk: {width: Fill, height: Fill}
-    draw_bg: { color: #xff00ff20 }
     
     <Frame> {
         walk: {width: Fill, height: Fill}
@@ -1327,7 +634,7 @@ ModePlay = <Frame> {
                 layout: { padding: 0, spacing: 0, align: {x: 0.0, y: 0.5} }
                 label: "Arp"
             }
-            draw_bg: { color: (COLOR_HIDDEN_WHITE) }
+            draw_bg: { color: (COLOR_UP_OFF) }
         }
 
         <ChordPiano> {}
@@ -1342,7 +649,7 @@ ModePlay = <Frame> {
             layout: {flow: Down}
             walk: { width: Fill, height: 200 }
             draw_bg: {
-                color: #xFFFFFF10,
+                color: COLOR_UP_2,
                 radius: 5.0
             }
 
@@ -1394,6 +701,39 @@ ModePlay = <Frame> {
 
 }
 
+FishCheckbox = <CheckBox> {
+    draw_check: {
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+
+            let left = 1;
+            let sz = 8.0;
+
+            let c = vec2(left + sz, self.rect_size.y * 0.5 - 2.0);
+
+            sdf.box(left, c.y - sz, sz * 2.5, sz * 2.5, 2.0); // 3rd parameter == corner radius
+            sdf.fill_keep(mix((COLOR_UP_2), (COLOR_UP_7), self.selected))
+            sdf.stroke(#x888, 0.0) // outline
+
+            let szs = sz * 0.5;
+            let dx = 1.0;
+
+            let offset = 1.5;
+
+            sdf.move_to(left + 4.0 + offset, c.y + offset);
+            sdf.line_to(c.x + offset, c.y + szs + offset);
+            sdf.line_to(c.x + szs + offset, c.y - szs + offset);
+
+            sdf.stroke_keep(mix(#fff0, (COLOR_DOWN_FULL), self.selected), 1.75);
+
+            return sdf.result
+        }
+    }
+    draw_label: {
+        text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+        color: (COLOR_UP_6)
+    }
+}
 
 PresetListEntry = <Frame> {
     layout: {flow: Down, padding: {top: 5, right: 20, bottom: 5, left: 20}}
@@ -1403,20 +743,31 @@ PresetListEntry = <Frame> {
         layout: {flow: Right, align: {x: 0.0, y: 0.5}}
         walk: { width: Fill, height: Fit}
 
-        presetselector = <CheckBox> {
-            label: "Select"
+        presetselector = <FishCheckbox> {
+            label: " "
         }
 
-        label = <Label> {
+        label = <Button> {
+            walk: { width: Fill }
+            layout: {align: {x: 0.0, y: 0.5}}
             draw_label: {
+                fn get_color(self) -> vec4 {
+                    return mix(
+                        (COLOR_UP_6),
+                        (COLOR_UP_8),
+                        self.pressed
+                    )
+                }
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-                color: (COLOR_TEXT_H2)
+                color: (COLOR_UP_6)
+            }
+            draw_bg: {
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    return sdf.result
+                }
             }
             text: "Preset Name"
-        }
-
-        <Frame> {
-            walk: { width: Fill, height: Fit}
         }
 
         presetfavorite = <CheckBox> {
@@ -1426,7 +777,7 @@ PresetListEntry = <Frame> {
         share = <FishButton> {
             text: "Share"
             walk: {width: Fit, height: Fit}
-            // color: (COLOR_TEXT_H2)
+            // color: (COLOR_UP_6)
             draw_label: { text_style: {font_size: (FONT_SIZE_H2)} }
         }
     }
@@ -1435,7 +786,7 @@ PresetListEntry = <Frame> {
 
 PaginationButton = <FishButton> {
     text: "1"
-    walk: {width: 40, height: 40}
+    walk: {width: 40, height: 40, margin: {top: 20}}
     draw_label: { text_style: {font_size: (FONT_SIZE_H2)} }
 
     draw_bg: {
@@ -1451,14 +802,14 @@ PaginationButton = <FishButton> {
                 2.0
             )
             
-            sdf.fill(mix(#FFFFFF10, #xFFFFFF20, self.pressed));
+            sdf.fill(mix((COLOR_UP_2), (COLOR_UP_3), self.pressed));
             
             return sdf.result;
         }
     }
 }
 
-MOCKUP_pagination = <Frame> {
+Pagination = <Frame> {
     walk: { width: Fill, height: Fit, margin: {bottom: (SPACING_OS)}}
     layout: {flow: Right, align: {x: 0.5, y: 0.0}, spacing: 10 }
 
@@ -1508,7 +859,7 @@ ModePresetmanager = <Box> {
     layout: {flow: Down}
 
     <GradientY> {
-        draw_bg: {color: #x00000000, color2: #x00000040}
+        draw_bg: {color: (COLOR_DOWN_OFF), color2: (COLOR_DOWN_2)}
         walk: { width: Fill, height: 80 }
         layout: { flow: Right }
 
@@ -1529,16 +880,20 @@ ModePresetmanager = <Box> {
                 }
             }
 
-            modes = <Box> {
+            modes = <Frame> {
                 walk: { width: Fit }
+                layout: { spacing: 10, align: { x: 0.0, y: 1.0 }}
+
                 tab1 = <FishTab> {
                     label: "All",
+                    walk: { height: Fit, margin: 10 }
                     state: {selected = {default: on}},
-                    draw_label: {color_selected: (COLOR_MUSIC)}
+                    draw_label: {color_selected: (COLOR_UP_8)}
                 }
                 tab2 = <FishTab> {
                     label: "Favorites",
-                    draw_label: {color_selected: (COLOR_MUSIC)}
+                    walk: { height: Fit, margin: 10 }
+                    draw_label: {color_selected: (COLOR_UP_8)}
                 }
             }
         }
@@ -1546,12 +901,12 @@ ModePresetmanager = <Box> {
     }
 
     <PresetList> {}
-    <MOCKUP_pagination> {}
+    <Pagination> {}
 }
 
 // APP
 App = {{App}} {
-    window: {window: {inner_size: vec2(585, 1266)}, pass: {clear_color: #3}}
+    window: {window: {inner_size: vec2(585, 1266)}, pass: {clear_color: (COLOR_CLEAR)}}
     audio_graph: {
         root: <Mixer> {
             c1 = <Instrument> {
@@ -1566,13 +921,13 @@ App = {{App}} {
         layout: {padding: 0, align: {x: 0.0, y: 0.0}, spacing: 0., flow: Down}
 
         <GradientY> {
-            draw_bg: {color: #x08221D, color2: #x3F3769}
+            draw_bg: {color: (GRADIENT_A), color2: (GRADIENT_B)}
             layout: { flow: Down, spacing: (SPACING_BASE_PADDING) }
 
             os_header_placeholder = <Box> {
                 walk: { width: Fill, height: 50 }
                 layout: { flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20}
-                draw_bg: { color: #x00000020 }
+                draw_bg: { color: (COLOR_DOWN_1) }
             }
 
             <SequencerControls> {}
@@ -1586,7 +941,7 @@ App = {{App}} {
             menu = <Box> {
                 walk: { width: Fill, height: 150 }
                 layout: { flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20}
-                draw_bg: { color: #x00000040 }
+                draw_bg: { color: (COLOR_DOWN_2) }
 
                 modes = <Frame> {
                     tab1 = <FishTab> {
@@ -1594,19 +949,19 @@ App = {{App}} {
                         layout: {align: {x: 0.5, y: 0.5}}
                         label: "Sequence",
                         state: {selected = {default: on}},
-                        draw_label: {color_selected: (COLOR_MUSIC)}
+                        draw_label: {color_selected: (COLOR_UP_8)}
                     }
                     tab2 = <FishTab> {
                         walk: { width: Fill }
                         layout: {align: {x: 0.5, y: 0.5}}
                         label: "Play",
-                        draw_label: {color_selected: (COLOR_MUSIC)}
+                        draw_label: {color_selected: (COLOR_UP_8)}
                     }
                     tab3 = <FishTab> {
                         walk: { width: Fill }
                         layout: {align: {x: 0.5, y: 0.5}}
                         label: "Presets",
-                        draw_label: {color_selected: (COLOR_MUSIC)}
+                        draw_label: {color_selected: (COLOR_UP_8)}
                     }
                 }
             }
@@ -1619,252 +974,286 @@ main_app!(App);
 
 #[derive(Live)]
 pub struct App {
-ui: FrameRef,
-audio_graph: AudioGraph,
-window: DesktopWindow,
-#[rust] midi_input: MidiInput,
+    ui: FrameRef,
+    audio_graph: AudioGraph,
+    window: DesktopWindow,
+    #[rust] midi_input: MidiInput,
 }
 
 impl LiveHook for App {
-fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> Option<usize> {
-    //_nodes.debug_print(0,100);
-    None
-}
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> Option<usize> {
+        //_nodes.debug_print(0,100);
+        None
+    }
 }
 
 impl App {
-pub fn live_design(cx: &mut Cx) {
-    makepad_audio_graph::live_design(cx);
-    crate::ironfish::live_design(cx);
-    crate::sequencer::live_design(cx);
-}
-
-pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, actions: &WidgetActions) {
-    let mut db = db.borrow_cx(cx, &self.ui, actions);
-    // touch
-    data_to_widget!(db, touch.scale => touch.scale.slider);
-    data_to_widget!(db, touch.scale => touch.scale.slider);
-    data_to_widget!(db, touch.curve => touch.curve.slider);
-    data_to_widget!(db, touch.offset => touch.offset.slider);
-    data_to_widget!(db, filter1.touch_amount => touch.touchamount.slider);
-    
-    // sequencer
-    data_to_widget!(db, sequencer.playing => playpause.checkbox);
-    data_to_widget!(db, sequencer.bpm => speed.slider);
-    data_to_widget!(db, sequencer.rootnote => rootnote.dropdown);
-    data_to_widget!(db, sequencer.scale => scaletype.dropdown);
-    data_to_widget!(db, arp.enabled => arp.checkbox);
-    
-    // Mixer panel
-    data_to_widget!(db, osc_balance => balance.slider);
-    data_to_widget!(db, noise => noise.slider);
-    data_to_widget!(db, sub_osc => sub.slider);
-    data_to_widget!(db, portamento => porta.slider);
-    
-    // DelayFX Panel
-    data_to_widget!(db, delay.delaysend => delaysend.slider);
-    data_to_widget!(db, delay.delayfeedback => delayfeedback.slider);
-    
-    data_to_widget!(db, bitcrush.enable => crushenable.checkbox);
-    data_to_widget!(db, bitcrush.amount => crushamount.slider);
-    
-    data_to_widget!(db, delay.difference => delaydifference.slider);
-    data_to_widget!(db, delay.cross => delaycross.slider);
-    
-    // Chorus panel
-    data_to_widget!(db, chorus.mix => chorusmix.slider);
-    data_to_widget!(db, chorus.mindelay => chorusdelay.slider);
-    data_to_widget!(db, chorus.moddepth => chorusmod.slider);
-    data_to_widget!(db, chorus.rate => chorusrate.slider);
-    data_to_widget!(db, chorus.phasediff => chorusphase.slider);
-    data_to_widget!(db, chorus.feedback => chorusfeedback.slider);
-    
-    //LFO Panel
-    data_to_widget!(db, lfo.rate => rate.slider);
-    data_to_widget!(db, filter1.lfo_amount => lfoamount.slider);
-    data_to_widget!(db, lfo.synconkey => sync.checkbox);
-    
-    //Volume Envelope
-    data_to_widget!(db, volume_envelope.a => vol_env.attack.slider);
-    data_to_widget!(db, volume_envelope.h => vol_env.hold.slider);
-    data_to_widget!(db, volume_envelope.d => vol_env.decay.slider);
-    data_to_widget!(db, volume_envelope.s => vol_env.sustain.slider);
-    data_to_widget!(db, volume_envelope.r => vol_env.release.slider);
-    
-    //Mod Envelope
-    data_to_widget!(db, mod_envelope.a => mod_env.attack.slider);
-    data_to_widget!(db, mod_envelope.h => mod_env.hold.slider);
-    data_to_widget!(db, mod_envelope.d => mod_env.decay.slider);
-    data_to_widget!(db, mod_envelope.s => mod_env.sustain.slider);
-    data_to_widget!(db, mod_envelope.r => mod_env.release.slider);
-    data_to_widget!(db, filter1.envelope_amount => modamount.slider);
-    
-    // Filter panel
-    data_to_widget!(db, filter1.filter_type => filter_type.dropdown);
-    data_to_widget!(db, filter1.cutoff => cutoff.slider);
-    data_to_widget!(db, filter1.resonance => resonance.slider);
-    
-    // Osc1 panel
-    data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
-    data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
-    data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
-    data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
-    data_to_widget!(db, supersaw1.spread => osc1.hypersaw.spread.slider);
-    data_to_widget!(db, supersaw1.diffuse => osc1.hypersaw.diffuse.slider);
-    
-    data_to_widget!(db, osc1.osc_type => osc1.type.dropdown);
-    data_to_widget!(db, osc1.transpose => osc1.transpose.slider);
-    data_to_widget!(db, osc1.detune => osc1.detune.slider);
-    data_to_widget!(db, osc1.harmonic => osc1.harmonicshift.slider);
-    data_to_widget!(db, osc1.harmonicenv => osc1.harmonicenv.slider);
-    data_to_widget!(db, osc1.harmoniclfo => osc1.harmoniclfo.slider);
-    
-    // Osc2 panel
-    data_to_widget!(db, supersaw1.spread => osc2.supersaw.spread.slider);
-    data_to_widget!(db, supersaw1.diffuse => osc2.supersaw.diffuse.slider);
-    data_to_widget!(db, supersaw2.spread => osc2.supersaw.spread.slider);
-    data_to_widget!(db, supersaw2.diffuse => osc2.supersaw.diffuse.slider);
-    data_to_widget!(db, supersaw2.spread => osc2.hypersaw.spread.slider);
-    data_to_widget!(db, supersaw2.diffuse => osc2.hypersaw.diffuse.slider);
-    
-    data_to_widget!(db, osc2.osc_type => osc2.type.dropdown);
-    data_to_widget!(db, osc2.transpose => osc2.transpose.slider);
-    data_to_widget!(db, osc2.detune => osc2.detune.slider);
-    data_to_widget!(db, osc2.harmonic => osc2.harmonicshift.slider);
-    data_to_widget!(db, osc2.harmonicenv => osc2.harmonicenv.slider);
-    data_to_widget!(db, osc2.harmoniclfo => osc2.harmoniclfo.slider);
-    
-    // sequencer
-    data_to_widget!(db, sequencer.steps => sequencer);
-    
-    data_to_apply!(db, osc1.osc_type => osc1.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
-    data_to_apply!(db, osc2.osc_type => osc2.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
-    data_to_apply!(db, osc1.osc_type => osc1.hypersaw, visible => | v | v == id!(HyperSaw).to_enum());
-    data_to_apply!(db, osc2.osc_type => osc2.hypersaw, visible => | v | v == id!(HyperSaw).to_enum());
-    data_to_apply!(db, osc1.osc_type => osc1.harmonic, visible => | v | v == id!(HarmonicSeries).to_enum());
-    data_to_apply!(db, osc2.osc_type => osc2.harmonic, visible => | v | v == id!(HarmonicSeries).to_enum());
-    
-    data_to_apply!(db, mod_envelope.a => mod_env.display, draw_bg.attack => | v | v);
-    data_to_apply!(db, mod_envelope.h => mod_env.display, draw_bg.hold => | v | v);
-    data_to_apply!(db, mod_envelope.d => mod_env.display, draw_bg.decay => | v | v);
-    data_to_apply!(db, mod_envelope.s => mod_env.display, draw_bg.sustain => | v | v);
-    data_to_apply!(db, mod_envelope.r => mod_env.display, draw_bg.release => | v | v);
-    data_to_apply!(db, volume_envelope.a => vol_env.display, draw_bg.attack => | v | v);
-    data_to_apply!(db, volume_envelope.h => vol_env.display, draw_bg.hold => | v | v);
-    data_to_apply!(db, volume_envelope.d => vol_env.display, draw_bg.decay => | v | v);
-    data_to_apply!(db, volume_envelope.s => vol_env.display, draw_bg.sustain => | v | v);
-    data_to_apply!(db, volume_envelope.r => vol_env.display, draw_bg.release => | v | v);
-}
-
-pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-    
-    if let Event::Draw(event) = event {
-        return self.draw(&mut Cx2d::new(cx, event));
+    pub fn live_design(cx: &mut Cx) {
+        makepad_audio_widgets::live_design(cx);
+        makepad_audio_graph::live_design(cx);
+        makepad_synth_ironfish::live_design(cx);
+        crate::sequencer::live_design(cx);
     }
     
-    self.window.handle_event(cx, event);
-    
-    let ui = self.ui.clone();
-    let mut db = DataBinding::new();
-    
-    let actions = ui.handle_event(cx, event);
-    
-    if let Event::Construct = event {
-        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        db.to_widgets(ironfish.settings.live_read()); 
-        ui.get_piano(id!(piano)).set_key_focus(cx);
-        self.midi_input = cx.midi_input();
-        //self.midi_data = cx.midi_output_create_sender();
+    pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, actions: &WidgetActions) {
+        let mut db = db.borrow_cx(cx, &self.ui, actions);
+        // touch
+        // data_to_widget!(db, touch.scale => touch.scale.slider);
+        // data_to_widget!(db, touch.scale => touch.scale.slider);
+        // data_to_widget!(db, touch.curve => touch.curve.slider);
+        // data_to_widget!(db, touch.offset => touch.offset.slider);
+        // data_to_widget!(db, filter1.touch_amount => touch.touchamount.slider);
+        
+        // sequencer
+        data_to_widget!(db, sequencer.playing => playpause.checkbox);
+        data_to_widget!(db, sequencer.bpm => speed.slider);
+        data_to_widget!(db, sequencer.rootnote => rootnote.dropdown);
+        data_to_widget!(db, sequencer.scale => scaletype.dropdown);
+        data_to_widget!(db, arp.enabled => arp.checkbox);
+        
+        // Mixer panel
+        // data_to_widget!(db, osc_balance => balance.slider);
+        // data_to_widget!(db, noise => noise.slider);
+        // data_to_widget!(db, sub_osc => sub.slider);
+        // data_to_widget!(db, portamento => porta.slider);
+        
+        // DelayFX Panel
+        // data_to_widget!(db, delay.delaysend => delaysend.slider);
+        // data_to_widget!(db, delay.delayfeedback => delayfeedback.slider);
+        
+        // data_to_widget!(db, bitcrush.enable => crushenable.checkbox);
+        // data_to_widget!(db, bitcrush.amount => crushamount.slider);
+        
+        // data_to_widget!(db, delay.difference => delaydifference.slider);
+        // data_to_widget!(db, delay.cross => delaycross.slider);
+        
+        // Chorus panel
+        // data_to_widget!(db, chorus.mix => chorusmix.slider);
+        // data_to_widget!(db, chorus.mindelay => chorusdelay.slider);
+        // data_to_widget!(db, chorus.moddepth => chorusmod.slider);
+        // data_to_widget!(db, chorus.rate => chorusrate.slider);
+        // data_to_widget!(db, chorus.phasediff => chorusphase.slider);
+        // data_to_widget!(db, chorus.feedback => chorusfeedback.slider);
+        
+        //LFO Panel
+        // data_to_widget!(db, lfo.rate => rate.slider);
+        // data_to_widget!(db, filter1.lfo_amount => lfoamount.slider);
+        // data_to_widget!(db, lfo.synconkey => sync.checkbox);
+        
+        //Volume Envelope
+        // data_to_widget!(db, volume_envelope.a => vol_env.attack.slider);
+        // data_to_widget!(db, volume_envelope.h => vol_env.hold.slider);
+        // data_to_widget!(db, volume_envelope.d => vol_env.decay.slider);
+        // data_to_widget!(db, volume_envelope.s => vol_env.sustain.slider);
+        // data_to_widget!(db, volume_envelope.r => vol_env.release.slider);
+        
+        // //Mod Envelope
+        // data_to_widget!(db, mod_envelope.a => mod_env.attack.slider);
+        // data_to_widget!(db, mod_envelope.h => mod_env.hold.slider);
+        // data_to_widget!(db, mod_envelope.d => mod_env.decay.slider);
+        // data_to_widget!(db, mod_envelope.s => mod_env.sustain.slider);
+        // data_to_widget!(db, mod_envelope.r => mod_env.release.slider);
+        // data_to_widget!(db, filter1.envelope_amount => modamount.slider);
+        
+        // Filter panel
+        // data_to_widget!(db, filter1.filter_type => filter_type.dropdown);
+        // data_to_widget!(db, filter1.cutoff => cutoff.slider);
+        // data_to_widget!(db, filter1.resonance => resonance.slider);
+        
+        // Osc1 panel
+        // data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
+        // data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
+        // data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
+        // data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
+        // data_to_widget!(db, supersaw1.spread => osc1.hypersaw.spread.slider);
+        // data_to_widget!(db, supersaw1.diffuse => osc1.hypersaw.diffuse.slider);
+        
+        // data_to_widget!(db, osc1.osc_type => osc1.type.dropdown);
+        // data_to_widget!(db, osc1.transpose => osc1.transpose.slider);
+        // data_to_widget!(db, osc1.detune => osc1.detune.slider);
+        // data_to_widget!(db, osc1.harmonic => osc1.harmonicshift.slider);
+        // data_to_widget!(db, osc1.harmonicenv => osc1.harmonicenv.slider);
+        // data_to_widget!(db, osc1.harmoniclfo => osc1.harmoniclfo.slider);
+        
+        // // Osc2 panel
+        // data_to_widget!(db, supersaw1.spread => osc2.supersaw.spread.slider);
+        // data_to_widget!(db, supersaw1.diffuse => osc2.supersaw.diffuse.slider);
+        // data_to_widget!(db, supersaw2.spread => osc2.supersaw.spread.slider);
+        // data_to_widget!(db, supersaw2.diffuse => osc2.supersaw.diffuse.slider);
+        // data_to_widget!(db, supersaw2.spread => osc2.hypersaw.spread.slider);
+        // data_to_widget!(db, supersaw2.diffuse => osc2.hypersaw.diffuse.slider);
+        
+        // data_to_widget!(db, osc2.osc_type => osc2.type.dropdown);
+        // data_to_widget!(db, osc2.transpose => osc2.transpose.slider);
+        // data_to_widget!(db, osc2.detune => osc2.detune.slider);
+        // data_to_widget!(db, osc2.harmonic => osc2.harmonicshift.slider);
+        // data_to_widget!(db, osc2.harmonicenv => osc2.harmonicenv.slider);
+        // data_to_widget!(db, osc2.harmoniclfo => osc2.harmoniclfo.slider);
+        
+        // sequencer
+        data_to_widget!(db, sequencer.steps => sequencer);
+        
+        // data_to_apply!(db, osc1.osc_type => osc1.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
+        // data_to_apply!(db, osc2.osc_type => osc2.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
+        // data_to_apply!(db, osc1.osc_type => osc1.hypersaw, visible => | v | v == id!(HyperSaw).to_enum());
+        // data_to_apply!(db, osc2.osc_type => osc2.hypersaw, visible => | v | v == id!(HyperSaw).to_enum());
+        // data_to_apply!(db, osc1.osc_type => osc1.harmonic, visible => | v | v == id!(HarmonicSeries).to_enum());
+        // data_to_apply!(db, osc2.osc_type => osc2.harmonic, visible => | v | v == id!(HarmonicSeries).to_enum());
+        
+        // data_to_apply!(db, mod_envelope.a => mod_env.display, draw_bg.attack => | v | v); data_to_apply!(db, mod_envelope.h => mod_env.display, draw_bg.hold => | v | v);
+        // data_to_apply!(db, mod_envelope.d => mod_env.display, draw_bg.decay => | v | v);
+        // data_to_apply!(db, mod_envelope.s => mod_env.display, draw_bg.sustain => | v | v);
+        // data_to_apply!(db, mod_envelope.r => mod_env.display, draw_bg.release => | v | v);
+        // data_to_apply!(db, volume_envelope.a => vol_env.display, draw_bg.attack => | v | v);
+        // data_to_apply!(db, volume_envelope.h => vol_env.display, draw_bg.hold => | v | v);
+        // data_to_apply!(db, volume_envelope.d => vol_env.display, draw_bg.decay => | v | v);
+        // data_to_apply!(db, volume_envelope.s => vol_env.display, draw_bg.sustain => | v | v);
+        // data_to_apply!(db, volume_envelope.r => vol_env.display, draw_bg.release => | v | v);
     }
     
-    if let Event::MidiPorts(ports) = event{
-        println!("MidiPorts:\n{:?}", ports); 
-        cx.use_midi_inputs(&ports.all_inputs());
-    }
-    
-    if let Event::AudioDevices(devices) = event{
-        cx.use_audio_outputs(&devices.default_output());
-    }
-
-    ui.get_radio_group(&[
-        id!(modes.tab1),
-        // id!(modes.tab2),
-        // id!(modes.tab3),
-    ]).selected_to_visible(cx, &ui, &actions, &[
-        id!(application_pages.tab1_frame),
-        // id!(application_pages.tab2_frame),
-        // id!(application_pages.tab3_frame),
-    ]);
-    
-    
-    let display_audio = ui.get_display_audio(id!(display_audio));
-    
-    let mut buffers = 0;
-    self.audio_graph.handle_event_fn(cx, event, &mut | cx, action | {
-        match action {
-            AudioGraphAction::DisplayAudio {buffer, voice, active} => {
-                display_audio.process_buffer(cx, active, voice, buffer);
-                buffers += 1;
-            }
-            AudioGraphAction::VoiceOff {voice} => {
-                display_audio.voice_off(cx, voice);
-            }
-        };
-    });
-    
-    let piano = ui.get_piano(id!(piano));
-    
-    while let Some((_, data)) = self.midi_input.receive() {
-        self.audio_graph.send_midi_data(data);
-        if let Some(note) = data.decode().on_note() {
-            piano.set_note(cx, note.is_on, note.note_number)
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        
+        if let Event::Draw(event) = event {
+            return self.draw(&mut Cx2d::new(cx, event));
         }
-    }
-    
-    for note in piano.notes_played(&actions) {
-        self.audio_graph.send_midi_data(MidiNote {
-            channel: 0,
-            is_on: note.is_on,
-            note_number: note.note_number,
-            velocity: note.velocity
-        }.into());
-    }
-    
-    if ui.get_button(id!(panic)).clicked(&actions) {
-        cx.midi_reset();
-        self.audio_graph.all_notes_off();
-    }
+        
+        self.window.handle_event(cx, event);
+        
+        let ui = self.ui.clone();
+        let mut db = DataBinding::new();
+        
+        let actions = ui.handle_event(cx, event);
+        
+        if let Event::Construct = event {
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+            db.to_widgets(ironfish.settings.live_read());
+            ui.get_piano(id!(piano)).set_key_focus(cx);
+            self.midi_input = cx.midi_input();
+            //self.midi_data = cx.midi_output_create_sender();
+        }
+        
+        if let Event::MidiPorts(ports) = event {
+            println!("MidiPorts:\n{:?}", ports);
+            cx.use_midi_inputs(&ports.all_inputs());
+        }
+        
+        if let Event::AudioDevices(devices) = event {
+            cx.use_audio_outputs(&devices.default_output());
+        }
+        
+        ui.get_radio_group(&[
+            id!(modes.tab1),
+            // id!(modes.tab2),
+            // id!(modes.tab3),
+        ]).selected_to_visible(cx, &ui, &actions, &[
+            id!(application_pages.tab1_frame),
+            // id!(application_pages.tab2_frame),
+            // id!(application_pages.tab3_frame),
+        ]);
 
-    let sequencer = ui.get_sequencer(id!(sequencer));
-    // lets fetch and update the tick.
-    
-    if ui.get_button(id!(clear_grid)).clicked(&actions) {
-        sequencer.clear_grid(cx, &mut db);
+        
+        let display_audio = ui.get_display_audio(id!(display_audio));
+        
+        let mut buffers = 0;
+        self.audio_graph.handle_event_fn(cx, event, &mut | cx, action | {
+            match action {
+                AudioGraphAction::DisplayAudio {buffer, voice, active} => {
+                    display_audio.process_buffer(cx, active, voice, buffer);
+                    buffers += 1;
+                }
+                AudioGraphAction::VoiceOff {voice} => {
+                    display_audio.voice_off(cx, voice);
+                }
+            };
+        });
+        
+        let piano = ui.get_piano(id!(piano));
+        
+        while let Some((_, data)) = self.midi_input.receive() {
+            self.audio_graph.send_midi_data(data);
+            if let Some(note) = data.decode().on_note() {
+                piano.set_note(cx, note.is_on, note.note_number)
+            }
+        }
+        
+        for note in piano.notes_played(&actions) {
+            self.audio_graph.send_midi_data(MidiNote {
+                channel: 0,
+                is_on: note.is_on,
+                note_number: note.note_number,
+                velocity: note.velocity
+            }.into());
+        }
+        
+        if ui.get_button(id!(panic)).clicked(&actions) {
+            cx.midi_reset();
+            self.audio_graph.all_notes_off();
+        }
+        
+        let sequencer = ui.get_sequencer(id!(sequencer));
+        // lets fetch and update the tick.
+        
+        if ui.get_button(id!(clear_grid)).clicked(&actions) {
+            sequencer.clear_grid(cx, &mut db);
+        }
+        
+        if ui.get_button(id!(grid_down)).clicked(&actions) {
+            sequencer.grid_down(cx, &mut db);
+        }
+        
+        if ui.get_button(id!(grid_up)).clicked(&actions) {
+            sequencer.grid_up(cx, &mut db);
+        }
+        
+        self.data_bind(cx, &mut db, &actions);
+        if let Some(nodes) = db.from_widgets() {
+            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+            ironfish.settings.apply_over(cx, &nodes);
+        }
+        
     }
-    
-    if ui.get_button(id!(grid_down)).clicked(&actions) {
-        sequencer.grid_down(cx, &mut db);
-    }
-    
-    if ui.get_button(id!(grid_up)).clicked(&actions) {
-        sequencer.grid_up(cx, &mut db);
-    }
-
-    self.data_bind(cx, &mut db, &actions);
-    if let Some(nodes) = db.from_widgets() {
+    /*
+    pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        ironfish.settings.apply_over(cx, &nodes);
+        let file_name = format!("preset_{}.txt", index);
+        if save {
+            let nodes = ironfish.settings.live_read();
+            let data = nodes.to_cbor(0).unwrap();
+            let data = makepad_miniz::compress_to_vec(&data, 10);
+            let data = makepad_base64::base64_encode(&data, &makepad_base64::BASE64_URL_SAFE);
+            log!("Saving preset {}", file_name);
+            let mut file = File::create(&file_name).unwrap();
+            file.write_all(&data).unwrap();
+        }
+        else if let Ok(mut file) = File::open(&file_name) {
+            log!("Loading preset {}", file_name);
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).unwrap();
+            if let Ok(data) = makepad_base64::base64_decode(&data) {
+                if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
+                    let mut nodes = Vec::new();
+                    nodes.from_cbor(&data).unwrap();
+                    ironfish.settings.apply_over(cx, &nodes);
+                    //self.imgui.root_frame().bind_read(cx, &nodes);
+                }
+                else {
+                    log!("Error decompressing preset");
+                }
+            }
+            else {
+                log!("Error base64 decoding preset");
+            }
+        }
+    }*/
+    
+    
+    pub fn draw(&mut self, cx: &mut Cx2d) {
+        if self.window.begin(cx).is_not_redrawing() {
+            return;
+        }
+        
+        while self.ui.draw(cx).is_not_done() {};
+        
+        self.window.end(cx);
     }
-    
-}
-
-pub fn draw(&mut self, cx: &mut Cx2d) {
-    if self.window.begin(cx).is_not_redrawing() {
-        return;
-    }
-    
-    while self.ui.draw(cx).is_not_done() {};
-    
-    self.window.end(cx);
-}
 }
