@@ -17,7 +17,6 @@ use {
             DropEvent,
             TextCopyEvent,
             TimerEvent,
-            SignalEvent,
         },
     }
 };
@@ -47,6 +46,5 @@ pub enum CocoaEvent {
     KeyUp(KeyEvent),
     TextCopy(TextCopyEvent),
     Timer(TimerEvent),
-    Signal(SignalEvent),
     MenuCommand(MenuCommand),
 }

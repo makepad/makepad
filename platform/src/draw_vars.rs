@@ -24,7 +24,7 @@ use {
         area::Area,
         geometry::{GeometryFields},
         live_traits::*,
-        cx_draw_shaders::*
+        draw_shader::*
     },
 };
 
@@ -83,7 +83,7 @@ pub const fn shader_enum(i:u32)->u32{
 
 pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
-pub const DRAW_CALL_VAR_INSTANCES: usize = 16;
+pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
 #[derive(Default, Debug)]
 #[repr(C)]
@@ -311,7 +311,7 @@ impl DrawVars {
                     cx.draw_shaders.shaders.push(CxDrawShader {
                         class_prop: class_node.id,
                         type_name: shader_type_name,
-                        platform: None,
+                        os_shader_id: None,
                         mapping: mapping
                     });
                     // ok so. maybe we should fill the live_uniforms buffer?
@@ -338,9 +338,6 @@ impl DrawVars {
     
     pub fn update_area_with_self(&mut self, cx: &mut Cx, index: usize, nodes: &[LiveNode]) {
         if let Some(draw_shader) = self.draw_shader {
-            // ok now what.
-            // we could iterate our uniform and instance props
-            // call get_write_ref and write into it
             if let Some(inst) = self.area.valid_instance(cx) {
                 if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
                     return;
@@ -367,6 +364,7 @@ impl DrawVars {
                                     instances[input.offset + i + j * stride] = inst_slice[input.offset + i]
                                 }
                             }
+                            draw_call.instance_dirty = true;
                         }
                     }
                     for input in &sh.mapping.user_uniforms.inputs {
@@ -375,14 +373,47 @@ impl DrawVars {
                                 draw_call.user_uniforms[input.offset + i] = self.user_uniforms[input.offset + i]
                             }
                         }
+                        draw_call.uniforms_dirty = true;
                     }
                     node_iter = nodes.next_child(node_index);
                 }
                 // DONE!
-                
                 cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+            }
+        }
+    }
+    
+    pub fn update_rect(&mut self, cx: &mut Cx, rect:Rect) {
+        if let Some(draw_shader) = self.draw_shader {
+            if let Some(inst) = self.area.valid_instance(cx) {
+                if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
+                    return;
+                }
+                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                
+                let repeat = inst.instance_count;
+                let stride = sh.mapping.instances.total_slots;
+                let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
+                
+                for input in &sh.mapping.instances.inputs {
+                    if input.id == live_id!(rect_pos) {
+                        for j in 0..repeat {
+                            instances[input.offset + 0 + j * stride] = rect.pos.x as f32;
+                            instances[input.offset + 1 + j * stride] = rect.pos.y as f32;
+                        }
+                    }
+                    if input.id == live_id!(rect_size) {
+                        for j in 0..repeat {
+                            instances[input.offset + 0 + j * stride] = rect.size.x as f32;
+                            instances[input.offset + 1 + j * stride] = rect.size.y as f32;
+                        }
+                    }
+                }
                 draw_call.instance_dirty = true;
-                draw_call.uniforms_dirty = true;
+                cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
             }
         }
     }
@@ -510,6 +541,7 @@ impl DrawVars {
                 }
             }
             for input in &sh.mapping.var_instances.inputs {
+                
                 let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
                 let slots = input.slots;
                 if input.id == id {

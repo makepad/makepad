@@ -9,7 +9,7 @@ use {
         objc_block,
         objc_block_invoke,
         os::{
-            apple::frameworks::*,
+            apple::apple_sys::*,
             apple_util::{
                 nsstring_to_string,
                 str_to_nsstring,

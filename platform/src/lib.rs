@@ -6,7 +6,6 @@ mod live_prims;
 #[macro_use]
 mod cx;
 mod cx_api;
-mod cx_draw_shaders;
 
 pub mod live_traits;
 pub mod live_cx;
@@ -15,8 +14,13 @@ pub mod live_atomic;
 pub mod thread;
 pub mod audio;
 pub mod midi;
+pub mod video;
 
 mod draw_matrix;
+mod draw_shader; 
+mod draw_list;
+mod draw_vars;
+
 mod id_pool;
 mod event;
 mod area;
@@ -27,9 +31,7 @@ mod cursor;
 mod menu;
 mod state;
 mod gpu_info;
-mod draw_vars;
 mod geometry;
-mod draw_list;
 mod debug;
 mod component_map;
 
@@ -44,6 +46,9 @@ pub use makepad_wasm_bridge;
 #[cfg(target_os = "macos")]
 pub use makepad_objc_sys;
 
+#[cfg(target_os = "windows")]
+pub use makepad_windows as windows_crate; 
+ 
 pub use {
     makepad_shader_compiler,
     makepad_shader_compiler::makepad_derive_live,
@@ -128,13 +133,13 @@ pub use {
         menu::{
             MenuCommand,
         },
+        thread::Signal,
         event::{
             Margin,
             KeyCode,
             Event,
             Hit,
             DragHit,
-            Signal,
             Trigger,
             //MidiInputListEvent,
             WebSocket,
@@ -157,7 +162,6 @@ pub use {
             WindowMovedEvent,
             NextFrameEvent,
             TimerEvent,
-            SignalEvent,
             KeyEvent,
             KeyFocusEvent,
             TextInputEvent,
@@ -185,6 +189,7 @@ pub use {
         pass::{
             PassId,
             CxPassParent,
+            CxPassRect,
             Pass,
             PassClearColor,
             PassClearDepth

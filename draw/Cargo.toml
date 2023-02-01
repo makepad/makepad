@@ -14,6 +14,3 @@ makepad-platform = { path = "../platform", version = "0.3.0" }
 makepad-image-formats = { path = "./image_formats", version = "0.3.0" }
 makepad-vector = { path = "./vector", version = "0.3.0" }
 
-[features] 
-nightly = ["makepad-platform/nightly", "makepad-image-formats/nightly"]
-
