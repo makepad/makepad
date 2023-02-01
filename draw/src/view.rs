@@ -3,6 +3,7 @@ use {
         makepad_platform::*,
         nav::*,
         cx_2d::Cx2d,
+        turtle::Walk,
     }
 };
 
@@ -10,6 +11,7 @@ use {
 #[derive(Debug)]
 pub struct View { // draw info per UI element
     pub (crate) draw_list: DrawList,
+    pub (crate) dirty_check_rect: Rect,
 }
 
 impl LiveHook for View {}
@@ -17,6 +19,7 @@ impl LiveNew for View {
     fn new(cx: &mut Cx) -> Self {
         let draw_list = cx.draw_lists.alloc();
         Self {
+            dirty_check_rect: Default::default(),
             draw_list,
         }
     }
@@ -107,14 +110,14 @@ impl View {
     }
     
     pub fn begin_always(&mut self, cx: &mut Cx2d) {
-        self.begin_maybe(cx, true).expect_redraw();
+        self.begin_maybe(cx, None).expect_redraw();
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
-        self.begin_maybe(cx, false)
+    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
+        self.begin_maybe(cx, Some(walk))
     }
     
-    fn begin_maybe(&mut self, cx: &mut Cx2d, always_redraw: bool) -> ViewRedrawing {
+    fn begin_maybe(&mut self, cx: &mut Cx2d, cache_check: Option<Walk>) -> ViewRedrawing {
         
         // check if we have a pass id parent
         let pass_id = cx.pass_stack.last().unwrap().pass_id;
@@ -124,7 +127,7 @@ impl View {
         
         let codeflow_parent_id = cx.draw_list_stack.last().cloned();
         
-        let view_will_redraw = cx.view_will_redraw(self) || always_redraw;
+        let view_will_redraw = cache_check.is_none() || cx.view_will_redraw(self, cache_check.unwrap());
         
         let is_main_draw_list = if cx.passes[pass_id].main_draw_list_id.is_none() {
             cx.passes[pass_id].main_draw_list_id = Some(self.draw_list.id());
