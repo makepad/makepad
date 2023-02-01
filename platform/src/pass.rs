@@ -13,9 +13,10 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         id_pool::*,
+        area::Area,
         window::{
             WindowId,
-        },
+        }, 
         os::{
             CxOsPass,
         },
@@ -23,7 +24,7 @@ use {
             Cx,
         },
         draw_list::{
-            DrawListId
+            DrawListId 
         },
         live_traits::*,
         texture::{
@@ -122,6 +123,7 @@ impl LiveApply for Pass {
             }
             match nodes[index].id {
                 live_id!(clear_color) => cx.passes[self.pass_id()].clear_color = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                live_id!(dont_clear) => cx.passes[self.pass_id()].dont_clear = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 _=> {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
@@ -145,7 +147,7 @@ impl Pass {
         if pass_size.x < 1.0{pass_size.x = 1.0};
         if pass_size.y < 1.0{pass_size.y = 1.0};
         let cxpass = &mut cx.passes[self.pass_id()];
-        cxpass.pass_size = pass_size;
+        cxpass.pass_rect = Some(CxPassRect::Size(pass_size));
     }
     
     pub fn set_window_clear_color(&self, cx: &mut Cx, clear_color: Vec4) {
@@ -234,28 +236,36 @@ pub enum PassMatrixMode{
 }
 
 #[derive(Clone)]
+pub enum CxPassRect{
+    Area(Area),
+    Size(DVec2)
+}
+
+#[derive(Clone)]
 pub struct CxPass {
     pub debug: bool,
     pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<TextureId>,
     pub clear_depth: PassClearDepth,
+    pub dont_clear: bool,
     pub depth_init: f64,
     pub clear_color: Vec4,
     pub override_dpi_factor: Option<f64>,
     pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxPassParent,
     pub paint_dirty: bool,
-    pub pass_size: DVec2,
+    pub pass_rect: Option<CxPassRect>,
     pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
-    pub platform: CxOsPass,
+    pub os: CxOsPass,
 }
 
 impl Default for CxPass {
     fn default() -> Self {
         CxPass {
             debug: false,
+            dont_clear: false,
             matrix_mode: PassMatrixMode::Ortho,
             zbias_step: 0.001,
             pass_uniforms: PassUniforms::default(),
@@ -268,8 +278,8 @@ impl Default for CxPass {
             main_draw_list_id: None,
             parent: CxPassParent::None,
             paint_dirty: false,
-            pass_size: DVec2::default(),
-            platform: CxOsPass::default()
+            pass_rect: None,
+            os: CxOsPass::default()
         }
     }
 } 

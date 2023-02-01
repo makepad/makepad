@@ -203,7 +203,7 @@ impl InitialState {
                 | ('?', _, _)
                 | ('@', _, _)
                 | ('^', _, _)
-                | ('_', _, _)
+               // | ('_', _, _)
                 | ('|', _, _) => {
                 let id = cursor.id_from_1();
                  cursor.skip(1);

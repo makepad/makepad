@@ -8,6 +8,13 @@ use {
     }
 };
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum EventFlow{
+    Poll,
+    Wait,
+    Exit
+}
+
 impl Cx {
     
     pub fn desktop_load_dependencies(&mut self){

@@ -42,8 +42,14 @@ pub struct ClosureSiteInfo<'a> {
     pub call_ptr: FnPtr
 }
 
+pub enum StructConsType{
+    Paren,
+    Brace,
+    ConsFn
+}
+
 pub trait BackendWriter {
-    fn needs_cstyle_struct_cons(&self)->bool;
+    fn get_struct_cons_type(&self)->StructConsType;
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool;
     fn needs_unpack_for_matrix_multiplication(&self) -> bool;
     fn const_table_is_vec4(&self) -> bool;
@@ -94,19 +100,20 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
     if !backend_writer.use_cons_fn(&cons_name) {
         return
     }
-    
     backend_writer.write_ty_lit(string, ty_lit);
     write!(string, " {}(", cons_name).unwrap();
+    
     let mut sep = "";
     if param_tys.len() == 1 {
         backend_writer.write_var_decl(string, sep, false, false, &Ident(live_id!(x)), &param_tys[0]);
     } else {
         for (index, param_ty) in param_tys.iter().enumerate() {
-            write!(string, "{}", sep).unwrap();
+            //write!(string, "{}", sep).unwrap();
             backend_writer.write_var_decl(string, sep, false, false,&DisplaConstructorArg(index), param_ty);
             sep = ", ";
         }
     }
+    
     writeln!(string, ") {{").unwrap();
     write!(string, "    return ").unwrap();
     backend_writer.write_ty_lit(string, ty_lit);
@@ -171,7 +178,7 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
         }
     }
     writeln!(string, ");").unwrap();
-    writeln!(string, "}}").unwrap();
+    writeln!(string, "}}\n").unwrap();
 }
 
 impl<'a> BlockGenerator<'a> {
@@ -328,7 +335,7 @@ impl<'a> BlockGenerator<'a> {
                 self.generate_expr(expr);
                 write!(self.string, " - {}.0)<0.5)", match_item.enum_value.get().unwrap()).unwrap();
             }
-            else{
+            else {
                 write!(self.string, "if(").unwrap();
                 self.generate_expr(expr);
                 write!(self.string, " == {})", match_item.enum_value.get().unwrap()).unwrap();
@@ -773,9 +780,22 @@ impl<'a> ExprGenerator<'a> {
         args: &Vec<(Ident, Expr)>,
     ) {
         let struct_decl = self.shader_registry.structs.get(&struct_ptr).unwrap();
-        let (sep1, sep2) = if self.backend_writer.needs_cstyle_struct_cons() { ("(",")")}else{("{","}")};
-
-        write!(self.string, "{}{}", struct_ptr, sep1).unwrap();
+        
+        let term = match self.backend_writer.get_struct_cons_type(){
+            StructConsType::Brace=>{
+                write!(self.string, "{}{{", struct_ptr).unwrap();
+                "}"
+            }
+            StructConsType::Paren=>{
+                write!(self.string, "{}(", struct_ptr).unwrap();
+                ")"
+            }
+            StructConsType::ConsFn=>{
+                write!(self.string, "consfn_{}(", struct_ptr).unwrap();
+                ")"
+            }
+        };
+        
         for (index, field) in struct_decl.fields.iter().enumerate() {
             if index != 0 {
                 write!(self.string, ",").unwrap();
@@ -783,7 +803,7 @@ impl<'a> ExprGenerator<'a> {
             let arg = args.iter().find( | (ident, _) | field.ident == *ident).unwrap();
             self.generate_expr(&arg.1);
         }
-        write!(self.string, "{}", sep2).unwrap();
+        write!(self.string, "{}", term).unwrap();
     }
     
     fn generate_index_expr(&mut self, _span: TokenSpan, expr: &Expr, index_expr: &Expr) {

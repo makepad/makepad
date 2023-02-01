@@ -76,17 +76,16 @@ live_design!{
             draw_bg: {
                 shape: None
                 color: #5
-                radius: 2
+                radius: 2.0
             },
             layout: {
-                padding: 0,
+                padding:0,
                 align: {y: 0.}
             },
             walk: {
                 margin: {top: 3, right: 5}
             }
         }
-        
         state: {
             hover = {
                 default: off

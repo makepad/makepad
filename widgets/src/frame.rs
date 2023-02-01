@@ -12,20 +12,313 @@ use {
 
 live_design!{
     import crate::scroll_bars::ScrollBars;
-    
+    import makepad_draw::shader::std::*;
+    import makepad_draw::shader::draw_color::DrawColor;
     Frame = {{Frame}} {}
     
-    Solid = <Frame> {draw_bg: {shape: Solid}}
-    Rect = <Frame> {draw_bg: {shape: Rect}}
-    Box = <Frame> {draw_bg: {shape: Box}}
-    BoxX = <Frame> {draw_bg: {shape: BoxX}}
-    BoxY = <Frame> {draw_bg: {shape: BoxY}}
-    BoxAll = <Frame> {draw_bg: {shape: BoxAll}}
-    Circle = <Frame> {draw_bg: {shape: Circle}}
-    Hexagon = <Frame> {draw_bg: {shape: Hexagon}}
-    GradientX = <Frame> {draw_bg: {shape: Solid, fill: GradientX}}
-    GradientY = <Frame> {draw_bg: {shape: Solid, fill: GradientY}}
-    Image = <Frame> {draw_bg: {shape: Solid, fill: Image}}
+    Solid = <Frame> {show_bg: true, draw_bg: {
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+        
+        fn pixel(self) -> vec4 {
+            return Pal::premul(self.get_color())
+        }
+    }}
+    
+    Rect = <Frame> {show_bg: true, draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+        
+        fn get_border_color(self) -> vec4 {
+            return self.border_color
+        }
+        
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            sdf.rect(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0)
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result
+        }
+    }}
+    
+    Box = <Frame> {show_bg: true, draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        instance radius: 2.5
+        
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+        
+        fn get_border_color(self) -> vec4 {
+            return self.border_color
+        }
+        
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                max(1.0, self.radius)
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result;
+        }
+    }}
+    
+    BoxX = <Frame> {show_bg: true, draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        instance radius: vec2(2.5, 2.5)
+        
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+        
+        fn get_border_color(self) -> vec4 {
+            return self.border_color
+        }
+        
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box_x(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                self.radius.x,
+                self.radius.y
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result;
+        }
+    }}
+    
+    BoxY = <Frame> {show_bg: true, draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        instance radius: vec2(2.5, 2.5)
+        
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+        
+        fn get_border_color(self) -> vec4 {
+            return self.border_color
+        }
+        
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box_y(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                self.radius.x,
+                self.radius.y
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result;
+        }
+    }}
+    
+    BoxAll = <Frame> {show_bg: true, draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        instance radius: vec4(2.5, 2.5, 2.5, 2.5)
+        
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+        
+        fn get_border_color(self) -> vec4 {
+            return self.border_color
+        }
+        
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box_all(
+                self.inset.x + self.border_width,
+                self.inset.y + self.border_width,
+                self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                self.radius.x,
+                self.radius.y,
+                self.radius.z,
+                self.radius.w
+            )
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result;
+        }
+    }}
+    
+    Circle = <Frame> {show_bg: true, draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        instance radius: 5.0
+        
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+        
+        fn get_border_color(self) -> vec4 {
+            return self.border_color
+        }
+        
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            if self.radius.x > 0.0 {
+                sdf.circle(
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    self.radius.x
+                )
+            }
+            else {
+                sdf.circle(
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    min(
+                        (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
+                        (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
+                    )
+                )
+            }
+            sdf.fill_keep(self.get_color())
+            if self.border_width > 0.0 {
+                sdf.stroke(self.get_border_color(), self.border_width)
+            }
+            return sdf.result
+        }
+    }}
+    
+    Hexagon = <Frame> {show_bg: true, draw_bg: {
+        instance border_width: 0.0
+        instance border_color: #0000
+        instance inset: vec4(0.0, 0.0, 0.0, 0.0)
+        instance radius: 5
+        
+        fn get_color(self) -> vec4 {
+            return self.color
+        }
+        
+        fn get_border_color(self) -> vec4 {
+            return self.border_color
+        }
+        
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            if self.radius.x > 0.0 {
+                sdf.hexagon(
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    self.radius
+                )
+            }
+            else {
+                sdf.hexagon(
+                    self.rect_size.x * 0.5,
+                    self.rect_size.y * 0.5,
+                    min(
+                        (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
+                        (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
+                    )
+                )
+            }
+            sdf.fill_keep(color)
+            if self.border_width > 0.0 {
+                sdf.stroke(self.border_color, self.border_width)
+            }
+            return sdf.result
+        }
+    }}
+    
+    GradientX = <Frame> {show_bg: true, draw_bg: {
+        instance color2: #f00
+        fn get_color(self) -> vec4 {
+            return mix(self.color, self.color2, self.pos.x)
+        }
+        
+        fn pixel(self) -> vec4 {
+            return Pal::premul(self.get_color())
+        }
+    }}
+    
+    GradientY = <Frame> {show_bg: true, draw_bg: {
+        instance color2: #f00
+        fn get_color(self) -> vec4 {
+            return mix(self.color, self.color2, self.pos.y)
+        }
+        
+        fn pixel(self) -> vec4 {
+            return Pal::premul(self.get_color())
+        }
+    }}
+    
+    Image = <Frame> {show_bg: true, draw_bg: {
+        texture image: texture2d
+        instance image_scale: vec2(1.0, 1.0)
+        instance image_pan: vec2(0.0, 0.0)
+        fn get_color(self) -> vec4 {
+            return sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
+        }
+        
+        fn pixel(self) -> vec4 {
+            return Pal::premul(self.get_color())
+        }
+        
+        shape: Solid,
+        fill: Image
+    }}
+    
+    CachedFrame = <Frame> {
+        has_view: true,
+        use_cache: true,
+        draw_bg: {
+            texture image: texture2d
+            
+            fn pixel(self) -> vec4 {
+                return sample2d_rt(self.image, self.pos);
+            }
+            
+            shape: Solid,
+            fill: Image
+        }
+    }
+    
     UserDraw = <Frame> {user_draw: true}
     ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
@@ -35,7 +328,9 @@ live_design!{
 #[derive(Live)]
 #[live_design_fn(widget_factory!(Frame))]
 pub struct Frame { // draw info per UI element
-    draw_bg: DrawShape,
+    draw_bg: DrawColor,
+    
+    #[live(false)] show_bg: bool,
     
     pub layout: Layout,
     
@@ -45,6 +340,7 @@ pub struct Frame { // draw info per UI element
     
     image_texture: Texture,
     
+    use_cache: bool,
     has_view: bool,
     #[live(true)] visible: bool,
     user_draw: bool,
@@ -57,14 +353,21 @@ pub struct Frame { // draw info per UI element
     #[rust] scroll_bars_obj: Option<ScrollBars>,
     
     #[live(false)] design_mode: bool,
+    #[rust] view_size: Option<DVec2>,
     #[rust] area: Area,
     #[rust] pub view: Option<View>,
-    
+    #[rust] cache: Option<FrameTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] templates: ComponentMap<LiveId, (LivePtr, usize)>,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>
+}
+
+struct FrameTextureCache {
+    pass: Pass,
+    _depth_texture: Texture,
+    color_texture: Texture,
 }
 
 impl LiveHook for Frame {
@@ -180,7 +483,7 @@ impl FrameRef {
         WidgetDraw::done()
     }
     
-    pub fn set_visible(&mut self, visible: bool){
+    pub fn set_visible(&mut self, visible: bool) {
         if let Some(mut inner) = self.inner_mut() {
             inner.visible = visible
         }
@@ -212,12 +515,23 @@ impl Widget for Frame {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
-            scroll_bars.handle_main_event(cx, event, &mut | _, _ | {});
+            let mut redraw = false;
+            scroll_bars.handle_main_event(cx, event, &mut | _, _ | {
+                // lets invalidate all children
+                redraw = true;
+            });
+            if redraw {
+                cx.redraw_area_and_children(self.area);
+            }
         }
         
+        // ok so if a child is not visible
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
-                child.handle_widget_event_fn(cx, event,dispatch_action);
+                // if a child is not visible, we should 
+                if child.is_visible() || !event.requires_visibility(){
+                    child.handle_widget_event_fn(cx, event, dispatch_action);
+                }
             }
         }
         
@@ -236,6 +550,10 @@ impl Widget for Frame {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.handle_scroll_event(cx, event, &mut | _, _ | {});
         }
+    }
+    
+    fn is_visible(&self)->bool{
+        self.visible
     }
     
     fn get_walk(&self) -> Walk {
@@ -322,7 +640,7 @@ impl Widget for Frame {
                 }
                 if let Some((widget, store_count)) = self.find_cache.get(&hash) {
                     let now_count = widget.strong_count();
-                    if now_count >= *store_count{
+                    if now_count >= *store_count {
                         return WidgetResult::found(widget.clone())
                     }
                 }
@@ -335,14 +653,14 @@ impl Widget for Frame {
                             return WidgetResult::found(result)
                         }
                     }
-                    else{
+                    else {
                         return WidgetResult::found(child.clone());
                     }
                 }
                 for child in self.children.values_mut() {
                     if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
                         let store_count = result.strong_count();
-                        self.find_cache.insert(hash, (result.clone(),store_count));
+                        self.find_cache.insert(hash, (result.clone(), store_count));
                         return WidgetResult::found(result)
                     }
                 }
@@ -357,7 +675,7 @@ impl Widget for Frame {
                             return WidgetResult::found(result)
                         }
                     }
-                    else{
+                    else {
                         return WidgetResult::found(child.clone());
                     }
                 }
@@ -406,7 +724,17 @@ impl Frame {
         self.draw_walk(cx, self.get_walk())
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> WidgetDraw {
+    pub fn walk_from_previous_size(&self, walk:Walk)->Walk{
+        let view_size = self.view_size.unwrap_or(DVec2::default());
+        Walk {
+            abs_pos: walk.abs_pos,
+            width: if walk.width.is_fill(){walk.width}else{Size::Fixed(view_size.x)},
+            height: if walk.height.is_fill(){walk.height}else{Size::Fixed(view_size.y)},
+            margin: walk.margin
+        }
+    }
+     
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if !self.visible {
             return WidgetDraw::done()
         }
@@ -415,11 +743,46 @@ impl Frame {
             self.defer_walks.clear();
             
             if self.has_view {
-                if self.view.as_mut().unwrap().begin(cx).not_redrawing() {
-                    return WidgetDraw::done()
-                };
-                walk = Walk::default();
+                // ok so.. how do we render this to texture
+                if self.use_cache {
+                    let walk = self.walk_from_previous_size(walk);
+                    if !cx.view_will_redraw(self.view.as_mut().unwrap(), walk) {
+                        if let Some(cache) = &self.cache{
+                            self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
+                            let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
+                            let dpi = cx.current_dpi_factor();
+                            rect.size = (rect.size / dpi).floor()*dpi;
+                            self.draw_bg.draw_abs(cx, rect);
+                            self.area = self.draw_bg.area();
+                            cx.set_pass_area(&cache.pass, self.area);
+                        }
+                        return WidgetDraw::done()
+                    }
+                    // lets start a pass
+                    if self.cache.is_none() {
+                        self.cache = Some(FrameTextureCache {
+                            pass: Pass::new(cx),
+                            _depth_texture: Texture::new(cx),
+                            color_texture: Texture::new(cx)
+                        });
+                        let cache = self.cache.as_mut().unwrap();
+                        //cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
+                        cache.pass.add_color_texture(cx, &cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+                    }
+                    let cache = self.cache.as_mut().unwrap();
+                    cx.make_child_pass(&cache.pass); 
+                    cx.begin_pass(&cache.pass);
+                    self.view.as_mut().unwrap().begin_always(cx)
+                }
+                else{
+                    let walk = self.walk_from_previous_size(walk);
+                    if self.view.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
+                        cx.walk_turtle_with_area(&mut self.area, walk);
+                        return WidgetDraw::done()
+                    };
+                }
             }
+            
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
             let scroll = if let Some(scroll_bars) = &mut self.scroll_bars_obj {
@@ -430,8 +793,8 @@ impl Frame {
                 self.layout.scroll
             };
             
-            if self.draw_bg.shape != Shape::None {
-                if self.draw_bg.fill == Fill::Image {
+            if self.show_bg {
+                if self.image.as_ref().len() > 0 {
                     self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
                 }
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
@@ -439,6 +802,7 @@ impl Frame {
             else {
                 cx.begin_turtle(walk, self.layout.with_scroll(scroll));
             }
+            
             
             if self.user_draw {
                 return WidgetDraw::not_done(WidgetRef::empty())
@@ -478,7 +842,10 @@ impl Frame {
                     scroll_bars.draw_scroll_bars(cx);
                 };
                 
-                if self.draw_bg.shape != Shape::None {
+                if self.show_bg {
+                    if self.use_cache {
+                        panic!("dont use show_bg and use_cache at the same time");
+                    }
                     self.draw_bg.end(cx);
                     self.area = self.draw_bg.area();
                 }
@@ -490,9 +857,23 @@ impl Frame {
                     scroll_bars.set_area(self.area);
                     scroll_bars.end_nav_area(cx);
                 };
-                
+                 
                 if self.has_view {
+                    let mut rect = self.area.get_rect(cx);
+                    self.view_size = Some(rect.size);
+                    let dpi = cx.current_dpi_factor();
+                    rect.size = (rect.size / dpi).floor()*dpi;
                     self.view.as_mut().unwrap().end(cx);
+                    
+                    if self.use_cache {
+                        let cache = self.cache.as_mut().unwrap();
+                        cx.end_pass(&cache.pass);
+                        self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
+                        self.draw_bg.draw_abs(cx, rect);
+                        let area = self.draw_bg.area();
+                        let cache = self.cache.as_mut().unwrap();
+                        cx.set_pass_area(&cache.pass, area);
+                    }
                 }
                 self.draw_state.end();
                 break;

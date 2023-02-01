@@ -967,6 +967,7 @@ impl<'a> FnDefAnalyser<'a> {
                         message: format!("Variant not found on enum {}::{}", match_item.enum_name.0, match_item.enum_variant.0),
                     } .into())
                 }
+                
                 // lets see if we have the right name
                 self.scopes.push_scope();
                 self.analyse_block(&match_item.block) ?;
