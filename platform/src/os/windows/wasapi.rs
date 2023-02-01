@@ -434,12 +434,7 @@ impl WasapiOutput {
     pub fn release_buffer(&mut self, output: WasapiAudioOutputBuffer) {
         unsafe {
             let device_buffer = std::slice::from_raw_parts_mut(output.device_buffer, output.frame_count * output.channel_count);
-            for i in 0..output.channel_count {
-                let input_channel = output.audio_buffer.channel(i);
-                for j in 0..output.frame_count {
-                    device_buffer[j * output.channel_count + i] = input_channel[j];
-                }
-            }
+            output.audio_buffer.copy_to_interleaved(device_buffer);
             self.render_client.ReleaseBuffer(output.frame_count as u32, 0).unwrap();
             self.base.audio_buffer = Some(output.audio_buffer);
         }
@@ -485,17 +480,8 @@ impl WasapiInput {
                 }
                 
                 let device_buffer = std::slice::from_raw_parts_mut(pdata as *mut f32, frame_count as usize * self.base.channel_count);
-                
                 let mut audio_buffer = self.base.audio_buffer.take().unwrap();
-                
-                audio_buffer.resize(frame_count as usize, self.base.channel_count);
-                
-                for i in 0..self.base.channel_count {
-                    let output_channel = audio_buffer.channel_mut(i);
-                    for j in 0..frame_count as usize {
-                        output_channel[j] = device_buffer[j * self.base.channel_count + i]
-                    }
-                }
+                audio_buffer.copy_from_interleaved(self.base.channel_count, device_buffer);
                 
                 self.capture_client.ReleaseBuffer(frame_count).unwrap();
                 
