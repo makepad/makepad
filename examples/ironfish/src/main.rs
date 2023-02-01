@@ -120,7 +120,7 @@ live_design!{
         popup_menu: {
             menu_item: {
                 indent_width: 10.0
-                walk: {width: Fit, height: Fit}
+                walk: {width: 300, height: Fit}
                 layout: {
                     padding: {left: 15, top: 5, bottom: 5, right: 15},
                 }
