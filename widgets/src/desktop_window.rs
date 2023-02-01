@@ -12,8 +12,9 @@ live_design!{
     import crate::theme::*;
     registry Widget::*;
     import makepad_widgets::frame::*;
-    
-    DesktopWindow = {{DesktopWindow}} {
+    import makepad_draw::shader::std::*;
+   
+     DesktopWindow = {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
         var caption = "Makepad"
         ui: {
@@ -51,7 +52,33 @@ live_design!{
             }
             inner_view = <Frame> {user_draw: true}
         }
-        
+        mouse_cursor_size: vec2(20, 20),
+        draw_cursor: {
+            instance border_width: 1.5
+            instance color: #000
+            instance border_color: #fff
+            
+            fn get_color(self) -> vec4 {
+                return self.color
+            }
+            
+            fn get_border_color(self) -> vec4 {
+                return self.border_color
+            }
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.move_to(1.0,1.0);
+                sdf.line_to(self.rect_size.x-1.0, self.rect_size.y*0.5)
+                sdf.line_to(self.rect_size.x*0.5, self.rect_size.y-1.0)
+                sdf.close_path();
+                sdf.fill_keep(self.get_color())
+                if self.border_width > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_width)
+                }
+                return sdf.result
+            }
+        }
         window: {
             inner_size: vec2(1024, 768)
         }
@@ -61,6 +88,11 @@ live_design!{
 #[derive(Live)]
 pub struct DesktopWindow {
     #[rust] pub caption_size: DVec2,
+    last_mouse_pos: DVec2,
+    mouse_cursor_size: DVec2,
+    
+    cursor_view: View,
+    draw_cursor: DrawQuad,
     
     debug_view: DebugView,
     nav_control: NavControl,
@@ -97,11 +129,14 @@ impl LiveHook for DesktopWindow {
             self.ui.get_frame(id!(web_xr)).set_visible(true);
             log!("VR IS SUPPORTED");
         }
-        if let OsType::MsWindows = cx.platform_type() {
+        if let OsType::Windows = cx.platform_type() {
             self.ui.get_frame(id!(caption_bar)).set_visible(true);
             self.ui.get_frame(id!(windows_buttons)).set_visible(true);
         }
-        if let OsType::Linux{..} = cx.platform_type(){
+        if let OsType::LinuxDirect = cx.platform_type() {
+            self.ui.get_frame(id!(caption_bar)).set_visible(false);
+        }
+        if let OsType::LinuxWindow {custom_window_chrome: false} = cx.platform_type() {
             self.ui.get_frame(id!(caption_bar)).set_visible(false);
         }
     }
@@ -211,10 +246,20 @@ impl DesktopWindow {
         if is_for_other_window {
             return dispatch_action(cx, DesktopWindowEvent::EventForOtherWindow)
         }
+        if let Event::MouseMove(ev) = event {
+            if let OsType::LinuxDirect = cx.platform_type() {
+                // ok move our mouse cursor
+                self.last_mouse_pos = ev.abs;
+                self.draw_cursor.update_abs(cx, Rect {
+                    pos: ev.abs,
+                    size: self.mouse_cursor_size
+                })
+            }
+        }
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
-        if !cx.view_will_redraw(&self.main_view) {
+        if !cx.view_will_redraw(&mut self.main_view, Walk::default()) {
             return ViewRedrawing::no()
         }
         
@@ -240,8 +285,17 @@ impl DesktopWindow {
         while self.ui.draw(cx).is_not_done() {}
         self.debug_view.draw(cx);
         
+        // lets draw our cursor
+        if let OsType::LinuxDirect = cx.platform_type() {
+            self.cursor_view.begin_overlay_last(cx);
+            self.draw_cursor.draw_abs(cx, Rect {
+                pos: self.last_mouse_pos,
+                size: self.mouse_cursor_size
+            });
+            self.cursor_view.end(cx);
+        }
+        
         self.overlay.end(cx);
-
         cx.end_overlay_turtle();
         
         self.main_view.end(cx);

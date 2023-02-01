@@ -6,13 +6,14 @@ use {
             MouseMoveEvent,
             ScrollEvent,
             KeyEvent,
+            TextInputEvent,
             TimerEvent,
         },
     }
 };
 
 #[derive(Debug)]
-pub enum KmsEvent {
+pub enum DirectEvent {
     Paint,
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),
@@ -20,5 +21,6 @@ pub enum KmsEvent {
     Scroll(ScrollEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
+    TextInput(TextInputEvent),
     Timer(TimerEvent),
 }

@@ -225,7 +225,7 @@ impl Cx {
                     size: (rect.size / dpi).floor() * dpi
                 })
             }
-            Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size:(size / dpi).floor() * dpi}),
+            Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size: (size / dpi).floor() * dpi}),
             None => None
         } 
     }

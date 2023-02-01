@@ -2,6 +2,9 @@
 use {
     std::sync::{Arc, Mutex, mpsc},
     std::ffi::CStr,
+    std::os::raw::{
+        c_uint,
+    },
     super::{
         alsa_sys::*,
         alsa_audio::AlsaError,
@@ -12,7 +15,7 @@ use {
         thread::Signal,
     }
 };
-
+ 
 
 #[derive(Clone)]
 pub struct OsMidiOutput(pub (crate) Arc<Mutex<AlsaMidiAccess >>);
@@ -65,15 +68,15 @@ struct AlsaClient {
     out_port_id: i32,
 }
 
-const kRequiredInputPortCaps: ::std::os::raw::c_uint =
+const kRequiredInputPortCaps: c_uint =
 SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ;
-const kRequiredOutputPortCaps: ::std::os::raw::c_uint =
+const kRequiredOutputPortCaps: c_uint =
 SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_SUBS_WRITE;
-const kCreateOutputPortCaps: ::std::os::raw::c_uint =
+const kCreateOutputPortCaps: c_uint =
 SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_NO_EXPORT;
-const kCreateInputPortCaps: ::std::os::raw::c_uint =
+const kCreateInputPortCaps: c_uint =
 SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_NO_EXPORT;
-const kCreatePortType: ::std::os::raw::c_uint =
+const kCreatePortType: c_uint =
 SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION;
 
 #[derive(Clone)]

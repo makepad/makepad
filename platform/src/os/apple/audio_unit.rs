@@ -1,4 +1,5 @@
 use {
+    std::collections::HashSet,
     std::sync::{Arc, Mutex},
     crate::{
         makepad_live_id::*,
@@ -19,10 +20,11 @@ use {
 pub struct AudioUnitAccess {
     pub change_signal: Signal,
     pub device_descs: Vec<CoreAudioDeviceDesc>,
-    pub audio_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, AudioBuffer) -> AudioBuffer + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
-    pub audio_output_cb: [Arc<Mutex<Option<Box<dyn FnMut(AudioInfo, &mut AudioBuffer) + Send + 'static >> > >;MAX_AUDIO_DEVICE_INDEX],
+    pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >;MAX_AUDIO_DEVICE_INDEX],
+    pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >;MAX_AUDIO_DEVICE_INDEX],
     pub audio_inputs: Arc<Mutex<Vec<RunningAudioUnit >> >,
-    pub audio_outputs: Arc<Mutex<Vec<RunningAudioUnit >> >
+    pub audio_outputs: Arc<Mutex<Vec<RunningAudioUnit >> >,
+    failed_devices: Arc<Mutex<HashSet<AudioDeviceId>>>,
 }
 
 #[derive(Debug)]
@@ -45,6 +47,7 @@ impl AudioUnitAccess {
     pub fn new(change_signal:Signal) -> Arc<Mutex<Self>> {
         Self::observe_route_changes(change_signal.clone());
         Arc::new(Mutex::new(Self{
+            failed_devices: Default::default(),
             change_signal,
             device_descs: Default::default(),
             audio_input_cb: Default::default(),
@@ -101,7 +104,8 @@ impl AudioUnitAccess {
             let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Input)[0];
             let audio_inputs = self.audio_inputs.clone();
             let audio_input_cb = self.audio_input_cb[index].clone();
-            
+            let failed_devices = self.failed_devices.clone();
+            let change_signal = self.change_signal.clone();
             self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move | result | {
                 let mut audio_inputs = audio_inputs.lock().unwrap();
                 match result {
@@ -121,6 +125,8 @@ impl AudioUnitAccess {
                         running.audio_unit = Some(audio_unit);
                     }
                     Err(err) => {
+                        failed_devices.lock().unwrap().insert(device_id);
+                        change_signal.set();
                         audio_inputs.retain( | v | v.device_id != device_id);
                         error!("spawn_audio_output Error {:?}", err)
                     }
@@ -168,6 +174,8 @@ impl AudioUnitAccess {
             let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Output)[0];
             let audio_outputs = self.audio_outputs.clone();
             let audio_output_cb = self.audio_output_cb[index].clone();
+            let failed_devices = self.failed_devices.clone();
+            let change_signal = self.change_signal.clone();
             self.new_audio_io(self.change_signal.clone(), unit_info, device_id, move | result | {
                 let mut audio_inputs = audio_outputs.lock().unwrap();
                 match result {
@@ -186,6 +194,8 @@ impl AudioUnitAccess {
                         running.audio_unit = Some(audio_unit);
                     }
                     Err(err) => {
+                        failed_devices.lock().unwrap().insert(device_id);
+                        change_signal.set();
                         audio_inputs.retain( | v | v.device_id != device_id);
                         error!("spawn_audio_output Error {:?}", err)
                     }
@@ -358,6 +368,7 @@ impl AudioUnitAccess {
                 self.device_descs.push(CoreAudioDeviceDesc {
                     core_device_id,
                     desc: AudioDeviceDesc {
+                        has_failed: self.failed_devices.lock().unwrap().contains(&device_id),
                         device_id,
                         device_type: AudioDeviceType::Input,
                         channels: input_channels,
@@ -371,6 +382,7 @@ impl AudioUnitAccess {
                 self.device_descs.push(CoreAudioDeviceDesc {
                     core_device_id,
                     desc: AudioDeviceDesc {
+                        has_failed: self.failed_devices.lock().unwrap().contains(&device_id),
                         device_id,
                         device_type: AudioDeviceType::Output,
                         channels: input_channels,
