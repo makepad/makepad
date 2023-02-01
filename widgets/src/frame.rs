@@ -366,7 +366,7 @@ pub struct Frame { // draw info per UI element
 
 struct FrameTextureCache {
     pass: Pass,
-    depth_texture: Texture,
+    _depth_texture: Texture,
     color_texture: Texture,
 }
 
@@ -525,9 +525,13 @@ impl Widget for Frame {
             }
         }
         
+        // ok so if a child is not visible
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
-                child.handle_widget_event_fn(cx, event, dispatch_action);
+                // if a child is not visible, we should 
+                if child.is_visible() || !event.requires_visibility(){
+                    child.handle_widget_event_fn(cx, event, dispatch_action);
+                }
             }
         }
         
@@ -546,6 +550,10 @@ impl Widget for Frame {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.handle_scroll_event(cx, event, &mut | _, _ | {});
         }
+    }
+    
+    fn is_visible(&self)->bool{
+        self.visible
     }
     
     fn get_walk(&self) -> Walk {
@@ -717,7 +725,7 @@ impl Frame {
     }
     
     pub fn walk_from_previous_size(&self, walk:Walk)->Walk{
-        let view_size = self.view_size.unwrap();
+        let view_size = self.view_size.unwrap_or(DVec2::default());
         Walk {
             abs_pos: walk.abs_pos,
             width: if walk.width.is_fill(){walk.width}else{Size::Fixed(view_size.x)},
@@ -737,10 +745,10 @@ impl Frame {
             if self.has_view {
                 // ok so.. how do we render this to texture
                 if self.use_cache {
-                    if !cx.view_will_redraw(self.view.as_ref().unwrap()) {
+                    let walk = self.walk_from_previous_size(walk);
+                    if !cx.view_will_redraw(self.view.as_mut().unwrap(), walk) {
                         if let Some(cache) = &self.cache{
                             self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
-                            let walk = self.walk_from_previous_size(walk);
                             let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
                             let dpi = cx.current_dpi_factor();
                             rect.size = (rect.size / dpi).floor()*dpi;
@@ -754,23 +762,25 @@ impl Frame {
                     if self.cache.is_none() {
                         self.cache = Some(FrameTextureCache {
                             pass: Pass::new(cx),
-                            depth_texture: Texture::new(cx),
+                            _depth_texture: Texture::new(cx),
                             color_texture: Texture::new(cx)
                         });
                         let cache = self.cache.as_mut().unwrap();
-                        cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
+                        //cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
                         cache.pass.add_color_texture(cx, &cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
                     }
                     let cache = self.cache.as_mut().unwrap();
                     cx.make_child_pass(&cache.pass); 
                     cx.begin_pass(&cache.pass);
+                    self.view.as_mut().unwrap().begin_always(cx)
                 }
-                
-                if self.view.as_mut().unwrap().begin(cx).is_not_redrawing() {
+                else{
                     let walk = self.walk_from_previous_size(walk);
-                    cx.walk_turtle_with_area(&mut self.area, walk);
-                    return WidgetDraw::done()
-                };
+                    if self.view.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
+                        cx.walk_turtle_with_area(&mut self.area, walk);
+                        return WidgetDraw::done()
+                    };
+                }
             }
             
             
@@ -854,6 +864,7 @@ impl Frame {
                     let dpi = cx.current_dpi_factor();
                     rect.size = (rect.size / dpi).floor()*dpi;
                     self.view.as_mut().unwrap().end(cx);
+                    
                     if self.use_cache {
                         let cache = self.cache.as_mut().unwrap();
                         cx.end_pass(&cache.pass);

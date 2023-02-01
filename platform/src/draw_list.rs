@@ -265,23 +265,10 @@ pub struct CxDrawList {
     pub redraw_id: u64,
     pub pass_id: Option<PassId>,
     
-    //pub locked_view_transform: bool,
-
-    // scrolling
-    //pub no_v_scroll: bool, // this means we
-    //pub no_h_scroll: bool,
-    //pub parent_scroll: Vec2,
-    //pub unsnapped_scroll: Vec2,
-    //pub snapped_scroll: Vec2,
-    
     pub draw_items: CxDrawItems,
     
     pub draw_list_uniforms: CxDrawListUniforms,
     pub os: CxOsView,
-    
-    //pub rect: Rect,
-    //pub draw_clip: (Vec2,Vec2),
-    //pub unclipped: bool,
     pub rect_areas: Vec<CxRectArea>,
 }
 
@@ -371,8 +358,37 @@ impl CxDrawList {
         // see if we need to add a new one
         self.draw_items.push_item(redraw_id, CxDrawKind::SubList(sub_list_id));
     }
+    
+    pub fn store_sub_list_last(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
+        // use an empty slot if we have them to insert our subview
+        let len = self.draw_items.len();
+        for i in 0..len{
+            let item = &mut self.draw_items[i];
+            if let Some(id) = item.kind.sub_list(){
+                if id == sub_list_id{
+                    item.kind = CxDrawKind::Empty;
+                    break
+                }
+            }
+        }
+        if len > 0{
+            let item = &mut self.draw_items[len - 1];
+            if item.kind.is_empty(){
+                item.redraw_id = redraw_id;
+                item.kind = CxDrawKind::SubList(sub_list_id);
+                return
+            }
+            if let CxDrawKind::SubList(id) = item.kind{
+                if id == sub_list_id{
+                    item.redraw_id = redraw_id;
+                    return
+                }
+            }
+        }
+        self.append_sub_list(redraw_id, sub_list_id);
+    }
 
-    pub fn insert_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
+    pub fn store_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
         // use an empty slot if we have them to insert our subview
         for i in 0..self.draw_items.len(){
             let item = &mut self.draw_items[i];
@@ -393,7 +409,7 @@ impl CxDrawList {
         self.append_sub_list(redraw_id, sub_list_id);
     }
     
-    pub fn remove_sub_list(&mut self, sub_list_id: DrawListId) {
+    pub fn clear_sub_list(&mut self, sub_list_id: DrawListId) {
         // set our subview to empty
         for i in 0..self.draw_items.len(){
             let item = &mut self.draw_items[i];

@@ -40,7 +40,8 @@ impl SelectTimers {
         let mut fds = mem::MaybeUninit::uninit();
         unsafe {
             libc_sys::FD_ZERO(fds.as_mut_ptr());
-            libc_sys::FD_SET(fd, fds.as_mut_ptr());
+            libc_sys::FD_SET(0, fds.as_mut_ptr());
+            libc_sys::FD_SET(fd, fds.as_mut_ptr()); 
         }
         //libc_sys::FD_SET(self.signal_fds[0], fds.as_mut_ptr());
         // If there are any timers, we set the timeout for select to the `delta_timeout`
@@ -54,8 +55,8 @@ impl SelectTimers {
                 // `delta_timeout` 1000000.0.
                 tv_usec: (timer.delta_timeout.fract() * 1000000.0) as libc_sys::time_t,
             })
-        }
-        else {
+        }  
+        else { 
             None
         };
         let _nfds = unsafe {libc_sys::select(
@@ -64,7 +65,8 @@ impl SelectTimers {
             ptr::null_mut(),
             ptr::null_mut(),
             if let Some(mut timeout) = timeout {&mut timeout} else {ptr::null_mut()}
-        )}; 
+        )};  
+       // println!("RETURNED!");
     }
     
     pub fn time_now(&self) -> f64 {

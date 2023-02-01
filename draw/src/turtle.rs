@@ -371,7 +371,7 @@ impl<'a> Cx2d<'a> {
                 size: dvec2(w.fixed_or_zero(), h.fixed_or_zero())
             }
         }
-        let mut rect = self.walk_turtle_internal(Walk {width: w, height: h, ..turtle.walk}, turtle.align_start, true);
+        let mut rect = self.walk_turtle_move(Walk {width: w, height: h, ..turtle.walk}, turtle.align_start);
         if let Some(shift) = turtle.shift {
             rect.pos += shift;
         }
@@ -379,39 +379,39 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn walk_turtle(&mut self, walk: Walk) -> Rect {
-        self.walk_turtle_internal(walk, self.align_list.len(), true)
+        self.walk_turtle_move(walk, self.align_list.len())
     }
     
     pub fn walk_turtle_with_area(&mut self, area: &mut Area, walk: Walk) -> Rect {
-        let rect = self.walk_turtle_internal(walk, self.align_list.len(), true);
+        let rect = self.walk_turtle_move(walk, self.align_list.len());
         self.add_aligned_rect_area(area, rect, self.turtle().draw_clip());
         rect
     }
     
     pub fn walk_turtle_with_align(&mut self, walk: Walk, align_start: usize) -> Rect {
-        self.walk_turtle_internal(walk, align_start, true)
+        self.walk_turtle_move(walk, align_start)
     }
     
-    pub fn peek_walk_turtle(&mut self, walk: Walk) -> Rect {
-        self.walk_turtle_internal(walk, self.align_list.len(), false)
+    pub fn peek_walk_turtle(&self, walk: Walk) -> Rect {
+        self.walk_turtle_peek(walk)
     }
     
     pub fn walk_turtle_would_be_visible(&mut self, walk: Walk) -> bool {
-        let rect = self.walk_turtle_internal(walk, self.align_list.len(), false);
+        let rect = self.walk_turtle_peek(walk);
         self.turtle().rect_is_visible(rect)
     }
     
-    pub fn peek_walk_pos(&mut self, walk: Walk) -> DVec2 {
+    pub fn peek_walk_pos(&self, walk: Walk) -> DVec2 {
         if let Some(pos) = walk.abs_pos {
             pos + walk.margin.left_top()
         }
         else {
-            let turtle = self.turtles.last_mut().unwrap();
+            let turtle = self.turtles.last().unwrap();
             turtle.pos + walk.margin.left_top()
         }
     }
     
-    fn walk_turtle_internal(&mut self, walk: Walk, align_start: usize, actually_move: bool) -> Rect {
+     fn walk_turtle_move(&mut self, walk: Walk, align_start: usize) -> Rect {
         
         let turtle = self.turtles.last_mut().unwrap();
         let size = dvec2(
@@ -420,61 +420,78 @@ impl<'a> Cx2d<'a> {
         );
         
         if let Some(pos) = walk.abs_pos {
-            if actually_move {
-                self.turtle_walks.push(TurtleWalk {
-                    align_start,
-                    defer_index: 0,
-                    rect: Rect {pos, size: size + walk.margin.size()}
-                });
-                
-                match turtle.layout.flow {
-                    Flow::Right=>turtle.update_height_max(pos.y, size.y + walk.margin.size().y),
-                    Flow::Down=>turtle.update_width_max(pos.x, size.x + walk.margin.size().x),
-                    _=>()
-                }
+            self.turtle_walks.push(TurtleWalk {
+                align_start,
+                defer_index: 0,
+                rect: Rect {pos, size: size + walk.margin.size()}
+            });
+            
+            match turtle.layout.flow {
+                Flow::Right=>turtle.update_height_max(pos.y, size.y + walk.margin.size().y),
+                Flow::Down=>turtle.update_width_max(pos.x, size.x + walk.margin.size().x),
+                _=>()
             }
             Rect {pos: pos + walk.margin.left_top(), size}
         }
         else {
             let spacing = turtle.child_spacing(self.turtle_walks.len());
             let pos = turtle.pos;
-            if actually_move {
-                let margin_size = walk.margin.size();
-                match turtle.layout.flow {
-                    Flow::Right => {
-                        turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
-                        if size.x < 0.0 {
-                            turtle.update_width_min(turtle.pos.x, 0.0);
-                            turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
-                        }
-                        else {
-                            turtle.update_width_max(turtle.pos.x, 0.0);
-                            turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
-                        }
-                    },
-                    Flow::Down => {
-                        turtle.pos.y = pos.y + size.y + margin_size.y + spacing.y;
-                        if size.y < 0.0 {
-                            turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
-                            turtle.update_height_min(turtle.pos.y,0.0);
-                        }
-                        else {
-                            turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
-                            turtle.update_height_max(turtle.pos.y,0.0);
-                        }
-                    },
-                    Flow::Overlay => { // do not walk
-                        turtle.update_width_max(turtle.pos.x, size.x);
-                        turtle.update_height_max(turtle.pos.y,size.y);
+        
+            let margin_size = walk.margin.size();
+            match turtle.layout.flow {
+                Flow::Right => {
+                    turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
+                    if size.x < 0.0 {
+                        turtle.update_width_min(turtle.pos.x, 0.0);
+                        turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
                     }
-                };
-                
-                self.turtle_walks.push(TurtleWalk {
-                    align_start,
-                    defer_index: turtle.defer_count,
-                    rect: Rect {pos, size: size + margin_size}
-                });
-            }
+                    else {
+                        turtle.update_width_max(turtle.pos.x, 0.0);
+                        turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
+                    }
+                },
+                Flow::Down => {
+                    turtle.pos.y = pos.y + size.y + margin_size.y + spacing.y;
+                    if size.y < 0.0 {
+                        turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
+                        turtle.update_height_min(turtle.pos.y,0.0);
+                    }
+                    else {
+                        turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
+                        turtle.update_height_max(turtle.pos.y,0.0);
+                    }
+                },
+                Flow::Overlay => { // do not walk
+                    turtle.update_width_max(turtle.pos.x, size.x);
+                    turtle.update_height_max(turtle.pos.y,size.y);
+                }
+            };
+            
+            self.turtle_walks.push(TurtleWalk {
+                align_start,
+                defer_index: turtle.defer_count,
+                rect: Rect {pos, size: size + margin_size}
+            });
+            Rect {pos: pos + walk.margin.left_top() + spacing, size}
+        }
+    }
+    
+    fn walk_turtle_peek(&self, walk: Walk) -> Rect {
+        if self.turtles.len() == 0{
+            return Rect::default()
+        }
+        let turtle = self.turtles.last().unwrap();
+        let size = dvec2(
+            turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
+            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
+        );
+        
+        if let Some(pos) = walk.abs_pos {
+            Rect {pos: pos + walk.margin.left_top(), size}
+        }
+        else {
+            let spacing = turtle.child_spacing(self.turtle_walks.len());
+            let pos = turtle.pos;
             Rect {pos: pos + walk.margin.left_top() + spacing, size}
         }
     }

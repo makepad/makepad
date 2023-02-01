@@ -121,7 +121,7 @@ live_design!{
         popup_menu: {
             menu_item: {
                 indent_width: 10.0
-                walk: {width: Fit, height: Fit}
+                walk: {width: 300, height: Fit}
                 layout: {
                     padding: {left: 15, top: 5, bottom: 5, right: 15},
                 }
@@ -1483,11 +1483,12 @@ impl App {
         }
         
         if let Event::MidiPorts(ports) = event {
-            println!("MidiPorts:\n{:?}", ports);
+            //println!("{}", ports);
             cx.use_midi_inputs(&ports.all_inputs());
         }
-        
+         
         if let Event::AudioDevices(devices) = event {
+            println!("{}", devices);  
             cx.use_audio_outputs(&devices.default_output());
         }
         

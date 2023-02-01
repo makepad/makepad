@@ -103,6 +103,19 @@ pub enum DragHit<'a>{
     NoHit
 }
 
+impl Event{
+    pub fn requires_visibility(&self)->bool{
+        match self{
+            Self::MouseDown(_)|
+            Self::MouseMove(_)|
+            Self::MouseUp(_)|
+            Self::TouchUpdateEvent(_)|
+            Self::Scroll(_)=>true,
+            _=>false
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TriggerEvent {
     pub triggers: HashMap<Area, Vec<Trigger>>
