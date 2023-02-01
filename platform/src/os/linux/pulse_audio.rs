@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use {
+    std::collections::HashSet,
     std::sync::atomic::{AtomicU32, Ordering},
     std::sync::{Arc, Mutex},
     std::ffi::CStr,
@@ -182,7 +183,7 @@ struct PulseOutputStruct {
 }
 
 impl PulseOutputStream {
-    unsafe fn new(device_id: AudioDeviceId, name: &str, index: usize, pulse: &PulseAudioAccess) -> PulseOutputStream {
+    unsafe fn new(device_id: AudioDeviceId, name: &str, index: usize, pulse: &PulseAudioAccess) -> Option<PulseOutputStream> {
         
         pa_threaded_mainloop_lock(pulse.main_loop);
         let sample_spec = pa_sample_spec {
@@ -232,7 +233,9 @@ impl PulseOutputStream {
                 break;
             }
             if ready_state == 2 {
-                panic!("STREAM CANNOT BE STARTED");
+                // ok here we return None
+                Self::terminate_stream(stream, pulse);
+                return None
             }
             pa_threaded_mainloop_wait(pulse.main_loop);
         }
@@ -247,18 +250,22 @@ impl PulseOutputStream {
         }
         pa_operation_unref(op);
         
-        Self {
+        Some(Self {
             device_id,
             stream
-        }
+        })
+    }
+
+    pub fn terminate(&self, pulse: &PulseAudioAccess) {
+        unsafe{Self::terminate_stream(self.stream, pulse)};
     }
     
-    pub unsafe fn terminate(self, pulse: &PulseAudioAccess) {
+    pub unsafe fn terminate_stream(stream:*mut pa_stream, pulse: &PulseAudioAccess) {
         pa_threaded_mainloop_lock(pulse.main_loop);
-        pa_stream_set_write_callback(self.stream, None, std::ptr::null_mut());
-        pa_stream_set_state_callback(self.stream, None, std::ptr::null_mut());
-        pa_stream_disconnect(self.stream);
-        pa_stream_unref(self.stream);
+        pa_stream_set_write_callback(stream, None, std::ptr::null_mut());
+        pa_stream_set_state_callback(stream, None, std::ptr::null_mut());
+        pa_stream_disconnect(stream);
+        pa_stream_unref(stream);
         pa_threaded_mainloop_unlock(pulse.main_loop);
     }
     
@@ -342,6 +349,8 @@ pub struct PulseAudioAccess {
     main_loop_api: *mut pa_mainloop_api,
     context: *mut pa_context,
     self_ptr: *const Mutex<PulseAudioAccess>,
+    
+    failed_devices: HashSet<AudioDeviceId>,
 }
 
 struct PulseDeviceDesc {
@@ -381,7 +390,8 @@ impl PulseAudioAccess {
                     audio_input_cb: alsa_audio.audio_input_cb.clone(),
                     audio_output_cb: alsa_audio.audio_output_cb.clone(),
                     device_descs: Default::default(),
-                    self_ptr: std::ptr::null()
+                    self_ptr: std::ptr::null(),
+                    failed_devices: Default::default(),
                 }
             ));
             let self_ptr = Arc::into_raw(pulse.clone());
@@ -516,8 +526,10 @@ impl PulseAudioAccess {
             let mut out = Vec::new();
             let mut device_descs = Vec::new();
             for source in query.source_list {
+                let device_id = LiveId::from_str_unchecked(&source.name).into();
                 out.push(AudioDeviceDesc {
-                    device_id: LiveId::from_str_unchecked(&source.name).into(),
+                    has_failed: self.failed_devices.contains(&device_id),
+                    device_id,
                     device_type: AudioDeviceType::Input,
                     is_default: Some(&source.name) == query.default_source.as_ref(),
                     channels: 2,
@@ -529,8 +541,10 @@ impl PulseAudioAccess {
                 });
             }
             for sink in query.sink_list {
+                let device_id = LiveId::from_str_unchecked(&sink.name).into();
                 out.push(AudioDeviceDesc {
-                    device_id: LiveId::from_str_unchecked(&sink.name).into(),
+                    has_failed: self.failed_devices.contains(&device_id),
+                    device_id,
                     device_type: AudioDeviceType::Output,
                     is_default: Some(&sink.name) == query.default_sink.as_ref(),
                     channels: 2,
@@ -583,7 +597,7 @@ impl PulseAudioAccess {
             while i < self.audio_outputs.len() {
                 if !devices.contains(&self.audio_outputs[i].device_id) {
                     let item = self.audio_outputs.remove(i);
-                    unsafe {item.terminate(self)};
+                    item.terminate(self);
                 }
                 else {
                     i += 1;
@@ -602,8 +616,13 @@ impl PulseAudioAccess {
             
         };
         for (index, device_id, name) in new {
-            let new_output = unsafe {PulseOutputStream::new(device_id, name, index, self)};
-            self.audio_outputs.push(new_output);
+            if let Some(new_output) = unsafe {PulseOutputStream::new(device_id, name, index, self)}{
+                self.audio_outputs.push(new_output);
+            }
+            else{
+                self.failed_devices.insert(device_id);
+                self.change_signal.set();
+            }
         }
     }
 }

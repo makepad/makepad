@@ -1,4 +1,5 @@
 use {
+    std::collections::HashSet,
     std::sync::{Arc, Mutex},
     std::os::raw::{c_void, c_char},
     std::ffi::CStr,
@@ -35,6 +36,8 @@ pub struct AlsaAudioAccess {
     audio_outputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
     audio_inputs: Arc<Mutex<Vec<AlsaAudioDeviceRef >> >,
     device_descs: Vec<AlsaAudioDesc>,
+    failed_devices: Arc<Mutex<HashSet<AudioDeviceId>>>,
+    change_signal: Signal
 }
 
 #[derive(Debug)]
@@ -48,6 +51,7 @@ macro_rules!alsa_error {
 
 impl AlsaAudioAccess {
     pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
+        let change_signal_inner = change_signal.clone();
         std::thread::spawn(move || {
             let mut last_card_count = 0;
             loop {
@@ -62,7 +66,7 @@ impl AlsaAudioAccess {
                 }
                 if card_count != last_card_count{
                     last_card_count = card_count;
-                    change_signal.set();
+                    change_signal_inner.set();
                 }
                 let _ = std::thread::sleep(std::time::Duration::new(1, 0));
             }
@@ -70,6 +74,8 @@ impl AlsaAudioAccess {
         
         Arc::new(Mutex::new(
             AlsaAudioAccess {
+                change_signal,
+                failed_devices: Default::default(),
                 audio_input_cb: Default::default(),
                 audio_output_cb: Default::default(),
                 device_descs: Default::default(),
@@ -81,7 +87,7 @@ impl AlsaAudioAccess {
     
     pub fn get_updated_descs(&mut self)-> Vec<AudioDeviceDesc> {
         // alright lets do it
-        fn inner() -> Result<Vec<AlsaAudioDesc>, AlsaError> {
+        fn inner(alsa:&AlsaAudioAccess) -> Result<Vec<AlsaAudioDesc>, AlsaError> {
             let mut device_descs = Vec::new();
             let mut card_num = -1;
             unsafe {
@@ -103,6 +109,7 @@ impl AlsaAudioAccess {
                         let ioid = from_alsa_string(snd_device_name_get_hint(hint_ptr, "IOID\0".as_ptr())).unwrap_or("".into());
                         let device_id = AudioDeviceId(LiveId::from_str_unchecked(&name_str));
                         let desc = AudioDeviceDesc {
+                            has_failed: alsa.failed_devices.lock().unwrap().contains(&device_id),
                             device_id,
                             device_type: AudioDeviceType::Input,
                             is_default: false,
@@ -128,13 +135,12 @@ impl AlsaAudioAccess {
             Ok(device_descs)
         }
         self.device_descs.clear();
-        match inner() {
+        match inner(self) {
             Err(e) => {
                 println!("ALSA ERROR {}", e.0)
             }
-            Ok(descs) => {
+            Ok(mut descs) => {
                 // pick a single default device
-                /*
                 if let Some(descs) = descs.iter_mut().find( | v | v.desc.device_type.is_output() && v.name.starts_with("plughw:")) {
                     descs.desc.is_default = true;
                 }
@@ -152,7 +158,7 @@ impl AlsaAudioAccess {
                 }
                 else if let Some(descs) = descs.iter_mut().find( | v | v.desc.device_type.is_input()) {
                     descs.desc.is_default = true;
-                }*/
+                }
                 
                 self.device_descs = descs;
             }
@@ -188,33 +194,41 @@ impl AlsaAudioAccess {
         for (index, device_id, name) in new {
             let audio_input_cb = self.audio_input_cb[index].clone();
             let audio_inputs = self.audio_inputs.clone();
+            let failed_devices = self.failed_devices.clone();
+            let change_signal = self.change_signal.clone();
             std::thread::spawn(move || {
-                let (mut device, device_ref) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_CAPTURE).unwrap();
-                audio_inputs.lock().unwrap().push(device_ref);
-                let mut audio_buffer = device.allocate_matching_buffer();
-                loop {
-                    if audio_inputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
-                        break;
-                    }
-                    match device.read_input_buffer(&mut audio_buffer) {
-                        Err(e) => {
-                            println!("Write output buffer error {}", e.0);
+                if let Ok((mut device, device_ref)) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_CAPTURE){
+                    audio_inputs.lock().unwrap().push(device_ref);
+                    let mut audio_buffer = device.allocate_matching_buffer();
+                    loop {
+                        if audio_inputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
                             break;
                         }
-                        Ok(_) => ()
+                        match device.read_input_buffer(&mut audio_buffer) {
+                            Err(e) => {
+                                println!("Write output buffer error {}", e.0);
+                                break;
+                            }
+                            Ok(_) => ()
+                        }
+                        if let Some(fbox) = &mut *audio_input_cb.lock().unwrap() {
+                            audio_buffer = fbox(
+                                AudioInfo {
+                                    device_id,
+                                    time: None,
+                                },
+                                audio_buffer
+                            );
+                        }
                     }
-                    if let Some(fbox) = &mut *audio_input_cb.lock().unwrap() {
-                        audio_buffer = fbox(
-                            AudioInfo {
-                                device_id,
-                                time: None,
-                            },
-                            audio_buffer
-                        );
-                    }
+                    let mut audio_inputs = audio_inputs.lock().unwrap();
+                    audio_inputs.retain( | v | v.device_id != device_id);
                 }
-                let mut audio_inputs = audio_inputs.lock().unwrap();
-                audio_inputs.retain( | v | v.device_id != device_id);
+                else{
+                    println!("Failed to open ALSA audio device, trying something else");
+                    failed_devices.lock().unwrap().insert(device_id);
+                    change_signal.set();
+                }
             });
         }
     }
@@ -243,35 +257,43 @@ impl AlsaAudioAccess {
         for (index, device_id, name) in new {
             let audio_output_cb = self.audio_output_cb[index].clone();
             let audio_outputs = self.audio_outputs.clone();
+            let failed_devices = self.failed_devices.clone();
+            let change_signal = self.change_signal.clone();
             std::thread::spawn(move || {
-                
-                let (mut device, device_ref) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_PLAYBACK).expect("Alsa device failure ");
-                audio_outputs.lock().unwrap().push(device_ref);
-                // lets allocate an output buffer
-                let mut audio_buffer = device.allocate_matching_buffer();
-                loop {
-                    if audio_outputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
-                        break;
-                    }
-                    if let Some(fbox) = &mut *audio_output_cb.lock().unwrap() {
-                        fbox(
-                            AudioInfo {
-                                device_id,
-                                time: None,
-                            },
-                            &mut audio_buffer
-                        );
-                    }
-                    match device.write_output_buffer(&audio_buffer) {
-                        Err(e) => {
-                            println!("Write output buffer error {}", e.0);
+                // this thing fails here. so how would we then drop down to a secondary
+                // we could simply switch default
+                if let Ok((mut device, device_ref)) = AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_PLAYBACK){
+                    audio_outputs.lock().unwrap().push(device_ref);
+                    // lets allocate an output buffer
+                    let mut audio_buffer = device.allocate_matching_buffer();
+                    loop {
+                        if audio_outputs.lock().unwrap().iter().find( | v | v.device_id == device_id && v.is_terminated).is_some() {
                             break;
                         }
-                        Ok(_) => ()
+                        if let Some(fbox) = &mut *audio_output_cb.lock().unwrap() {
+                            fbox(
+                                AudioInfo {
+                                    device_id,
+                                    time: None,
+                                },
+                                &mut audio_buffer
+                            );
+                        }
+                        match device.write_output_buffer(&audio_buffer) {
+                            Err(e) => {
+                                println!("Write output buffer error {}", e.0);
+                                break;
+                            }
+                            Ok(_) => ()
+                        }
                     }
+                    audio_outputs.lock().unwrap().retain( | v | v.device_id != device_id);
                 }
-                
-                audio_outputs.lock().unwrap().retain( | v | v.device_id != device_id);
+                else{
+                    println!("Failed to open ALSA audio device, trying something else");
+                    failed_devices.lock().unwrap().insert(device_id);
+                    change_signal.set();
+                }
             });
         }
     }
@@ -286,7 +308,6 @@ impl AlsaAudioDevice {
             let mut hw_params: *mut snd_pcm_hw_params_t = 0 as *mut _;
             let name0 = format!("{}\0", device_name);
             let mut rate = 48000;
-            println!("### Opening ALSA Device {} ###", name0);
             alsa_error!(snd_pcm_open(&mut handle, name0.as_ptr(), direction, 0)) ?;
             alsa_error!(snd_pcm_hw_params_malloc(&mut hw_params)) ?;
             alsa_error!(snd_pcm_hw_params_any(handle, hw_params)) ?;
