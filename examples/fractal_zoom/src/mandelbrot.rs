@@ -535,10 +535,10 @@ impl Mandelbrot {
     
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
         //self.state_handle_event(cx, event);
-        if let Event::Signal(_) = event {
+        //if let Event::Signal(_) = event {
             // this batches up all the input signals into a single animation frame
-            self.next_frame = cx.new_next_frame();
-        }
+          //  self.next_frame = cx.new_next_frame();
+        //}
         
         if let Some(ne) = self.next_frame.is_event(event) {
             // If we don't have a current layer, initiate the first tile render on the center of the screen
