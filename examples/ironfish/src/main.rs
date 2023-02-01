@@ -29,7 +29,7 @@ live_design!{
     const SPACING_PANELS = 10.0
     const SPACING_CONTROLS = 3.0
     const SPACING_BASE_PADDING = 8.0
-    const HEIGHT_AUDIOVIZ = 200 
+    const HEIGHT_AUDIOVIZ = 200
     const COLOR_OSC = #xFFFF99FF // yellow
     const COLOR_MUSIC = #xC // gray
     const COLOR_ENV = #xF9A894 // light red
@@ -61,7 +61,7 @@ live_design!{
         layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
     }
     
-    FishPanelContainer = <Frame> {
+    FishPanelContainer = <CachedFrame> {
         layout: {flow: Down},
         walk: {width: Fill, height: Fit}
     }
@@ -492,7 +492,7 @@ live_design!{
     EnvelopePanel = <Box> {
         layout: {flow: Down, padding: 0.0}
         walk: {width: Fill, height: Fit}
-
+        
         display = <GraphPaper> {}
         
         <Frame> { // TODO: REPLACE WITH DEDICATED WIDGET?
@@ -556,24 +556,24 @@ live_design!{
     ModEnvelopePanel = <Frame> {
         walk: {width: Fill, height: Fit}
         layout: {flow: Down}
-
+        
         <Frame> {
             layout: {flow: Down}
             walk: {width: Fill, height: Fit}
             <Frame> {
-                layout: {flow: Right, align: { x: 0.0, y: 0.0 } }
+                layout: {flow: Right, align: {x: 0.0, y: 0.0}}
                 walk: {width: Fill, height: Fit}
-
+                
                 <FishSubTitle> {
-                    walk: { width: Fill }
+                    walk: {width: Fill}
                     label = {
                         text: "Cutoff Modulation",
                         draw_label: {color: (COLOR_ENV)},
                     }
                 }
-
+                
                 modamount = <InstrumentBipolarSlider> {
-                    walk: { width: Fill }
+                    walk: {width: Fill}
                     slider = {
                         draw_slider: {line_color: (COLOR_ENV)}
                         min: -1.0
@@ -581,15 +581,15 @@ live_design!{
                         label: "Amount"
                     }
                 }
-
+                
             }
-        }        
-
+        }
+        
         mod_env = <EnvelopePanel> {
             layout: {flow: Down, padding: 0.0}
             walk: {width: Fill, height: Fit}
         }
-
+        
     }
     
     
@@ -597,11 +597,11 @@ live_design!{
         walk: {height: Fit, width: Fill}
         layout: {flow: Down, padding: {top: 0.0, right: (SPACING_BASE_PADDING), bottom: 0.0, left: (SPACING_BASE_PADDING)}}
         
-
+        
         <Frame> {
             walk: {height: Fit, width: Fill}
             layout: {flow: Right, align: {x: 0.0, y: 0.5}, spacing: (SPACING_CONTROLS)}
-
+            
             playpause = <PlayPause> {}
             
             speed = <InstrumentSlider> {
@@ -616,9 +616,9 @@ live_design!{
         }
         
         <Frame> {
-            walk: { height: Fit, width: Fill }
-            layout: { flow: Right, spacing: (SPACING_CONTROLS), padding: { bottom: 10, top: 5 } }
-
+            walk: {height: Fit, width: Fill}
+            layout: {flow: Right, spacing: (SPACING_CONTROLS), padding: {bottom: 10, top: 5}}
+            
             rootnote = <InstrumentDropdown> {
                 walk: {height: Fit, width: Fit}
                 dropdown = {
@@ -634,11 +634,11 @@ live_design!{
                     values: [Minor, Major, Dorian, Pentatonic]
                 }
             }
-
+            
             <Frame> {
                 walk: {width: Fill}
             }
-
+            
             clear_grid = <FishButton> {
                 text: "Clear"
                 walk: {width: Fit, height: Fit}
@@ -657,7 +657,7 @@ live_design!{
     
     PianoControls = <GradientY> {
         layout: {flow: Right, padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
-        walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: 0, left: (SPACING_BASE_PADDING * 2)} }
+        walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: 0, left: (SPACING_BASE_PADDING * 2)}}
         draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
         
         porta = <InstrumentSlider> {
@@ -679,30 +679,30 @@ live_design!{
     }
     
     SequencerPanel = <Box> {
-        layout: { flow: Down }
-        walk: { margin: 0 }
+        layout: {flow: Down}
+        walk: {margin: 0}
         <GradientY> {
             walk: {width: Fill, height: Fill}
             layout: {flow: Down, spacing: 0.0, padding: {top: (SPACING_BASE_PADDING)}}
             draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
             
             <SequencerControls> {}
-            sequencer = <Sequencer> {walk: {width: Fill, height: 300} }
-    }
+            sequencer = <Sequencer> {walk: {width: Fill, height: 300}}
+        }
     }
     
     CrushFXPanel = <Frame> {
         walk: {width: Fill, height: Fit}
         layout: {flow: Down}
-
-
+        
+        
         <Frame> {
             layout: {flow: Down}
             walk: {width: Fill, height: Fit}
             <Frame> {
                 layout: {flow: Right, align: {x: 0.0, y: 0.5}}
                 walk: {width: Fill, height: Fit}
-
+                
                 <FishSubTitle> {
                     label = {
                         text: "Bitcrush",
@@ -715,7 +715,7 @@ live_design!{
                 }
             }
         }
-
+        
         <Frame> {
             walk: {width: Fill, height: Fit}
             crushamount = <InstrumentSlider> {
@@ -790,7 +790,7 @@ live_design!{
                 }
                 
             }
-                
+            
         }
     }
     
@@ -873,7 +873,7 @@ live_design!{
     }
     
     FishPanelFilter = <FishPanelContainer> {
-
+        
         <FishHeader> {
             title = {
                 label = {
@@ -882,7 +882,7 @@ live_design!{
                 draw_bg: {color: (COLOR_FILTER)}
             }
             menu = <Box> {
-                draw_bg: { color: (COLOR_FILTER) }
+                draw_bg: {color: (COLOR_FILTER)}
                 filter_type = <InstrumentDropdown> {
                     label = {
                         draw_label: {
@@ -1129,10 +1129,10 @@ live_design!{
     
     FishPanelSoundSources = <FishPanelContainer> {
         walk: {width: Fill, height: Fill}
-
+        
         <FishHeader> {
             title = {
-                walk: { width: Fill } 
+                walk: {width: Fill}
                 label = {
                     text: "Sound Sources",
                 },
@@ -1142,7 +1142,7 @@ live_design!{
         
         <FishPanel> {
             walk: {width: Fill, height: Fill}
-
+            
             osc1 = <OscPanel> {}
             <Divider> {}
             osc2 = <OscPanel> {}
@@ -1162,9 +1162,9 @@ live_design!{
     
     // TABS
     FishPanelEnvelopes = <FishPanelContainer> {
-        walk: { width: Fill, height: Fill }
-        layout: { padding: 0, align: {x: 0.0, y: 0.0}, spacing: 0., flow: Down }
-
+        walk: {width: Fill, height: Fill}
+        layout: {padding: 0, align: {x: 0.0, y: 0.0}, spacing: 0., flow: Down}
+        
         <FishHeader> {
             title = {
                 label = {
@@ -1175,32 +1175,32 @@ live_design!{
         }
         
         <FishPanel> {
-            walk: { height: Fill }
+            walk: {height: Fill}
             <FishSubTitle> {
                 label = {
                     text: "Volume",
                     draw_label: {color: (COLOR_ENV)},
                 }
             }
-
+            
             <VolumeEnvelopePanel> {
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fit}
             }
-        
-            <Divider> {} 
-
+            
+            <Divider> {}
+            
             <ModEnvelopePanel> {
                 layout: {flow: Down, clip_y: true}
                 walk: {width: Fill, height: Fit}
             }
-        } 
+        }
     }
     
     FishPanelEffects = <FishPanelContainer> {
-        walk: { width: Fill, height: Fill }
-        layout: { padding: 0, align: {x: 0.0, y: 0.0}, spacing: 0., flow: Down }
-
+        walk: {width: Fill, height: Fill}
+        layout: {padding: 0, align: {x: 0.0, y: 0.0}, spacing: 0., flow: Down}
+        
         <FishHeader> {
             title = {
                 label = {
@@ -1209,7 +1209,7 @@ live_design!{
                 draw_bg: {color: (COLOR_FX)}
             }
         }
-
+        
         <FishPanel> {
             walk: {width: Fill, height: Fill}
             <CrushFXPanel> {}
@@ -1247,14 +1247,14 @@ live_design!{
                     walk: {width: Fill, height: Fit, margin: {left: 70, top: 10}}
                     layout: {flow: Right, spacing: 2.0}
                     
-                    panic = <FishButton> { text: "Panic", walk: {width: Fit} }
+                    panic = <FishButton> {text: "Panic", walk: {width: Fit}}
                     // save1 = <FishButton> {text: "1"}
                 }
                 <Image> {image: d"crate://self/resources/tinrs.png", walk: {width: (1000 * 0.25), height: (175 * 0.25)}}
             }
             <GradientY> {
                 walk: {width: Fill, height: (HEIGHT_AUDIOVIZ)}
-                draw_bg: { color: #0004, color2: #000C }
+                draw_bg: {color: #0004, color2: #000C}
                 display_audio = <DisplayAudio> {
                     walk: {height: Fill, width: Fill}
                 }
@@ -1267,14 +1267,14 @@ live_design!{
                 layout: {flow: Right, spacing: 2, padding: {top: (SPACING_BASE_PADDING * 2), right: (SPACING_BASE_PADDING * 2), bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)}}
                 
                 <Frame> {
-                // <ScrollY> {
+                    // <ScrollY> {
                     
-                    layout: { flow: Down, spacing: 3 }
+                    layout: {flow: Down, spacing: 3}
                     walk: {height: Fill, width: Fill}
                     
                     oscillators = <FishPanelSoundSources> {}
-
-                    <FishPanelFilter> { }
+                    
+                    <FishPanelFilter> {}
                 }
                 
                 <Frame> {
@@ -1282,38 +1282,41 @@ live_design!{
                     walk: {height: Fill, width: Fill}
                     envelopes = <FishPanelEnvelopes> {}
                 }
-
+                
                 <Frame> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    walk: {height: Fill, width: Fill }
-
+                    walk: {height: Fill, width: Fill}
+                    
                     effects = <FishPanelEffects> {}
                 }
-
-                <Frame> {
+                
+                <CachedFrame> {
                     layout: {flow: Down}
                     walk: {height: Fill, width: Fill}
-
+                    
                     <FishHeader> {
                         title = {
-                            walk: { width: Fill } 
+                            walk: {width: Fill}
                             label = {
                                 text: "Sequencer",
                             },
-                            draw_bg: {color: (COLOR_SEQ) }
+                            draw_bg: {color: (COLOR_SEQ)}
                         }
                         menu = {
-                            walk: { width: Fit }
+                            walk: {width: Fit}
                         }
                     }
-
+                    
                     <SequencerPanel> {walk: {height: Fill, width: Fill}}
                 }
             }
-
-            <PianoControls> {}
-            piano = <Piano> {
-                walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
+            <CachedFrame> {
+                layout:{flow:Down},
+                walk:{height: Fit, width: Fill},
+                <PianoControls> {}
+                piano = <Piano> {
+                    walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)}}
+                }
             }
             
         }
@@ -1486,9 +1489,9 @@ impl App {
             //println!("{}", ports);
             cx.use_midi_inputs(&ports.all_inputs());
         }
-         
+        
         if let Event::AudioDevices(devices) = event {
-            println!("{}", devices);  
+            println!("{}", devices);
             cx.use_audio_outputs(&devices.default_output());
         }
         
