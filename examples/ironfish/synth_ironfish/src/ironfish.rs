@@ -19,6 +19,7 @@
 #![allow(dead_code)]
 
 use crate::waveguide::Waveguide;
+use crate::delay_toys::DelayToy;
 
 use {
     std::sync::Arc,
@@ -1717,6 +1718,7 @@ impl IronFishState {
                     let rootnoteenum = self.settings.sequencer.rootnote.get();
                     
                     let mut rootnote = 12;
+
                     if rootnoteenum == RootNote::A {rootnote = 12 - 3;};
                     if rootnoteenum == RootNote::Asharp {rootnote = 12 - 2;};
                     if rootnoteenum == RootNote::B {rootnote = 12 - 1;};
@@ -1795,9 +1797,9 @@ impl IronFishState {
             }
         }
         self.apply_bitcrush(buffer);
-        self.chorus.apply_chorus(buffer, &self.settings.chorus, self.settings.sample_rate.get());
-        
+        self.chorus.apply_chorus(buffer, &self.settings.chorus, self.settings.sample_rate.get());        
         self.apply_delay(buffer);
+
     }
 }
 
