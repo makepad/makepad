@@ -265,23 +265,10 @@ pub struct CxDrawList {
     pub redraw_id: u64,
     pub pass_id: Option<PassId>,
     
-    //pub locked_view_transform: bool,
-
-    // scrolling
-    //pub no_v_scroll: bool, // this means we
-    //pub no_h_scroll: bool,
-    //pub parent_scroll: Vec2,
-    //pub unsnapped_scroll: Vec2,
-    //pub snapped_scroll: Vec2,
-    
     pub draw_items: CxDrawItems,
     
     pub draw_list_uniforms: CxDrawListUniforms,
     pub os: CxOsView,
-    
-    //pub rect: Rect,
-    //pub draw_clip: (Vec2,Vec2),
-    //pub unclipped: bool,
     pub rect_areas: Vec<CxRectArea>,
 }
 
