@@ -25,7 +25,7 @@ use {
 impl Cx {
     
     pub fn event_loop(mut self) {
-        self.platform_type = OsType::MsWindows;
+        self.platform_type = OsType::Windows;
         let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
         let cx = Rc::new(RefCell::new(self));
         

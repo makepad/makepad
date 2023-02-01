@@ -314,6 +314,9 @@ impl Cx {
         unsafe {
             d3d11_cx.context.RSSetViewports(Some(&[viewport]));
         }
+        if viewport.Width < 1.0 || viewport.Height < 1.0{
+            return
+        }
         // set up the color texture array
         let mut color_textures = Vec::new();
         
@@ -714,7 +717,7 @@ impl CxOsTexture {
         let width = desc.width.unwrap_or(default_size.x as usize) as u32;
         let height = desc.height.unwrap_or(default_size.y as usize) as u32;
         
-        if self.width == width && self.height == height {
+        if self.width == width && self.height == height || width == 0 || height == 0{
             return false
         }
         

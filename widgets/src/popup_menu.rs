@@ -101,24 +101,24 @@ live_design!{
             padding: 5
         }
         draw_bg: {
-    
+            
             instance color: #0
             
             instance border_width: 0.0,
             instance border_color: #0000,
-            instance inset: vec4(0.0,0.0,0.0,0.0),
+            instance inset: vec4(0.0, 0.0, 0.0, 0.0),
             instance radius: 4.0
             
-            fn get_color(self)->vec4{
+            fn get_color(self) -> vec4 {
                 return self.color
             }
             
-            fn get_border_color(self)->vec4{
+            fn get_border_color(self) -> vec4 {
                 return self.border_color
             }
             
-            fn pixel(self)->vec4{
-    
+            fn pixel(self) -> vec4 {
+                
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.blur = 20.0;
                 sdf.box(
@@ -276,7 +276,7 @@ impl PopupMenu {
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d, width: f64) {
-        self.view.begin_overlay(cx);
+        self.view.begin_overlay_reuse(cx);
         
         cx.begin_overlay_turtle(Layout::flow_down());
         
