@@ -276,7 +276,7 @@ impl PopupMenu {
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d, width: f64) {
-        self.view.begin_overlay(cx);
+        self.view.begin_overlay_reuse(cx);
         
         cx.begin_overlay_turtle(Layout::flow_down());
         
