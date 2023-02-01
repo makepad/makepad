@@ -250,5 +250,26 @@ impl AudioBuffer {
             self.data[i] = 0.0;
         }
     }
+    
+    pub fn copy_from_interleaved(&mut self, channel_count:usize, interleaved:&[f32]){
+        let frame_count = interleaved.len() / channel_count;
+        self.resize(frame_count, channel_count);
+        for i in 0..frame_count {
+            for j in 0..channel_count{
+                self.data[i + j * frame_count] = interleaved[i * channel_count + j];
+            }
+        }
+    }
+
+    pub fn copy_to_interleaved(&self, interleaved:&mut [f32]){
+        if interleaved.len() != self.frame_count * self.channel_count{
+            panic!()
+        }
+        for i in 0..self.frame_count {
+            for j in 0..self.channel_count{
+                interleaved[i * self.channel_count + j] = self.data[i + j * self.frame_count];
+            }
+        }
+    }
 }
 
