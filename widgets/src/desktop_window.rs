@@ -256,7 +256,7 @@ impl DesktopWindow {
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
-        if !cx.view_will_redraw(&self.main_view) {
+        if !cx.view_will_redraw(&mut self.main_view, Walk::default()) {
             return ViewRedrawing::no()
         }
         

@@ -717,7 +717,7 @@ impl Frame {
     }
     
     pub fn walk_from_previous_size(&self, walk:Walk)->Walk{
-        let view_size = self.view_size.unwrap();
+        let view_size = self.view_size.unwrap_or(DVec2::default());
         Walk {
             abs_pos: walk.abs_pos,
             width: if walk.width.is_fill(){walk.width}else{Size::Fixed(view_size.x)},
@@ -737,10 +737,10 @@ impl Frame {
             if self.has_view {
                 // ok so.. how do we render this to texture
                 if self.use_cache {
-                    if !cx.view_will_redraw(self.view.as_ref().unwrap()) {
+                    let walk = self.walk_from_previous_size(walk);
+                    if !cx.view_will_redraw(self.view.as_mut().unwrap(), walk) {
                         if let Some(cache) = &self.cache{
                             self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
-                            let walk = self.walk_from_previous_size(walk);
                             let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
                             let dpi = cx.current_dpi_factor();
                             rect.size = (rect.size / dpi).floor()*dpi;
@@ -764,13 +764,15 @@ impl Frame {
                     let cache = self.cache.as_mut().unwrap();
                     cx.make_child_pass(&cache.pass); 
                     cx.begin_pass(&cache.pass);
+                    self.view.as_mut().unwrap().begin_always(cx)
                 }
-                
-                if self.view.as_mut().unwrap().begin(cx).is_not_redrawing() {
+                else{
                     let walk = self.walk_from_previous_size(walk);
-                    cx.walk_turtle_with_area(&mut self.area, walk);
-                    return WidgetDraw::done()
-                };
+                    if self.view.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
+                        cx.walk_turtle_with_area(&mut self.area, walk);
+                        return WidgetDraw::done()
+                    };
+                }
             }
             
             
@@ -854,6 +856,7 @@ impl Frame {
                     let dpi = cx.current_dpi_factor();
                     rect.size = (rect.size / dpi).floor()*dpi;
                     self.view.as_mut().unwrap().end(cx);
+                    
                     if self.use_cache {
                         let cache = self.cache.as_mut().unwrap();
                         cx.end_pass(&cache.pass);
