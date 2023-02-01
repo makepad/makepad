@@ -287,7 +287,7 @@ impl DesktopWindow {
         
         // lets draw our cursor
         if let OsType::LinuxDirect = cx.platform_type() {
-            self.cursor_view.begin_overlay(cx);
+            self.cursor_view.begin_overlay_last(cx);
             self.draw_cursor.draw_abs(cx, Rect {
                 pos: self.last_mouse_pos,
                 size: self.mouse_cursor_size
