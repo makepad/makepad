@@ -37,13 +37,13 @@ live_design!{
     }
     
     Mandelbrot = {{Mandelbrot}} {
-        max_iter: 620,
+        max_iter: 256,
     }
 }
 
 pub const TILE_SIZE_X: usize = 256;
 pub const TILE_SIZE_Y: usize = 256;
-pub const TILE_CACHE_SIZE: usize = 500;
+pub const TILE_CACHE_SIZE: usize = 3500;
 // the shader struct used to draw
 
 #[derive(Live, LiveHook)]
@@ -174,7 +174,7 @@ impl TileCache {
             empty,
             current_zoom: 0.0,
             next_zoom: 0.0,
-            tiles_in_flight: 0, 
+            tiles_in_flight: 0,
             thread_pool: ThreadPool::new(cx, use_cores),
         }
     }
@@ -470,8 +470,8 @@ impl Mandelbrot {
             }
             
             if !is_zooming {
-               mandelbrot_f64x2_4xaa(&mut tile, max_iter);
-             }
+                mandelbrot_f64x2_4xaa(&mut tile, max_iter);
+            }
             else
             if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
@@ -529,16 +529,16 @@ impl Mandelbrot {
         }
     }
     
-    pub fn area(&self)->Area{
+    pub fn area(&self) -> Area {
         self.view_area
     }
     
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
         //self.state_handle_event(cx, event);
-        if let Event::Signal(_) = event {
-            // this batches up all the input signals into a single animation frame
-            self.next_frame = cx.new_next_frame();
-        }
+        //if let Event::Signal(_) = event {
+        // this batches up all the input signals into a single animation frame
+        //  self.next_frame = cx.new_next_frame();
+        //}
         
         if let Some(ne) = self.next_frame.is_event(event) {
             // If we don't have a current layer, initiate the first tile render on the center of the screen
@@ -574,7 +574,12 @@ impl Mandelbrot {
             
             // We are zooming, so animate the zoom
             if self.is_zooming {
-                self.space.zoom_around(if self.is_zoom_in {0.98} else {1.02}, self.finger_abs);
+                if let OsType::LinuxDirect = cx.platform_type() {
+                    self.space.zoom_around(if self.is_zoom_in {0.92} else {1.08}, self.finger_abs);
+                }
+                else {
+                    self.space.zoom_around(if self.is_zoom_in {0.98} else {1.02}, self.finger_abs);
+                }
                 // this kickstarts the tile cache generation when zooming, only happens once per zoom
                 if self.tile_cache.generate_completed() {
                     let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
@@ -583,7 +588,7 @@ impl Mandelbrot {
             }
             
             // animate color cycle
-            self.draw_tile.color_cycle = (ne.time * 0.1).fract() as f32;
+            self.draw_tile.color_cycle = (ne.time * 0.02).fract() as f32;
             // this triggers a draw_walk call and another 'next frame' event
             self.view_area.redraw(cx);
             self.next_frame = cx.new_next_frame();
@@ -597,14 +602,14 @@ impl Mandelbrot {
                 self.is_zooming = true;
                 // in case of a mouse we check which mousebutton is down
                 //if let Some(button) = fe.digit.mouse_button() {
-                    self.finger_abs = fe.abs;
-                 //   if button == 0 {
-                        self.is_zoom_in = true;
-                 //   }
-                 //   else {
+                self.finger_abs = fe.abs;
+                //   if button == 0 {
+                self.is_zoom_in = true;
+                //   }
+                //   else {
                 //        self.is_zoom_in = false;
                 //    }
-               /* }
+                /* }
                 else {
                     if fe.digit.count == 1 {
                         self.finger_abs = fe.abs;
@@ -621,7 +626,7 @@ impl Mandelbrot {
             },
             Hit::FingerMove(fe) => {
                 //if fe.digit.index == 0 { // only respond to digit 0
-                    self.finger_abs = fe.abs;
+                self.finger_abs = fe.abs;
                 //}
             }
             Hit::FingerUp(_) => {
@@ -633,7 +638,7 @@ impl Mandelbrot {
     }
     
     // draw the mandelbrot view
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk)  {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // checks if our view is dirty, exits here if its clean
         cx.begin_turtle(walk, Layout::flow_right());
         

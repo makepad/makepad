@@ -98,6 +98,12 @@ impl DrawQuad {
         }
     }
     
+    pub fn update_abs(&mut self, cx: &mut Cx, rect: Rect) {
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();
+        self.draw_vars.update_rect(cx, rect);
+    }
+    
     pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect) {
         self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos.into();

@@ -49,7 +49,7 @@ impl AudioGraphNode for Node {
     
     fn render_to_audio_buffer(
         &mut self,
-        time: AudioTime,
+        info: AudioInfo,
         outputs: &mut [&mut AudioBuffer],
         inputs: &[&AudioBuffer],
         _display: &mut DisplayAudioGraph
@@ -62,7 +62,7 @@ impl AudioGraphNode for Node {
             }
         }
         if let Some(audio_unit) = &self.audio_unit {
-            audio_unit.render_to_audio_buffer(time, outputs, inputs);
+            audio_unit.render_to_audio_buffer(info, outputs, inputs);
         }
     }
 }
@@ -76,10 +76,10 @@ impl LiveHook for AudioUnitEffect {
 impl AudioUnitEffect {
     fn load_audio_unit(&mut self) {
         // alright lets create an audio device
-        let list = AudioUnitFactory::query_audio_units(AudioUnitType::Effect);
+        let list = AudioUnitAccess::query_audio_units(AudioUnitQuery::Effect);
         let sender = self.to_ui.sender();
         if let Some(info) = list.iter().find( | item | item.name == self.plugin) {
-            AudioUnitFactory::new_audio_unit(info, move | result | {
+            AudioUnitAccess::new_audio_plugin(info, move | result | {
                 match result {
                     Ok(audio_unit) => {
                         sender.send(ToUI::NewAudioUnit(audio_unit)).unwrap()
@@ -107,8 +107,8 @@ impl AudioComponent for AudioUnitEffect {
         })
     }
     
-    fn handle_event_fn(&mut self, _cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
-        while let Ok(to_ui) = self.to_ui.try_recv(event) {
+    fn handle_event_fn(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+        while let Ok(to_ui) = self.to_ui.try_recv() {
             match to_ui {
                 ToUI::NewAudioUnit(audio_unit) => {
                     self.from_ui.send(FromUI::NewAudioUnit(audio_unit.clone())).unwrap();

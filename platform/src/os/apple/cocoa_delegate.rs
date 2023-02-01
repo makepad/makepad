@@ -11,7 +11,7 @@ use {
             DVec2,
         },
         os::{
-            apple::frameworks::*,
+            apple::apple_sys::*,
             cocoa_app::{
                 get_cocoa_class_global,
                 get_cocoa_app_global
@@ -23,7 +23,6 @@ use {
                 get_cocoa_window
             },
             apple_util::{
-                str_to_nsstring,
                 nsstring_to_string,
                 get_event_key_modifier,
                 superclass,
@@ -43,32 +42,107 @@ use {
     }
 };
 
+
+pub struct AvVideoCaptureCallback {
+    _callback: Box<Box<dyn Fn(CMSampleBufferRef) + Send + 'static>>,
+    pub delegate: RcObjcId,
+}
+
+impl AvVideoCaptureCallback {
+    pub fn new(callback: Box<dyn Fn(CMSampleBufferRef) + Send + 'static>) -> Self {
+        unsafe {
+            let double_box = Box::new(callback);
+            //let cocoa_app = get_cocoa_app_global();
+            let delegate = RcObjcId::from_owned(msg_send![get_cocoa_class_global().video_callback_delegate, alloc]);
+            (*delegate.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
+            Self {
+                _callback: double_box,
+                delegate
+            }
+        }
+        
+    }
+}
+
+pub fn define_av_video_callback_delegate() -> *const Class {
+    
+    extern fn capture_output_did_output_sample_buffer(
+        this: &Object,
+        _: Sel,
+        _: ObjcId,
+        sample_buffer: CMSampleBufferRef,
+        _: ObjcId,
+    ) {
+        unsafe {
+            let ptr: *const c_void = *this.get_ivar("callback");
+            if ptr == 0 as *const c_void { // owner gone
+                return
+            }
+            (*(ptr as *const Box<dyn Fn(CMSampleBufferRef)>))(sample_buffer);
+        }
+    }
+    extern "C" fn capture_output_did_drop_sample_buffer(
+        _: &Object,
+        _: Sel,
+        _: ObjcId,
+        _: ObjcId,
+        _: ObjcId,
+    ) {
+    }
+    
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("AvVideoCaptureCallback", superclass).unwrap();
+    
+    // Add callback methods
+    unsafe {
+        decl.add_method(
+            sel!(captureOutput:didOutputSampleBuffer:fromConnection:),
+            capture_output_did_output_sample_buffer as extern fn(&Object, Sel, ObjcId, CMSampleBufferRef, ObjcId)
+        );
+        decl.add_method(
+            sel!(captureOutput:didDropSampleBuffer:fromConnection:),
+            capture_output_did_drop_sample_buffer as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId)
+        );
+        decl.add_protocol(
+            Protocol::get("AVCaptureVideoDataOutputSampleBufferDelegate").unwrap(),
+        );
+    }
+    // Store internal state as user data
+    decl.add_ivar::<*mut c_void>("callback");
+    
+    return decl.register();
+}
+
+
+
 pub struct KeyValueObserver {
     _callback: Box<Box<dyn Fn() >>,
     observer: RcObjcId
 }
+unsafe impl Send for KeyValueObserver {}
+unsafe impl Sync for KeyValueObserver {}
 
 impl Drop for KeyValueObserver {
     fn drop(&mut self) {
         unsafe {
-            (*self.observer.as_id()).set_ivar("key_value_observer_callback", 0 as *mut c_void);
+            (*self.observer.as_id()).set_ivar("callback", 0 as *mut c_void);
         }
     }
 }
 
 impl KeyValueObserver {
-    pub fn new(target: ObjcId, name: &str, callback: Box<dyn Fn()>) -> Self {
+    pub fn new(target: ObjcId, name: ObjcId, callback: Box<dyn Fn()>) -> Self {
         unsafe {
             let double_box = Box::new(callback);
             //let cocoa_app = get_cocoa_app_global();
             let observer = RcObjcId::from_owned(msg_send![get_cocoa_class_global().key_value_observing_delegate, alloc]);
             
-            (*observer.as_id()).set_ivar("key_value_observer_callback", &*double_box as *const _ as *const c_void);
+            (*observer.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
             
             let () = msg_send![
                 target,
                 addObserver: observer.as_id()
-                forKeyPath: str_to_nsstring(name)
+                forKeyPath: name
                 options: 15u64 // if its not 1+2+4+8 it does nothing
                 context: nil
             ];
@@ -199,7 +273,7 @@ struct CocoaPostInit {
     cocoa_app_ptr: *mut CocoaApp,
     signal_id: u64,
 }*/
-
+/*
 pub fn define_cocoa_post_delegate() -> *const Class {
     
     extern fn received_post(_this: &Object, _: Sel, _nstimer: ObjcId) {
@@ -229,7 +303,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     //decl.add_ivar::<usize>("status");
     
     return decl.register();
-}
+}*/
 
 pub fn define_cocoa_window_delegate() -> *const Class {
     
@@ -696,7 +770,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn dragging_session_ended_at_point_operation(this: &Object, _: Sel, _session: ObjcId, _point: NSPoint, _operation: NSDragOperation) {
         let window = get_cocoa_window(this);
-        window.do_callback(vec![CocoaEvent::DragEnd]);
+        window.do_callback(CocoaEvent::DragEnd);
     }
     
     extern fn dragging_entered(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
@@ -720,12 +794,12 @@ pub fn define_cocoa_view_class() -> *const Class {
         }));
         let action = Rc::new(Cell::new(DragAction::None));
         
-        window.do_callback(vec![CocoaEvent::Drag(DragEvent {
+        window.do_callback(CocoaEvent::Drag(DragEvent {
             handled: Cell::new(false),
             abs: pos,
             state: DragState::Over,
             action: action.clone()
-        })]);
+        }));
         
         match action.get(){
             DragAction::None => NSDragOperation::None,
@@ -772,14 +846,14 @@ pub fn define_cocoa_view_class() -> *const Class {
             let string = unsafe {CStr::from_ptr(msg_send![string, UTF8String])};
             file_urls.push(string.to_str().unwrap().to_string());
         }
-        let events = vec![CocoaEvent::Drop(DropEvent {
+
+        window.do_callback(CocoaEvent::Drop(DropEvent {
             handled: Cell::new(false),
             abs: pos,
             dragged_item: DraggedItem {
                 file_urls,
             }
-        })];
-        window.do_callback(events);
+        }));
     }
     
     /*

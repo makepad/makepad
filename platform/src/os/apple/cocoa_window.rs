@@ -2,7 +2,6 @@ use {
     std::{
         rc::Rc,
         cell::Cell,
-        time::Instant,
         os::raw::{c_void}
     },
     crate::{
@@ -11,7 +10,7 @@ use {
         },
         window::WindowId,
         os::{
-            apple::frameworks::*,
+            apple::apple_sys::*,
             apple::apple_util::{
                 str_to_nsstring,
             },
@@ -22,6 +21,7 @@ use {
         },
         area::Area,
         event::{
+            ScrollEvent,
             MouseUpEvent,
             MouseDownEvent,
             MouseMoveEvent,
@@ -49,7 +49,6 @@ pub struct CocoaWindow {
     window_delegate: ObjcId,
     live_resize_timer: ObjcId,
     last_window_geom: Option<WindowGeom>,
-    time_start: Instant,
 }
 
 impl CocoaWindow {
@@ -66,10 +65,8 @@ impl CocoaWindow {
             cocoa_app.cocoa_windows.push((window, view));
             CocoaWindow {
                 is_fullscreen: false,
-                time_start: cocoa_app.time_start,
                 live_resize_timer: nil,
                 window_delegate: window_delegate,
-                //layer_delegate:layer_delegate,
                 window: window,
                 window_id: window_id,
                 view: view,
@@ -180,9 +177,9 @@ impl CocoaWindow {
             let () = msg_send![pool, release];
         }
         
-        self.do_callback(vec![
+        self.do_callback(
             CocoaEvent::WindowResizeLoopStart(self.window_id)
-        ]);
+        );
     }
     
     pub fn end_live_resize(&mut self) {
@@ -190,9 +187,9 @@ impl CocoaWindow {
             let () = msg_send![self.live_resize_timer, invalidate];
             self.live_resize_timer = nil;
         }
-        self.do_callback(vec![
+        self.do_callback(
             CocoaEvent::WindowResizeLoopStop(self.window_id)
-        ]);
+        );
     }
     
     pub fn close_window(&mut self) {
@@ -221,8 +218,7 @@ impl CocoaWindow {
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
+         get_cocoa_app_global().time_now()
     }
     
     pub fn get_window_geom(&self) -> WindowGeom {
@@ -238,8 +234,8 @@ impl CocoaWindow {
         }
     }
     
-    pub fn do_callback(&mut self, events: Vec<CocoaEvent>) {
-        get_cocoa_app_global().do_callback(events);
+    pub fn do_callback(&mut self, event: CocoaEvent) {
+        get_cocoa_app_global().do_callback(event);
     }
     
     pub fn set_position(&mut self, pos: DVec2) {
@@ -299,35 +295,35 @@ impl CocoaWindow {
             new_geom.clone()
         };
         self.last_window_geom = Some(new_geom.clone());
-        self.do_callback(vec![
+        self.do_callback(
             CocoaEvent::WindowGeomChange(WindowGeomChangeEvent {
                 window_id: self.window_id,
                 old_geom: old_geom,
                 new_geom: new_geom
             }),
-            CocoaEvent::Paint
-        ]);
+        );
+        self.do_callback(CocoaEvent::Paint);
         // we should schedule a timer for +16ms another Paint
         
     }
     
     pub fn send_got_focus_event(&mut self) {
-        self.do_callback(vec![CocoaEvent::AppGotFocus]);
+        self.do_callback(CocoaEvent::AppGotFocus);
     }
     
     pub fn send_lost_focus_event(&mut self) {
-        self.do_callback(vec![CocoaEvent::AppLostFocus]);
+        self.do_callback(CocoaEvent::AppLostFocus);
     }
     
     pub fn mouse_down_can_drag_window(&mut self) -> bool {
         let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
-        self.do_callback(vec![
+        self.do_callback(
             CocoaEvent::WindowDragQuery(WindowDragQueryEvent {
                 window_id: self.window_id,
                 abs: self.last_mouse_pos,
                 response: response.clone()
             })
-        ]);
+        );
         match response.get() {
             WindowDragQueryResponse::Caption | WindowDragQueryResponse::SysMenu => {
                 true
@@ -340,33 +336,32 @@ impl CocoaWindow {
     
     pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
         let () = unsafe {msg_send![self.window, makeFirstResponder: self.view]};
-        self.do_callback(vec![CocoaEvent::MouseDown(MouseDownEvent {
+        self.do_callback(CocoaEvent::MouseDown(MouseDownEvent {
             button,
             modifiers,
             window_id: self.window_id,
             abs: self.last_mouse_pos,
             time: self.time_now(),
             handled: Cell::new(Area::Empty),
-        })]);
+        }));
     }
     
     pub fn send_mouse_up(&mut self, button: usize, modifiers: KeyModifiers) {
-        self.do_callback(vec![CocoaEvent::MouseUp(MouseUpEvent {
+        self.do_callback(CocoaEvent::MouseUp(MouseUpEvent {
             button,
             modifiers,
             window_id: self.window_id,
             abs: self.last_mouse_pos,
             time: self.time_now()
-        })]);
+        }));
     }
     
     pub fn send_mouse_move(&mut self, _event: ObjcId, pos: DVec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
-        let mut events = Vec::new();
         
         get_cocoa_app_global().startup_focus_hack();
         
-        events.push(CocoaEvent::MouseMove(MouseMoveEvent {
+        self.do_callback(CocoaEvent::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
             abs: pos,
             modifiers: modifiers,
@@ -374,17 +369,30 @@ impl CocoaWindow {
             handled: Cell::new(Area::Empty),
         }));
         
-        //get_cocoa_app_global().ns_event = event;
-        self.do_callback(events);
         //get_cocoa_app_global().ns_event = ptr::null_mut();
+    }
+    
+    pub fn send_scroll(&mut self, scroll:DVec2, modifiers: KeyModifiers, is_mouse:bool){
+        self.do_callback(
+            CocoaEvent::Scroll(ScrollEvent {
+                window_id: self.window_id,
+                scroll,
+                abs: self.last_mouse_pos,
+                modifiers,
+                time: self.time_now(),
+                is_mouse,
+                handled_x: Cell::new(false),
+                handled_y: Cell::new(false),
+            })
+        );
     }
     
     pub fn send_window_close_requested_event(&mut self) -> bool {
         let accept_close = Rc::new(Cell::new(true));
-        self.do_callback(vec![CocoaEvent::WindowCloseRequested(WindowCloseRequestedEvent {
+        self.do_callback(CocoaEvent::WindowCloseRequested(WindowCloseRequestedEvent {
             window_id: self.window_id,
             accept_close: accept_close.clone()
-        })]);
+        }));
         if !accept_close.get() {
             return false
         }
@@ -392,17 +400,17 @@ impl CocoaWindow {
     }
     
     pub fn send_window_closed_event(&mut self) {
-        self.do_callback(vec![CocoaEvent::WindowClosed(WindowClosedEvent {
+        self.do_callback(CocoaEvent::WindowClosed(WindowClosedEvent {
             window_id: self.window_id
-        })])
+        }))
     }
     
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
-        self.do_callback(vec![CocoaEvent::TextInput(TextInputEvent {
+        self.do_callback(CocoaEvent::TextInput(TextInputEvent {
             input: input,
             was_paste: false,
             replace_last: replace_last
-        })])
+        }))
     }
     
     pub fn start_dragging(&mut self, ns_event: ObjcId, dragged_item: DraggedItem) {

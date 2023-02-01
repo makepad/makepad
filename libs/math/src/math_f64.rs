@@ -147,6 +147,13 @@ impl DVec2 {
         };
     }
     
+    pub fn floor(self) -> DVec2 {
+        return DVec2 {
+            x: self.x.floor(), 
+            y: self.y.floor(),
+        };
+    }
+    
     pub fn distance(&self, other: &DVec2) -> f64 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;

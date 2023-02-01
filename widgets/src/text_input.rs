@@ -78,11 +78,38 @@ live_design!{
         numeric_only: false,
         empty_message: "0",
         draw_bg: {
-            shape: Box
-            color: #3
-            radius: 2
+            instance radius: 2.0
+            instance border_width: 0.0
+            instance border_color: #3
+            instance inset: vec4(0.0,0.0,0.0,0.0)
+            
+            fn get_color(self)->vec4{
+                return self.color
+            }
+            
+            fn get_border_color(self)->vec4{
+                return self.border_color
+            }
+            
+            fn pixel(self)->vec4{
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.inset.x + self.border_width,
+                    self.inset.y + self.border_width,
+                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                    max(1.0, self.radius)
+                )
+                sdf.fill_keep(self.get_color())
+                if self.border_width > 0.0 {
+                    sdf.stroke(self.get_border_color(), self.border_width)
+                }
+                return sdf.result;
+            }
         },
         layout: {
+            clip_x: false,
+            clip_y: false,
             padding: {left:10,top:11, right:10, bottom:10}
             align: {y: 0.}
         },
@@ -173,7 +200,7 @@ pub struct DrawLabel {
 pub struct TextInput {
     state: State,
     
-    draw_bg: DrawShape,
+    draw_bg: DrawColor,
     draw_select: DrawQuad,
     draw_cursor: DrawQuad,
     draw_label: DrawLabel,

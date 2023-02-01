@@ -15,6 +15,9 @@ use {
             xr::*,
             drag_drop::*,
         },
+        audio::AudioDevicesEvent,
+        midi::MidiPortsEvent,
+        video::VideoInputsEvent,
         draw_list::DrawListId,
         menu::MenuCommand,
     },
@@ -46,7 +49,7 @@ pub enum Event {
     
     Timer(TimerEvent),
     
-    Signal(SignalEvent),
+    Signal,
     Trigger(TriggerEvent),
     MenuCommand(MenuCommand),
     KeyFocus(KeyFocusEvent),
@@ -64,6 +67,10 @@ pub enum Event {
     WebSocketOpen(WebSocket),
     WebSocketError(WebSocketErrorEvent),
     WebSocketMessage(WebSocketMessageEvent),
+    
+    AudioDevices(AudioDevicesEvent),
+    MidiPorts(MidiPortsEvent),
+    VideoInputs(VideoInputsEvent),
     
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
@@ -94,6 +101,19 @@ pub enum DragHit<'a>{
     Drop(DropHitEvent<'a>),
     DragEnd,
     NoHit
+}
+
+impl Event{
+    pub fn requires_visibility(&self)->bool{
+        match self{
+            Self::MouseDown(_)|
+            Self::MouseMove(_)|
+            Self::MouseUp(_)|
+            Self::TouchUpdateEvent(_)|
+            Self::Scroll(_)=>true,
+            _=>false
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -162,13 +182,6 @@ pub struct TimerEvent {
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct Signal(pub LiveId);
-impl From<LiveId> for Signal {
-    fn from(live_id: LiveId) -> Signal {Signal(live_id)}
-}
-
-
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
 pub struct Trigger{
     pub id:LiveId,
     pub from:Area
@@ -195,11 +208,6 @@ pub struct WebSocketErrorEvent {
 pub struct WebSocketMessageEvent {
     pub web_socket: WebSocket,
     pub data: Vec<u8>
-}
-
-#[derive(Clone, Debug)]
-pub struct SignalEvent {
-    pub signals: HashSet<Signal>
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]

@@ -16,5 +16,3 @@ proc-macro = true
 makepad-micro-proc-macro = { path = "../../libs/micro_proc_macro", version = "0.3.0" }
 makepad-live-id = { path = "../../libs/live_id", version = "0.3.0" }
 
-[features]
-nightly = []
