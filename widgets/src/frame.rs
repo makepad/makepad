@@ -309,13 +309,18 @@ live_design!{
         use_cache: true,
         draw_bg: {
             texture image: texture2d
+            varying scale: vec2
+            varying shift: vec2
             fn vertex(self) -> vec4 {
-                let rect_size = ceil(self.rect_size)
-                let rect_pos = floor(self.rect_pos)
-                return self.clip_and_transform_vertex(rect_pos,rect_size)
+                let dpi = 2.0;
+                let ceil_size = ceil(self.rect_size*dpi)/dpi
+                let floor_pos = floor(self.rect_pos*dpi)/dpi
+                self.scale = ceil_size / self.rect_size;
+                self.shift = -(self.rect_pos - floor_pos) / self.rect_size;
+                return self.clip_and_transform_vertex(self.rect_pos,self.rect_size)
             }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos);
+                return sample2d_rt(self.image, self.pos*self.scale + self.shift);
             }
             
             shape: Solid,
