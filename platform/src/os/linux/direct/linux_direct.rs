@@ -13,6 +13,7 @@ use {
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_live_id::*,
+        makepad_error_log::*,
         makepad_math::*,
         thread::Signal,
         event::{
@@ -72,9 +73,13 @@ impl Cx {
     pub fn event_loop(mut self) {
         self.platform_type = OsType::LinuxDirect;
         self.gpu_info.performance = GpuPerformance::Tier1;
-        
+
+        let p = profile_start();
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
+        profile_end("construct",p);
+
+
         let mut direct_app = DirectApp::new();
         direct_app.timers.start_timer(0, 0.008, true);
         // lets run the kms eventloop
@@ -82,7 +87,7 @@ impl Cx {
         let mut timer_ids = Vec::new();
         let mut signal_fds = [0, 0];
         unsafe {libc_sys::pipe(signal_fds.as_mut_ptr());}
-        
+        let mut first_profile = true;
         while event_flow != EventFlow::Exit {
             if event_flow == EventFlow::Wait {
                 //    kms_app.timers.select(signal_fds[0]);
@@ -96,7 +101,7 @@ impl Cx {
             }
             let input_events = direct_app.raw_input.poll_raw_input(
                 direct_app.timers.time_now(),
-                CxWindowPool::id_zero()
+                CxWindowPool::id_zero() 
             );
             for event in input_events {
                 self.kms_event_callback(
@@ -104,8 +109,13 @@ impl Cx {
                     event
                 );
             }
+            let p = profile_start(); 
             event_flow = self.kms_event_callback(&mut direct_app, DirectEvent::Paint);
-            // alright so.. how do we do things
+            if first_profile{
+                profile_end("first paint", p);
+                first_profile = false;
+            }
+            // alright so.. how do we do things 
         }
     }
     
