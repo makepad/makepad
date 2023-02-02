@@ -270,8 +270,8 @@ live_design!{
         instance color2: #f00
         instance dither: 1.0
         fn get_color(self) -> vec4 {
-            let dither = Math::random_2d(self.pos.xy)* 0.02 * self.dither;
-            return mix(self.color, self.color2, self.pos.x)
+            let dither = Math::random_2d(self.pos.xy)* 0.04 * self.dither;
+            return mix(self.color, self.color2, self.pos.x+ dither)
         }
         
         fn pixel(self) -> vec4 {
@@ -283,7 +283,7 @@ live_design!{
         instance color2: #f00
         instance dither: 1.0
         fn get_color(self) -> vec4 {
-            let dither = Math::random_2d(self.pos.xy) * 0.02 * self.dither;
+            let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
             return mix(self.color, self.color2, self.pos.y + dither)
         }
         
