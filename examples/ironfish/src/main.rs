@@ -355,7 +355,7 @@ live_design!{
     }
     
     GraphPaper = <Box> {
-        walk: {width: Fill, height: 110}
+        walk: {width: Fill, height: 125}
         draw_bg: {
             color: #x44,
             instance color2: #x0,
@@ -658,9 +658,9 @@ live_design!{
     
     PianoControls = <GradientY> {
         layout: {flow: Right, padding: <BASE_PADDING> {}}
-        walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: 0, left: (SPACING_BASE_PADDING * 2)} }
-        draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
-        
+        walk: {height: Fit, width: 300, margin: {top: 0, right: 0, bottom: 0, left: (SPACING_BASE_PADDING * 2)} }
+        draw_bg: {color: (COLOR_HIDDEN_WHITE), color2: (COLOR_HIDDEN_WHITE)}
+
         porta = <InstrumentSlider> {
             walk: {width: 200}
             slider = {
@@ -687,8 +687,8 @@ live_design!{
             layout: {flow: Down, spacing: 0.0, padding: {top: (SPACING_BASE_PADDING)}}
             draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
             
-            <SequencerControls> {}
             sequencer = <Sequencer> {walk: {width: Fill, height: 300} }
+            <SequencerControls> {}
         }
     }
     
@@ -876,23 +876,66 @@ live_design!{
     FishPanelFilter = <FishPanelContainer> {
         <FishHeader> {
             title = {
+                walk: {width: Fit}
                 label = {
                     text: "Filter",
                 },
                 draw_bg: {color: (COLOR_FILTER)}
             }
             menu = <Box> {
-                draw_bg: {color: (COLOR_FILTER)}
-                filter_type = <InstrumentDropdown> {
-                    label = {
-                        draw_label: {
-                            color: #x000000 // TODO: COLOR IS NOT ACCEPTED
+                walk: {margin: {left: -2.0}}
+                draw_bg: {color: (COLOR_FILTER * 0.75), radius: 0}
+                filter_type = <DropDown> {
+                    draw_label: {
+                        text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                        fn get_color(self) -> vec4 {
+                            return mix(
+                                mix(
+                                    (#FFFFFFAA),
+                                    (#FFFFFF),
+                                    self.hover
+                                ),
+                                (#xFFFFFF),
+                                self.pressed
+                            )
                         }
                     }
-                    dropdown = {
-                        labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
-                        values: [LowPass, HighPass, BandPass, BandReject]
+                    draw_bg: {
+                        fn get_bg(self, inout sdf: Sdf2d) {
+                            sdf.box(
+                                1,
+                                1,
+                                self.rect_size.x - 2,
+                                self.rect_size.y - 2,
+                                3
+                            )
+                            sdf.fill(
+                                mix(
+                                    #FFFFFF00,
+                                    #FFFFFF10,
+                                    self.hover
+                                )
+                            );
+                        }
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            self.get_bg(sdf);
+                            // lets draw a little triangle in the corner
+                            let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                            let sz = 2.5;
+                            
+                            sdf.move_to(c.x - sz, c.y - sz);
+                            sdf.line_to(c.x + sz, c.y - sz);
+                            sdf.line_to(c.x, c.y + sz * 0.75);
+                            sdf.close_path();
+                            
+                            sdf.fill(mix(#FFFFFFAA, #FFFFFFFF, self.hover));
+                            
+                            return sdf.result
+                        }
                     }
+                    labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
+                    values: [LowPass, HighPass, BandPass, BandReject]
                 }
             }
         }
@@ -1082,18 +1125,6 @@ live_design!{
         walk: {width: Fill, height: Fit}
         layout: {flow: Down}
         <Frame> {
-            layout: {flow: Right}
-            walk: {width: Fill, height: Fit}
-            balance = <InstrumentBipolarSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Oscillator Balance"
-                }
-            }
-        }
-        <Frame> {
             layout: { flow: Right, spacing: (SPACING_CONTROLS)}
             walk: {width: Fill, height: Fit}
             noise = <InstrumentSlider> {
@@ -1110,6 +1141,18 @@ live_design!{
                     min: 0.0
                     max: 1.0
                     label: "Sub"
+                }
+            }
+        }
+        <Frame> {
+            layout: {flow: Right}
+            walk: {width: Fill, height: Fit}
+            balance = <InstrumentBipolarSlider> {
+                slider = {
+                    draw_slider: {line_color: (COLOR_OSC)}
+                    min: 0.0
+                    max: 1.0
+                    label: "Oscillator Balance"
                 }
             }
         }
@@ -1130,17 +1173,8 @@ live_design!{
         
         <FishPanel> {
             walk: {width: Fill, height: Fill }
-            layout: { flow: Down }
+            layout: { flow: Down, spacing: (SPACING_CONTROLS) }
 
-            <Frame> {
-                walk: {width: Fill, height: Fit}
-                layout: { flow: Right, spacing: (SPACING_CONTROLS)}
-
-                osc1 = <OscPanel> {}
-                osc2 = <OscPanel> {}
-            }
-
-            
             <FishSubTitle> {
                 label = {
                     text: "Mixer",
@@ -1149,6 +1183,14 @@ live_design!{
             }
             
             <MixerPanel> {walk: {width: Fill, height: Fit}}
+
+            <Frame> {
+                walk: {width: Fill, height: Fit}
+                layout: { flow: Right, spacing: (SPACING_CONTROLS)}
+
+                osc1 = <OscPanel> {}
+                osc2 = <OscPanel> {}
+            }
         }
     }
     
@@ -1302,10 +1344,11 @@ live_design!{
                 }
             }
 
-            <Frame> {
-                layout: {flow: Down}
-                walk: {height: Fit, width: Fill}
 
+            <GradientY> {
+                layout: {flow: Right, padding: {top: 10}}
+                walk: { height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2), bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
+                draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
                 <PianoControls> {}
                 piano = <Piano> {
                     walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
