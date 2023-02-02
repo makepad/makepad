@@ -1488,14 +1488,14 @@ impl IronFishState {
                 current += 1;
             }
         }
-        let mut n = 1;
+        let mut _n = 1;
         
         if self.settings.arp.octaves.get() < 0 
         {
-            n = -1;
+            _n = -1;
         }
         
-        for i in 1 .. self.settings.arp.octaves.get()
+        for _i in 1 .. self.settings.arp.octaves.get()
         {
             
         }

@@ -8,7 +8,7 @@ pub struct DelayToy {
     writeidx: usize,
     localidx: usize,
     accumulator: f32,
-    feedback1: f32,
+    _feedback1: f32,
     buffer: Vec<f32>
 }
 
@@ -19,7 +19,7 @@ impl Default for DelayToy {
             writeidx: 0,
             localidx: 0,
             accumulator: 0.0,
-            feedback1: 0.0
+            _feedback1: 0.0
         }
     }    
 }
@@ -41,7 +41,7 @@ impl DelayToy {
         self.writeidx = (self.writeidx+ 1) & DELAYTOY_BUFFERMASK;
     }
 
-    pub fn allPass(&mut self, length: usize, coeff: f32 ){
+    pub fn all_pass(&mut self, length: usize, coeff: f32 ){
         let j = (self.localidx + length) & DELAYTOY_BUFFERMASK;
         let d = self.buffer[j];
         self.accumulator -= d * coeff;
@@ -50,7 +50,7 @@ impl DelayToy {
         self.localidx = j;
     }
 
-    pub fn linearInterpolate(&mut self, index: usize, offset: f32 ) -> f32
+    pub fn linear_interpolate(&mut self, index: usize, offset: f32 ) -> f32
     {
         let  adjustedindex = (index + MAX_DELAYTOY_DELAY - (offset.floor() as usize))&DELAYTOY_BUFFERMASK;
         let frac = offset.fract();
@@ -58,7 +58,7 @@ impl DelayToy {
         return self.buffer[adjustedindex] * ifrac + self.buffer[(adjustedindex+1)&DELAYTOY_BUFFERMASK] * frac;
     }
 
-    pub fn allPassWobble(&mut self, length: usize, coeff: f32, _lengthoffset: f32  ){
+    pub fn all_pass_wobble(&mut self, length: usize, coeff: f32, _lengthoffset: f32  ){
         let j = (self.localidx + length) & DELAYTOY_BUFFERMASK;
         let d = self.buffer[j];
 
@@ -96,7 +96,7 @@ impl DelayToy {
         if input < -1.0 {return -1.0};
         return input;
     }
-
+/*
     pub fn griesingerReverb(&mut self, mut left: f32, mut right: f32, send: f32){       
         let mut leftOut: f32 = left;      
         let mut rightOut: f32 = right;
@@ -120,5 +120,5 @@ impl DelayToy {
         right = rightOut;
         left = leftOut;
        
-    }
+    }*/
 }
