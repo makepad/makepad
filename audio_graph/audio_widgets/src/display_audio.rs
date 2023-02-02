@@ -121,7 +121,7 @@ impl DisplayAudio {
         for i in 0..frames {
             let left_u16 = ((left[i] + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
             let right_u16 = ((right[i] + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
-            if left[i].abs()>0.00001 || right[i].abs()>0.00001{
+            if left[i].abs()>0.000000000001 || right[i].abs()>0.000000000001{
                 is_active = true;
             }
             wave_buf[voice_offset + ((wave_off + i) & (WAVE_SIZE_X - 1))] = left_u16 << 16 | right_u16;
@@ -129,7 +129,7 @@ impl DisplayAudio {
         self.wave_texture.swap_image_u32(cx, &mut wave_buf);
         self.data_offset[voice] = (self.data_offset[voice] + frames) & (WAVE_SIZE_X - 1);
         if self.active[voice] || is_active{
-            self.area.redraw(cx);
+            self.draw_wave.redraw(cx);
         }
         self.active[voice] = is_active;
     }
@@ -137,14 +137,14 @@ impl DisplayAudio {
 
 impl DisplayAudio {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.draw_wave.draw_vars.set_texture(0, &self.wave_texture);
-        self.draw_wave.draw_abs(cx, rect);
+        self.draw_wave.draw_walk(cx, walk);
     }
     
-    pub fn area(&mut self) -> Area {
-        self.area
+    pub fn area(&self)->Area{
+        self.draw_wave.area()
     }
+    
     
     pub fn handle_event_fn(
         &mut self,
