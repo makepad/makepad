@@ -38,17 +38,16 @@ impl Cx {
         let window = opengl_window.xlib_window.window.unwrap();
         
         self.passes[pass_id].paint_dirty = false;
-        
+         
         let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
         let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
-        
         unsafe {
             glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
-            gl_sys::Viewport(0, 0, pix_width as i32, pix_height as i32);
+            gl_sys::Viewport(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
         
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            self.passes[pass_id].clear_color
+            self.passes[pass_id].clear_color 
         }
         else {
             match self.passes[pass_id].color_textures[0].clear_color {
