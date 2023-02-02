@@ -16,12 +16,12 @@ use {
         pass::{PassClearColor, PassClearDepth, PassId},
         draw_list::DrawListId,
         draw_shader::{CxDrawShaderMapping, DrawShaderTextureInput},
-    }, 
+    },
 };
 
 impl Cx {
     
-    pub(crate) fn render_view(
+    pub (crate) fn render_view(
         &mut self,
         pass_id: PassId,
         draw_list_id: DrawListId,
@@ -47,6 +47,7 @@ impl Cx {
             else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
+                
                 
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
                     draw_call
@@ -148,6 +149,7 @@ impl Cx {
                 
                 unsafe {
                     gl_sys::UseProgram(shp.program);
+                    
                     gl_sys::BindVertexArray(draw_item.os.vao.as_ref().unwrap().vao);
                     let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
                     
@@ -184,7 +186,7 @@ impl Cx {
                         }
                     }
                     for i in 0..sh.mapping.textures.len() {
-                         let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
+                        let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
                             texture_id
                         }else {
                             continue;
@@ -211,6 +213,7 @@ impl Cx {
                     
                     gl_sys::BindVertexArray(0);
                 }
+                
             }
         }
     }
@@ -236,12 +239,12 @@ impl Cx {
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
-            return None 
+            return None
         }
         
         self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
-
+        
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         Some(pass_rect.size)
     }
@@ -330,7 +333,7 @@ impl Cx {
             }
         }
         else {
-           /* unsafe { // BUGFIX. we have to create a depthbuffer for rtt without depthbuffer use otherwise it fails if there is another pass with depth
+            /* unsafe { // BUGFIX. we have to create a depthbuffer for rtt without depthbuffer use otherwise it fails if there is another pass with depth
                 if self.passes[pass_id].os.gl_bugfix_depthbuffer.is_none() {
                     let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
                     gl_sys::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
@@ -352,10 +355,10 @@ impl Cx {
             }*/
         }
         
-        
         unsafe {
             gl_sys::Viewport(0, 0, (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32);
         }
+
         if clear_flags != 0 {
             unsafe {
                 gl_sys::ClearDepth(clear_depth as f64);
@@ -377,11 +380,12 @@ impl Cx {
         );
         unsafe {
             gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
+            //gl_sys::Finish();
         }
     }
     
     pub fn opengl_compile_shaders(&mut self) {
-        let p = profile_start();
+        //let p = profile_start();
         for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
@@ -397,7 +401,7 @@ impl Cx {
                     &cx_shader.mapping.const_table,
                     &self.shader_registry
                 );
-                
+       
                 if cx_shader.mapping.flags.debug {
                     log!("{}\n{}", vertex, pixel);
                 }
@@ -409,6 +413,7 @@ impl Cx {
                         break;
                     }
                 }
+
                 if cx_shader.os_shader_id.is_none() {
                     let shp = CxOsDrawShader::new(&vertex, &pixel, &cx_shader.mapping);
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
@@ -416,9 +421,6 @@ impl Cx {
                 }
             }
         }
-        if self.draw_shaders.compile_set.len()>0{
-            profile_end("shader compile", p);
-        };
         self.draw_shaders.compile_set.clear();
     }
 }
@@ -871,3 +873,30 @@ impl OpenglBuffer {
         }
     }
 }
+
+/*
+// void shaders to test if we are shader compiletime bottlenecked
+
+                let vertex = "
+uniform float const_table[24];
+uniform float draw_table[1];
+uniform float pass_table[50];
+uniform float view_table[16];
+attribute vec2 packed_geometry_0;
+attribute vec4 packed_instance_0;
+attribute vec3 packed_instance_1;
+
+void main() {
+    gl_Position = vec4(0.0,0.0,0.0,0.0);
+}";
+
+let pixel = "
+uniform float const_table[24];
+uniform float draw_table[1];
+uniform float pass_table[50];
+uniform float view_table[16];
+
+void main() {
+    gl_FragColor = vec4(0.0,0.0,0.0,0.0);
+}";*/
+         

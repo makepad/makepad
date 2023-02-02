@@ -313,6 +313,7 @@ live_design!{
         use_cache: true,
         draw_bg: {
             texture image: texture2d
+            uniform marked: float,
             varying scale: vec2
             varying shift: vec2
             fn vertex(self) -> vec4 {
@@ -324,7 +325,7 @@ live_design!{
                 return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos * self.scale + self.shift);
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked,0.0,0.0,0.0);
             }
             
             shape: Solid,
@@ -877,6 +878,12 @@ impl Frame {
                     if self.use_cache {
                         let cache = self.cache.as_mut().unwrap();
                         cx.end_pass(&cache.pass);
+                        /*if cache.pass.id_equals(4){
+                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[1.0]);
+                        }
+                        else{
+                            self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[0.0]);
+                        }*/
                         self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
