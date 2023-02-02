@@ -266,7 +266,7 @@ impl Cx {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
-                    let size = dvec2(direct_app.drm.width as f64, direct_app.drm.height as f64);
+                    let size = dvec2(direct_app.drm.width as f64 / direct_app.dpi_factor, direct_app.drm.height as f64 / direct_app.dpi_factor);
                     window.window_geom = WindowGeom {
                         dpi_factor: direct_app.dpi_factor,
                         can_fullscreen: false,
