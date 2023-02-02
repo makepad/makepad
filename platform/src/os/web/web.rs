@@ -139,7 +139,7 @@ impl Cx {
                             }
                         }
                     }
-                    self.fingers.move_captures();
+                    self.fingers.switch_captures();
                 }
                 
                 live_id!(ToWasmMouseDown) => {
@@ -153,7 +153,7 @@ impl Cx {
                     let e: MouseMoveEvent = ToWasmMouseMove::read_to_wasm(&mut to_wasm).into();
                     self.call_event_handler(&Event::MouseMove(e.into()));
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
-                    self.fingers.move_captures();
+                    self.fingers.switch_captures();
                 }
                 
                 live_id!(ToWasmMouseUp) => {
