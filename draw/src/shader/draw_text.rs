@@ -392,9 +392,8 @@ impl DrawText {
             let min_pos_y = pos.y - font_size_logical * glyph.bounds.p_min.y + self.text_style.font_size * self.text_style.top_drop;
             
             // compute subpixel shift
-            let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
-            let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
-            
+            let subpixel_x_fract = (min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor).fract();
+            let subpixel_y_fract = (min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor).fract();
             // scale and snap it
             //let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
             //let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;

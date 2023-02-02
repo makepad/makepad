@@ -43,7 +43,7 @@ pub struct DirectApp {
 impl DirectApp {
     fn new() -> Self {
         let mut mode = "1920x1080-60".to_string();
-        let mut dpi_factor = 1.0;
+        let mut dpi_factor = 0.5;
         for arg in std::env::args() {
             if arg.starts_with("-mode=") {
                 mode = arg.trim_start_matches("-mode=").to_string();
@@ -61,7 +61,7 @@ impl DirectApp {
         Self {
             dpi_factor,
             egl,
-            raw_input: RawInput::new(drm.width as f64, drm.height as f64),
+            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64/ dpi_factor),
             drm,
             timers: SelectTimers::new()
         }
