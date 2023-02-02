@@ -628,7 +628,7 @@ live_design!{
             }
             
             scaletype = <InstrumentDropdown> {
-                walk: {height: Fit, width: Fill}
+                walk: {height: Fit, width: Fit}
                 dropdown = {
                     labels: ["Minor", "Major", "Dorian", "Pentatonic"]
                     values: [Minor, Major, Dorian, Pentatonic]
