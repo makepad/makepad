@@ -1362,6 +1362,7 @@ impl App {
         data_to_widget!(db, sequencer.rootnote => rootnote.dropdown);
         data_to_widget!(db, sequencer.scale => scaletype.dropdown);
         data_to_widget!(db, arp.enabled => arp.checkbox);
+        data_to_widget!(db, arp.octaves => arpoctaves.slider);
         
         // Mixer panel
         data_to_widget!(db, osc_balance => balance.slider);

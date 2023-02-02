@@ -181,7 +181,8 @@ pub struct DelaySettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct ArpSettings {
-    #[live(false)] enabled: boola,
+    #[live(true)] enabled: boola,
+    #[live(0)] octaves: i32a
 }
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
@@ -1486,6 +1487,17 @@ impl IronFishState {
                 self.arp.melody[current] = i as u32;
                 current += 1;
             }
+        }
+        let mut n = 1;
+        
+        if self.settings.arp.octaves.get() < 0 
+        {
+            n = -1;
+        }
+        
+        for i in 1 .. self.settings.arp.octaves.get()
+        {
+            
         }
         self.arp.melodylength = current;
     }
