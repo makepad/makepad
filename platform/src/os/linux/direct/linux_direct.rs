@@ -37,14 +37,19 @@ pub struct DirectApp {
     drm: Drm,
     egl: Egl,
     raw_input: RawInput,
+    dpi_factor: f64,
 }
 
 impl DirectApp {
     fn new() -> Self {
         let mut mode = "1920x1080-60".to_string();
+        let mut dpi_factor = 1.0;
         for arg in std::env::args() {
-            if arg.starts_with("-m=") {
-                mode = arg.trim_start_matches("-m=").to_string();
+            if arg.starts_with("-mode=") {
+                mode = arg.trim_start_matches("-mode=").to_string();
+            }
+            if arg.starts_with("-scale=") {
+                dpi_factor = arg.trim_start_matches("-scale=").parse().unwrap();
             }
         }
         
@@ -54,6 +59,7 @@ impl DirectApp {
         egl.swap_buffers();
         unsafe {drm.first_mode()};
         Self {
+            dpi_factor,
             egl,
             raw_input: RawInput::new(drm.width as f64, drm.height as f64),
             drm,
@@ -242,7 +248,7 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
-                    self.draw_pass_to_fullscreen(*pass_id, direct_app, 1.0);
+                    self.draw_pass_to_fullscreen(*pass_id, direct_app, direct_app.dpi_factor);
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
