@@ -83,6 +83,8 @@ live_design!{
         popup_menu: <PopupMenu> {
         }
         
+        popup_shift: vec2(-6.0,4.0)
+        
         selected_item: 0
         state: {
             hover = {
@@ -152,6 +154,8 @@ pub struct DropDown {
     
     labels: Vec<String>,
     values: Vec<LiveValue>,
+    
+    popup_shift: DVec2,
     
     #[rust] last_rect: Option<Rect>,
     #[rust] is_open: bool,
@@ -353,7 +357,7 @@ impl DropDown {
             }
             
             // ok we shift the entire menu. however we shouldnt go outside the screen area
-            popup_menu.end(cx, last_rect.pos - item_pos.unwrap_or(dvec2(0.0,0.0)));
+            popup_menu.end(cx, last_rect.pos - item_pos.unwrap_or(dvec2(0.0,0.0))+self.popup_shift);
         }
     }
 }
