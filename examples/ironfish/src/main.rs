@@ -676,6 +676,15 @@ live_design!{
             checkbox = {label: "Arp"}
             walk: {width: Fit, height: Fit}
         }
+        arpoctaves = <InstrumentBipolarSlider> {
+            walk: {width: 200}
+            slider = {
+                draw_slider: {line_color: (COLOR_MUSIC)}
+                min: -4.0
+                max: 4.0
+                label: "Octaves"
+            }
+        }
     }
     
     SequencerPanel = <Box> {
