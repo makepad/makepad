@@ -23,35 +23,12 @@ live_design!{
                 let audio = (left + right)-0.01;
                 let half = self.rect_size.y*0.5;
                 let scale = half * 2.0;
-                sdf.hline(abs(audio) * scale, half + audio * scale);
+                sdf.hline(half + audio * scale, abs(audio) * scale);
                 let color = Pal::iq1(0.35+2.0*step)*0.8;
                 sdf.fill(vec4(color,1.0))
-                // lets make an sdf gradient here
                 step += 1.0/16.0;
             }
             return sdf.result
-            /*
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size * vec2(1.0, 0.5));
-            let color = Pal::iq1(0.25) * 0.5;
-            
-            if left < 0.0 {
-                sdf.rect(0., self.rect_size.y * 0.25, self.rect_size.x, -left * self.rect_size.y + 0.5);
-            }
-            else {
-                sdf.rect(0., self.rect_size.y * 0.25 - self.rect_size.y * left, self.rect_size.x, left * self.rect_size.y + 0.5);
-            }
-            sdf.fill(vec4(color, 1.0));
-            
-            if right < 0.0 {
-                sdf.rect(0., self.rect_size.y * 0.75, self.rect_size.x, -right * self.rect_size.y + 0.5);
-            }
-            else {
-                sdf.rect(0., self.rect_size.y * 0.75 - self.rect_size.y * right, self.rect_size.x, right * self.rect_size.y + 0.5);
-            }
-            sdf.fill(vec4(color, 1.0));
-            
-            let result = sdf.result.xyz;
-            return vec4(result, 0.0)*/
         }
     }
     
@@ -77,7 +54,6 @@ pub struct DisplayAudio {
     wave_texture: Texture,
     #[rust] data_offset: [usize; 32],
     #[rust([true;32])] active: [bool; 32],
-    #[rust] area: Area,
 }
 
 #[derive(Clone, WidgetAction)]
