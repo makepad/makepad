@@ -447,11 +447,7 @@ impl Cx {
     
      
     pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
-        let mut lines = 0;
-        let mut shaders = 0;
-        let mut shader_output = String::new();
-        let start = profile_start();
-        for draw_shader_ptr in &self.draw_shaders.compile_set {
+       for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
                 let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
@@ -472,10 +468,6 @@ impl Cx {
                     }
                 }
                 if cx_shader.os_shader_id.is_none() {
-                    shader_output.push_str("\n\n\n\n ----------------- SHADER --------------------\n\n\n\n");
-                    shader_output.push_str(&gen.mtlsl);
-                    lines += gen.mtlsl.split("\n").count();
-                    shaders += 1;
                     if let Some(shp) = CxOsDrawShader::new(metal_cx, gen) {
                         cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                         self.draw_shaders.os_shaders.push(shp);
@@ -483,10 +475,6 @@ impl Cx {
                 }
             }
         } 
-        profile_end(start);
-        println!("SHADER LINES {} shaders {}", lines, shaders);
-        use std::io::Write;
-        std::fs::File::create("./dump.txt").unwrap().write(&shader_output.as_bytes());
         self.draw_shaders.compile_set.clear();
     }
 }

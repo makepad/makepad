@@ -250,6 +250,9 @@ impl CxFingers {
                 capture.sweep_area = new_area;
             }
         }
+        if self.sweep_lock == Some(old_area) {
+            self.sweep_lock = Some(new_area);
+        }
     }
     
     pub (crate) fn new_hover_area(&mut self, digit_id: DigitId, new_area: Area) {
@@ -355,6 +358,28 @@ impl CxFingers {
             self.release_digit(digit_id);
         }
     }
+    
+    pub (crate) fn test_sweep_lock(&mut self, sweep_area: Area) -> bool {
+        if let Some(lock) = self.sweep_lock {
+            if lock != sweep_area {
+                return true
+            }
+        }
+        false
+    }
+    
+    pub fn sweep_lock(&mut self, area:Area){
+        if self.sweep_lock.is_none(){
+            self.sweep_lock = Some(area);
+        }
+    }
+    
+    pub fn sweep_unlock(&mut self, area:Area){
+        if self.sweep_lock == Some(area){
+            self.sweep_lock = None;
+        }
+    }
+    
 }
 
 #[derive(Clone, Debug)]
@@ -526,7 +551,7 @@ impl Event {
         self.hits_with_options(cx, area, HitOptions::default())
     }
     
-    pub fn hits_with_sweep_area(&self, cx: &mut Cx, area: Area, sweep_area:Area) -> Hit {
+    pub fn hits_with_sweep_area(&self, cx: &mut Cx, area: Area, sweep_area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::new().with_sweep_area(sweep_area))
     }
     
@@ -565,7 +590,7 @@ impl Event {
             },
             Event::Scroll(e) => {
                 let digit_id = live_id!(mouse).into();
-
+                
                 let rect = area.get_clipped_rect(&cx);
                 if Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
                     //fe.handled = true;
@@ -585,6 +610,9 @@ impl Event {
                 }
             },
             Event::TouchUpdateEvent(e) => {
+                if cx.fingers.test_sweep_lock(options.sweep_area){
+                    return Hit::Nothing
+                }
                 for t in &e.touches {
                     let digit_id = live_id_num!(touch, t.uid).into();
                     let device = DigitDevice::Touch {
@@ -593,6 +621,7 @@ impl Event {
                     
                     match t.state {
                         TouchState::Start => {
+                            
                             if !t.handled.get().is_empty() {
                                 continue;
                             }
@@ -720,6 +749,10 @@ impl Event {
                 }
             }
             Event::MouseMove(e) => { // ok so we dont get hovers
+                if cx.fingers.test_sweep_lock(options.sweep_area){
+                    return Hit::Nothing
+                }
+
                 let digit_id = live_id!(mouse).into();
                 
                 let tap_count = cx.fingers.get_tap_count();
@@ -842,6 +875,10 @@ impl Event {
                 }
             },
             Event::MouseDown(e) => {
+                if cx.fingers.test_sweep_lock(options.sweep_area){
+                    return Hit::Nothing
+                }
+
                 let digit_id = live_id!(mouse).into();
                 
                 if !e.handled.get().is_empty() {
@@ -880,6 +917,10 @@ impl Event {
                 })
             },
             Event::MouseUp(e) => {
+                if cx.fingers.test_sweep_lock(options.sweep_area){
+                    return Hit::Nothing
+                }
+
                 if cx.fingers.first_mouse_button != Some(e.button) {
                     return Hit::Nothing
                 }
