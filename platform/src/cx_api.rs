@@ -221,11 +221,25 @@ impl Cx {
             Some(CxPassRect::Area(area)) => {
                 let rect = area.get_rect(self);
                 Some(Rect{
-                    pos:rect.pos.floor(),
-                    size: (rect.size / dpi).ceil() * dpi
+                    pos: (rect.pos * dpi).floor() / dpi,
+                    size: (rect.size * dpi).ceil() / dpi
                 })
             }
             Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size: (size / dpi).floor() * dpi}),
+            None => None
+        } 
+    }
+    
+    pub fn get_pass_rect2(&self, pass_id: PassId) -> Option<Rect> {
+        match self.passes[pass_id].pass_rect {
+            Some(CxPassRect::Area(area)) => {
+                let rect = area.get_rect(self);
+                Some(Rect{
+                    pos:rect.pos,
+                    size: rect.size 
+                })
+            }
+            Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size}),
             None => None
         } 
     }
