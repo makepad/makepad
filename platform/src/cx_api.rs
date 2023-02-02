@@ -221,8 +221,8 @@ impl Cx {
             Some(CxPassRect::Area(area)) => {
                 let rect = area.get_rect(self);
                 Some(Rect{
-                    pos:rect.pos,
-                    size: (rect.size / dpi).floor() * dpi
+                    pos:rect.pos.floor(),
+                    size: (rect.size / dpi).ceil() * dpi
                 })
             }
             Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size: (size / dpi).floor() * dpi}),
