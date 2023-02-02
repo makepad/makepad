@@ -24,6 +24,10 @@ live_design!{
             let sa = sin(a);
             return vec2(v.x * ca - v.y * sa, v.x * sa + v.y * ca);
         }
+        
+        fn random_2d(v: vec2)->float {
+           return fract(sin(dot(v.xy, vec2(12.9898,78.233))) * 43758.5453);
+        }
     }
     
     Pal = {

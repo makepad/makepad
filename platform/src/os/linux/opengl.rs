@@ -235,14 +235,13 @@ impl Cx {
         };
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         
-        //println!("{:?}", pass_rect);
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
-            return None
+            return None 
         }
         
         self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
-        
+
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         Some(pass_rect.size)
     }

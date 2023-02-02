@@ -19,7 +19,7 @@
 #![allow(dead_code)]
 
 use crate::waveguide::Waveguide;
-use crate::delay_toys::DelayToy;
+//use crate::delay_toys::DelayToy;
 
 use {
     std::sync::Arc,
@@ -181,7 +181,8 @@ pub struct DelaySettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct ArpSettings {
-    #[live(false)] enabled: boola,
+    #[live(true)] enabled: boola,
+    #[live(0)] octaves: i32a
 }
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
@@ -1486,6 +1487,17 @@ impl IronFishState {
                 self.arp.melody[current] = i as u32;
                 current += 1;
             }
+        }
+        let mut _n = 1;
+        
+        if self.settings.arp.octaves.get() < 0 
+        {
+            _n = -1;
+        }
+        
+        for _i in 1 .. self.settings.arp.octaves.get()
+        {
+            
         }
         self.arp.melodylength = current;
     }

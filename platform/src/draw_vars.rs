@@ -36,46 +36,46 @@ pub enum ShaderCompileResult {
 
 
 #[cfg(target_arch = "wasm32")]
-pub const fn shader_enum(i:u32)->u32{
-    match i{
-        1=>0x3f800000,
-        2=>0x40000000,
-        3=>0x40400000,
-        4=>0x40800000,
-        5=>0x40a00000,
-        6=>0x40c00000,
-        7=>0x40e00000,
-        8=>0x41000000,
-        9=>0x41100000,
-        10=>0x41200000,
-        11=>0x41300000,
-        12=>0x41400000,
-        13=>0x41500000,
-        14=>0x41600000,
-        15=>0x41700000,
-        16=>0x41800000,
-        17=>0x41880000,
-        18=>0x41900000,
-        19=>0x41980000,
-        20=>0x41a00000,
-        21=>0x41a80000,
-        22=>0x41b00000,
-        23=>0x41b80000,
-        24=>0x41c00000,
-        25=>0x41c80000,
-        26=>0x41d00000,
-        27=>0x41d80000,
-        28=>0x41e00000,
-        29=>0x41e80000,
-        30=>0x41f00000,
-        31=>0x41f80000,
-        _=>panic!()
+pub const fn shader_enum(i: u32) -> u32 {
+    match i {
+        1 => 0x3f800000,
+        2 => 0x40000000,
+        3 => 0x40400000,
+        4 => 0x40800000,
+        5 => 0x40a00000,
+        6 => 0x40c00000,
+        7 => 0x40e00000,
+        8 => 0x41000000,
+        9 => 0x41100000,
+        10 => 0x41200000,
+        11 => 0x41300000,
+        12 => 0x41400000,
+        13 => 0x41500000,
+        14 => 0x41600000,
+        15 => 0x41700000,
+        16 => 0x41800000,
+        17 => 0x41880000,
+        18 => 0x41900000,
+        19 => 0x41980000,
+        20 => 0x41a00000,
+        21 => 0x41a80000,
+        22 => 0x41b00000,
+        23 => 0x41b80000,
+        24 => 0x41c00000,
+        25 => 0x41c80000,
+        26 => 0x41d00000,
+        27 => 0x41d80000,
+        28 => 0x41e00000,
+        29 => 0x41e80000,
+        30 => 0x41f00000,
+        31 => 0x41f80000,
+        _ => panic!()
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub const fn shader_enum(i:u32)->u32{
-    if i<1 ||i > 31{
+pub const fn shader_enum(i: u32) -> u32 {
+    if i<1 || i > 31 {
         panic!();
     }
     i
@@ -129,11 +129,26 @@ impl DrawVars {
         self.texture_slots[slot] = Some(texture.texture_id());
     }
     
-    pub fn redraw(&self, cx:&mut Cx) {
+    pub fn set_uniform(&mut self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
+        if let Some(draw_shader) = self.draw_shader {
+            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+            for input in &sh.mapping.user_uniforms.inputs {
+                let offset = input.offset;
+                let slots = input.slots;
+                if input.id == uniform[0] {
+                    for i in 0..value.len().min(slots) {
+                        self.user_uniforms[offset + i] = value[i]
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn redraw(&self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
     
-    pub fn area(&self)->Area {
+    pub fn area(&self) -> Area {
         self.area
     }
     
@@ -383,7 +398,7 @@ impl DrawVars {
         }
     }
     
-    pub fn update_rect(&mut self, cx: &mut Cx, rect:Rect) {
+    pub fn update_rect(&mut self, cx: &mut Cx, rect: Rect) {
         if let Some(draw_shader) = self.draw_shader {
             if let Some(inst) = self.area.valid_instance(cx) {
                 if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
