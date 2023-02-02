@@ -1489,17 +1489,23 @@ impl IronFishState {
             }
         }
         let mut n = 1;
-        
-        if self.settings.arp.octaves.get() < 0 
+        let notesinoriginalmelody = current;
+        if self.settings.arp.octaves.get() != 0 
         {
-            n = -1;
-        }
-        
-        for i in 1 .. self.settings.arp.octaves.get()
-        {
+
+            if self.settings.arp.octaves.get() < 0 {
+                n = -1;
+            }
             
+            for i in 0 .. self.settings.arp.octaves.get().abs() {
+                for q in 0..notesinoriginalmelody  {
+                    self.arp.melody[current] = ((self.arp.melody[q] as i32)+ ((i+1) as i32) * 12 * n) as u32;
+                    current += 1;
+                }
+            }
         }
         self.arp.melodylength = current;
+
     }
     
     /*
