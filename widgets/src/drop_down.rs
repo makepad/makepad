@@ -208,11 +208,13 @@ impl DropDown {
         let node_id = LiveId(self.selected_item as u64).into();
         lb.init_select_item(node_id);
         self.last_rect = Some(self.draw_bg.area().get_rect(cx));
+        cx.sweep_lock(self.draw_bg.area());
     }
     
     pub fn set_closed(&mut self, cx: &mut Cx) {
         self.is_open = false;
         self.draw_bg.redraw(cx);
+        cx.sweep_unlock(self.draw_bg.area());
     }
     
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DropDownAction)) {
@@ -242,14 +244,9 @@ impl DropDown {
             if close {
                 self.set_closed(cx);
             }
+            
             // check if we clicked outside of the popup menu
             if let Event::MouseDown(e) = event {
-                if !menu.menu_contains_pos(cx, e.abs) {
-                    self.set_closed(cx);
-                    self.animate_state(cx, id!(hover.off));
-                }
-            }
-            if let Event::MouseUp(e) = event {
                 if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
                     self.animate_state(cx, id!(hover.off));
@@ -340,19 +337,23 @@ impl DropDown {
             // ok so how will we solve this one
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
-            let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
+            let popup_menu = map.get_mut(&self.popup_menu.unwrap()).unwrap();
             let mut item_pos = None;
             
-            lb.begin(cx, last_rect.size.x);
+            // we kinda need to draw it twice.
+            
+            popup_menu.begin(cx);
+            
             for (i, item) in self.labels.iter().enumerate() {
                 let node_id = LiveId(i as u64).into();
                 if i == self.selected_item {
                     item_pos = Some(cx.turtle().pos());
                 }
-                lb.draw_item(cx, node_id, &item);
+                popup_menu.draw_item(cx, node_id, &item);
             }
+            
             // ok we shift the entire menu. however we shouldnt go outside the screen area
-            lb.end(cx, last_rect.pos - item_pos.unwrap_or(dvec2(0.0,0.0)));
+            popup_menu.end(cx, last_rect.pos - item_pos.unwrap_or(dvec2(0.0,0.0)));
         }
     }
 }

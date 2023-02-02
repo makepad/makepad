@@ -121,7 +121,7 @@ live_design!{
         popup_menu: {
             menu_item: {
                 indent_width: 10.0
-                walk: {width: 300, height: Fit}
+                walk: {width: Fill, height: Fit}
                 layout: {
                     padding: {left: 15, top: 5, bottom: 5, right: 15},
                 }
@@ -1492,7 +1492,7 @@ impl App {
         }
         
         if let Event::AudioDevices(devices) = event {
-            // println!("{}", devices);
+            //println!("{}", devices);
             cx.use_audio_outputs(&devices.default_output());
         }
         

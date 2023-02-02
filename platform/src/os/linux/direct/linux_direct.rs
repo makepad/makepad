@@ -1,7 +1,7 @@
 use {
     self::super::{
         direct_event::*,
-        egl_drm::{Egl,Drm},
+        egl_drm::{Egl, Drm},
         raw_input::RawInput,
     },
     self::super::super::{
@@ -44,7 +44,7 @@ pub struct DirectApp {
 impl DirectApp {
     fn new() -> Self {
         let mut mode = "1280x720-60".to_string();
-        let mut dpi_factor = 0.7; 
+        let mut dpi_factor = 0.7;
         for arg in std::env::args() {
             if arg.starts_with("-mode=") {
                 mode = arg.trim_start_matches("-mode=").to_string();
@@ -62,7 +62,7 @@ impl DirectApp {
         Self {
             dpi_factor,
             egl,
-            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64/ dpi_factor),
+            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64 / dpi_factor),
             drm,
             timers: SelectTimers::new()
         }
@@ -73,13 +73,13 @@ impl Cx {
     pub fn event_loop(mut self) {
         self.platform_type = OsType::LinuxDirect;
         self.gpu_info.performance = GpuPerformance::Tier1;
-
+        
         let p = profile_start();
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
-        profile_end("construct",p);
-
-
+        profile_end("construct", p);
+        
+        
         let mut direct_app = DirectApp::new();
         direct_app.timers.start_timer(0, 0.008, true);
         // lets run the kms eventloop
@@ -101,7 +101,7 @@ impl Cx {
             }
             let input_events = direct_app.raw_input.poll_raw_input(
                 direct_app.timers.time_now(),
-                CxWindowPool::id_zero() 
+                CxWindowPool::id_zero()
             );
             for event in input_events {
                 self.kms_event_callback(
@@ -109,13 +109,11 @@ impl Cx {
                     event
                 );
             }
-            let p = profile_start(); 
             event_flow = self.kms_event_callback(&mut direct_app, DirectEvent::Paint);
-            if first_profile{
-                profile_end("first paint", p);
+            if first_profile {
                 first_profile = false;
             }
-            // alright so.. how do we do things 
+            // alright so.. how do we do things
         }
     }
     
@@ -131,6 +129,7 @@ impl Cx {
         //self.process_desktop_pre_event(&mut event);
         match event {
             DirectEvent::Paint => {
+                //let p = profile_start();
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(direct_app.timers.time_now());
                 }
@@ -140,7 +139,10 @@ impl Cx {
                     self.opengl_compile_shaders();
                 }
                 // ok here we send out to all our childprocesses
+                //profile_end("paint event handling", p);
+                //let p = profile_start();
                 self.handle_repaint(direct_app);
+                //profile_end("paint openGL", p);
             }
             DirectEvent::MouseDown(e) => {
                 self.fingers.process_tap_count(
@@ -258,14 +260,26 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
+                    let p = profile_start();
                     self.draw_pass_to_fullscreen(*pass_id, direct_app, direct_app.dpi_factor);
+                    profile_end("draw_pass_to_fullscreen", p);
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    let p = profile_start();
                     self.draw_pass_to_texture(*pass_id, dpi_factor);
+                    profile_end(
+                        &format!("draw_pass_to_texture {} {:?}", self.get_pass_name(*pass_id), *pass_id),
+                        p 
+                    );
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, 1.0);
+                    let p = profile_start();
+                    self.draw_pass_to_texture(*pass_id, 1.0); 
+                    profile_end(
+                        &format!("draw_pass_to_texture {} {:?}", self.get_pass_name(*pass_id), *pass_id),
+                        p 
+                    );
                 }
             }
         }
@@ -307,9 +321,11 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init(&mut self) {
+        let p = profile_start();
         self.live_expand();
         self.live_scan_dependencies();
         self.desktop_load_dependencies();
+        profile_end("live expand", p);
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
