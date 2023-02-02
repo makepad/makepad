@@ -308,7 +308,7 @@ impl DropDown {
                     self.animate_state(cx, id!(hover.off));
                 }
             }
-            _ => ()
+            _=>()
         };
     }
     

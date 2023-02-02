@@ -279,8 +279,10 @@ live_design!{
     
     GradientY = <Frame> {show_bg: true, draw_bg: {
         instance color2: #f00
+        instance noise: 1.0
         fn get_color(self) -> vec4 {
-            return mix(self.color, self.color2, self.pos.y)
+            let dither = Math::random_2d(self.pos.xy) * self.rect_size.y * 0.0002 * self.noise;
+            return mix(self.color, self.color2, self.pos.y + dither)
         }
         
         fn pixel(self) -> vec4 {
@@ -313,14 +315,14 @@ live_design!{
             varying shift: vec2
             fn vertex(self) -> vec4 {
                 let dpi = self.dpi_factor;
-                let ceil_size = ceil(self.rect_size*dpi)/dpi
-                let floor_pos = floor(self.rect_pos*dpi)/dpi
-                self.scale = self.rect_size/ceil_size;
+                let ceil_size = ceil(self.rect_size * dpi) / dpi
+                let floor_pos = floor(self.rect_pos * dpi) / dpi
+                self.scale = self.rect_size / ceil_size;
                 self.shift = (self.rect_pos - floor_pos) / ceil_size;
-                return self.clip_and_transform_vertex(self.rect_pos,self.rect_size)
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos*self.scale + self.shift);
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift);
             }
             
             shape: Solid,
