@@ -37,14 +37,19 @@ pub struct DirectApp {
     drm: Drm,
     egl: Egl,
     raw_input: RawInput,
+    dpi_factor: f64,
 }
 
 impl DirectApp {
     fn new() -> Self {
-        let mut mode = "1920x1080-60".to_string();
+        let mut mode = "1280x720-60".to_string();
+        let mut dpi_factor = 0.7; 
         for arg in std::env::args() {
-            if arg.starts_with("-m=") {
-                mode = arg.trim_start_matches("-m=").to_string();
+            if arg.starts_with("-mode=") {
+                mode = arg.trim_start_matches("-mode=").to_string();
+            }
+            if arg.starts_with("-scale=") {
+                dpi_factor = arg.trim_start_matches("-scale=").parse().unwrap();
             }
         }
         
@@ -54,8 +59,9 @@ impl DirectApp {
         egl.swap_buffers();
         unsafe {drm.first_mode()};
         Self {
+            dpi_factor,
             egl,
-            raw_input: RawInput::new(drm.width as f64, drm.height as f64),
+            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64/ dpi_factor),
             drm,
             timers: SelectTimers::new()
         }
@@ -137,7 +143,7 @@ impl Cx {
             DirectEvent::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
-                self.fingers.move_captures();
+                self.fingers.switch_captures();
             }
             DirectEvent::MouseUp(e) => {
                 let button = e.button;
@@ -242,15 +248,7 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
-                    self.draw_pass_to_fullscreen(*pass_id, direct_app, 1.0);
-                    // lets run a paint pass here
-                    
-                    /*if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        let dpi_factor = window.window_geom.dpi_factor;
-                        window.resize_buffers(&opengl_cx);
-                        self.draw_pass_to_window(*pass_id, dpi_factor, window, opengl_cx);
-                    }*/
-                    // DO HERE
+                    self.draw_pass_to_fullscreen(*pass_id, direct_app, direct_app.dpi_factor);
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -268,9 +266,9 @@ impl Cx {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
-                    let size = dvec2(direct_app.drm.width as f64, direct_app.drm.height as f64);
+                    let size = dvec2(direct_app.drm.width as f64 / direct_app.dpi_factor, direct_app.drm.height as f64 / direct_app.dpi_factor);
                     window.window_geom = WindowGeom {
-                        dpi_factor: 1.0,
+                        dpi_factor: direct_app.dpi_factor,
                         can_fullscreen: false,
                         xr_is_presenting: false,
                         is_fullscreen: true,

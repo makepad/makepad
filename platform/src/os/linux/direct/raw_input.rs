@@ -289,6 +289,17 @@ impl RawInput {
                     }
                 }
                 if new.code == 272 || new.code == 273 || new.code == 274 { // mouse
+                    if mouse_moved {
+                        mouse_moved = false;
+                        evts.push(DirectEvent::MouseMove(MouseMoveEvent {
+                            abs: self.abs,
+                            window_id,
+                            modifiers: self.modifiers,
+                            time,
+                            handled: Cell::new(Area::Empty),
+                        }));
+                    }
+
                     if key_down{
                         evts.push(DirectEvent::MouseDown(MouseDownEvent {
                             button: (new.code - 272) as usize,
