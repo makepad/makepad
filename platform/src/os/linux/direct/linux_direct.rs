@@ -268,7 +268,7 @@ impl Cx {
                     let window = &mut self.windows[window_id];
                     let size = dvec2(direct_app.drm.width as f64, direct_app.drm.height as f64);
                     window.window_geom = WindowGeom {
-                        dpi_factor: 1.0,
+                        dpi_factor: direct_app.dpi_factor,
                         can_fullscreen: false,
                         xr_is_presenting: false,
                         is_fullscreen: true,
