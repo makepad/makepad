@@ -153,6 +153,13 @@ impl DVec2 {
             y: self.y.floor(),
         };
     }
+        
+    pub fn ceil(self) -> DVec2 {
+        return DVec2 {
+            x: self.x.ceil(), 
+            y: self.y.ceil(),
+        };
+    }
     
     pub fn distance(&self, other: &DVec2) -> f64 {
         let dx = self.x - other.x;
