@@ -243,14 +243,6 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
                     self.draw_pass_to_fullscreen(*pass_id, direct_app, 1.0);
-                    // lets run a paint pass here
-                    0
-                    /*if let Some(window) = opengl_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        let dpi_factor = window.window_geom.dpi_factor;
-                        window.resize_buffers(&opengl_cx);
-                        self.draw_pass_to_window(*pass_id, dpi_factor, window, opengl_cx);
-                    }*/
-                    // DO HERE
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
