@@ -1492,7 +1492,7 @@ impl App {
         }
         
         if let Event::AudioDevices(devices) = event {
-            println!("{}", devices);
+            // println!("{}", devices);
             cx.use_audio_outputs(&devices.default_output());
         }
         

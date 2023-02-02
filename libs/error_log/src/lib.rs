@@ -23,6 +23,6 @@ pub fn profile_start() -> Instant {
     Instant::now()
 }
 
-pub fn profile_end(instant: Instant) {
-    log!("Profile time {} ms", (instant.elapsed().as_nanos() as f64) / 1000000f64);
+pub fn profile_end(name:&str, instant: Instant) {
+    log!("Profile {} time {} ms", name, (instant.elapsed().as_nanos() as f64) / 1000000f64);
 }
