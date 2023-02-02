@@ -28,8 +28,8 @@ live_design!{
     
     const SPACING_PANELS = 10.0
     const SPACING_CONTROLS = 3.0
-    const SPACING_BASE_PADDING = 8.0
-    const HEIGHT_AUDIOVIZ = 200 
+    const SPACING_BASE_PADDING = 7.5
+    const HEIGHT_AUDIOVIZ = 150
     const COLOR_OSC = #xFFFF99FF // yellow
     const COLOR_MUSIC = #xC // gray
     const COLOR_ENV = #xF9A894 // light red
@@ -53,6 +53,7 @@ live_design!{
     const COLOR_BG_GRADIENT_DARK = #xFFFFFF0A
     const FONT_SIZE_H1 = 11.0
     const FONT_SIZE_H2 = 9.5
+    BASE_PADDING = {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}
     
     // WIDGETS
     ElementBox = <Frame> {
@@ -87,7 +88,7 @@ live_design!{
     }
     
     FishPanel = <GradientY> {
-        layout: {flow: Down, padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
+        layout: {flow: Down, padding: <BASE_PADDING> {} }
         walk: {width: Fill, height: Fit}
         draw_bg: {
             color: (COLOR_BG_GRADIENT_BRIGHT),
@@ -158,7 +159,7 @@ live_design!{
     FishButton = <Button> {
         layout: {
             align: {x: 0.5, y: 0.5},
-            padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}
+            padding: <BASE_PADDING> {}
         }
         
         draw_label: {
@@ -307,7 +308,7 @@ live_design!{
     
     InstrumentCheckbox = <ElementBox> {
         checkbox = <CheckBox> {
-            layout: {padding: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}}
+            layout: {padding: <BASE_PADDING> {}}
             label: "CutOff1"
             draw_check: {
                 fn pixel(self) -> vec4 {
@@ -354,7 +355,7 @@ live_design!{
     }
     
     GraphPaper = <Box> {
-        walk: {width: Fill, height: 150}
+        walk: {width: Fill, height: 110}
         draw_bg: {
             color: #x44,
             instance color2: #x0,
@@ -397,8 +398,8 @@ live_design!{
     }
     
     FishTitle = <Solid> {
-        walk: {width: Fit, height: Fit, margin: {bottom: -2}}
-        layout: {padding: {left: (SPACING_BASE_PADDING), top: (SPACING_BASE_PADDING + 1), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING + 2)}}
+        walk: {width: Fit, height: Fit}
+        layout: {padding: 7.5}
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -436,7 +437,7 @@ live_design!{
     
     FishSubTitle = <Frame> {
         walk: {width: Fit, height: Fit}
-        layout: {padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
+        layout: {padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING / 2)}}
         
         label = <Label> {
             draw_label: {
@@ -497,6 +498,7 @@ live_design!{
         
         <Frame> { // TODO: REPLACE WITH DEDICATED WIDGET?
             walk: {width: Fill, height: Fit}
+            layout: {flow: Right, spacing: (SPACING_CONTROLS)}
             attack = <InstrumentSlider> {
                 slider = {
                     draw_slider: {line_color: (COLOR_ENV)}
@@ -592,7 +594,6 @@ live_design!{
 
     }
     
-    
     SequencerControls = <Frame> {
         walk: {height: Fit, width: Fill}
         layout: {flow: Down, padding: {top: 0.0, right: (SPACING_BASE_PADDING), bottom: 0.0, left: (SPACING_BASE_PADDING)}}
@@ -656,7 +657,7 @@ live_design!{
     }
     
     PianoControls = <GradientY> {
-        layout: {flow: Right, padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
+        layout: {flow: Right, padding: <BASE_PADDING> {}}
         walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: 0, left: (SPACING_BASE_PADDING * 2)} }
         draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
         
@@ -688,7 +689,7 @@ live_design!{
             
             <SequencerControls> {}
             sequencer = <Sequencer> {walk: {width: Fill, height: 300} }
-    }
+        }
     }
     
     CrushFXPanel = <Frame> {
@@ -743,7 +744,7 @@ live_design!{
             walk: {width: Fill, height: Fit}
             
             <Frame> {
-                layout: {flow: Right}
+                layout: {flow: Right, spacing: (SPACING_CONTROLS)}
                 walk: {width: Fill, height: Fit}
                 
                 delaysend = <InstrumentSlider> {
@@ -768,7 +769,7 @@ live_design!{
             }
             
             <Frame> {
-                layout: {flow: Right}
+                layout: {flow: Right, spacing: (SPACING_CONTROLS)}
                 walk: {width: Fill, height: Fit}
                 
                 delaydifference = <InstrumentSlider> {
@@ -806,7 +807,7 @@ live_design!{
             walk: {width: Fill, height: Fit}
             
             <Frame> {
-                layout: {flow: Right}
+                layout: {flow: Right, spacing: (SPACING_CONTROLS)}
                 walk: {width: Fill, height: Fit}
                 
                 chorusmix = <InstrumentSlider> {
@@ -827,7 +828,7 @@ live_design!{
                 }
             }
             <Frame> {
-                layout: {flow: Right}
+                layout: {flow: Right, spacing: (SPACING_CONTROLS)}
                 walk: {width: Fill, height: Fit}
                 chorusmod = <InstrumentSlider> {
                     slider = {
@@ -848,7 +849,7 @@ live_design!{
                 }
             }
             <Frame> {
-                layout: {flow: Right}
+                layout: {flow: Right, spacing: (SPACING_CONTROLS)}
                 walk: {width: Fill, height: Fit}
                 chorusphase = <InstrumentSlider> {
                     slider = {
@@ -873,7 +874,6 @@ live_design!{
     }
     
     FishPanelFilter = <FishPanelContainer> {
-
         <FishHeader> {
             title = {
                 label = {
@@ -899,8 +899,9 @@ live_design!{
         
         <FishPanel> {
             walk: {height: Fit}
+
             <Frame> {
-                layout: {flow: Right}
+                layout: {flow: Right, spacing: (SPACING_CONTROLS)}
                 walk: {width: Fill, height: Fit}
                 cutoff = <InstrumentSlider> {
                     slider = {
@@ -921,7 +922,7 @@ live_design!{
                 }
             }
             <Frame> {
-                layout: {flow: Right}
+                layout: {flow: Right, spacing: (SPACING_CONTROLS)}
                 walk: {width: Fill, height: Fit}
                 
                 lfoamount = <InstrumentBipolarSlider> {
@@ -962,14 +963,11 @@ live_design!{
         walk: {width: Fill, height: Fit}
         layout: {flow: Down}
         
-        <Frame> {
-            layout: {flow: Down}
-            walk: {width: Fill, height: Fit}
             <Frame> {
                 layout: {flow: Right}
                 walk: {width: Fill, height: Fit}
                 
-                <FishSubTitle> {label = {text: "Oscillator", draw_label: {color: (COLOR_OSC)}, walk: {width: Fit}}}
+                <FishSubTitle> {label = {text: "Osc", draw_label: {color: (COLOR_OSC)}, walk: {width: Fit}}}
                 type = <InstrumentDropdown> {
                     layout: {flow: Down}
                     dropdown = {
@@ -984,7 +982,7 @@ live_design!{
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fit}
                 supersaw = <Frame> {
-                    layout: {flow: Right}
+                    layout: {flow: Down}
                     walk: {width: Fill, height: Fit}
                     spread = <InstrumentSlider> {
                         slider = {
@@ -1005,7 +1003,7 @@ live_design!{
                 }
                 
                 hypersaw = <Frame> {
-                    layout: {flow: Right}
+                    layout: {flow: Down}
                     walk: {width: Fill, height: Fit}
                     spread = <InstrumentSlider> {
                         slider = {
@@ -1028,9 +1026,6 @@ live_design!{
                 harmonic = <Frame> {
                     layout: {flow: Down}
                     walk: {width: Fill, height: Fit}
-                    <Frame> {
-                        layout: {flow: Right}
-                        walk: {width: Fill, height: Fit}
                         harmonicshift = <InstrumentSlider> {
                             slider = {
                                 draw_slider: {line_color: (COLOR_OSC)}
@@ -1047,10 +1042,6 @@ live_design!{
                                 label: "Env mod"
                             }
                         }
-                    }
-                    <Frame> {
-                        layout: {flow: Right}
-                        walk: {width: Fill, height: Fit}
                         harmoniclfo = <InstrumentBipolarSlider> {
                             slider = {
                                 draw_slider: {line_color: (COLOR_OSC)}
@@ -1059,15 +1050,12 @@ live_design!{
                                 label: "LFO mod"
                             }
                         }
-                        <Frame> {}
-                    }
                 }
             }
-        }
         
         
         twocol = <Frame> {
-            layout: {flow: Right}
+            layout: {flow: Down}
             walk: {width: Fill, height: Fit}
             transpose = <InstrumentBipolarSlider> {
                 slider = {
@@ -1106,7 +1094,7 @@ live_design!{
             }
         }
         <Frame> {
-            layout: {flow: Right}
+            layout: { flow: Right, spacing: (SPACING_CONTROLS)}
             walk: {width: Fill, height: Fit}
             noise = <InstrumentSlider> {
                 slider = {
@@ -1141,12 +1129,17 @@ live_design!{
         }
         
         <FishPanel> {
-            walk: {width: Fill, height: Fill}
+            walk: {width: Fill, height: Fill }
+            layout: { flow: Down }
 
-            osc1 = <OscPanel> {}
-            <Divider> {}
-            osc2 = <OscPanel> {}
-            <Divider> {}
+            <Frame> {
+                walk: {width: Fill, height: Fit}
+                layout: { flow: Right, spacing: (SPACING_CONTROLS)}
+
+                osc1 = <OscPanel> {}
+                osc2 = <OscPanel> {}
+            }
+
             
             <FishSubTitle> {
                 label = {
@@ -1236,7 +1229,7 @@ live_design!{
         ui: {
             design_mode: false
             walk: {width: Fill, height: Fill}
-            layout: {padding: 0, align: {x: 0.0, y: 0.0}, spacing: 0., flow: Down}
+            layout: {padding: 0, align: {x: 0.0, y: 0.0}, spacing: (SPACING_PANELS), flow: Down}
             
             // APPLICATION HEADER
             <Frame> {
@@ -1252,8 +1245,9 @@ live_design!{
                 }
                 <Image> {image: d"crate://self/resources/tinrs.png", walk: {width: (1000 * 0.25), height: (175 * 0.25)}}
             }
+
             <GradientY> {
-                walk: {width: Fill, height: (HEIGHT_AUDIOVIZ)}
+                walk: {width: Fill, height: (HEIGHT_AUDIOVIZ), margin: {top: -10}}
                 draw_bg: { color: #0004, color2: #000C }
                 display_audio = <DisplayAudio> {
                     walk: {height: Fill, width: Fill}
@@ -1264,33 +1258,30 @@ live_design!{
             // CONTROLS
             <Frame> {
                 walk: {width: Fill, height: Fill}
-                layout: {flow: Right, spacing: 2, padding: {top: (SPACING_BASE_PADDING * 2), right: (SPACING_BASE_PADDING * 2), bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)}}
+                layout: {flow: Right, spacing: 2, padding: {top: 5, right: (SPACING_BASE_PADDING * 2), bottom: 0, left: (SPACING_BASE_PADDING * 2)}}
                 
-                <Frame> {
-                // <ScrollY> {
-                    
+                <ScrollY> {
                     layout: { flow: Down, spacing: 3 }
                     walk: {height: Fill, width: Fill}
                     
                     oscillators = <FishPanelSoundSources> {}
-
-                    <FishPanelFilter> { }
                 }
                 
-                <Frame> {
+                <ScrollY> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: Fill}
                     envelopes = <FishPanelEnvelopes> {}
+                    <FishPanelFilter> { }
                 }
 
-                <Frame> {
+                <ScrollY> {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     walk: {height: Fill, width: Fill }
 
                     effects = <FishPanelEffects> {}
                 }
 
-                <Frame> {
+                <ScrollY> {
                     layout: {flow: Down}
                     walk: {height: Fill, width: Fill}
 
@@ -1311,10 +1302,16 @@ live_design!{
                 }
             }
 
-            <PianoControls> {}
-            piano = <Piano> {
-                walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
+            <Frame> {
+                layout: {flow: Down}
+                walk: {height: Fit, width: Fill}
+
+                <PianoControls> {}
+                piano = <Piano> {
+                    walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
+                }
             }
+            
             
         }
     }
