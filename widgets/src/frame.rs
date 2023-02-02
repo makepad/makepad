@@ -268,7 +268,9 @@ live_design!{
     
     GradientX = <Frame> {show_bg: true, draw_bg: {
         instance color2: #f00
+        instance dither: 1.0
         fn get_color(self) -> vec4 {
+            let dither = Math::random_2d(self.pos.xy)* 0.02 * self.dither;
             return mix(self.color, self.color2, self.pos.x)
         }
         
@@ -279,9 +281,9 @@ live_design!{
     
     GradientY = <Frame> {show_bg: true, draw_bg: {
         instance color2: #f00
-        instance noise: 1.0
+        instance dither: 1.0
         fn get_color(self) -> vec4 {
-            let dither = Math::random_2d(self.pos.xy) * self.rect_size.y * 0.0002 * self.noise;
+            let dither = Math::random_2d(self.pos.xy) * 0.02 * self.dither;
             return mix(self.color, self.color2, self.pos.y + dither)
         }
         
