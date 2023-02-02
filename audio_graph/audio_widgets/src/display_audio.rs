@@ -16,7 +16,7 @@ live_design!{
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             let step = 0.0;
-            for i in 0..16{
+            for i in 0..4{
                 let wave = sample2d(self.wave_texture, vec2(self.pos.x, step));
                 let right = (wave.y + wave.z / 256.0 - 0.5) * 3.0;
                 let left = (wave.w + wave.x / 256.0 - 0.5) * 3.0;
