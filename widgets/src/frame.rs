@@ -268,8 +268,10 @@ live_design!{
     
     GradientX = <Frame> {show_bg: true, draw_bg: {
         instance color2: #f00
+        instance dither: 1.0
         fn get_color(self) -> vec4 {
-            return mix(self.color, self.color2, self.pos.x)
+            let dither = Math::random_2d(self.pos.xy)* 0.04 * self.dither;
+            return mix(self.color, self.color2, self.pos.x+ dither)
         }
         
         fn pixel(self) -> vec4 {
@@ -279,8 +281,10 @@ live_design!{
     
     GradientY = <Frame> {show_bg: true, draw_bg: {
         instance color2: #f00
+        instance dither: 1.0
         fn get_color(self) -> vec4 {
-            return mix(self.color, self.color2, self.pos.y)
+            let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
+            return mix(self.color, self.color2, self.pos.y + dither)
         }
         
         fn pixel(self) -> vec4 {
@@ -309,9 +313,18 @@ live_design!{
         use_cache: true,
         draw_bg: {
             texture image: texture2d
-            
+            varying scale: vec2
+            varying shift: vec2
+            fn vertex(self) -> vec4 {
+                let dpi = self.dpi_factor;
+                let ceil_size = ceil(self.rect_size * dpi) / dpi
+                let floor_pos = floor(self.rect_pos * dpi) / dpi
+                self.scale = self.rect_size / ceil_size;
+                self.shift = (self.rect_pos - floor_pos) / ceil_size;
+                return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+            }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos);
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift);
             }
             
             shape: Solid,
@@ -528,8 +541,8 @@ impl Widget for Frame {
         // ok so if a child is not visible
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
-                // if a child is not visible, we should 
-                if child.is_visible() || !event.requires_visibility(){
+                // if a child is not visible, we should
+                if child.is_visible() || !event.requires_visibility() {
                     child.handle_widget_event_fn(cx, event, dispatch_action);
                 }
             }
@@ -552,7 +565,7 @@ impl Widget for Frame {
         }
     }
     
-    fn is_visible(&self)->bool{
+    fn is_visible(&self) -> bool {
         self.visible
     }
     
@@ -724,16 +737,16 @@ impl Frame {
         self.draw_walk(cx, self.get_walk())
     }
     
-    pub fn walk_from_previous_size(&self, walk:Walk)->Walk{
+    pub fn walk_from_previous_size(&self, walk: Walk) -> Walk {
         let view_size = self.view_size.unwrap_or(DVec2::default());
         Walk {
             abs_pos: walk.abs_pos,
-            width: if walk.width.is_fill(){walk.width}else{Size::Fixed(view_size.x)},
-            height: if walk.height.is_fill(){walk.height}else{Size::Fixed(view_size.y)},
+            width: if walk.width.is_fill() {walk.width}else {Size::Fixed(view_size.x)},
+            height: if walk.height.is_fill() {walk.height}else {Size::Fixed(view_size.y)},
             margin: walk.margin
         }
     }
-     
+    
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if !self.visible {
             return WidgetDraw::done()
@@ -747,11 +760,9 @@ impl Frame {
                 if self.use_cache {
                     let walk = self.walk_from_previous_size(walk);
                     if !cx.view_will_redraw(self.view.as_mut().unwrap(), walk) {
-                        if let Some(cache) = &self.cache{
+                        if let Some(cache) = &self.cache {
                             self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
-                            let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
-                            let dpi = cx.current_dpi_factor();
-                            rect.size = (rect.size / dpi).floor()*dpi;
+                            let rect = cx.walk_turtle_with_area(&mut self.area, walk);
                             self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
                             cx.set_pass_area(&cache.pass, self.area);
@@ -770,11 +781,11 @@ impl Frame {
                         cache.pass.add_color_texture(cx, &cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
                     }
                     let cache = self.cache.as_mut().unwrap();
-                    cx.make_child_pass(&cache.pass); 
+                    cx.make_child_pass(&cache.pass);
                     cx.begin_pass(&cache.pass);
                     self.view.as_mut().unwrap().begin_always(cx)
                 }
-                else{
+                else {
                     let walk = self.walk_from_previous_size(walk);
                     if self.view.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
                         cx.walk_turtle_with_area(&mut self.area, walk);
@@ -857,12 +868,10 @@ impl Frame {
                     scroll_bars.set_area(self.area);
                     scroll_bars.end_nav_area(cx);
                 };
-                 
+                
                 if self.has_view {
-                    let mut rect = self.area.get_rect(cx);
+                    let rect = self.area.get_rect(cx);
                     self.view_size = Some(rect.size);
-                    let dpi = cx.current_dpi_factor();
-                    rect.size = (rect.size / dpi).floor()*dpi;
                     self.view.as_mut().unwrap().end(cx);
                     
                     if self.use_cache {
