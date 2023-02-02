@@ -3,13 +3,44 @@ const MAX_DELAYTOY_BITS: usize = 16;
 const MAX_DELAYTOY_DELAY: usize = 1<<MAX_DELAYTOY_BITS;
 const DELAYTOY_BUFFERMASK: usize = MAX_DELAYTOY_DELAY-1;
 
+
+#[derive(Clone)]
+pub struct ResonatorLFO{
+    cospart: f32,
+    sinpart: f32,
+    amppart: f32
+}
+
+impl ResonatorLFO {
+    fn makenew(freq: f32) -> Self {
+        let mut res = Self {
+            cospart: 0.0,
+            sinpart: 0.0,
+            amppart: 0.0
+        };
+        res.set_freq(freq);
+        return res;
+    }    
+    fn get_next(&mut self) -> f32{
+        self.cospart -= self.amppart * self.sinpart;
+        self.sinpart += self.amppart * self.cospart;
+        return self.sinpart;
+    }
+    fn set_freq(&mut self, freq: f32){        
+        self.amppart = freq + freq;        
+    }
+}
+
 #[derive(Clone)]
 pub struct DelayToy {
     writeidx: usize,
     localidx: usize,
     accumulator: f32,
-    _feedback1: f32,
-    buffer: Vec<f32>
+    feedback1: f32,
+    buffer: Vec<f32>,
+    lfo1: ResonatorLFO,
+    lfo2: ResonatorLFO,
+    
 }
 
 impl Default for DelayToy {
@@ -19,7 +50,9 @@ impl Default for DelayToy {
             writeidx: 0,
             localidx: 0,
             accumulator: 0.0,
-            _feedback1: 0.0
+            feedback1: 0.0,
+            lfo1: ResonatorLFO::makenew(1.0 / 32777.0 * 9.4),
+            lfo2: ResonatorLFO::makenew(1.3 / 32777.0 * 3.15971)
         }
     }    
 }
@@ -96,29 +129,44 @@ impl DelayToy {
         if input < -1.0 {return -1.0};
         return input;
     }
-/*
-    pub fn griesingerReverb(&mut self, mut left: f32, mut right: f32, send: f32){       
-        let mut leftOut: f32 = left;      
-        let mut rightOut: f32 = right;
+
+    pub fn griesinger_reverb(&mut self, mut left: f32, mut right: f32, send: f32, fade: f32){       
+        let mut left_out: f32 = left;      
+        let mut right_out: f32 = right;
         self.start();
         self.accumulator = (left + right) * send;
-        self.allPass(142, 0.5);
-        self.allPass(379, 0.5);
+        self.all_pass(142, 0.5);
+        self.all_pass(379, 0.5);
         self.accumulator += (left + right) * send;
-        self.allPass(107, 0.5);
-        self.allPass(277, 0.5);
+        self.all_pass(107, 0.5);
+        self.all_pass(277, 0.5);
+      
         let reinject = self.accumulator;
+        
+        let w1 = self.lfo1.get_next();
+        let w2 = self.lfo2.get_next();
+
         self.accumulator += self.feedback1;
 		
-       // self.allPassWobble(672, 0.5, wobble1);
-        self.allPass(1800, 0.5);
+        self.all_pass_wobble(672, 0.5, w1);
+        self.all_pass(1800, 0.5);
         self.delay(4453);
 
+		left_out += self.accumulator;
+
+		self.accumulator += reinject;
+		self.all_pass_wobble(908, 0.5, w2);
+		self.all_pass(2656, 0.5);
+		self.delay(3163);
+		
+		right_out += self.accumulator;
+
+		self.feedback1 = self.accumulator  * fade;
 
         self.end();
 
-        right = rightOut;
-        left = leftOut;
+        right = right_out;
+        left = left_out;
        
-    }*/
+    }
 }
