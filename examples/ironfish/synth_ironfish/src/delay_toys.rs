@@ -52,10 +52,10 @@ impl DelayToy {
 
     pub fn linearInterpolate(&mut self, index: usize, offset: f32 ) -> f32
     {
-        let  adjustedindex = index + MAX_DELAYTOY_DELAY - (offset.floor() as usize);
+        let  adjustedindex = (index + MAX_DELAYTOY_DELAY - (offset.floor() as usize))&DELAYTOY_BUFFERMASK;
         let frac = offset.fract();
         let ifrac = 1.0 - frac;
-        return self.buffer[adjustedindex] * ifrac + self.buffer[adjustedindex+1] * frac;
+        return self.buffer[adjustedindex] * ifrac + self.buffer[(adjustedindex+1)&DELAYTOY_BUFFERMASK] * frac;
     }
 
     pub fn allPassWobble(&mut self, length: usize, coeff: f32, _lengthoffset: f32  ){
