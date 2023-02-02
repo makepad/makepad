@@ -180,7 +180,7 @@ pub struct CxDigitCapture {
     digit_id: DigitId,
     pub area: Area,
     pub sweep_area: Area,
-    pub move_capture: Option<Area>,
+    pub switch_capture: Option<Area>,
     pub time: f64,
     pub abs_start: DVec2,
 }
@@ -206,6 +206,7 @@ pub struct CxFingers {
     captures: Vec<CxDigitCapture>,
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
+    sweep_lock: Option<Area>,
 }
 
 impl CxFingers {
@@ -294,7 +295,7 @@ impl CxFingers {
                 area,
                 time,
                 abs_start,
-                move_capture: None
+                switch_capture: None
             })
         }
     }
@@ -338,11 +339,11 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn move_captures(&mut self) {
+    pub (crate) fn switch_captures(&mut self) {
         for capture in &mut self.captures {
-            if let Some(area) = capture.move_capture {
+            if let Some(area) = capture.switch_capture {
                 capture.area = area;
-                capture.move_capture = None;
+                capture.switch_capture = None;
             }
         }
     }
@@ -645,7 +646,7 @@ impl Event {
                             if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
                                 let handled_area = t.handled.get();
                                 if !options.sweep_area.is_empty() {
-                                    if capture.move_capture.is_none()
+                                    if capture.switch_capture.is_none()
                                         && Margin::rect_contains_with_margin(&rect, t.abs, &options.margin) {
                                         if t.handled.get().is_empty() {
                                             t.handled.set(area);
@@ -664,7 +665,7 @@ impl Event {
                                                 })
                                             }
                                             else if capture.sweep_area == options.sweep_area { // take over the capture
-                                                capture.move_capture = Some(area);
+                                                capture.switch_capture = Some(area);
                                                 return Hit::FingerDown(FingerDownEvent {
                                                     window_id: e.window_id,
                                                     abs: t.abs,
@@ -679,8 +680,8 @@ impl Event {
                                         }
                                     }
                                     else if capture.area == area { // we are not over the area
-                                        if capture.move_capture.is_none() {
-                                            capture.move_capture = Some(Area::Empty);
+                                        if capture.switch_capture.is_none() {
+                                            capture.switch_capture = Some(Area::Empty);
                                         }
                                         return Hit::FingerUp(FingerUpEvent {
                                             abs_start: capture.abs_start,
@@ -733,7 +734,7 @@ impl Event {
                     if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
                         let handled_area = e.handled.get();
                         if !options.sweep_area.is_empty() {
-                            if capture.move_capture.is_none()
+                            if capture.switch_capture.is_none()
                                 && Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
                                 if e.handled.get().is_empty() {
                                     e.handled.set(area);
@@ -752,7 +753,7 @@ impl Event {
                                         })
                                     }
                                     else if capture.sweep_area == options.sweep_area { // take over the capture
-                                        capture.move_capture = Some(area);
+                                        capture.switch_capture = Some(area);
                                         return Hit::FingerDown(FingerDownEvent {
                                             window_id: e.window_id,
                                             abs: e.abs,
@@ -767,8 +768,8 @@ impl Event {
                                 }
                             }
                             else if capture.area == area { // we are not over the area
-                                if capture.move_capture.is_none() {
-                                    capture.move_capture = Some(Area::Empty);
+                                if capture.switch_capture.is_none() {
+                                    capture.switch_capture = Some(Area::Empty);
                                 }
                                 return Hit::FingerUp(FingerUpEvent {
                                     abs_start: capture.abs_start,
