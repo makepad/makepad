@@ -1083,6 +1083,8 @@ live_design!{
                     draw_slider: {line_color: (COLOR_OSC)}
                     min: -24.0
                     max: 24.0
+                    step: 1.0
+                    precision:0,
                     label: "Transpose"
                 }
             }
