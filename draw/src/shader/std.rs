@@ -234,7 +234,7 @@ live_design!{
             self.shape = min(self.shape, self.dist);
         }
         
-        fn hline(inout self,  h:float, y: float) {
+        fn hline(inout self, y: float, h:float) {
             let c = self.pos.y - y;
             self.dist = -h+abs(c) / self.scale_factor;
             self.old_shape = self.shape;
