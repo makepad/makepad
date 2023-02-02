@@ -312,11 +312,11 @@ live_design!{
             varying scale: vec2
             varying shift: vec2
             fn vertex(self) -> vec4 {
-                let dpi = 2.0;
+                let dpi = self.dpi_factor;
                 let ceil_size = ceil(self.rect_size*dpi)/dpi
                 let floor_pos = floor(self.rect_pos*dpi)/dpi
-                self.scale = ceil_size / self.rect_size;
-                self.shift = -(self.rect_pos - floor_pos) / self.rect_size;
+                self.scale = self.rect_size/ceil_size;
+                self.shift = (self.rect_pos - floor_pos) / ceil_size;
                 return self.clip_and_transform_vertex(self.rect_pos,self.rect_size)
             }
             fn pixel(self) -> vec4 {
