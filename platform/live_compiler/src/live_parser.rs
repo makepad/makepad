@@ -125,14 +125,21 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_float(&mut self) -> Result<f64, LiveError> {
+        let sign = if let LiveToken::Punct(live_id!(-)) = self.peek_token(){
+            self.skip_token();
+            -1.0
+        }
+        else{
+            1.0
+        };
         match self.peek_token() {
             LiveToken::Float(v) => {
                 self.skip_token();
-                Ok(v)
+                Ok(v*sign)
             }
             LiveToken::Int(v) => {
                 self.skip_token();
-                Ok(v as f64)
+                Ok(v as f64 * sign)
             }
             token => Err(self.error(format!("expected float, unexpected token `{}`", token), live_error_origin!())),
         }
