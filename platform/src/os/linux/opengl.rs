@@ -381,7 +381,7 @@ impl Cx {
     }
     
     pub fn opengl_compile_shaders(&mut self) {
-        
+        let p = profile_start();
         for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
@@ -416,6 +416,10 @@ impl Cx {
                 }
             }
         }
+        if self.draw_shaders.compile_set.len()>0{
+            profile_end("shader compile", p);
+        };
+        self.draw_shaders.compile_set.clear();
     }
 }
 
