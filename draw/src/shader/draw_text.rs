@@ -392,8 +392,8 @@ impl DrawText {
             let min_pos_y = pos.y - font_size_logical * glyph.bounds.p_min.y + self.text_style.font_size * self.text_style.top_drop;
             
             // compute subpixel shift
-            let subpixel_x_fract = (min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor);
-            let subpixel_y_fract = (min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor);
+            let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
+            let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             // scale and snap it
             //let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
             //let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
@@ -403,8 +403,8 @@ impl DrawText {
                 0
             }
             else { // subtle 64 index subpixel id
-                ((subpixel_y_fract.fract() * 7.0) as usize) << 3 |
-                (subpixel_x_fract.fract() * 7.0) as usize
+                ((subpixel_y_fract * dpi_factor * 7.0) as usize) << 3 |
+                (subpixel_x_fract * dpi_factor* 7.0) as usize
             };
             
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
@@ -415,8 +415,8 @@ impl DrawText {
                 // see if we can fit it
                 // allocate slot
                 fonts_atlas.alloc.todo.push(CxFontsAtlasTodo {
-                    subpixel_x_fract:subpixel_x_fract.fract(),
-                    subpixel_y_fract:subpixel_y_fract.fract(),
+                    subpixel_x_fract,
+                    subpixel_y_fract,
                     font_id,
                     atlas_page_id,
                     glyph_id,
