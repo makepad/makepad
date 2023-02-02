@@ -242,9 +242,6 @@ impl Cx {
         self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
 
-        println!("{:?}", dpi_factor);
-
-        
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         Some(pass_rect.size)
     }
