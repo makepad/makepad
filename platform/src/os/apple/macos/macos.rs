@@ -182,6 +182,7 @@ impl Cx {
                 if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
                     window.window_geom = re.new_geom.clone();
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
+                    
                     // redraw just this windows root draw list
                     if re.old_geom.inner_size != re.new_geom.inner_size {
                         if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
@@ -228,7 +229,7 @@ impl Cx {
             CocoaEvent::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
-                self.fingers.move_captures();
+                self.fingers.switch_captures();
             }
             CocoaEvent::MouseUp(e) => {
                 let button = e.button;

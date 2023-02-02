@@ -258,7 +258,6 @@ impl Cx {
         let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
         
         let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some(){1.0}else{dpi_factor}).unwrap();
-        
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5{
             return
         }
