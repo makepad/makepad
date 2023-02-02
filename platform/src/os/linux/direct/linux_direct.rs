@@ -260,26 +260,14 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
-                    let p = profile_start();
                     self.draw_pass_to_fullscreen(*pass_id, direct_app, direct_app.dpi_factor);
-                    profile_end("draw_pass_to_fullscreen", p);
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    let p = profile_start();
                     self.draw_pass_to_texture(*pass_id, dpi_factor);
-                    profile_end(
-                        &format!("draw_pass_to_texture {} {:?}", self.get_pass_name(*pass_id), *pass_id),
-                        p 
-                    );
                 },
                 CxPassParent::None => {
-                    let p = profile_start();
                     self.draw_pass_to_texture(*pass_id, 1.0); 
-                    profile_end(
-                        &format!("draw_pass_to_texture {} {:?}", self.get_pass_name(*pass_id), *pass_id),
-                        p 
-                    );
                 }
             }
         }
