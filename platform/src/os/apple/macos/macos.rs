@@ -181,7 +181,7 @@ impl Cx {
             CocoaEvent::WindowGeomChange(mut re) => { // do this here because mac
                 if let Some(window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
                     window.window_geom = re.new_geom.clone();
-                    re.new_geom.dpi_factor = 1.0;
+                    //re.new_geom.dpi_factor = 1.0;
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
                     // redraw just this windows root draw list
                     if re.old_geom.inner_size != re.new_geom.inner_size {
