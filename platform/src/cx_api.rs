@@ -138,6 +138,14 @@ impl Cx {
         }
     }
     
+    pub fn sweep_lock(&mut self, value:Area){
+        self.fingers.sweep_lock(value);
+    }
+    
+    pub fn sweep_unlock(&mut self, value:Area){
+        self.fingers.sweep_unlock(value);
+    }
+    
     pub fn start_timeout(&mut self, interval: f64) -> Timer {
         self.timer_id += 1;
         self.platform_ops.push(CxOsOp::StartTimer {
@@ -230,18 +238,8 @@ impl Cx {
         } 
     }
     
-    pub fn get_pass_rect2(&self, pass_id: PassId) -> Option<Rect> {
-        match self.passes[pass_id].pass_rect {
-            Some(CxPassRect::Area(area)) => {
-                let rect = area.get_rect(self);
-                Some(Rect{
-                    pos:rect.pos,
-                    size: rect.size 
-                })
-            }
-            Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size}),
-            None => None
-        } 
+    pub fn get_pass_name(&self, pass_id: PassId) -> &str {
+        &self.passes[pass_id].debug_name
     }
     
     pub fn repaint_pass(&mut self, pass_id: PassId) {

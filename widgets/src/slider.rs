@@ -51,6 +51,7 @@ live_design!{
     Slider = {{Slider}} {
         min: 0.0,
         max: 1.0,
+        step: 0.0,
         
         label_text: {
             color: #9
@@ -65,6 +66,8 @@ live_design!{
         label_align: {
             y: 0.0
         }
+        
+        precision: 2,
         
         text_input: {
             cursor_margin_bottom: 3.0,
@@ -160,8 +163,11 @@ pub struct Slider {
     
     text_input: TextInput,
     
+    precision: usize,
+    
     min: f64,
     max: f64,
+    step: f64,
     
     bind: String,
     
@@ -182,7 +188,13 @@ pub enum SliderAction {
 impl Slider {
     
     fn to_external(&self) -> f64 {
-        self.value * (self.max - self.min) + self.min
+        let val = self.value * (self.max - self.min) + self.min;
+        if self.step != 0.0{
+            return (val * self.step).floor() / self.step
+        }
+        else{
+            val
+        }
     }
     
     fn set_internal(&mut self, external: f64) -> bool {
@@ -251,6 +263,7 @@ impl Slider {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
                     self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
+                    self.set_internal(self.to_external());
                     self.draw_slider.redraw(cx);
                     self.update_text_input(cx);
                     dispatch_action(cx, SliderAction::Slide(self.to_external()));
@@ -261,7 +274,18 @@ impl Slider {
     }
     
     pub fn update_text_input(&mut self, cx: &mut Cx) {
-        self.text_input.text = format!("{:.2}", self.to_external());
+        let e = self.to_external();
+        self.text_input.text = match self.precision{
+            0=>format!("{:.0}",e),
+            1=>format!("{:.1}",e),
+            2=>format!("{:.2}",e),
+            3=>format!("{:.3}",e),
+            4=>format!("{:.4}",e),
+            5=>format!("{:.5}",e),
+            6=>format!("{:.6}",e),
+            7=>format!("{:.7}",e),
+            _=>format!("{}",e)
+        };
         self.text_input.select_all();
         self.text_input.redraw(cx)
     }
