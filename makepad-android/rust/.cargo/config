@@ -1,5 +1,0 @@
-[target.aarch64-linux-android]
-linker = "../env_strip/NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang"
-
-[build]
-target = "aarch64-linux-android"
