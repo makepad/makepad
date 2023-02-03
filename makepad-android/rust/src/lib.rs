@@ -22,7 +22,7 @@ extern "C" {
     fn __android_log_write(prio: c_int, tag: *const c_char, text: *const c_char) -> c_int;
 }
 
-#[link(name = "EGL")]
+//#[link(name = "EGL")]
 extern "C" {
     fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
 }
@@ -42,10 +42,10 @@ impl Cx {
     /// Called when EGL is initialized.
     pub fn init(&mut self, callback: Callback<'_>) {
         log!("Cx::init");
-        gl::load_with(|s| {
-            let s = CString::new(s).unwrap();
-            unsafe { eglGetProcAddress(s.as_ptr()) }
-        });
+        //gl::load_with(|s| {
+        //    let s = CString::new(s).unwrap();
+        //    unsafe { eglGetProcAddress(s.as_ptr()) }
+        //});
         callback.schedule_timeout(0, 1000);
     }
 
@@ -53,7 +53,7 @@ impl Cx {
     pub fn resize(&mut self, width: i32, height: i32, _callback: Callback<'_>) {
         log!("Cx::resize {} {}", width, height);
         unsafe {
-            gl::Viewport(0, 0, width, height);
+           // gl::Viewport(0, 0, width, height);
         }
     }
 
@@ -61,7 +61,7 @@ impl Cx {
     pub fn draw(&mut self, callback: Callback<'_>) {
         log!("Cx::draw");
         unsafe {
-            gl::Clear(gl::COLOR_BUFFER_BIT);
+           // gl::Clear(gl::COLOR_BUFFER_BIT);
         }
         callback.swap_buffers();
     }
@@ -70,7 +70,7 @@ impl Cx {
     pub fn touch(&mut self, action: Action, pointers: &[Pointer], callback: Callback<'_>) {
         log!("Cx::touch {:?}: {:?}", action, pointers);
         unsafe {
-            gl::ClearColor(pointers[0].x / 1000.0, pointers[0].y / 2000.0, 0.0, 1.0);
+            //gl::ClearColor(pointers[0].x / 1000.0, pointers[0].y / 2000.0, 0.0, 1.0);
         }
         callback.schedule_redraw();
     }
