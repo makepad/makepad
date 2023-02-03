@@ -26,7 +26,7 @@ use {
                 get_event_keycode,
                 get_event_key_modifier
             },
-            cx_desktop::EventFlow,
+            cx_native::EventFlow,
         },
         menu::{
             CxCommandSetting
