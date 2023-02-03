@@ -197,7 +197,7 @@ impl LiveHook for Font {
 
 impl CxFontsAtlas {
     pub fn get_font_by_path(&mut self, cx: &Cx, path: &str) -> usize {
-        
+         
         if let Some(item) = self.path_to_font_id.get(path) {
             return *item;
         }
@@ -397,7 +397,6 @@ impl CxDrawFontsAtlas {
         //cx.fonts_atlas.texture_id = Some(atlas_texture.texture_id());
         
         let draw_trapezoid_text = DrawTrapezoidText::new_local(cx);
-        
         // ok we need to initialize drawtrapezoidtext from a live pointer.
         Self {
             counter: 0,
@@ -433,7 +432,7 @@ impl<'a> Cx2d<'a> {
         // we need to start a pass that just uses the texture
         if fonts_atlas.alloc.todo.len()>0 {
             self.begin_pass(&draw_fonts_atlas.atlas_pass);
-            
+
             let texture_size = fonts_atlas.alloc.texture_size;
             draw_fonts_atlas.atlas_pass.set_size(self.cx, texture_size);
             
@@ -501,8 +500,6 @@ pub struct CxFontsAtlasTodo {
     pub glyph_id: usize,
     pub subpixel_id: usize
 }
-
-
 
 impl CxFont {
     pub fn load_from_ttf_bytes(bytes: &[u8]) -> makepad_vector::ttf_parser::Result<Self> {

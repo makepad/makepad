@@ -1,7 +1,7 @@
 use {
     self::super::{
         direct_event::*,
-        egl_drm::{Egl,Drm},
+        egl_drm::{Egl, Drm},
         raw_input::RawInput,
     },
     self::super::super::{
@@ -13,6 +13,7 @@ use {
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_live_id::*,
+        makepad_error_log::*,
         makepad_math::*,
         thread::Signal,
         event::{
@@ -43,7 +44,7 @@ pub struct DirectApp {
 impl DirectApp {
     fn new() -> Self {
         let mut mode = "1280x720-60".to_string();
-        let mut dpi_factor = 0.7; 
+        let mut dpi_factor = 0.7;
         for arg in std::env::args() {
             if arg.starts_with("-mode=") {
                 mode = arg.trim_start_matches("-mode=").to_string();
@@ -61,7 +62,7 @@ impl DirectApp {
         Self {
             dpi_factor,
             egl,
-            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64/ dpi_factor),
+            raw_input: RawInput::new(drm.width as f64 / dpi_factor, drm.height as f64 / dpi_factor),
             drm,
             timers: SelectTimers::new()
         }
@@ -73,8 +74,12 @@ impl Cx {
         self.platform_type = OsType::LinuxDirect;
         self.gpu_info.performance = GpuPerformance::Tier1;
         
+        let p = profile_start();
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
+        profile_end("construct", p);
+        
+        
         let mut direct_app = DirectApp::new();
         direct_app.timers.start_timer(0, 0.008, true);
         // lets run the kms eventloop
@@ -82,7 +87,7 @@ impl Cx {
         let mut timer_ids = Vec::new();
         let mut signal_fds = [0, 0];
         unsafe {libc_sys::pipe(signal_fds.as_mut_ptr());}
-        
+        let mut first_profile = true;
         while event_flow != EventFlow::Exit {
             if event_flow == EventFlow::Wait {
                 //    kms_app.timers.select(signal_fds[0]);
@@ -105,6 +110,9 @@ impl Cx {
                 );
             }
             event_flow = self.kms_event_callback(&mut direct_app, DirectEvent::Paint);
+            if first_profile {
+                first_profile = false;
+            }
             // alright so.. how do we do things
         }
     }
@@ -121,6 +129,7 @@ impl Cx {
         //self.process_desktop_pre_event(&mut event);
         match event {
             DirectEvent::Paint => {
+                //let p = profile_start();
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(direct_app.timers.time_now());
                 }
@@ -130,7 +139,10 @@ impl Cx {
                     self.opengl_compile_shaders();
                 }
                 // ok here we send out to all our childprocesses
+                //profile_end("paint event handling", p);
+                //let p = profile_start();
                 self.handle_repaint(direct_app);
+                //profile_end("paint openGL", p);
             }
             DirectEvent::MouseDown(e) => {
                 self.fingers.process_tap_count(
@@ -143,7 +155,7 @@ impl Cx {
             DirectEvent::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
-                self.fingers.move_captures();
+                self.fingers.switch_captures();
             }
             DirectEvent::MouseUp(e) => {
                 let button = e.button;
@@ -255,7 +267,7 @@ impl Cx {
                     self.draw_pass_to_texture(*pass_id, dpi_factor);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, 1.0);
+                    self.draw_pass_to_texture(*pass_id, 1.0); 
                 }
             }
         }
@@ -297,9 +309,11 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init(&mut self) {
+        let p = profile_start();
         self.live_expand();
         self.live_scan_dependencies();
         self.desktop_load_dependencies();
+        profile_end("live expand", p);
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {

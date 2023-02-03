@@ -122,7 +122,7 @@ live_design!{
         popup_menu: {
             menu_item: {
                 indent_width: 10.0
-                walk: {width: 300, height: Fit}
+                walk: {width: Fill, height: Fit}
                 layout: {
                     padding: {left: 15, top: 5, bottom: 5, right: 15},
                 }
@@ -629,7 +629,7 @@ live_design!{
             }
             
             scaletype = <InstrumentDropdown> {
-                walk: {height: Fit, width: Fill}
+                walk: {height: Fit, width: Fit}
                 dropdown = {
                     labels: ["Minor", "Major", "Dorian", "Pentatonic"]
                     values: [Minor, Major, Dorian, Pentatonic]
@@ -676,6 +676,15 @@ live_design!{
         arp = <InstrumentCheckbox> {
             checkbox = {label: "Arp"}
             walk: {width: Fit, height: Fit}
+        }
+        arpoctaves = <InstrumentBipolarSlider> {
+            walk: {width: 200}
+            slider = {
+                draw_slider: {line_color: (COLOR_MUSIC)}
+                min: -4.0
+                max: 4.0
+                label: "Octaves"
+            }
         }
     }
     
@@ -1105,6 +1114,8 @@ live_design!{
                     draw_slider: {line_color: (COLOR_OSC)}
                     min: -24.0
                     max: 24.0
+                    step: 1.0
+                    precision:0,
                     label: "Transpose"
                 }
             }
@@ -1529,7 +1540,7 @@ impl App {
         }
         
         if let Event::AudioDevices(devices) = event {
-            println!("{}", devices);
+            //println!("{}", devices);
             cx.use_audio_outputs(&devices.default_output());
         }
         

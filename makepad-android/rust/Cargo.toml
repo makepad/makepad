@@ -6,5 +6,8 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[build]
+target = "aarch64-linux-android"
+
 [dependencies]
-gl = "0.14.0"
+#gl = "0.14.0"

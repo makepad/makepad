@@ -106,6 +106,7 @@ pub const CLAMP_TO_EDGE: types::GLenum = 0x812F;
 #[inline] pub unsafe fn BufferData(target: types::GLenum, size: types::GLsizeiptr, data: *const raw::c_void, usage: types::GLenum) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLsizeiptr, *const raw::c_void, types::GLenum) -> ()>(storage::BufferData.f)(target, size, data, usage) }
 #[inline] pub unsafe fn Uniform1i(location: types::GLint, v0: types::GLint) -> () { mem::transmute::<_, extern "system" fn(types::GLint, types::GLint) -> ()>(storage::Uniform1i.f)(location, v0) }
 #[inline] pub unsafe fn GetError() -> types::GLenum { mem::transmute::<_, extern "system" fn() -> types::GLenum>(storage::GetError.f)() }
+#[inline] pub unsafe fn Finish() -> () { mem::transmute::<_, extern "system" fn() -> ()>(storage::Finish.f)() }
 
 mod storage {
     use super::FnPtr;
@@ -157,6 +158,8 @@ mod storage {
     pub static mut BufferData: FnPtr = FnPtr::default();
     pub static mut Uniform1i: FnPtr = FnPtr::default();
     pub static mut GetError: FnPtr = FnPtr::default();
+    pub static mut Finish: FnPtr = FnPtr::default();
+    
 }
 
 pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const raw::c_void {
@@ -208,6 +211,7 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::BufferData = FnPtr::new(metaloadfn(&mut loadfn, "glBufferData", &["glBufferDataARB"]));
     storage::Uniform1i = FnPtr::new(metaloadfn(&mut loadfn, "glUniform1i", &["glUniform1iARB"]));
     storage::GetError = FnPtr::new(metaloadfn(&mut loadfn, "glGetError", &[]));
+    storage::Finish = FnPtr::new(metaloadfn(&mut loadfn, "glFinish", &[]))
 }
 
 #[inline(never)]

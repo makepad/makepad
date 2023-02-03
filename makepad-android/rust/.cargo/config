@@ -1,6 +1,5 @@
 [target.aarch64-linux-android]
-ar = "/Users/ejpbruel/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-ar"
-linker = "/Users/ejpbruel/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang"
+linker = "../env_strip/NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang"
 
 [build]
 target = "aarch64-linux-android"
