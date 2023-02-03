@@ -1,6 +1,6 @@
 #[macro_use]
-#[cfg(any(target_os = "linux", target_os="macos", target_os="windows"))]
-pub mod cx_desktop;
+#[cfg(any(target_os = "android", target_os = "linux", target_os="macos", target_os="windows"))]
+pub mod cx_native;
 
 #[macro_use]
 pub mod cx_shared;
@@ -25,14 +25,24 @@ pub use crate::os::windows::*;
 #[cfg(target_os = "windows")]
 pub use crate::os::windows::windows_media::*;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub mod linux;
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub use crate::os::linux::*;
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub use crate::os::linux::android::android_media::*;
+
+#[cfg(target_os = "linux")]
+pub use crate::os::linux::linux_media::*;
 
 #[cfg(target_os = "linux")]
 pub use crate::os::linux::*;
 
 #[cfg(target_os = "linux")]
 pub use crate::os::linux::linux_media::*;
+
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;

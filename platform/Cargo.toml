@@ -23,9 +23,6 @@ makepad-objc-sys = { path = "./bind/objc-sys", version = "0.3.0" }
 
 [target.aarch64-unknown-linux-gnu.dependencies] 
 
-#[target.aarch64-unknown-linux-gnu.dependencies.libdrm-sys] 
-#path = "./bind/libdrm-sys"
-
 [target.'cfg(windows)'.dependencies.makepad-futures]
 path = "../libs/futures"
 version = "0.3"
