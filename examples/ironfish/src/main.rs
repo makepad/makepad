@@ -1183,7 +1183,7 @@ live_design!{
             }
             
             <MixerPanel> {walk: {width: Fill, height: Fit}}
-
+            <Divider> {}
             <Frame> {
                 walk: {width: Fill, height: Fit}
                 layout: { flow: Right, spacing: (SPACING_CONTROLS)}
