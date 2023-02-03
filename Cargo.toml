@@ -6,7 +6,7 @@ workspace.exclude = [
     "code_editor/regex",
     "code_editor/ucd",
     "code_editor/varint",
-    "makepad-android"
+    "tools/android/rust"
 ]
 
 workspace.members = [

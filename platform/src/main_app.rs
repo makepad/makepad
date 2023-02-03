@@ -3,7 +3,7 @@
 macro_rules!main_app {
     ( $ app: ident) => {
         #[cfg(not(target_arch = "wasm32"))]
-        fn main() {
+        pub fn main() {
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Cx::new(Box::new(move | cx, event | {
                 
