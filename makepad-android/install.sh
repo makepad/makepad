@@ -1,3 +1,3 @@
 #!/bin/bash
 
-adb install -r build/makepad_android.apk
+./env_strip/platform-tools/adb install -r build/makepad_android.apk

@@ -19,7 +19,7 @@ live_design!{
                 COLOR_BG_SELECTED,
                 self.hover
             ));
-            
+             
             // we have 3 points, and need to rotate around its center
             let sz = 3.;
             let dx = 2.0;
@@ -54,7 +54,7 @@ live_design!{
             padding: {left: 15, top: 5, bottom: 5},
         }
         walk: {
-            width: Fill,
+            width: Fit,
             height: Fit
         }
         state: {
@@ -99,6 +99,10 @@ live_design!{
         layout: {
             flow: Down,
             padding: 5
+        }
+        walk:{
+            width:100,
+            height:Fit
         }
         draw_bg: {
             
@@ -175,6 +179,7 @@ pub struct PopupMenu {
     
     draw_bg: DrawQuad,
     layout: Layout,
+    walk: Walk,
     items: Vec<String>,
     #[rust] first_tap: bool,
     #[rust] menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
@@ -252,12 +257,13 @@ impl PopupMenuItem {
             }
             Hit::FingerUp(se) => {
                 if !se.is_sweep {
-                    if se.was_tap() { // ok this only goes for the first time
-                        dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
-                    }
-                    else {
+                    //if se.was_tap() { // ok this only goes for the first time
+                    //    dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
+                    //    println!("MIGHTBESELECTED");
+                   // }
+                    //else {
                         dispatch_action(cx, PopupMenuItemAction::WasSelected);
-                    }
+                    //}
                 }
                 else {
                     self.animate_state(cx, id!(hover.off));
@@ -275,13 +281,13 @@ impl PopupMenu {
         self.draw_bg.area().get_clipped_rect(cx).contains(pos)
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, width: f64) {
+    pub fn begin(&mut self, cx: &mut Cx2d) {
         self.view.begin_overlay_reuse(cx);
         
         cx.begin_overlay_turtle(Layout::flow_down());
         
         // ok so. this thing needs a complete position reset
-        self.draw_bg.begin(cx, Walk::size(Size::Fixed(width), Size::Fit), self.layout);
+        self.draw_bg.begin(cx, self.walk, self.layout);
         self.count = 0;
     }
     
