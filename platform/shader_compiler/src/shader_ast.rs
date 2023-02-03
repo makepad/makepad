@@ -1384,6 +1384,7 @@ impl Val {
     pub fn to_int(&self) -> Option<i32> {
         match *self {
             Val::Int(val) => Some(val),
+            Val::Float(val) => Some(val as i32),
             _ => None,
         }
     }

@@ -234,6 +234,13 @@ live_design!{
             self.shape = min(self.shape, self.dist);
         }
         
+        fn hline(inout self, y: float, h:float) {
+            let c = self.pos.y - y;
+            self.dist = -h+abs(c) / self.scale_factor;
+            self.old_shape = self.shape;
+            self.shape = min(self.shape, self.dist);
+        }
+        
         fn box(inout self, x: float, y: float, w: float, h: float, r: float) {
             let p = self.pos - vec2(x, y);
             let size = vec2(0.5 * w, 0.5 * h);

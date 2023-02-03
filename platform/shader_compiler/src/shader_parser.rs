@@ -614,11 +614,14 @@ impl<'a> ShaderParser<'a> {
         let span = self.begin_span();
         self.expect_token(LiveToken::Ident(live_id!(for))) ?;
         let ident = self.expect_ident(live_error_origin!()) ?;
-        self.expect_token(LiveToken::Ident(live_id!(from))) ?;
+        
+        self.expect_token(LiveToken::Ident(live_id!(in))) ?;
+        
         let from_expr = self.expect_expr() ?;
-        self.expect_token(LiveToken::Ident(live_id!(to))) ?;
+        self.expect_token(LiveToken::Punct(live_id!(..))) ?;
+        //self.expect_token(LiveToken::Ident(live_id!(to))) ?;
         let to_expr = self.expect_expr() ?;
-        let step_expr = if self.accept_token(LiveToken::Ident(live_id!(step))) {
+        let step_expr = if self.accept_token(LiveToken::Ident(live_id!(step_by))) {
             Some(self.expect_expr() ?)
         } else {
             None
