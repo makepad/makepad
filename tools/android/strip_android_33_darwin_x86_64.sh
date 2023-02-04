@@ -1,5 +1,12 @@
 #!/bin/bash
 
+#
+#  This file generates a stripped down version of all buildtooling needed to build
+#  an android application with the makepad Rust stack.
+#
+
+# To create the stripped down version you need the following origin data:
+
 # android-33-ext
 # Downloading https://dl.google.com/android/repository/platform-33-ext4_r01.zip
 # put in $SRC/android-33-ext4
@@ -21,7 +28,7 @@
 # version 16 also has this warning: One or more classes has class file version >= 56 which is not officially supported.
 # however atleast we get an M1 native build with 16,
 # openJDK 11 which is apparently in android studio doesnt have an m1 build.
-# Copy the Contents/Home directory to openjdk/
+# Copy the Contents/Home/* directory to openjdk/*
  
 # this is the input directory where you expand all the files above
 SRC=android_33_darwin_x86_64
