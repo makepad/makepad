@@ -143,7 +143,7 @@ impl LiveHook for DesktopWindow {
         }
     }
 }
-
+ 
 #[derive(Clone)]
 pub enum DesktopWindowEvent {
     EventForOtherWindow,
