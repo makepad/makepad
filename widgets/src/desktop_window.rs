@@ -148,7 +148,7 @@ impl LiveHook for DesktopWindow {
 pub enum DesktopWindowEvent {
     EventForOtherWindow,
     WindowClosed,
-    WindowGeomChange(WindowGeomChangeEvent),
+    WindowGeomChange(WindowGeomChangeEvent), 
     None
 }
 
