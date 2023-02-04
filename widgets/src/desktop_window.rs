@@ -129,15 +129,17 @@ impl LiveHook for DesktopWindow {
             self.ui.get_frame(id!(web_xr)).set_visible(true);
             log!("VR IS SUPPORTED");
         }
-        if let OsType::Windows = cx.platform_type() {
-            self.ui.get_frame(id!(caption_bar)).set_visible(true);
-            self.ui.get_frame(id!(windows_buttons)).set_visible(true);
-        }
-        if let OsType::LinuxDirect = cx.platform_type() {
-            self.ui.get_frame(id!(caption_bar)).set_visible(false);
-        }
-        if let OsType::LinuxWindow {custom_window_chrome: false} = cx.platform_type() {
-            self.ui.get_frame(id!(caption_bar)).set_visible(false);
+        match cx.platform_type(){
+             OsType::Windows=>{
+                self.ui.get_frame(id!(caption_bar)).set_visible(true);
+                self.ui.get_frame(id!(windows_buttons)).set_visible(true);
+             }
+             OsType::LinuxWindow{..} |
+             OsType::LinuxDirect |
+             OsType::Android=>{
+                self.ui.get_frame(id!(caption_bar)).set_visible(false);
+            }
+            _=>()
         }
     }
 }

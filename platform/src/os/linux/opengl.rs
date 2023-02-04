@@ -183,7 +183,7 @@ impl Cx {
                                 cxtexture.desc.height.unwrap() as u32,
                                 &cxtexture.image_u32
                             );
-                        }  
+                        }
                     }
                     for i in 0..sh.mapping.textures.len() {
                         let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
@@ -238,13 +238,13 @@ impl Cx {
         };
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         
+        self.passes[pass_id].paint_dirty = false;
+        
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
             return None
         }
         
         self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
-        self.passes[pass_id].paint_dirty = false;
-        
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         Some(pass_rect.size)
     }
@@ -358,15 +358,16 @@ impl Cx {
         unsafe {
             gl_sys::Viewport(0, 0, (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32);
         }
-
+        
         if clear_flags != 0 {
             unsafe {
-                gl_sys::ClearDepth(clear_depth as f64);
+                if clear_flags & gl_sys::DEPTH_BUFFER_BIT != 0 {
+                    gl_sys::ClearDepth(clear_depth as f64);
+                }
                 gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
                 gl_sys::Clear(clear_flags);
             }
         }
-        
         Self::set_default_depth_and_blend_mode();
         
         let mut zbias = 0.0;
@@ -378,6 +379,7 @@ impl Cx {
             &mut zbias,
             zbias_step,
         );
+        
         unsafe {
             gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
             //gl_sys::Finish();
@@ -401,7 +403,7 @@ impl Cx {
                     &cx_shader.mapping.const_table,
                     &self.shader_registry
                 );
-       
+                
                 if cx_shader.mapping.flags.debug {
                     log!("{}\n{}", vertex, pixel);
                 }
@@ -413,7 +415,7 @@ impl Cx {
                         break;
                     }
                 }
-
+                
                 if cx_shader.os_shader_id.is_none() {
                     let shp = CxOsDrawShader::new(&vertex, &pixel, &cx_shader.mapping);
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
@@ -899,4 +901,4 @@ uniform float view_table[16];
 void main() {
     gl_FragColor = vec4(0.0,0.0,0.0,0.0);
 }";*/
-         
+

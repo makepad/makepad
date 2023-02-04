@@ -2,11 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     package="nl.makepad.android">
-
     <application
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
         android:allowBackup="true"
         android:supportsRtl="true"
         tools:targetApi="33">
+        <meta-data android:name="android.max_aspect" android:value="2.1" />
         <activity
             android:name="MakepadActivity"
             android:exported="true">
@@ -19,3 +20,4 @@
     <uses-sdk android:targetSdkVersion="33"/>
     <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
 </manifest>
+

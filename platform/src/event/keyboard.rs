@@ -15,6 +15,7 @@ pub struct CxKeyboard {
     pub (crate) prev_key_focus: Area,
     pub (crate) next_key_focus: Area,
     pub (crate) key_focus: Area,
+    #[allow(dead_code)]
     pub (crate) keys_down: Vec<KeyEvent>,
 }
 
@@ -59,6 +60,7 @@ impl CxKeyboard {
         None
     }
     
+    #[allow(dead_code)]
     pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {
         if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
             return;
@@ -66,6 +68,7 @@ impl CxKeyboard {
         self.keys_down.push(key_event);
     }
     
+    #[allow(dead_code)]
     pub (crate) fn process_key_up(&mut self, key_event: KeyEvent) {
         if let Some(pos) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
             self.keys_down.remove(pos);
