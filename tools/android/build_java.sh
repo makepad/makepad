@@ -23,10 +23,4 @@ pushd $APK_DIR
     echo "Creating apk file"
     $SDK_DIR/android-13/aapt package -F makepad_android_java.apk -I $SDK_DIR/android-33-ext4/android.jar -M $MANIFEST_FILE
     $SDK_DIR/android-13/aapt add makepad_android_java.apk classes.dex
-
-    #../android-13/aapt add makepad_android.apk lib/arm64-v8a/libmakepad.so
-
-    # Sign our .apk file with the debug key.
-    #echo "Signing apk file"
-    #../android-13/apksigner sign -ks ../debug.keystore --ks-key-alias androiddebugkey --ks-pass pass:android makepad_android.apk
 popd

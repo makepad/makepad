@@ -40,87 +40,83 @@ DST=android_33_darwin_x86_64_to_aarch64
 rm -rf $DST
 mkdir -p $DST
 
-pushd $DST
-   
-    # openJDK files
+# openJDK files
 
-    mkdir -p openjdk/bin
-    cp ../$SRC/openjdk/bin/java openjdk/bin
-    cp ../$SRC/openjdk/bin/javac openjdk/bin
+mkdir -p $DST/openjdk/bin
+cp $SRC/openjdk/bin/java $DST/openjdk/bin
+cp $SRC/openjdk/bin/javac $DST/openjdk/bin
 
-    mkdir -p openjdk/lib/jli
-    cp ../$SRC/openjdk/lib/libjli.dylib openjdk/lib
-    cp ../$SRC/openjdk/lib/jvm.cfg openjdk/lib/
+mkdir -p $DST/openjdk/lib/jli
+cp $SRC/openjdk/lib/libjli.dylib $DST/openjdk/lib
+cp $SRC/openjdk/lib/jvm.cfg $DST/openjdk/lib/
 
-    mkdir -p openjdk/lib/server
-    cp ../$SRC/openjdk/lib/server/libjsig.dylib openjdk/lib/server
-    cp ../$SRC/openjdk/lib/server/libjvm.dylib openjdk/lib/server
+mkdir -p $DST/openjdk/lib/server
+cp $SRC/openjdk/lib/server/libjsig.dylib $DST/openjdk/lib/server
+cp $SRC/openjdk/lib/server/libjvm.dylib $DST/openjdk/lib/server
 
-    cp ../$SRC/openjdk/lib/modules openjdk/lib
+cp $SRC/openjdk/lib/modules $DST/openjdk/lib
 
-    cp ../$SRC/openjdk/lib/tzdb.dat openjdk/lib
-    cp ../$SRC/openjdk/lib/libjava.dylib openjdk/lib
-    cp ../$SRC/openjdk/lib/libjimage.dylib openjdk/lib
-    cp ../$SRC/openjdk/lib/libnet.dylib openjdk/lib
-    cp ../$SRC/openjdk/lib/libnio.dylib openjdk/lib
-    cp ../$SRC/openjdk/lib/libverify.dylib openjdk/lib
-    cp ../$SRC/openjdk/lib/libzip.dylib openjdk/lib
+cp $SRC/openjdk/lib/tzdb.dat $DST/openjdk/lib
+cp $SRC/openjdk/lib/libjava.dylib $DST/openjdk/lib
+cp $SRC/openjdk/lib/libjimage.dylib $DST/openjdk/lib
+cp $SRC/openjdk/lib/libnet.dylib $DST/openjdk/lib
+cp $SRC/openjdk/lib/libnio.dylib $DST/openjdk/lib
+cp $SRC/openjdk/lib/libverify.dylib $DST/openjdk/lib
+cp $SRC/openjdk/lib/libzip.dylib $DST/openjdk/lib
 
-    mkdir -p openjdk/conf/security 
-    cp -a ../$SRC/openjdk/conf/security/* openjdk/conf/security/
+mkdir -p $DST/openjdk/conf/security 
+cp -a $SRC/openjdk/conf/security/* $DST/openjdk/conf/security/
 
-    # build tools
+# build tools
 
-    mkdir android-13
-    cp ../$SRC/android-13/aapt android-13
-    cp ../$SRC/android-13/apksigner android-13
-    cp ../$SRC/android-13/zipalign android-13
-    cp ../$SRC/android-13/d8 android-13
+mkdir $DST/android-13
+cp $SRC/android-13/aapt $DST/android-13
+cp $SRC/android-13/apksigner $DST/android-13
+cp $SRC/android-13/zipalign $DST/android-13
+cp $SRC/android-13/d8 $DST/android-13
 
-    mkdir android-13/lib
-    cp ../$SRC/android-13/lib/apksigner.jar android-13/lib
-    cp ../$SRC/android-13/lib/d8.jar android-13/lib  
+mkdir $DST/android-13/lib
+cp $SRC/android-13/lib/apksigner.jar $DST/android-13/lib
+cp $SRC/android-13/lib/d8.jar $DST/android-13/lib  
 
-    # something ext
+# something ext
 
-    mkdir android-33-ext4
-    cp ../$SRC/android-33-ext4/android.jar android-33-ext4
+mkdir $DST/android-33-ext4
+cp $SRC/android-33-ext4/android.jar $DST/android-33-ext4
 
-    # platform tools
+# platform tools
 
-    mkdir platform-tools
-    cp ../$SRC/platform-tools/adb platform-tools
+mkdir $DST/platform-tools
+cp $SRC/platform-tools/adb $DST/platform-tools
 
-    # NDK
+# NDK
 
-    BIN=NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin
+BIN=NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin
 
-    mkdir -p $BIN
-    cp ../$SRC/$BIN/aarch64-linux-android33-clang $BIN
-    cp ../$SRC/$BIN/clang $BIN
-    cp ../$SRC/$BIN/ld $BIN
+mkdir -p $DST/$BIN
+cp $SRC/$BIN/aarch64-linux-android33-clang $DST/$BIN
+cp $SRC/$BIN/clang $DST/$BIN
+cp $SRC/$BIN/ld $DST/$BIN
 
-    LIB64=NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64
+LIB64=NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64
 
-    mkdir -p $LIB64
-    cp ../$SRC/$LIB64/libxml2.2.* $LIB64
+mkdir -p $DST/$LIB64
+cp $SRC/$LIB64/libxml2.2.* $DST/$LIB64
 
-    SYSLIB=NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33
+SYSLIB=NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33
 
-    mkdir -p $SYSLIB
-    cp ../$SRC/$SYSLIB/crtbegin_so.o $SYSLIB    
-    cp ../$SRC/$SYSLIB/crtend_so.o $SYSLIB 
-    cp ../$SRC/$SYSLIB/libc.so $SYSLIB    
-    cp ../$SRC/$SYSLIB/libGLESv2.so $SYSLIB    
-    cp ../$SRC/$SYSLIB/libm.so $SYSLIB    
-    cp ../$SRC/$SYSLIB/liblog.so $SYSLIB    
-    cp ../$SRC/$SYSLIB/libEGL.so $SYSLIB    
-    cp ../$SRC/$SYSLIB/libdl.so $SYSLIB    
-    cp ../$SRC/$SYSLIB/libaaudio.so $SYSLIB   
-    cp ../$SRC/$SYSLIB/libaaudio.so $SYSLIB
+mkdir -p $DST/$SYSLIB
+cp $SRC/$SYSLIB/crtbegin_so.o $DST/$SYSLIB    
+cp $SRC/$SYSLIB/crtend_so.o $DST/$SYSLIB 
+cp $SRC/$SYSLIB/libc.so $DST/$SYSLIB    
+cp $SRC/$SYSLIB/libGLESv2.so $DST/$SYSLIB    
+cp $SRC/$SYSLIB/libm.so $DST/$SYSLIB    
+cp $SRC/$SYSLIB/liblog.so $DST/$SYSLIB    
+cp $SRC/$SYSLIB/libEGL.so $DST/$SYSLIB    
+cp $SRC/$SYSLIB/libdl.so $DST/$SYSLIB    
+cp $SRC/$SYSLIB/libaaudio.so $DST/$SYSLIB   
+cp $SRC/$SYSLIB/libaaudio.so $DST/$SYSLIB
 
-    # these files are needed by the rust linker but are actually no-ops so we just copy libc to stand in as a fake 
-    cp $SYSLIB/libc.so $SYSLIB/libgcc.so
-    cp $SYSLIB/libc.so $SYSLIB/libunwind.so
-
-popd
+# these files are needed by the rust linker but are actually no-ops so we just copy libc to stand in as a fake 
+cp $DST/$SYSLIB/libc.so $DST/$SYSLIB/libgcc.so
+cp $DST/$SYSLIB/libc.so $DST/$SYSLIB/libunwind.so
