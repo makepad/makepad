@@ -18,5 +18,5 @@ pushd $APK_DIR
 
     # Sign our .apk file with the debug key.
     echo "Signing apk file"
-    JAVA_HOME=`$pwd`$REL_ROOT/$SDK_DIR/jbr $REL_ROOT/$SDK_DIR/android-13/apksigner sign -ks $REL_ROOT/tools/android/debug.keystore --ks-key-alias androiddebugkey --ks-pass pass:android makepad_android.apk
+    JAVA_HOME=`$pwd`$REL_ROOT/$SDK_DIR/jbr $REL_ROOT/$SDK_DIR/android-13/apksigner sign -v -ks $REL_ROOT/tools/android/debug.keystore --ks-key-alias androiddebugkey --ks-pass pass:android makepad_android.apk
 popd
