@@ -17,12 +17,16 @@
 # put in $SRC/NDK
 
 # $SRC/openjdk/ is the openJDK distribution for m1 from https://jdk.java.net/archive/ version 16
-# version 19 had this error:  Unsupported class file major version 63 with d8. Copy the Contents/Home directory
+# version 19 had this error:  Unsupported class file major version 63 with d8. 
 # version 16 also has this warning: One or more classes has class file version >= 56 which is not officially supported.
 # however atleast we get an M1 native build with 16,
 # openJDK 11 which is apparently in android studio doesnt have an m1 build.
-
+# Copy the Contents/Home directory to openjdk/
+ 
+# this is the input directory where you expand all the files above
 SRC=android_33_darwin_x86_64
+
+# this is the destination directory
 DST=android_33_darwin_x86_64_to_aarch64
 
 rm -rf $DST
