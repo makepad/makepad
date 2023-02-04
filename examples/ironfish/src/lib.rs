@@ -1,8 +1,7 @@
-pub use makepad_audio_widgets::makepad_widgets;
-pub use makepad_widgets::makepad_platform;
-pub use makepad_platform::makepad_math;
-pub use makepad_synth_ironfish;
-pub use makepad_synth_ironfish::makepad_audio_graph;
+use makepad_audio_widgets::makepad_widgets;
+use makepad_widgets::makepad_platform;
+use makepad_synth_ironfish;
+use makepad_synth_ironfish::makepad_audio_graph;
 
 use makepad_widgets::*;
 use makepad_draw::*;
@@ -29,7 +28,7 @@ live_design!{
     const SPACING_PANELS = 10.0
     const SPACING_CONTROLS = 3.0
     const SPACING_BASE_PADDING = 8.0
-    const HEIGHT_AUDIOVIZ = 200
+    const HEIGHT_AUDIOVIZ = 50
     const COLOR_OSC = #xFFFF99FF // yellow
     const COLOR_MUSIC = #xC // gray
     const COLOR_ENV = #xF9A894 // light red

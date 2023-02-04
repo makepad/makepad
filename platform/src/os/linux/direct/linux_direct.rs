@@ -242,7 +242,7 @@ impl Cx {
         );
         
         unsafe {
-            direct_app.drm.flip_buffers_and_wait(&direct_app.egl);
+            direct_app.drm.swap_buffers_and_wait(&direct_app.egl);
         }
     }
     

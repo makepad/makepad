@@ -2,7 +2,7 @@
 #[macro_export]
 macro_rules!main_app {
     ( $ app: ident) => {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(any(target_arch = "wasm32", target_os="android")))]
         pub fn main() {
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Cx::new(Box::new(move | cx, event | {
@@ -16,6 +16,28 @@ macro_rules!main_app {
             live_design(&mut cx);
             cx.init();
             cx.event_loop();
+        }
+        
+        #[cfg(target_os = "android")]
+        #[no_mangle]
+        pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_newCx(_: *const std::ffi::c_void, _: *const std::ffi::c_void) -> i64 {
+            pub fn panic_hook(info: &std::panic::PanicInfo) {
+                error!("{}", info)
+            }
+            std::panic::set_hook(Box::new(panic_hook));
+            
+            let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
+                if let Event::Construct = event {
+                    *app.borrow_mut() = Some($app::new_main(cx));
+                }
+                app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
+            })));
+            live_design(&mut cx);
+            cx.init();
+            
+            let ptr = Box::into_raw(cx) as i64;
+            ptr
         }
         
         #[cfg(target_arch = "wasm32")]
