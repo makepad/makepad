@@ -77,10 +77,10 @@ impl MidiOutput {
     pub fn send(&self, port: Option<MidiPortId>, data: MidiData) {
         let output = self.0.as_ref().unwrap();
         output.send(port, data);
-    }
+    } 
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)] 
 pub struct MidiData {
     pub data: [u8; 3],
 }
