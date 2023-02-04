@@ -16,7 +16,8 @@
 # https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg
 # put in $SRC/NDK
 
-# $SRC/jbr/ comes from android studio application package Contents/jbr
+# $SRC/jbr/ comes from android studio application package Contents/jbr and is x86 
+# $SRC/jbrm1/ is the openJDK distribution for m1. its about 9.25s->8.5s for signing an apk.
 
 SRC=android_33_darwin_x86_64
 DST=android_33_darwin_x86_64_to_aarch64
@@ -27,35 +28,42 @@ mkdir -p $DST
 pushd $DST
 
     # Java Runtime
+    JBR=jbrm1
 
     mkdir -p jbr/bin
-    cp ../$SRC/jbr/bin/java jbr/bin
-    cp ../$SRC/jbr/bin/javac jbr/bin
+    cp ../$SRC/$JBR/bin/java jbr/bin
+    cp ../$SRC/$JBR/bin/javac jbr/bin
 
     mkdir -p jbr/lib/jli
-    cp ../$SRC/jbr/lib/jli/libjli.dylib jbr/lib/jli
-    cp ../$SRC/jbr/lib/jvm.cfg jbr/lib/
+    cp ../$SRC/$JBR/lib/libjli.dylib jbr/lib
+    #cp ../$SRC/$JBR/lib/jli/libjli.dylib jbr/lib/jli
+    cp ../$SRC/$JBR/lib/jvm.cfg jbr/lib/
 
     mkdir -p jbr/lib/server
-    cp ../$SRC/jbr/lib/server/libjsig.dylib jbr/lib/server
-    cp ../$SRC/jbr/lib/server/libjvm.dylib jbr/lib/server
+    cp ../$SRC/$JBR/lib/server/libjsig.dylib jbr/lib/server
+    cp ../$SRC/$JBR/lib/server/libjvm.dylib jbr/lib/server
 
-    cp ../$SRC/jbr/lib/modules jbr/lib
+    cp ../$SRC/$JBR/lib/modules jbr/lib
 
-    cp ../$SRC/jbr/lib/tzdb.dat jbr/lib
-    cp ../$SRC/jbr/lib/libjava.dylib jbr/lib
-    cp ../$SRC/jbr/lib/libjimage.dylib jbr/lib
-    cp ../$SRC/jbr/lib/libnet.dylib jbr/lib
-    cp ../$SRC/jbr/lib/libnio.dylib jbr/lib
-    cp ../$SRC/jbr/lib/libverify.dylib jbr/lib
-    cp ../$SRC/jbr/lib/libzip.dylib jbr/lib
+    cp ../$SRC/$JBR/lib/tzdb.dat jbr/lib
+    cp ../$SRC/$JBR/lib/libjava.dylib jbr/lib
+    cp ../$SRC/$JBR/lib/libjimage.dylib jbr/lib
+    cp ../$SRC/$JBR/lib/libnet.dylib jbr/lib
+    cp ../$SRC/$JBR/lib/libnio.dylib jbr/lib
+    cp ../$SRC/$JBR/lib/libverify.dylib jbr/lib
+    cp ../$SRC/$JBR/lib/libzip.dylib jbr/lib
+
+    mkdir -p jbr/conf/security 
+    cp -a ../$SRC/$JBR/conf/security/* jbr/conf/security/
 
     # build tools
 
     mkdir android-13
     cp ../$SRC/android-13/aapt android-13
     cp ../$SRC/android-13/apksigner android-13
+    cp ../$SRC/android-13/zipalign android-13
     cp ../$SRC/android-13/d8 android-13
+
     mkdir android-13/lib
     cp ../$SRC/android-13/lib/apksigner.jar android-13/lib
     cp ../$SRC/android-13/lib/d8.jar android-13/lib  
