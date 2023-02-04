@@ -16,8 +16,11 @@
 # https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg
 # put in $SRC/NDK
 
-# $SRC/jbr/ comes from android studio application package Contents/jbr and is x86 
-# $SRC/jbrm1/ is the openJDK distribution for m1. its about 9.25s->8.5s for signing an apk.
+# $SRC/openjdk/ is the openJDK distribution for m1 from https://jdk.java.net/archive/ version 16
+# version 19 had this error:  Unsupported class file major version 63 with d8. Copy the Contents/Home directory
+# version 16 also has this warning: One or more classes has class file version >= 56 which is not officially supported.
+# however atleast we get an M1 native build with 16,
+# openJDK 11 which is apparently in android studio doesnt have an m1 build.
 
 SRC=android_33_darwin_x86_64
 DST=android_33_darwin_x86_64_to_aarch64
@@ -26,35 +29,31 @@ rm -rf $DST
 mkdir -p $DST
 
 pushd $DST
+   
+    mkdir -p openjdk/bin
+    cp ../$SRC/openjdk/bin/java openjdk/bin
+    cp ../$SRC/openjdk/bin/javac openjdk/bin
 
-    # Java Runtime
-    JBR=jbrm1
+    mkdir -p openjdk/lib/jli
+    cp ../$SRC/openjdk/lib/libjli.dylib openjdk/lib
+    cp ../$SRC/openjdk/lib/jvm.cfg openjdk/lib/
 
-    mkdir -p jbr/bin
-    cp ../$SRC/$JBR/bin/java jbr/bin
-    cp ../$SRC/$JBR/bin/javac jbr/bin
+    mkdir -p openjdk/lib/server
+    cp ../$SRC/openjdk/lib/server/libjsig.dylib openjdk/lib/server
+    cp ../$SRC/openjdk/lib/server/libjvm.dylib openjdk/lib/server
 
-    mkdir -p jbr/lib/jli
-    cp ../$SRC/$JBR/lib/libjli.dylib jbr/lib
-    #cp ../$SRC/$JBR/lib/jli/libjli.dylib jbr/lib/jli
-    cp ../$SRC/$JBR/lib/jvm.cfg jbr/lib/
+    cp ../$SRC/openjdk/lib/modules openjdk/lib
 
-    mkdir -p jbr/lib/server
-    cp ../$SRC/$JBR/lib/server/libjsig.dylib jbr/lib/server
-    cp ../$SRC/$JBR/lib/server/libjvm.dylib jbr/lib/server
+    cp ../$SRC/openjdk/lib/tzdb.dat openjdk/lib
+    cp ../$SRC/openjdk/lib/libjava.dylib openjdk/lib
+    cp ../$SRC/openjdk/lib/libjimage.dylib openjdk/lib
+    cp ../$SRC/openjdk/lib/libnet.dylib openjdk/lib
+    cp ../$SRC/openjdk/lib/libnio.dylib openjdk/lib
+    cp ../$SRC/openjdk/lib/libverify.dylib openjdk/lib
+    cp ../$SRC/openjdk/lib/libzip.dylib openjdk/lib
 
-    cp ../$SRC/$JBR/lib/modules jbr/lib
-
-    cp ../$SRC/$JBR/lib/tzdb.dat jbr/lib
-    cp ../$SRC/$JBR/lib/libjava.dylib jbr/lib
-    cp ../$SRC/$JBR/lib/libjimage.dylib jbr/lib
-    cp ../$SRC/$JBR/lib/libnet.dylib jbr/lib
-    cp ../$SRC/$JBR/lib/libnio.dylib jbr/lib
-    cp ../$SRC/$JBR/lib/libverify.dylib jbr/lib
-    cp ../$SRC/$JBR/lib/libzip.dylib jbr/lib
-
-    mkdir -p jbr/conf/security 
-    cp -a ../$SRC/$JBR/conf/security/* jbr/conf/security/
+    mkdir -p openjdk/conf/security 
+    cp -a ../$SRC/openjdk/conf/security/* openjdk/conf/security/
 
     # build tools
 
