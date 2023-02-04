@@ -42,6 +42,8 @@ mkdir -p $DST
 
 pushd $DST
    
+    # openJDK files
+
     mkdir -p openjdk/bin
     cp ../$SRC/openjdk/bin/java openjdk/bin
     cp ../$SRC/openjdk/bin/javac openjdk/bin
