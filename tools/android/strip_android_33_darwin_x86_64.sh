@@ -2,21 +2,21 @@
 
 # android-33-ext
 # Downloading https://dl.google.com/android/repository/platform-33-ext4_r01.zip
-# put in env_src/android-33-ext4
+# put in $SRC/android-33-ext4
 
 # android-13:
 # Downloading https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip
-# put in env_src/android-13
+# put in $SRC/android-13
 
 # platform tools (adb)
 # Downloading https://dl.google.com/android/repository/platform-tools_r33.0.3-darwin.zip
-# put in env_src/platform-tools
+# put in $SRC/platform-tools
 
 # NDK comes from
 # https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg
-# put in env_src/NDK
+# put in $SRC/NDK
 
-# env_src/jbr/ comes from android studio application package Contents/jbr
+# $SRC/jbr/ comes from android studio application package Contents/jbr
 
 SRC=android_33_darwin_x86_64
 SDK_DIR=android_33_darwin_x86_64_to_aarch64
