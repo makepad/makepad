@@ -19,32 +19,30 @@
 # $SRC/jbr/ comes from android studio application package Contents/jbr
 
 SRC=android_33_darwin_x86_64
-SDK_DIR=android_33_darwin_x86_64_to_aarch64
+DST=android_33_darwin_x86_64_to_aarch64
 
-rm -rf $SDK_DIR
-mkdir -p $SDK_DIR
+rm -rf $DST
+mkdir -p $DST
 
-pushd $SDK_DIR
+pushd $DST
 
     # Java Runtime
 
-    rm -rf jbr
-    mkdir jbr
-    mkdir jbr/bin
-
+    mkdir -p jbr/bin
     cp ../$SRC/jbr/bin/java jbr/bin
+    cp ../$SRC/jbr/bin/javac jbr/bin
 
-    mkdir jbr/lib
-    mkdir jbr/lib/jli
+    mkdir -p jbr/lib/jli
     cp ../$SRC/jbr/lib/jli/libjli.dylib jbr/lib/jli
     cp ../$SRC/jbr/lib/jvm.cfg jbr/lib/
 
-    mkdir jbr/lib/server
+    mkdir -p jbr/lib/server
     cp ../$SRC/jbr/lib/server/libjsig.dylib jbr/lib/server
     cp ../$SRC/jbr/lib/server/libjvm.dylib jbr/lib/server
 
     cp ../$SRC/jbr/lib/modules jbr/lib
 
+    cp ../$SRC/jbr/lib/tzdb.dat jbr/lib
     cp ../$SRC/jbr/lib/libjava.dylib jbr/lib
     cp ../$SRC/jbr/lib/libjimage.dylib jbr/lib
     cp ../$SRC/jbr/lib/libnet.dylib jbr/lib
@@ -57,8 +55,10 @@ pushd $SDK_DIR
     mkdir android-13
     cp ../$SRC/android-13/aapt android-13
     cp ../$SRC/android-13/apksigner android-13
+    cp ../$SRC/android-13/d8 android-13
     mkdir android-13/lib
     cp ../$SRC/android-13/lib/apksigner.jar android-13/lib
+    cp ../$SRC/android-13/lib/d8.jar android-13/lib  
 
     # something ext
 
@@ -72,34 +72,31 @@ pushd $SDK_DIR
 
     # NDK
 
-    mkdir -p NDK/toolchains/llvm/prebuilt/darwin-x86_64
+    BIN=NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin
+    mkdir -p $BIN
+    cp ../$SRC/$BIN/aarch64-linux-android33-clang $BIN
+    cp ../$SRC/$BIN/clang $BIN
+    cp ../$SRC/$BIN/ld $BIN
 
-    mkdir NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin
-    cp ../$SRC/NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang \
-            NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin
-    cp ../$SRC/NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang \
-            NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin
-    cp ../$SRC/NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/ld \
-            NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin
+    LIB64=NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64
 
-    mkdir -p NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64
-    cp ../$SRC/NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64/libxml2.2.* \
-            NDK/toolchains/llvm/prebuilt/darwin-x86_64/lib64
+    mkdir -p $LIB64
+    cp ../$SRC/$LIB64/libxml2.2.* $LIB64
 
-    mkdir -p NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android
-    cp -a ../$SRC/NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33 \
-      NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/
+    SYSLIB=NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33
 
-    cp NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33/libc.so\
-       NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33/libgcc.so
-    cp NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33/libc.so\
-       NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33/libunwind.so
-
-
-    #only needed for java build (saves 10mb. not useful)
-    cp ../$SRC/jbr/bin/javac jbr/bin
-    cp ../$SRC/android-13/d8 android-13
-    cp ../$SRC/jbr/lib/tzdb.dat jbr/lib
-    cp ../$SRC/android-13/lib/d8.jar android-13/lib  
+    mkdir -p $SYSLIB
+    cp ../$SRC/$SYSLIB/crtbegin_so.o $SYSLIB    
+    cp ../$SRC/$SYSLIB/crtend_so.o $SYSLIB 
+    cp ../$SRC/$SYSLIB/libc.so $SYSLIB    
+    cp ../$SRC/$SYSLIB/libGLESv2.so $SYSLIB    
+    cp ../$SRC/$SYSLIB/libm.so $SYSLIB    
+    cp ../$SRC/$SYSLIB/liblog.so $SYSLIB    
+    cp ../$SRC/$SYSLIB/libEGL.so $SYSLIB    
+    cp ../$SRC/$SYSLIB/libdl.so $SYSLIB    
+    cp ../$SRC/$SYSLIB/libaaudio.so $SYSLIB   
+    cp ../$SRC/$SYSLIB/libaaudio.so $SYSLIB    
+    cp $SYSLIB/libc.so $SYSLIB/libgcc.so
+    cp $SYSLIB/libc.so $SYSLIB/libunwind.so
 
 popd
