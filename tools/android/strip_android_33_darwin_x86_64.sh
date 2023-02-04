@@ -73,6 +73,7 @@ pushd $DST
     # NDK
 
     BIN=NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin
+
     mkdir -p $BIN
     cp ../$SRC/$BIN/aarch64-linux-android33-clang $BIN
     cp ../$SRC/$BIN/clang $BIN
@@ -95,7 +96,9 @@ pushd $DST
     cp ../$SRC/$SYSLIB/libEGL.so $SYSLIB    
     cp ../$SRC/$SYSLIB/libdl.so $SYSLIB    
     cp ../$SRC/$SYSLIB/libaaudio.so $SYSLIB   
-    cp ../$SRC/$SYSLIB/libaaudio.so $SYSLIB    
+    cp ../$SRC/$SYSLIB/libaaudio.so $SYSLIB
+
+    # these files are needed by the rust linker but are actually no-ops so we just copy libc to stand in as a fake 
     cp $SYSLIB/libc.so $SYSLIB/libgcc.so
     cp $SYSLIB/libc.so $SYSLIB/libunwind.so
 
