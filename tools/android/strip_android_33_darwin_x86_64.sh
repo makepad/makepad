@@ -3,6 +3,7 @@
 #
 #  This file generates a stripped down version of all buildtooling needed to build
 #  an android application with the makepad Rust stack.
+#  Currently it is macos only.
 #
 
 # To create the stripped down version you need the following origin data:
