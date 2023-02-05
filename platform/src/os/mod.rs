@@ -31,7 +31,7 @@ pub mod linux;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 pub use crate::os::linux::*;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(target_os = "android")]
 pub use crate::os::linux::android::android_media::*;
 
 #[cfg(target_os = "linux")]
