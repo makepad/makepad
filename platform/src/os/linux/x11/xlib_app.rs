@@ -17,7 +17,7 @@ use {
         makepad_math::DVec2,
         event::*,
         cursor::MouseCursor,
-        os::cx_desktop::EventFlow,
+        os::cx_native::EventFlow,
     },
 };
 
