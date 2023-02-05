@@ -22,7 +22,7 @@ use {
         pass::CxPassParent,
         cx::{Cx, OsType,}, 
         gpu_info::GpuPerformance,
-        os::cx_desktop::EventFlow,
+        os::cx_native::EventFlow,
         
     }
 };
@@ -306,7 +306,7 @@ impl CxOsApi for Cx {
     fn init(&mut self) {
         self.live_expand();
         self.live_scan_dependencies();
-        self.desktop_load_dependencies();
+        self.native_load_dependencies();
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {

@@ -15,7 +15,7 @@ use {
                 d3d11::{D3d11Window, D3d11Cx},
                 win32_app::*,
             },
-            cx_desktop::EventFlow,
+            cx_native::EventFlow,
         },
         pass::{CxPassParent},
         cx_api::{CxOsApi, CxOsOp},
@@ -303,7 +303,7 @@ impl CxOsApi for Cx {
     fn init(&mut self) {
         self.live_expand();
         self.live_scan_dependencies();
-        self.desktop_load_dependencies();
+        self.native_load_dependencies();
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {

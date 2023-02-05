@@ -73,7 +73,7 @@ impl Cx {
             position: dvec2(0.0, 0.0),
             inner_size: size,
             outer_size: size,
-        };
+        }; 
         let new_geom = window.window_geom.clone();
         self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
             window_id,
@@ -98,7 +98,7 @@ impl Cx {
             self.opengl_compile_shaders();
         }
         
-        self.handle_repaint(&callback);
+        self.handle_repaint(&callback); 
         self.after_every_event(&callback);
     }
     
@@ -110,7 +110,7 @@ impl Cx {
         //callback.schedule_redraw();
         self.after_every_event(&callback);
     }
-    
+      
     /// Called when a timeout expired.
     pub fn android_timeout(&mut self, timer_id: i64, callback: AndroidCallback<'_>) {
         if timer_id == 0 {
@@ -123,7 +123,7 @@ impl Cx {
         else {
             self.call_event_handler(&Event::Timer(TimerEvent {timer_id: timer_id as u64}))
         }
-        self.after_every_event(&callback);
+        self.after_every_event(&callback); 
     }
     
     fn after_every_event(&mut self, callback: &AndroidCallback<'_>) {
@@ -263,7 +263,7 @@ impl CxOsApi for Cx {
     
     fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
         todo!()
-    }
+    } 
 }
 
 impl Default for CxOs {
