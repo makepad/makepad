@@ -561,7 +561,7 @@ extern "C" {
 
     pub fn pa_stream_connect_record(
         s: *mut pa_stream,
-        dev: *const ::std::os::raw::c_char,
+        dev: *const u8,
         attr: *const pa_buffer_attr,
         flags: pa_stream_flags_t,
     ) -> c_int;

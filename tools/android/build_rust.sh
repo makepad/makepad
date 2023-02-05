@@ -6,7 +6,7 @@ PKG="makepad-example-ironfish"
 FILE="makepad_example_ironfish"
 JDK_DIR=$SDK_DIR/openjdk
 
-CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$SDK_DIR/NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang" cargo +nightly rustc --lib --crate-type=cdylib -p $PKG --release --target=aarch64-linux-android
+CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$SDK_DIR/NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang" cargo +nightly rustc --lib --crate-type=cdylib -p $PKG --release --target=aarch64-linux-android --message-format=json
 
 pushd $APK_DIR
     # Make sure libmakepad.so ends up in the correct location in the .apk file.
