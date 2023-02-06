@@ -1708,3 +1708,6 @@ impl App {
         self.window.end(cx);
     }
 }
+fn main(){
+    makepad_example_ironfish::main()
+}
