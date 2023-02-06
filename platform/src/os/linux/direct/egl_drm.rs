@@ -199,7 +199,7 @@ impl Drm {
         }
     }
     
-    pub unsafe fn flip_buffers_and_wait(&mut self, egl: &Egl) {
+    pub unsafe fn swap_buffers_and_wait(&mut self, egl: &Egl) {
         egl.swap_buffers();
         
         let next_bo = gbm_surface_lock_front_buffer(self.gbm_surface);

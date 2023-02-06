@@ -6,7 +6,7 @@ workspace.exclude = [
     "code_editor/regex",
     "code_editor/ucd",
     "code_editor/varint",
-    "makepad-android"
+    "tools/android/rust"
 ]
 
 workspace.members = [
@@ -28,4 +28,9 @@ workspace.members = [
 ]
 
 
-
+[profile.release]
+# opt-level = 'z'     # Optimize for size
+#lto = true          # Enable link-time optimization
+#codegen-units = 1   # Reduce number of codegen units to increase optimizations
+panic = 'abort'     # Abort on panic
+strip = true   

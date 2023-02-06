@@ -13,7 +13,7 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         os::{
-            cx_desktop::EventFlow,
+            cx_native::EventFlow,
             apple::apple_sys::*,
             cocoa_event::{CocoaEvent},
             metal_xpc::{
@@ -370,7 +370,7 @@ impl CxOsApi for Cx {
     fn init(&mut self) {
         self.live_expand();
         self.live_scan_dependencies();
-        self.desktop_load_dependencies();
+        self.native_load_dependencies();
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
