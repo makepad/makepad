@@ -48,8 +48,8 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                 EGL10.EGL_GREEN_SIZE, 8,
                 EGL10.EGL_BLUE_SIZE, 8,
                 EGL10.EGL_ALPHA_SIZE, 8,
-                EGL10.EGL_DEPTH_SIZE, 24,
-                EGL10.EGL_STENCIL_SIZE, 8,
+                //EGL10.EGL_DEPTH_SIZE, 24,
+                //EGL10.EGL_STENCIL_SIZE, 8,
                 EGL10.EGL_NONE,
         };
         EGLConfig[] configs = new EGLConfig[1];
@@ -59,8 +59,8 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                 EGL10.EGL_GREEN_SIZE, 8,
                 EGL10.EGL_BLUE_SIZE, 8,
                 EGL10.EGL_ALPHA_SIZE, 8,
-                EGL10.EGL_DEPTH_SIZE, 24,
-                EGL10.EGL_STENCIL_SIZE, 8,
+                //EGL10.EGL_DEPTH_SIZE, 24,
+                //EGL10.EGL_STENCIL_SIZE, 8,
                 EGL10.EGL_NONE,
         }, configs, 1, num_config)) {
             throw new RuntimeException("eglChooseConfig failed");

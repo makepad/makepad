@@ -107,8 +107,7 @@ impl Cx {
                 }
                 
                 // lets verify our instance_offset is not disaligned
-                let instances = (draw_item.instances.as_ref().unwrap().len()
-                     / sh.mapping.instances.total_slots) as u64;
+                let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
                 
                 if instances == 0 {
                     continue;
@@ -257,13 +256,14 @@ impl Cx {
         
         let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
         
-        let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some(){1.0}else{dpi_factor}).unwrap();
-        if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5{
-            return
-        }
+        let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
         
         self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
+        
+        if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
+            return
+        }
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
@@ -434,7 +434,7 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn commit_command_buffer(&mut self, _stdin_frame:Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
+    fn commit_command_buffer(&mut self, _stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         let () = unsafe {msg_send![
             command_buffer,
@@ -445,9 +445,9 @@ impl Cx {
         let () = unsafe {msg_send![command_buffer, commit]};
     }
     
-     
+    
     pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
-       for draw_shader_ptr in &self.draw_shaders.compile_set {
+        for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
                 let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
@@ -474,7 +474,7 @@ impl Cx {
                     }
                 }
             }
-        } 
+        }
         self.draw_shaders.compile_set.clear();
     }
 }
@@ -570,7 +570,7 @@ impl MetalWindow {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
         };
-        if self.cal_size != cal_size { 
+        if self.cal_size != cal_size {
             self.cal_size = cal_size;
             unsafe {
                 let () = msg_send![self.ca_layer, setDrawableSize: CGSize {width: cal_size.x, height: cal_size.y}];
