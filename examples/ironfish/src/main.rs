@@ -657,35 +657,42 @@ live_design!{
     }
     
     PianoControls = <GradientY> {
-        layout: {flow: Right, padding: <BASE_PADDING> {}}
-        walk: {height: Fit, width: 300, margin: {top: 0, right: 0, bottom: 0, left: (SPACING_BASE_PADDING * 2)} }
+        layout: {flow: Down, padding: 0}
+        walk: {height: Fit, width: 110, margin: {top: -5, right: 0, bottom: 0, left: (SPACING_BASE_PADDING * 2)} }
         draw_bg: {color: (COLOR_HIDDEN_WHITE), color2: (COLOR_HIDDEN_WHITE)}
 
-        porta = <InstrumentSlider> {
-            walk: {width: 200}
-            slider = {
-                draw_slider: {line_color: (COLOR_MUSIC)}
-                min: 0.0
-                max: 1.0
-                label: "Portamento"
+            <Frame> {
+                layout: {flow: Right, align: {x: 0.0, y: 0.5}, padding: 0}
+                walk: {width: Fill, height: Fit, margin: { bottom: -7.0 } }
+
+                <FishSubTitle> {
+                    label = {
+                        text: "Arp",
+                        draw_label: {color: (COLOR_MUSIC)},
+                    }
+                }
+
+                arp = <InstrumentCheckbox> {
+                    checkbox = {label: " "}
+                    layout: {padding: 0}
+                    walk: {width: Fit, height: Fit, margin: 0}
+                }
+
             }
-        }
-        
-        <Frame> {walk: {width: Fill}}
-        
-        arp = <InstrumentCheckbox> {
-            checkbox = {label: "Arp"}
-            walk: {width: Fit, height: Fit}
-        }
-        arpoctaves = <InstrumentBipolarSlider> {
-            walk: {width: 200}
-            slider = {
-                draw_slider: {line_color: (COLOR_MUSIC)}
-                min: -4.0
-                max: 4.0
-                label: "Octaves"
+
+            arpoctaves = <InstrumentBipolarSlider> {
+                walk: {width: 100, margin: 0}
+                layout: {padding: 0}
+                slider = {
+                    draw_slider: {line_color: (COLOR_MUSIC)}
+                    min: -4.0
+                    max: 4.0
+                    step: 1.0
+                    precision:0,
+                    label: "Octaves"
+                }
             }
-        }
+
     }
     
     SequencerPanel = <Box> {
@@ -705,24 +712,19 @@ live_design!{
         walk: {width: Fill, height: Fit}
         layout: {flow: Down}
         
-        
         <Frame> {
-            layout: {flow: Down}
+            layout: {flow: Right, align: {x: 0.0, y: 0.0}}
             walk: {width: Fill, height: Fit}
-            <Frame> {
-                layout: {flow: Right, align: {x: 0.0, y: 0.5}}
-                walk: {width: Fill, height: Fit}
-                
-                <FishSubTitle> {
-                    label = {
-                        text: "Bitcrush",
-                        draw_label: {color: (COLOR_FX)},
-                    }
+            
+            <FishSubTitle> {
+                label = {
+                    text: "Bitcrush",
+                    draw_label: {color: (COLOR_FX)},
                 }
-                crushenable = <InstrumentCheckbox> {
-                    checkbox = {label: "On"}
-                    walk: {width: Fit, height: Fit}
-                }
+            }
+            crushenable = <InstrumentCheckbox> {
+                checkbox = {label: " "}
+                walk: {width: Fit, height: Fit, margin: { top: -10 } }
             }
         }
         
@@ -891,45 +893,38 @@ live_design!{
                 },
                 draw_bg: {color: (COLOR_FILTER)}
             }
-            menu = <Box> {
-                walk: {margin: {left: -2.0}}
-                draw_bg: {color: (COLOR_FILTER * 0.75), radius: 0}
-                filter_type = <DropDown> {
+            
+            menu = <Frame> {
+                walk: { margin: {top: -1, right: -1, bottom: 1} }
+                filter_type = <FishDropDown> {
+                    walk: { width: Fill }
+                    labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
+                    values: [LowPass, HighPass, BandPass, BandReject]
+
                     draw_label: {
                         text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
                         fn get_color(self) -> vec4 {
                             return mix(
                                 mix(
-                                    (#FFFFFFAA),
-                                    (#FFFFFF),
+                                    mix(
+                                        (#000A),
+                                        (#000A),
+                                        self.focus
+                                    ),
+                                    (#000F),
                                     self.hover
                                 ),
-                                (#xFFFFFF),
+                                (#000A),
                                 self.pressed
                             )
                         }
                     }
+                    
                     draw_bg: {
-                        fn get_bg(self, inout sdf: Sdf2d) {
-                            sdf.box(
-                                1,
-                                1,
-                                self.rect_size.x - 2,
-                                self.rect_size.y - 2,
-                                3
-                            )
-                            sdf.fill(
-                                mix(
-                                    #FFFFFF00,
-                                    #FFFFFF10,
-                                    self.hover
-                                )
-                            );
-                        }
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                             self.get_bg(sdf);
-                            // lets draw a little triangle in the corner
+                            // triangle
                             let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
                             let sz = 2.5;
                             
@@ -938,13 +933,38 @@ live_design!{
                             sdf.line_to(c.x, c.y + sz * 0.75);
                             sdf.close_path();
                             
-                            sdf.fill(mix(#FFFFFFAA, #FFFFFFFF, self.hover));
+                            sdf.fill(mix(#000A, #000F, self.hover));
                             
                             return sdf.result
                         }
+
+                        fn get_bg(self, inout sdf: Sdf2d) {
+                            sdf.rect(
+                                0,
+                                0,
+                                self.rect_size.x,
+                                self.rect_size.y
+                            )
+                            sdf.fill(
+                                mix(
+                                    (COLOR_FILTER),
+                                    (COLOR_FILTER * 1.2),
+                                    self.hover
+                                )
+                            );
+                        }
                     }
-                    labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
-                    values: [LowPass, HighPass, BandPass, BandReject]
+
+                    popup_menu: {
+                        menu_item: {
+                            indent_width: 10.0
+                            walk: {width: Fill, height: Fit}
+                            layout: {
+                                padding: {left: 15, top: 5, bottom: 5, right: 15},
+                            }
+                        }
+                    }
+
                 }
             }
         }
@@ -1030,6 +1050,30 @@ live_design!{
                 }
             }
             
+            twocol = <Frame> {
+                layout: {flow: Down}
+                walk: {width: Fill, height: Fit}
+                transpose = <InstrumentBipolarSlider> {
+                    slider = {
+                        draw_slider: {line_color: (COLOR_OSC)}
+                        min: -24.0
+                        max: 24.0
+                        step: 1.0
+                        precision:0,
+                        label: "Transpose"
+                    }
+                }
+                
+                detune = <InstrumentBipolarSlider> {
+                    slider = {
+                        draw_slider: {line_color: (COLOR_OSC)}
+                        min: -1.0
+                        max: 1.0
+                        label: "Detune"
+                    }
+                }
+            }
+        
             <Frame> {
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fit}
@@ -1078,57 +1122,33 @@ live_design!{
                 harmonic = <Frame> {
                     layout: {flow: Down}
                     walk: {width: Fill, height: Fit}
-                        harmonicshift = <InstrumentSlider> {
-                            slider = {
-                                draw_slider: {line_color: (COLOR_OSC)}
-                                min: 0
-                                max: 1.0
-                                label: "Shift"
-                            }
+                    harmonicshift = <InstrumentSlider> {
+                        slider = {
+                            draw_slider: {line_color: (COLOR_OSC)}
+                            min: 0
+                            max: 1.0
+                            label: "Shift"
                         }
-                        harmonicenv = <InstrumentBipolarSlider> {
-                            slider = {
-                                draw_slider: {line_color: (COLOR_OSC)}
-                                min: -1.0
-                                max: 1.0
-                                label: "Env mod"
-                            }
+                    }
+                    harmonicenv = <InstrumentBipolarSlider> {
+                        slider = {
+                            draw_slider: {line_color: (COLOR_OSC)}
+                            min: -1.0
+                            max: 1.0
+                            label: "Env mod"
                         }
-                        harmoniclfo = <InstrumentBipolarSlider> {
-                            slider = {
-                                draw_slider: {line_color: (COLOR_OSC)}
-                                min: -1.0
-                                max: 1.0
-                                label: "LFO mod"
-                            }
+                    }
+                    harmoniclfo = <InstrumentBipolarSlider> {
+                        slider = {
+                            draw_slider: {line_color: (COLOR_OSC)}
+                            min: -1.0
+                            max: 1.0
+                            label: "LFO mod"
                         }
+                    }
                 }
             }
         
-        
-        twocol = <Frame> {
-            layout: {flow: Down}
-            walk: {width: Fill, height: Fit}
-            transpose = <InstrumentBipolarSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
-                    min: -24.0
-                    max: 24.0
-                    step: 1.0
-                    precision:0,
-                    label: "Transpose"
-                }
-            }
-            
-            detune = <InstrumentBipolarSlider> {
-                slider = {
-                    draw_slider: {line_color: (COLOR_OSC)}
-                    min: -1.0
-                    max: 1.0
-                    label: "Detune"
-                }
-            }
-        }
         
     }
     
@@ -1266,6 +1286,29 @@ live_design!{
         }
     }
     
+    Play = <GradientY> {
+        layout: {flow: Right, padding: {top: 10}}
+        walk: { height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2), bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
+        draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
+
+        <PianoControls> {}
+
+        piano = <Piano> {
+            walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
+        }
+
+        porta = <InstrumentSlider> {
+            walk: { width: 100, margin: { right: 10 } }
+            layout: { padding: {right: 10 } }
+            slider = {
+                draw_slider: {line_color: (COLOR_MUSIC)}
+                min: 0.0
+                max: 1.0
+                label: "Portamento"
+            }
+        }
+        
+    }
     
     // APP
     App = {{App}} {
@@ -1321,7 +1364,7 @@ live_design!{
                 }
                 
                 <ScrollY> {
-                    layout: {flow: Down, spacing: (SPACING_PANELS)}
+                    layout: {flow: Down, spacing: 3}
                     walk: {height: Fill, width: Fill}
                     envelopes = <FishPanelEnvelopes> {}
                     <FishPanelFilter> { }
@@ -1355,17 +1398,7 @@ live_design!{
                 }
             }
 
-
-            <GradientY> {
-                layout: {flow: Right, padding: {top: 10}}
-                walk: { height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2), bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
-                draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
-                <PianoControls> {}
-                piano = <Piano> {
-                    walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
-                }
-            }
-            
+            <Play> {}        
             
         }
     }
