@@ -82,7 +82,7 @@ use {
         },
         event::{TimerEvent},
         cursor::MouseCursor,
-        os::cx_desktop::EventFlow,
+        os::cx_native::EventFlow,
         os::windows::win32_event::Win32Event,
         os::windows::win32_window::Win32Window,
     },

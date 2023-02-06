@@ -107,6 +107,7 @@ pub use {
         ShaderTy,
     },
     crate::{
+        os::*,
         cx_api::{
             CxOsApi,
         },

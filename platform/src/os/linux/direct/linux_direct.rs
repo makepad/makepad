@@ -85,16 +85,14 @@ impl Cx {
         // lets run the kms eventloop
         let mut event_flow = EventFlow::Poll;
         let mut timer_ids = Vec::new();
-        let mut signal_fds = [0, 0];
-        unsafe {libc_sys::pipe(signal_fds.as_mut_ptr());}
-        let mut first_profile = true;
+
         while event_flow != EventFlow::Exit {
             if event_flow == EventFlow::Wait {
                 //    kms_app.timers.select(signal_fds[0]);
             }
             direct_app.timers.update_timers(&mut timer_ids);
             for timer_id in &timer_ids {
-                self.kms_event_callback(
+                self.direct_event_callback(
                     &mut direct_app,
                     DirectEvent::Timer(TimerEvent {timer_id: *timer_id})
                 );
@@ -104,20 +102,16 @@ impl Cx {
                 CxWindowPool::id_zero()
             );
             for event in input_events {
-                self.kms_event_callback(
+                self.direct_event_callback(
                     &mut direct_app,
                     event
                 );
             }
-            event_flow = self.kms_event_callback(&mut direct_app, DirectEvent::Paint);
-            if first_profile {
-                first_profile = false;
-            }
-            // alright so.. how do we do things
+            event_flow = self.direct_event_callback(&mut direct_app, DirectEvent::Paint);
         }
     }
     
-    fn kms_event_callback(
+    fn direct_event_callback(
         &mut self,
         direct_app: &mut DirectApp,
         event: DirectEvent,
@@ -248,7 +242,7 @@ impl Cx {
         );
         
         unsafe {
-            direct_app.drm.flip_buffers_and_wait(&direct_app.egl);
+            direct_app.drm.swap_buffers_and_wait(&direct_app.egl);
         }
     }
     

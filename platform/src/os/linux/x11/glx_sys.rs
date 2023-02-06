@@ -7,7 +7,6 @@ use std::os::raw::{
     c_char,
 };
 
-
 pub type GLXDrawable = XID;
 pub type GLXContext = *mut __GLXcontextRec;
 
