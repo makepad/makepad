@@ -129,14 +129,14 @@ impl LiveHook for DesktopWindow {
             self.ui.get_frame(id!(web_xr)).set_visible(true);
             log!("VR IS SUPPORTED");
         }
-        match cx.platform_type(){
+        match cx.os_type(){
              OsType::Windows=>{
                 self.ui.get_frame(id!(caption_bar)).set_visible(true);
                 self.ui.get_frame(id!(windows_buttons)).set_visible(true);
              }
-             OsType::LinuxWindow{..} |
+             OsType::LinuxWindow(_) |
              OsType::LinuxDirect |
-             OsType::Android=>{
+             OsType::Android(_)=>{
                 self.ui.get_frame(id!(caption_bar)).set_visible(false);
             }
             _=>()
@@ -249,7 +249,7 @@ impl DesktopWindow {
             return dispatch_action(cx, DesktopWindowEvent::EventForOtherWindow)
         }
         if let Event::MouseMove(ev) = event {
-            if let OsType::LinuxDirect = cx.platform_type() {
+            if let OsType::LinuxDirect = cx.os_type() {
                 // ok move our mouse cursor
                 self.last_mouse_pos = ev.abs;
                 self.draw_cursor.update_abs(cx, Rect {
@@ -288,7 +288,7 @@ impl DesktopWindow {
         self.debug_view.draw(cx);
         
         // lets draw our cursor
-        if let OsType::LinuxDirect = cx.platform_type() {
+        if let OsType::LinuxDirect = cx.os_type() {
             self.cursor_view.begin_overlay_last(cx);
             self.draw_cursor.draw_abs(cx, Rect {
                 pos: self.last_mouse_pos,

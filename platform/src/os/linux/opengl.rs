@@ -1,11 +1,14 @@
 use {
     std::{
+        fs::File,
+        io::prelude::*,
         mem,
         ptr,
         ffi::{CStr},
     },
     self::super::gl_sys,
     crate::{
+        makepad_live_id::*,
         makepad_error_log::*,
         makepad_shader_compiler::{
             generate_glsl,
@@ -362,7 +365,7 @@ impl Cx {
         if clear_flags != 0 {
             unsafe {
                 if clear_flags & gl_sys::DEPTH_BUFFER_BIT != 0 {
-                    gl_sys::ClearDepth(clear_depth as f64);
+                    gl_sys::ClearDepthf(clear_depth);
                 }
                 gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
                 gl_sys::Clear(clear_flags);
@@ -386,7 +389,7 @@ impl Cx {
         }
     }
     
-    pub fn opengl_compile_shaders(&mut self) {
+    pub fn opengl_compile_shaders(&mut self, cache_dir: Option<&str>) {
         //let p = profile_start();
         for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
@@ -417,7 +420,7 @@ impl Cx {
                 }
                 
                 if cx_shader.os_shader_id.is_none() {
-                    let shp = CxOsDrawShader::new(&vertex, &pixel, &cx_shader.mapping);
+                    let shp = CxOsDrawShader::new(&vertex, &pixel, &cx_shader.mapping, cache_dir);
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
@@ -445,7 +448,7 @@ pub struct CxOsDrawShader {
 }
 
 impl CxOsDrawShader {
-    pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping) -> Self {
+    pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, cache_dir: Option<&str>) -> Self {
         
         let vertex = format!("
             #version 100
@@ -470,35 +473,80 @@ impl CxOsDrawShader {
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
             {}\0", pixel);
         
+        unsafe fn read_cache(vertex:&str, pixel:&str, cache_dir:Option<&str>)->Option<gl_sys::GLuint>{ 
+            if let Some(cache_dir) = cache_dir {
+                let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
+                if let Ok(mut cache_file) = File::open(format!("{}/shader_{:08x}.bin", cache_dir, shader_hash.0)) {
+                    let mut binary = Vec::new();
+                    let mut format_bytes = [0u8; 4];
+                    if cache_file.read(&mut format_bytes).is_ok() {
+                        let binary_format = u32::from_be_bytes(format_bytes);
+                        if cache_file.read_to_end(&mut binary).is_ok() {
+                            let program = gl_sys::CreateProgram();
+                            gl_sys::ProgramBinary(program, binary_format, binary.as_ptr() as *const _, binary.len() as i32);
+                            return Some(program)
+                        }
+                    }
+                }
+            }
+            None
+        }
+        
         unsafe {
-            
-            let vs = gl_sys::CreateShader(gl_sys::VERTEX_SHADER);
-            gl_sys::ShaderSource(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
-            gl_sys::CompileShader(vs);
-            //println!("{}", Self::opengl_get_info_log(true, vs as usize, &vertex));
-            if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
-                panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
+            let program = if let Some(program) = read_cache(&vertex,&pixel,cache_dir){
+                program
             }
-            let fs = gl_sys::CreateShader(gl_sys::FRAGMENT_SHADER);
-            gl_sys::ShaderSource(fs, 1, [pixel.as_ptr() as *const _].as_ptr(), ptr::null());
-            gl_sys::CompileShader(fs);
-            //println!("{}", Self::opengl_get_info_log(true, fs as usize, &fragment));
-            if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &pixel) {
-                panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
-            }
-            
-            let program = gl_sys::CreateProgram();
-            gl_sys::AttachShader(program, vs);
-            gl_sys::AttachShader(program, fs);
-            gl_sys::LinkProgram(program);
-            if let Some(error) = Self::opengl_has_shader_error(false, program as usize, "") {
-                panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
-            }
-            gl_sys::DeleteShader(vs);
-            gl_sys::DeleteShader(fs);
-            
+            else{ 
+                let vs = gl_sys::CreateShader(gl_sys::VERTEX_SHADER);
+                gl_sys::ShaderSource(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
+                gl_sys::CompileShader(vs);
+                //println!("{}", Self::opengl_get_info_log(true, vs as usize, &vertex));
+                if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
+                    panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
+                }
+                let fs = gl_sys::CreateShader(gl_sys::FRAGMENT_SHADER);
+                gl_sys::ShaderSource(fs, 1, [pixel.as_ptr() as *const _].as_ptr(), ptr::null());
+                gl_sys::CompileShader(fs);
+                //println!("{}", Self::opengl_get_info_log(true, fs as usize, &fragment));
+                if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &pixel) {
+                    panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
+                }
+                
+                let program = gl_sys::CreateProgram();
+                gl_sys::AttachShader(program, vs);
+                gl_sys::AttachShader(program, fs);
+                gl_sys::LinkProgram(program);
+                if let Some(error) = Self::opengl_has_shader_error(false, program as usize, "") {
+                    panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
+                }
+                gl_sys::DeleteShader(vs);
+                gl_sys::DeleteShader(fs);
+                program
+            };
+                
             let geometries = Self::opengl_get_attributes(program, "packed_geometry_", mapping.geometries.total_slots);
             let instances = Self::opengl_get_attributes(program, "packed_instance_", mapping.instances.total_slots);
+            
+            if let Some(cache_dir) = cache_dir {
+                let mut binary = Vec::new();
+                let mut binary_len = 0;
+                gl_sys::GetProgramiv(program, gl_sys::PROGRAM_BINARY_LENGTH, &mut binary_len);
+                if binary_len != 0 {
+                    binary.resize(binary_len as usize, 0u8);
+                    let mut return_size = 0i32;
+                    let mut binary_format = 0u32;
+                    gl_sys::GetProgramBinary(program, binary.len() as i32, &mut return_size as *mut _, &mut binary_format as *mut _, binary.as_mut_ptr() as *mut _);
+                    if return_size != 0 {
+                        //log!("GOT FORMAT {}", format);
+                        let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
+                        binary.resize(return_size as usize, 0u8);
+                        if let Ok(mut cache) = File::create(format!("{}/shader_{:08x}.bin", cache_dir, shader_hash.0)) {
+                            let _ = cache.write_all(&binary_format.to_be_bytes());
+                            let _ = cache.write_all(&binary);
+                        }
+                    }
+                } 
+            }
             
             // lets fetch the uniform positions for our uniforms
             CxOsDrawShader {
