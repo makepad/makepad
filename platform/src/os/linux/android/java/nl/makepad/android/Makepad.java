@@ -16,7 +16,7 @@ public class Makepad {
 
     static native long newCx();
     static native void dropCx(long cx);
-    static native void init(long cx, Callback callback);
+    static native void init(long cx, String cache_path, Callback callback);
     static native void resize(long cx, int width, int height, Callback callback);
     static native void draw(long cx, Callback callback);
     static native void touch(long cx, MotionEvent event, Callback callback);

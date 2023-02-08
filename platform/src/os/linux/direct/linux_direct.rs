@@ -27,7 +27,7 @@ use {
         pass::CxPassParent,
         cx::{Cx, OsType,},
         gpu_info::GpuPerformance,
-        os::cx_desktop::EventFlow,
+        os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
     }
 };

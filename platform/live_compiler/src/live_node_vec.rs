@@ -212,7 +212,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
             return None
         }
         let mut stack_depth: isize = 0;
-        let mut index = start_index;
+        let mut index = start_index; 
         // scan backwards to find a node with this name
         loop {
             if self_ref[index].is_open() {
@@ -227,7 +227,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                     stack_depth -= 1;
                 }
             }
-            else if self_ref[index].is_close() {
+            else if self_ref[index].is_close() { 
                 stack_depth += 1;
             }
             /*
