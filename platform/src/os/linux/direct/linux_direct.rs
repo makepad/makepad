@@ -77,7 +77,7 @@ impl Cx {
         let p = profile_start();
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
-        profile_end("construct", p);
+        profile_end!("construct", p);
         
         
         let mut direct_app = DirectApp::new();
