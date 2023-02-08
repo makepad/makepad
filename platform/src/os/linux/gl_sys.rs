@@ -57,6 +57,7 @@ pub const NEAREST: types::GLenum = 0x2600;
 pub const TEXTURE_WRAP_S: types::GLenum = 0x2802;
 pub const TEXTURE_WRAP_T: types::GLenum = 0x2803;
 pub const CLAMP_TO_EDGE: types::GLenum = 0x812F;
+pub const PROGRAM_BINARY_LENGTH: types::GLenum = 0x8741;
 
 #[inline] pub unsafe fn GenVertexArrays(n: types::GLsizei, arrays: *mut types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenVertexArrays.f)(n, arrays)}
 #[inline] pub unsafe fn BindVertexArray(array: types::GLuint) -> () {mem::transmute::<_, extern "system" fn(types::GLuint) -> ()>(storage::BindVertexArray.f)(array)}
@@ -74,7 +75,7 @@ pub const CLAMP_TO_EDGE: types::GLenum = 0x812F;
 #[inline] pub unsafe fn BlendFuncSeparate(sfactorRGB: types::GLenum, dfactorRGB: types::GLenum, sfactorAlpha: types::GLenum, dfactorAlpha: types::GLenum) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLenum, types::GLenum, types::GLenum) -> ()>(storage::BlendFuncSeparate.f)(sfactorRGB, dfactorRGB, sfactorAlpha, dfactorAlpha) }
 #[inline] pub unsafe fn Viewport(x: types::GLint, y: types::GLint, width: types::GLsizei, height: types::GLsizei) -> () { mem::transmute::<_, extern "system" fn(types::GLint, types::GLint, types::GLsizei, types::GLsizei) -> ()>(storage::Viewport.f)(x, y, width, height) }
 #[inline] pub unsafe fn BindFramebuffer(target: types::GLenum, framebuffer: types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLenum, types::GLuint) -> ()>(storage::BindFramebuffer.f)(target, framebuffer) }
-#[inline] pub unsafe fn ClearDepth(depth: types::GLdouble) -> () { mem::transmute::<_, extern "system" fn(types::GLdouble) -> ()>(storage::ClearDepth.f)(depth) }
+#[inline] pub unsafe fn ClearDepthf(d: types::GLfloat) -> () { mem::transmute::<_, extern "system" fn(types::GLfloat) -> ()>(storage::ClearDepthf.f)(d) }
 #[inline] pub unsafe fn ClearColor(red: types::GLfloat, green: types::GLfloat, blue: types::GLfloat, alpha: types::GLfloat) -> () { mem::transmute::<_, extern "system" fn(types::GLfloat, types::GLfloat, types::GLfloat, types::GLfloat) -> ()>(storage::ClearColor.f)(red, green, blue, alpha) }
 #[inline] pub unsafe fn Clear(mask: types::GLbitfield) -> () { mem::transmute::<_, extern "system" fn(types::GLbitfield) -> ()>(storage::Clear.f)(mask) }
 #[inline] pub unsafe fn GenFramebuffers(n: types::GLsizei, framebuffers: *mut types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *mut types::GLuint) -> ()>(storage::GenFramebuffers.f)(n, framebuffers) }
@@ -107,6 +108,8 @@ pub const CLAMP_TO_EDGE: types::GLenum = 0x812F;
 #[inline] pub unsafe fn Uniform1i(location: types::GLint, v0: types::GLint) -> () { mem::transmute::<_, extern "system" fn(types::GLint, types::GLint) -> ()>(storage::Uniform1i.f)(location, v0) }
 #[inline] pub unsafe fn GetError() -> types::GLenum { mem::transmute::<_, extern "system" fn() -> types::GLenum>(storage::GetError.f)() }
 #[inline] pub unsafe fn Finish() -> () { mem::transmute::<_, extern "system" fn() -> ()>(storage::Finish.f)() }
+#[inline] pub unsafe fn GetProgramBinary(program: types::GLuint, bufSize: types::GLsizei, length: *mut types::GLsizei, binaryFormat: *mut types::GLenum, binary: *mut raw::c_void) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLsizei, *mut types::GLsizei, *mut types::GLenum, *mut raw::c_void) -> ()>(storage::GetProgramBinary.f)(program, bufSize, length, binaryFormat, binary) }
+#[inline] pub unsafe fn ProgramBinary(program: types::GLuint, binaryFormat: types::GLenum, binary: *const raw::c_void, length: types::GLsizei) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLenum, *const raw::c_void, types::GLsizei) -> ()>(storage::ProgramBinary.f)(program, binaryFormat, binary, length) }
 
 mod storage {
     use super::FnPtr;
@@ -127,6 +130,7 @@ mod storage {
     pub static mut Viewport: FnPtr = FnPtr::default();
     pub static mut BindFramebuffer: FnPtr = FnPtr::default();
     pub static mut ClearDepth: FnPtr = FnPtr::default();
+    pub static mut ClearDepthf: FnPtr = FnPtr::default();
     pub static mut ClearColor: FnPtr = FnPtr::default();
     pub static mut Clear: FnPtr = FnPtr::default();
     pub static mut GenFramebuffers: FnPtr = FnPtr::default();
@@ -159,7 +163,8 @@ mod storage {
     pub static mut Uniform1i: FnPtr = FnPtr::default();
     pub static mut GetError: FnPtr = FnPtr::default();
     pub static mut Finish: FnPtr = FnPtr::default();
-    
+    pub static mut GetProgramBinary: FnPtr = FnPtr::default();
+    pub static mut ProgramBinary: FnPtr = FnPtr::default();
 }
 
 pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const raw::c_void {
@@ -211,7 +216,10 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::BufferData = FnPtr::new(metaloadfn(&mut loadfn, "glBufferData", &["glBufferDataARB"]));
     storage::Uniform1i = FnPtr::new(metaloadfn(&mut loadfn, "glUniform1i", &["glUniform1iARB"]));
     storage::GetError = FnPtr::new(metaloadfn(&mut loadfn, "glGetError", &[]));
-    storage::Finish = FnPtr::new(metaloadfn(&mut loadfn, "glFinish", &[]))
+    storage::Finish = FnPtr::new(metaloadfn(&mut loadfn, "glFinish", &[]));
+    storage::ClearDepthf = FnPtr::new(metaloadfn(&mut loadfn, "glClearDepthf", &["glClearDepthfOES"]));
+    storage::GetProgramBinary = FnPtr::new(metaloadfn(&mut loadfn, "glGetProgramBinary", &["glGetProgramBinaryOES"]));
+    storage::ProgramBinary = FnPtr::new(metaloadfn(&mut loadfn, "glProgramBinary", &["glProgramBinaryOES"]))
 }
 
 #[inline(never)]

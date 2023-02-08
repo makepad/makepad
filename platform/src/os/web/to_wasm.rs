@@ -4,7 +4,7 @@ use {
         makepad_live_id::*,
         makepad_wasm_bridge::*,
         makepad_math::{dvec2, DVec2, Vec3, Quat, Transform},
-        cx::{OsType, XrCapabilities},
+        cx::{OsType, XrCapabilities, WebBrowserParams},
         window::CxWindowPool,
         area::Area,
         //midi::{MidiData},
@@ -48,14 +48,14 @@ pub struct WBrowserInfo {
 
 impl Into<OsType> for WBrowserInfo {
     fn into(self) -> OsType {
-        OsType::WebBrowser {
+        OsType::WebBrowser(WebBrowserParams{
             protocol: self.protocol,
             hostname: self.hostname,
             host: self.host,
             pathname: self.pathname,
             search: self.search,
             hash: self.hash,
-        }
+        })
     }
 }
 
