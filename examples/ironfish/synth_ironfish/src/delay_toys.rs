@@ -195,7 +195,7 @@ impl DelayToy {
         self.all_pass(107, 0.5);
         self.all_pass(277, 0.5);
         
-        let reinject = self.accumulator;;
+        let reinject = self.accumulator;
         
         let w1 = self.lfo1.get_next();
         let w2 = self.lfo2.get_next();
