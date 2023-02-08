@@ -2,10 +2,10 @@
 
 use {
     self::super::{
-        jni_sys::{jclass, jint, jlong, jobject, JNIEnv},
+        jni_sys::{jclass, jint, jlong, jstring, jobject, JNIEnv},
     },
     crate::{
-        cx::Cx,
+        cx::{Cx,AndroidParams},
     },
     std::{
         ffi::{CString},
@@ -17,7 +17,7 @@ use {
 pub enum TouchAction {
     Down(usize),
     Up(usize),
-    Move,
+    Move(usize),
 }
 
 #[derive(Debug)]
@@ -124,14 +124,32 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_dropCx(_: JNIEnv, _: jc
     //drop(Box::from_raw(app as *mut Cx));
 }
 
+unsafe fn jstring_to_string(env:*mut JNIEnv, java_string: jstring)->String{
+    let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
+    let rust_string = std::ffi::CStr::from_ptr(chars).to_str().unwrap().to_string();
+    (**env).ReleaseStringUTFChars.unwrap()(env, java_string, chars);
+    rust_string
+}
+
+pub struct AndroidInitParams{
+    pub cache_path: String,
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_init(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
+    cache_path: jstring,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).android_init(AndroidCallback {
+    let cache_path = 
+    (*(cx as *mut Cx)).android_init(
+        AndroidParams{
+            cache_path: jstring_to_string(env, cache_path)
+        },
+        AndroidCallback {
+          
         env,
         callback,
         phantom: PhantomData,
@@ -200,7 +218,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_touch(
     let action = match action_masked {
         0 | 5 => TouchAction::Down(action_index as usize),
         1 | 6 => TouchAction::Up(action_index as usize),
-        2 => TouchAction::Move,
+        2 => TouchAction::Move(action_index as usize),
         _ => return,
     };
     
@@ -261,6 +279,27 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_touch(
         };
         
         pointers.push(TouchPointer {id, x, y, orientation, pressure});
+        /*
+        points.push(TouchPoint {
+            state: {
+                if action_index == index {
+                    match action_masked {
+                        0 | 5 => TouchAction::Down(action_index as usize),
+                        1 | 6 => TouchAction::Up(action_index as usize),
+                        2 => TouchAction::Move,
+                        _ => return,
+                    }
+                }
+                else {
+                    TouchState::Move
+                }
+            },
+            id,
+            x,
+            y,
+            orientation,
+            pressure
+        });*/
     }
     
     (*(cx as *mut Cx)).android_touch(

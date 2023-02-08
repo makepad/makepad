@@ -20,7 +20,7 @@ use {
             Event,
         },
         pass::CxPassParent,
-        cx::{Cx, OsType,}, 
+        cx::{Cx, OsType,LinuxWindowParams}, 
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         
@@ -29,7 +29,9 @@ use {
 
 impl Cx {
     pub fn event_loop(mut self) {
-        self.platform_type = OsType::LinuxWindow {custom_window_chrome: false};
+        self.os_type = OsType::LinuxWindow(LinuxWindowParams{
+            custom_window_chrome: false
+        });
         self.gpu_info.performance = GpuPerformance::Tier1;
         
         let opengl_cx = Rc::new(RefCell::new(None));
@@ -117,7 +119,7 @@ impl Cx {
                 if self.need_redrawing() {
                     self.call_draw_event();
                     opengl_cx.make_current();
-                    self.opengl_compile_shaders();
+                    self.opengl_compile_shaders(None);
                 }
                 // ok here we send out to all our childprocesses
                 

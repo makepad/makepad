@@ -64,7 +64,7 @@ impl Cx {
                         tw.gpu_info.vendor,
                         tw.gpu_info.renderer
                     );
-                    self.platform_type = tw.browser_info.into();
+                    self.os_type = tw.browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
                     let mut deps = Vec::<String>::new();
                     for (path, _) in &self.dependencies {

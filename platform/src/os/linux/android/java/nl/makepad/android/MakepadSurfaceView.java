@@ -10,6 +10,7 @@ import android.view.View;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import java.util.HashMap;
+import java.io.File;
 import javax.microedition.khronos.egl.EGL10;
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.egl.EGLContext;
@@ -40,8 +41,10 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         if (!mEgl.eglInitialize(mEglDisplay, version)) {
             throw new RuntimeException("eglInitialize failed");
         }
+        File cache_dir = context.getCacheDir();
+        String cache_path = cache_dir.getAbsolutePath();
 
-        Makepad.init(mCx, this);
+        Makepad.init(mCx, cache_path, this);
 
         int[] attrib_list = new int[]{
                 EGL10.EGL_RED_SIZE, 8,

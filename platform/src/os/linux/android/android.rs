@@ -4,7 +4,7 @@ use {
     std::time::Instant,
     self::super::{
         android_media::CxAndroidMedia,
-        android_jni::{AndroidCallback, TouchAction, TouchPointer},
+        android_jni::{AndroidCallback, AndroidInitParams, TouchAction, TouchPointer},
     },
     self::super::super::{
         gl_sys,
@@ -13,7 +13,7 @@ use {
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_error_log::*,
-        makepad_math::*,
+        makepad_math::*, 
         thread::Signal,
         event::{
             WindowGeomChangeEvent,
@@ -25,7 +25,7 @@ use {
         },
         window::CxWindowPool,
         pass::CxPassParent,
-        cx::{Cx, OsType,},
+        cx::{Cx, OsType, AndroidParams},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
@@ -40,9 +40,9 @@ extern "C" {
 impl Cx {
     
     /// Called when EGL is initialized.
-    pub fn android_init(&mut self, callback: AndroidCallback<'_>) {
-        self.platform_type = OsType::Android;
-        
+    pub fn android_init(&mut self, params: AndroidParams, callback: AndroidCallback<'_>) {
+        log!("GOT STARTUP {:?}", params);
+        self.os_type = OsType::Android(params);
         self.gpu_info.performance = GpuPerformance::Tier1;
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
@@ -94,8 +94,10 @@ impl Cx {
         }
         if self.need_redrawing() {
             self.call_draw_event();
+            let cache_path = if let OsType::Android(params) = &self.os_type{params.cache_path.clone()}else{panic!()};
+            
             //android_app.egl.make_current();
-            self.opengl_compile_shaders();
+            self.opengl_compile_shaders(Some(&cache_path));
         }
         
         self.handle_repaint(&callback); 
@@ -104,13 +106,14 @@ impl Cx {
     
     /// Called when a touch event happened on the MakepadSurface.
     pub fn android_touch(&mut self, _action: TouchAction, _pointers: &[TouchPointer], callback: AndroidCallback<'_>) {
+        log!("POINTERS {:?} {:?}",_action, _pointers);
         /*nsafe {
             gl_sys::ClearColor(pointers[0].x / 1000.0, pointers[0].y / 2000.0, 0.0, 1.0);
         }*/
         //callback.schedule_redraw();
         self.after_every_event(&callback);
     }
-      
+       
     /// Called when a timeout expired.
     pub fn android_timeout(&mut self, timer_id: i64, callback: AndroidCallback<'_>) {
         if timer_id == 0 {
@@ -166,7 +169,7 @@ impl Cx {
         if !self.passes[pass_id].dont_clear {
             unsafe {
                 //gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
-                //gl_sys::ClearDepth(clear_depth as f64);
+                gl_sys::ClearDepthf(clear_depth as f32);
                 gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
                 gl_sys::Clear(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }

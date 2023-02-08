@@ -90,7 +90,7 @@ pub enum TouchState {
     Stop,
     Move,
     Stable
-}
+}  
 
 #[derive(Clone, Debug)]
 pub struct TouchPoint {
