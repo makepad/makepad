@@ -880,6 +880,41 @@ live_design!{
         }
     }
     
+    DelayToyFXPanel = <FishPanelContainer> {
+        <FishSubTitle> {
+            label = {
+                text: "Reverb",
+                draw_label: {color: (COLOR_FX)},
+            }
+        }
+        <Frame> {
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fit}
+            
+            <Frame> {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                
+                reverbmix = <InstrumentSlider> {
+                    slider = {
+                        draw_slider: {line_color: (COLOR_FX)}
+                        min: 0.0
+                        max: 1.0
+                        label: "Mix"
+                    }
+                }
+                reverbfeedback = <InstrumentSlider> {
+                    slider = {
+                        draw_slider: {line_color: (COLOR_FX)}
+                        min: 0.0
+                        max: 1.0
+                        label: "Feedback"
+                    }
+                }
+            }
+        }
+    }
+    
     FishPanelFilter = <FishPanelContainer> {
         
         <FishHeader> {
@@ -1226,6 +1261,8 @@ live_design!{
             <Divider> {}
             <ChorusFXPanel> {}
             <Divider> {}
+            <DelayToyFXPanel> {}
+            <Divider> {}
             <DelayFXPanel> {}
         }
     }
@@ -1397,6 +1434,10 @@ impl App {
         data_to_widget!(db, chorus.rate => chorusrate.slider);
         data_to_widget!(db, chorus.phasediff => chorusphase.slider);
         data_to_widget!(db, chorus.feedback => chorusfeedback.slider);
+        
+        // Reverb panel
+        data_to_widget!(db, reverb.mix => reverbmix.slider);
+        data_to_widget!(db, reverb.feedback => reverbfeedback.slider);
         
         //LFO Panel
         data_to_widget!(db, lfo.rate => rate.slider);
