@@ -27,7 +27,7 @@ use {
         pass::CxPassParent,
         cx::{Cx, OsType,},
         gpu_info::GpuPerformance,
-        os::cx_desktop::EventFlow,
+        os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
     }
 };
@@ -71,13 +71,13 @@ impl DirectApp {
 
 impl Cx {
     pub fn event_loop(mut self) {
-        self.platform_type = OsType::LinuxDirect;
+        self.os_type = OsType::LinuxDirect;
         self.gpu_info.performance = GpuPerformance::Tier1;
         
         let p = profile_start();
         self.call_event_handler(&Event::Construct);
         self.redraw_all();
-        profile_end("construct", p);
+        profile_end!("construct", p);
         
         
         let mut direct_app = DirectApp::new();
@@ -130,7 +130,7 @@ impl Cx {
                 if self.need_redrawing() {
                     self.call_draw_event();
                     direct_app.egl.make_current();
-                    self.opengl_compile_shaders();
+                    self.opengl_compile_shaders(None);
                 }
                 // ok here we send out to all our childprocesses
                 //profile_end("paint event handling", p);
@@ -224,7 +224,7 @@ impl Cx {
         if !self.passes[pass_id].dont_clear {
             unsafe {
                 gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
-                gl_sys::ClearDepth(clear_depth as f64);
+                gl_sys::ClearDepthf(clear_depth as f32);
                 gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
                 gl_sys::Clear(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }
@@ -306,8 +306,8 @@ impl CxOsApi for Cx {
         let p = profile_start();
         self.live_expand();
         self.live_scan_dependencies();
-        self.desktop_load_dependencies();
-        profile_end("live expand", p);
+        self.native_load_dependencies();
+        profile_end!("live expand", p);
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
