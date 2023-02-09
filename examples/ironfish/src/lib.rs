@@ -359,28 +359,41 @@ live_design!{
     
     InstrumentCheckbox = <ElementBox> {
         checkbox = <CheckBox> {
-            layout: {padding: <BASE_PADDING> {}}
+            layout: { padding: <BASE_PADDING> {} }
             label: "CutOff1"
             draw_check: {
+                // check_type: Toggle
+                instance border_width: 1.0
+                instance border_color: #x06
+                instance border_color2: #xF1
+                size: 8.5;
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                    let left = 3;
-                    let sz = 7.0;
+                    let sz = self.size;
+                    let left = sz + 1.;
                     let c = vec2(left + sz, self.rect_size.y * 0.5);
-                    sdf.box(left, c.y - sz, sz * 2.0, sz * 2.2, 1.5); // rounding = 3rd value
-                    sdf.fill_keep(mix(
-                        mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 1.)),
-                        mix((COLOR_CONTROL_INSET_HOVER), (COLOR_CONTROL_INSET_HOVER) * 0.1, pow(self.pos.y, 1.0)),
-                        self.hover
-                    ))
-                    sdf.stroke(mix((COLOR_BEVEL_SHADOW), #xfff, pow(self.pos.y, 3.0)), 1.0) // outline
-                    
-                    let szs = sz * 0.5;
-                    let dx = 1.0;
-                    sdf.move_to(left + 4.0, c.y);
-                    sdf.line_to(c.x, c.y + szs);
-                    sdf.line_to(c.x + szs, c.y - szs);
-                    sdf.stroke(mix((COLOR_HIDDEN_WHITE), mix((COLOR_TEXT_H2), (COLOR_TEXT_H2_HOVER), self.hover), self.selected), 1.25); // CHECKMARK
+                    sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
+
+                    sdf.stroke_keep(
+                        mix(self.border_color, self.border_color2, clamp(self.pos.y - 0.2, 0, 1)),
+                        self.border_width
+                    )
+                    // sdf.fill(mix(#x0006, #x0008, self.hover));
+
+                    sdf.fill(
+                        mix(
+                            mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 1.0)),
+                            mix((COLOR_CONTROL_INSET) * 1.75, (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 1.0)),
+                            self.hover
+                        )
+                    )
+                    let isz = sz * 0.65;
+                    sdf.circle(left + sz + self.selected * sz, c.y, isz);
+                    sdf.circle(left + sz + self.selected * sz, c.y, 0.425 * isz);
+                    sdf.subtract();
+                    sdf.circle(left + sz + self.selected * sz, c.y, isz);
+                    sdf.blend(self.selected)
+                    sdf.fill(mix(#xFFF8, #xFFFC, self.hover));
                     return sdf.result
                 }
             }
@@ -651,7 +664,7 @@ live_design!{
     
     SequencerControls = <GradientY> {
         walk: {height: Fit, width: Fill, margin: { top: 5, right: 10, bottom: 10, left: 10 }}
-        layout: {flow: Down, padding: {top: 0.0, right: (SPACING_BASE_PADDING), bottom: 0.0, left: (SPACING_BASE_PADDING)}}
+        layout: {flow: Down, padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: 0.0, left: (SPACING_BASE_PADDING)}}
 
         draw_bg: {
             instance border_width: 1.0
@@ -711,7 +724,9 @@ live_design!{
             }
         }
 
-        <Divider> {}
+        <Divider> {
+            walk: { margin: {top: (SPACING_BASE_PADDING), right: 0, bottom: (SPACING_BASE_PADDING) }}
+        }
 
         <Frame> {
             walk: {height: Fit, width: Fill}
