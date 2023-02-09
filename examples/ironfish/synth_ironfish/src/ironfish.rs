@@ -19,7 +19,7 @@
 #![allow(dead_code)]
 
 use crate::waveguide::Waveguide;
-//use crate::delay_toys::DelayToy;
+use crate::delay_toys::DelayToy;
 
 use {
     std::sync::Arc,
@@ -230,6 +230,7 @@ pub struct IronFishSettings {
     pub sequencer: SequencerSettings,
     pub arp: ArpSettings,
     chorus: ChorusSettings,
+    reverb: ReverbSettings,
     #[live(48000.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
     #[live(0.5)] sub_osc: f32a,
@@ -852,6 +853,13 @@ pub struct ChorusSettings {
     #[live(0.0)] feedback: f32a
 }
 
+
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct ReverbSettings {
+    #[live(0.5)] mix: f32a,
+    #[live(0.0)] feedback: f32a
+}
+
 #[derive(Copy, Clone)]
 pub struct SmoothVal {
     current: f32,
@@ -897,6 +905,7 @@ pub struct ChorusState {
     mindepthsmooth: SmoothVal,
     moddepthsmooth: SmoothVal
 }
+
 
 impl Default for ChorusState {
     fn default() -> Self {
@@ -953,6 +962,19 @@ impl ChorusState {
             
             left[i] = mix * (l1 + l3 + l5) + left[i] * imix;
             right[i] = mix * (l2 + l4 + l6) + right[i] * imix;
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ReverbState{
+    toy: DelayToy
+}
+
+impl Default for ReverbState {
+    fn default() -> Self {
+        Self {
+            toy: Default::default()
         }
     }
 }
@@ -1407,7 +1429,8 @@ pub struct IronFishState {
     lastnote: u8,
     sps_detune_tab: [f32; 1024], // FIXME: move to IronFishGlobalVoiceState
     g: IronFishGlobalVoiceState,
-    chorus: ChorusState
+    chorus: ChorusState,
+    reverb: ReverbState
     
 }
 
@@ -1539,7 +1562,19 @@ impl IronFishState {
         }
         
     }
-    
+    pub fn apply_reverb(&mut self, buffer: &mut AudioBuffer ){
+        if self.settings.reverb.mix.get() == 0.0 {return;};
+        let frame_count = buffer.frame_count();
+        let (left, right) = buffer.stereo_mut();
+        for i in 0..frame_count {
+              
+       // let verb = self.reverb.toy.test_delay(left[i], right[i], self.settings.reverb.mix.get(), self.settings.reverb.feedback.get());
+        let verb = self.reverb.toy.griesinger_reverb(left[i], right[i], self.settings.reverb.mix.get(), self.settings.reverb.feedback.get());
+            left[i] = verb.0;
+            right[i] = verb.1;
+    }        
+    }
+
     pub fn apply_delay(&mut self, buffer: &mut AudioBuffer) {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
@@ -1817,6 +1852,7 @@ impl IronFishState {
         self.apply_bitcrush(buffer);
         self.chorus.apply_chorus(buffer, &self.settings.chorus, self.settings.sample_rate.get());        
         self.apply_delay(buffer);
+        self.apply_reverb(buffer);
 
     }
 }
@@ -1952,7 +1988,8 @@ impl AudioComponent for IronFish {
             lastnote: 69,
             sps_detune_tab,
             g: Default::default(),
-            chorus: Default::default()
+            chorus: Default::default(),
+            reverb: Default::default()
         })
     }
     
