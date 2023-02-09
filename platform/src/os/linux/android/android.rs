@@ -4,7 +4,7 @@ use {
     std::time::Instant,
     self::super::{
         android_media::CxAndroidMedia,
-        android_jni::{AndroidCallback, AndroidInitParams, TouchAction, TouchPointer},
+        android_jni::{AndroidCallback, TouchAction, TouchPointer},
     },
     self::super::super::{
         gl_sys,
@@ -41,7 +41,6 @@ impl Cx {
     
     /// Called when EGL is initialized.
     pub fn android_init(&mut self, params: AndroidParams, callback: AndroidCallback<'_>) {
-        log!("GOT STARTUP {:?}", params);
         self.os_type = OsType::Android(params);
         self.gpu_info.performance = GpuPerformance::Tier1;
         self.call_event_handler(&Event::Construct);
