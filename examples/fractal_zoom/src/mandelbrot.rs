@@ -574,7 +574,7 @@ impl Mandelbrot {
             
             // We are zooming, so animate the zoom
             if self.is_zooming {
-                if let OsType::LinuxDirect = cx.platform_type() {
+                if let OsType::LinuxDirect = cx.os_type() {
                     self.space.zoom_around(if self.is_zoom_in {0.92} else {1.08}, self.finger_abs);
                 }
                 else {

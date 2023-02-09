@@ -64,20 +64,24 @@ impl<'a> ShaderParser<'a> {
 
 impl<'a> ShaderParser<'a> {
     
+    #[inline]
     fn peek_span(&self) -> TextSpan {
         self.token_with_span.span
     }
     
+    #[inline]
     fn peek_token(&self) -> LiveToken {
         self.token_with_span.token
     }
     
+    #[inline]
     fn eat_token(&mut self) -> LiveToken {
         let token = self.peek_token();
         self.skip_token();
         token
     }
     
+    #[inline]
     fn skip_token(&mut self) {
         self.end = self.token_with_span.span.end;
         if LiveToken::Eof == self.token_with_span.token {
@@ -113,6 +117,7 @@ impl<'a> ShaderParser<'a> {
         self.token_with_span.span.end
     }
     
+    #[inline]
     fn accept_ident(&mut self) -> Option<Ident> {
         if let LiveToken::Ident(id) = self.peek_token() {
             self.skip_token();
@@ -154,6 +159,7 @@ impl<'a> ShaderParser<'a> {
         }
     }
     
+    #[inline]
     fn accept_token(&mut self, token: LiveToken) -> bool {
         if self.peek_token() != token {
             return false;
@@ -162,6 +168,7 @@ impl<'a> ShaderParser<'a> {
         true
     }
     
+    #[inline]
     fn expect_ident(&mut self, live_error_origin: LiveErrorOrigin) -> Result<Ident, LiveError> {
         match self.peek_token() {
             LiveToken::Ident(id) => {
@@ -172,6 +179,7 @@ impl<'a> ShaderParser<'a> {
         }
     }
     
+    #[inline]
     fn expect_specific_ident(&mut self, specific_id: LiveId) -> Result<(), LiveError> {
         match self.peek_token() {
             LiveToken::Ident(id) if id == id => {
@@ -182,6 +190,7 @@ impl<'a> ShaderParser<'a> {
         }
     }
     
+    #[inline]
     fn expect_token(&mut self, expected: LiveToken) -> Result<(), LiveError> {
         let actual = self.peek_token();
         if actual != expected {
@@ -191,6 +200,7 @@ impl<'a> ShaderParser<'a> {
         Ok(())
     }
     
+    #[inline]
     fn begin_span(&self) -> SpanTracker {
         SpanTracker {
             file_id: self.token_with_span.span.file_id,
