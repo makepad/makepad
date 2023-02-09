@@ -119,7 +119,7 @@ impl<'a> AndroidCallback<'a> {
 
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_dropCx(_: JNIEnv, _: jclass, app: jlong) {
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_dropCx(_: JNIEnv, _: jclass, _app: jlong) {
     //log!("DROP!"); 
     //drop(Box::from_raw(app as *mut Cx));
 }
@@ -143,7 +143,6 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_init(
     cache_path: jstring,
     callback: jobject,
 ) {
-    let cache_path = 
     (*(cx as *mut Cx)).android_init(
         AndroidParams{
             cache_path: jstring_to_string(env, cache_path)
