@@ -174,8 +174,14 @@ live_design!{
             menu_item: {
                 indent_width: 10.0
                 walk: {width: Fill, height: Fit}
+
                 layout: {
                     padding: {left: 15, top: 5, bottom: 5, right: 15},
+                }
+
+                draw_bg: {
+                    color: #x48,
+                    color_selected: #x6
                 }
             }
         }
@@ -487,11 +493,13 @@ live_design!{
         }
     }
     
-    FishHeader = <Frame> {
-        layout: {flow: Right}
+    FishHeader = <Box> {
+        layout: {flow: Right }
         walk: {height: Fit, width: Fill}
+        draw_bg: { color: (COLOR_HIDDEN_WHITE)}
         title = <FishTitle> {
-            walk: {height: Fit, width: Fill}
+            walk: {height: Fit, width: Fill, margin: 0}
+            layout: {padding: 7.5}
         }
         menu = <Frame> {
             layout: {flow: Right}
@@ -516,7 +524,7 @@ live_design!{
         walk: {width: Fit, height: Fit, margin: 10.0}
         layout: {align: {x: 0.0, y: 0.5}}
         checkbox = {
-            walk: {width: 20, height: 20}
+            walk: {width: 20, height: 20, margin: { right: -30 }}
             label: ""
             draw_check: {
                 fn pixel(self) -> vec4 {
@@ -674,9 +682,9 @@ live_design!{
             instance dither: 1.0
             color: (#x00000008),
             color2: (#x0004)
-            instance border_color: #x181818
-            instance border_color2: #x282828
-            instance border_color3: #x505050
+            instance border_color: #x1A
+            instance border_color2: #x28
+            instance border_color3: #x50
 
             fn get_color(self) -> vec4 {
                 let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
@@ -1063,6 +1071,7 @@ live_design!{
                     walk: { margin: {top: -1, right: -1, bottom: 1} }
                     filter_type = <FishDropDown> {
                         walk: { width: Fill }
+                        
                         labels: ["LowPass", "HighPass", "BandPass", "BandReject"]
                         values: [LowPass, HighPass, BandPass, BandReject]
 
@@ -1110,13 +1119,7 @@ live_design!{
                                     self.rect_size.x,
                                     self.rect_size.y
                                 )
-                                sdf.fill(
-                                    mix(
-                                        (COLOR_FILTER),
-                                        (COLOR_FILTER * 1.2),
-                                        self.hover
-                                    )
-                                );
+                                sdf.fill((COLOR_HIDDEN_WHITE))
                             }
                         }
 
