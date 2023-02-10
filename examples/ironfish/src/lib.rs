@@ -63,6 +63,14 @@ live_design!{
         layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
     }
     
+    FillerH = <Frame> {
+        walk: {width: Fill}
+    }
+
+    FillerV = <Frame> {
+        walk: {height: Fill}
+    }
+
     FishPanelContainer = <CachedFrame> {
         layout: {flow: Down},
         walk: {width: Fill, height: Fit}
@@ -81,7 +89,12 @@ live_design!{
         }
     }
     
-    
+    SubheaderContainer = <Box> {
+        draw_bg: { color: #xFFFFFF10 }
+        walk: {width: Fill, height: Fit, margin: {bottom: (SPACING_BASE_PADDING), top: (SPACING_BASE_PADDING * 2) }}
+        layout: {padding: {top: 0.0, right: 3.0, bottom: 0.0, left: 3.0 }}
+    }
+
     FishTab = <RadioButton> {
         walk: {height: Fill, width: Fit}
         layout: {align: {x: 0.0, y: 0.5}}
@@ -364,14 +377,15 @@ live_design!{
     }
     
     InstrumentCheckbox = <ElementBox> {
+        walk: {margin: {left: -5}}
+        layout: {padding: {left: 0, bottom: 0}}
         checkbox = <CheckBox> {
-            layout: { padding: <BASE_PADDING> {} }
+            layout: { padding: { top: 0.0, right: 7.5, bottom: 0.0, left: 23 } }
             label: "CutOff1"
             draw_check: {
-                // check_type: Toggle
                 instance border_width: 1.0
                 instance border_color: #x06
-                instance border_color2: #xF1
+                instance border_color2: #xFFFFFF0A
                 size: 8.5;
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -425,7 +439,7 @@ live_design!{
     }
     
     GraphPaper = <Box> {
-        walk: {width: Fill, height: 125}
+        walk: {width: Fill, height: 120}
         draw_bg: {
             color: #x44,
             instance color2: #x0,
@@ -495,8 +509,7 @@ live_design!{
     
     FishHeader = <Box> {
         layout: {flow: Right }
-        walk: {height: Fit, width: Fill}
-        draw_bg: { color: (COLOR_HIDDEN_WHITE)}
+        walk: {height: Fit, width: Fill, margin: { bottom: (SPACING_BASE_PADDING)} }
         title = <FishTitle> {
             walk: {height: Fit, width: Fill, margin: 0}
             layout: {padding: 7.5}
@@ -638,23 +651,15 @@ live_design!{
                 layout: {flow: Right, align: {x: 0.0, y: 0.0}}
                 walk: {width: Fill, height: Fit}
                 
-                <FishSubTitle> {
-                    walk: {width: Fill}
-                    label = {
-                        text: "Cutoff Modulation",
-                        draw_label: {color: (COLOR_ENV)},
+                <SubheaderContainer> {
+                    <FishSubTitle> {
+                        walk: {width: Fill}
+                        label = {
+                            text: "Modulation",
+                            draw_label: {color: (COLOR_ENV)},
+                        }
                     }
-                }
-                
-                modamount = <InstrumentBipolarSlider> {
-                    walk: {width: Fill}
-                    slider = {
-                        draw_slider: {line_color: (COLOR_ENV)}
-                        min: -1.0
-                        max: 1.0
-                        label: "Amount"
-                    }
-                }
+                }  
                 
             }
         }
@@ -664,6 +669,16 @@ live_design!{
             walk: {width: Fill, height: Fit}
         }
         
+        modamount = <InstrumentBipolarSlider> {
+            walk: {width: Fill}
+            slider = {
+                draw_slider: {line_color: (COLOR_ENV)}
+                min: -1.0
+                max: 1.0
+                label: "Influence on Cutoff"
+            }
+        }
+
     }
 
     
@@ -749,7 +764,7 @@ live_design!{
             }
             
             scaletype = <InstrumentDropdown> {
-                walk: {height: Fit, width: Fit}
+                walk: {height: Fit, width: Fill}
                 dropdown = {
                     labels: ["Minor", "Major", "Dorian", "Pentatonic"]
                     values: [Minor, Major, Dorian, Pentatonic]
@@ -793,7 +808,11 @@ live_design!{
                 }
 
                 arp = <InstrumentCheckbox> {
-                    checkbox = {label: " "}
+                    checkbox = {
+                        label: " "
+                        layout: { padding: { top: 7.5, right: 0, bottom: 7.5, left: 0 } }
+                        walk: { margin: {left: -7.5}  }
+                    }
                     layout: {padding: 0}
                     walk: {width: Fit, height: Fit, margin: 0}
                 }
@@ -850,15 +869,27 @@ live_design!{
             layout: {flow: Right, align: {x: 0.0, y: 0.0}}
             walk: {width: Fill, height: Fit}
             
-            <FishSubTitle> {
-                label = {
-                    text: "Bitcrush",
-                    draw_label: {color: (COLOR_FX)},
+            <SubheaderContainer> {
+                walk: {margin: { top: 0 }}
+                <FishSubTitle> {
+                    label = {
+                        text: "Bitcrush",
+                        draw_label: {color: (COLOR_FX)},
+                    }
                 }
-            }
-            crushenable = <InstrumentCheckbox> {
-                checkbox = {label: " "}
-                walk: {width: Fit, height: Fit, margin: { top: -10 } }
+
+                <FillerV> {}
+
+                crushenable = <InstrumentCheckbox> {
+                    walk: {margin: 0}
+                    layout: {padding: 0}
+                    checkbox = {
+                        label: " "
+                        layout: { padding: {top: 0.0, right: 5.0, bottom: 0.0, left: 0.0}}
+                        walk: { margin: 0.0 }
+                    }
+                    walk: {width: Fit, height: Fit, margin: { top: 0 } }
+                }
             }
         }
         
@@ -878,10 +909,12 @@ live_design!{
     }
     
     DelayFXPanel = <FishPanelContainer> {
-        <FishSubTitle> {
-            label = {
-                text: "Delay",
-                draw_label: {color: (COLOR_FX)},
+        <SubheaderContainer> {
+            <FishSubTitle> {
+                label = {
+                    text: "Delay",
+                    draw_label: {color: (COLOR_FX)},
+                }
             }
         }
         <Frame> {
@@ -941,10 +974,12 @@ live_design!{
     }
     
     ChorusFXPanel = <FishPanelContainer> {
-        <FishSubTitle> {
-            label = {
-                text: "Chorus",
-                draw_label: {color: (COLOR_FX)},
+        <SubheaderContainer> {
+            <FishSubTitle> {
+                label = {
+                    text: "Chorus",
+                    draw_label: {color: (COLOR_FX)},
+                }
             }
         }
         <Frame> {
@@ -1019,10 +1054,12 @@ live_design!{
     }
     
     DelayToyFXPanel = <FishPanelContainer> {
-        <FishSubTitle> {
-            label = {
-                text: "Reverb",
-                draw_label: {color: (COLOR_FX)},
+        <SubheaderContainer> {
+            <FishSubTitle> {
+                label = {
+                    text: "Reverb",
+                    draw_label: {color: (COLOR_FX)},
+                }
             }
         }
         <Frame> {
@@ -1059,12 +1096,12 @@ live_design!{
             walk: {height: Fit}
 
             <FishHeader> {
+                draw_bg: { color: (COLOR_FILTER) }
                 title = {
                     walk: {width: Fit}
                     label = {
                         text: "Filter",
                     },
-                    draw_bg: {color: (COLOR_FILTER)}
                 }
                 
                 menu = <Frame> {
@@ -1076,19 +1113,19 @@ live_design!{
                         values: [LowPass, HighPass, BandPass, BandReject]
 
                         draw_label: {
-                            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-Text.ttf"}},
                             fn get_color(self) -> vec4 {
                                 return mix(
                                     mix(
                                         mix(
-                                            (#000A),
-                                            (#000A),
+                                            (#x0008),
+                                            (#x0008),
                                             self.focus
                                         ),
-                                        (#000F),
+                                        (#x000F),
                                         self.hover
                                     ),
-                                    (#000A),
+                                    (#x000A),
                                     self.pressed
                                 )
                             }
@@ -1191,15 +1228,17 @@ live_design!{
                 layout: {flow: Right}
                 walk: {width: Fill, height: Fit}
                 
-                <FishSubTitle> {label = {text: "Osc", draw_label: {color: (COLOR_OSC)}, walk: {width: Fit}}}
-                type = <InstrumentDropdown> {
-                    layout: {flow: Down}
-                    dropdown = {
-                        walk: {width: Fit, height: Fit}
-                        values: [DPWSawPulse, BlampTri, Pure, SuperSaw, HyperSaw, HarmonicSeries]
-                        labels: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
+                <SubheaderContainer> {
+                    <FishSubTitle> {label = {text: "Osc", draw_label: {color: (COLOR_OSC)}, walk: {width: Fit}}}
+                    type = <InstrumentDropdown> {
+                        layout: {flow: Down}
+                        dropdown = {
+                            walk: {width: Fill, height: Fit}
+                            values: [DPWSawPulse, BlampTri, Pure, SuperSaw, HyperSaw, HarmonicSeries]
+                            labels: ["Saw", "Triangle", "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
+                        }
                     }
-                }
+                }   
             }
             
             twocol = <Frame> {
@@ -1358,25 +1397,26 @@ live_design!{
                 }
             }
         
-            <FishSubTitle> {
-                label = {
-                    text: "Mixer",
-                    draw_label: {color: (COLOR_OSC)},
+            <SubheaderContainer> {
+                walk: {margin: {top: 0 }}
+                <FishSubTitle> {
+                    label = {
+                        text: "Mixer",
+                        draw_label: {color: (COLOR_OSC)},
+                    }
                 }
             }
-            
+
             <MixerPanel> {walk: {width: Fill, height: Fit}}
-            <Divider> {}
             <Frame> {
                 walk: {width: Fill, height: Fit}
-                layout: { flow: Right, spacing: (SPACING_CONTROLS)}
+                layout: { flow: Right, spacing: 7.5 }
 
                 osc1 = <OscPanel> {}
                 osc2 = <OscPanel> {}
             }
         }
     }
-    
     
     // TABS
     FishPanelEnvelopes = <FishPanelContainer> {
@@ -1394,11 +1434,14 @@ live_design!{
                     draw_bg: {color: (COLOR_ENV)}
                 }
             }
-        
-            <FishSubTitle> {
-                label = {
-                    text: "Volume",
-                    draw_label: {color: (COLOR_ENV)},
+
+            <SubheaderContainer> {
+                walk: {margin: {top: 0 }}
+                <FishSubTitle> {
+                    label = {
+                        text: "Volume",
+                        draw_label: {color: (COLOR_ENV)},
+                    }
                 }
             }
             
@@ -1406,8 +1449,6 @@ live_design!{
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fit}
             }
-            
-            <Divider> {}
             
             <ModEnvelopePanel> {
                 layout: {flow: Down, clip_y: true}
@@ -1433,11 +1474,8 @@ live_design!{
 
             walk: {width: Fill, height: Fill}
             <CrushFXPanel> {}
-            <Divider> {}
             <ChorusFXPanel> {}
-            <Divider> {}
             <DelayToyFXPanel> {}
-            <Divider> {}
             <DelayFXPanel> {}
         }
     }
