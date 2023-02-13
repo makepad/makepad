@@ -1,0 +1,14 @@
+[package]
+name = "bender_viewer"
+version = "0.1.0"
+authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+bender_clipper = { path = "../clipper" }
+bender_filler = { path = "../filler" }
+bender_geometry = { path = "../geometry" }
+bender_stroker = { path = "../stroker" }
+gl = "0.12"
+glutin = "0.28"
+rand = "0.6"
