@@ -17,7 +17,7 @@ use makepad_audio_widgets::piano::*;
 use crate::sequencer::*;
 use makepad_audio_widgets::display_audio::*;
 
-//use std::fs::File;
+//use std::fs::File;  
 //use std::io::prelude::*;
 live_design!{
     registry AudioComponent::*;
@@ -1702,7 +1702,7 @@ impl App {
         }
         
         if let Event::AudioDevices(devices) = event {
-            //println!("{}", devices);
+            //log!("{}", devices); 
             cx.use_audio_outputs(&devices.default_output());
         }
         

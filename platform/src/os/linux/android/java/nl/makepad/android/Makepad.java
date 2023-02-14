@@ -8,6 +8,8 @@ public class Makepad {
         void scheduleRedraw();
         void scheduleTimeout(long id, long delay);
         void cancelTimeout(long id);
+        byte[] readAsset(String path);
+        String[] getAudioDevices(long flag);
     }
 
     static {

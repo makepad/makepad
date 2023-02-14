@@ -153,14 +153,14 @@ impl WasapiAccess {
                             break;
                         }
                         if let Some(fbox) = &mut *audio_input_cb.lock().unwrap() {
-                            let ret_buffer = fbox(
+                            fbox(
                                 AudioInfo {
                                     device_id,
                                     time: None
                                 },
-                                buffer
+                                &buffer
                             );
-                            wasapi.release_buffer(ret_buffer);
+                            wasapi.release_buffer(buffer);
                         }
                         else {
                             wasapi.release_buffer(buffer);
@@ -268,7 +268,7 @@ impl WasapiAccess {
                 device_id,
                 device_type,
                 is_default: def_id == dev_id,
-                channels: 2,
+                channel_count: 2,
                 name: dev_name
             });
         }

@@ -1,6 +1,7 @@
 package nl.makepad.android;
 
 import android.content.Context;
+import android.content.res.AssetManager;
 import android.graphics.Canvas;
 import android.opengl.GLES20;
 import android.os.Handler;
@@ -9,8 +10,17 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.util.Log;
+
+import android.media.AudioManager;
+import android.media.AudioDeviceInfo;
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.io.File;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+
 import javax.microedition.khronos.egl.EGL10;
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.egl.EGLContext;
@@ -41,8 +51,16 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         if (!mEgl.eglInitialize(mEglDisplay, version)) {
             throw new RuntimeException("eglInitialize failed");
         }
-        File cache_dir = context.getCacheDir();
-        String cache_path = cache_dir.getAbsolutePath();
+        String apk_path = context.getCacheDir().getAbsolutePath();
+        String cache_path = context.getCacheDir().getAbsolutePath();
+        
+       /* try{
+            AssetManager assetFiles = context.getAssets();
+            String[] files = assetFiles.list("makepad/makepad_widgets/resources");
+            for(String s:files){
+                Log.d("Makepad", s);
+            }
+        }catch(Exception e){};*/
 
         Makepad.init(mCx, cache_path, this);
 
@@ -127,6 +145,61 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         invalidate();
     }
 
+    public byte[] readAsset(String path){
+       Context context = this.getContext();
+       try{
+            InputStream in = context.getAssets().open(path);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            int byteCount = 0;
+            byte[] buffer = new byte[4096];
+            while (true) {
+                int read = in.read(buffer);
+                if (read == -1) {
+                    break;
+                }
+                out.write(buffer, 0, read);
+                byteCount += read;
+            }
+            return out.toByteArray();
+        }catch(Exception e){
+            return null;
+        }
+    }
+    
+    public String[] getAudioDevices(long flag){
+        try{
+          
+            Context context = this.getContext();
+            AudioManager am = (AudioManager)context.getSystemService(Context.AUDIO_SERVICE);
+            AudioDeviceInfo[] devices = null;
+            ArrayList<String> out = new ArrayList<String>();
+            if(flag == 0){
+                devices = am.getDevices(AudioManager.GET_DEVICES_INPUTS);
+            }
+            else{
+                devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+            }
+            for(AudioDeviceInfo device: devices){
+                int[] channel_counts = device.getChannelCounts();
+                for(int cc: channel_counts){
+                    out.add(String.format(
+                        "%d$$%d$$%d$$%s", 
+                        device.getId(), 
+                        device.getType(), 
+                        cc,
+                        device.getProductName().toString()
+                    ));
+                }
+            }
+            return out.toArray(new String[0]);
+        }
+        catch(Exception e){
+            Log.e("Makepad", "exception: " + e.getMessage());             
+            Log.e("Makepad", "exception: " + e.toString());
+            return null;
+        }
+    }
+    
     public void scheduleTimeout(long id, long delay) {
         Runnable runnable = () -> {
             mRunnables.remove(id);

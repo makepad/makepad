@@ -336,6 +336,30 @@ impl CxFingers {
         return self.tap.count
     }
     
+    pub (crate) fn process_touch_update_start(&mut self, time:f64, touches:&[TouchPoint]){
+        for touch in touches{
+            if let TouchState::Start = touch.state{
+                self.process_tap_count(touch.abs, time);
+            }
+        }
+    }
+    
+    pub (crate) fn process_touch_update_end(&mut self, touches:&[TouchPoint]){
+        for touch in touches{
+            let digit_id = live_id_num!(touch, touch.uid).into();
+            match touch.state{
+                TouchState::Stop=>{
+                    self.release_digit(digit_id);
+                    self.remove_hover(digit_id);
+                }
+                TouchState::Start | TouchState::Move | TouchState::Stable =>{
+                    self.cycle_hover_area(digit_id);
+                }
+            }
+        }
+        self.switch_captures();        
+    }
+
     pub (crate) fn mouse_down(&mut self, button: usize) {
         if self.first_mouse_button.is_none() {
             self.first_mouse_button = Some(button);
@@ -609,7 +633,7 @@ impl Event {
                     })
                 }
             },
-            Event::TouchUpdateEvent(e) => {
+            Event::TouchUpdate(e) => {
                 if cx.fingers.test_sweep_lock(options.sweep_area){
                     return Hit::Nothing
                 }
