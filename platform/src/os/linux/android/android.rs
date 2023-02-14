@@ -93,18 +93,19 @@ impl Cx {
         let new_geom = window.window_geom.clone();
         self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
             window_id,
-            new_geom,
+            new_geom, 
             old_geom
         }));
         if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
             self.redraw_pass_and_child_passes(main_pass_id);
         }
+        self.redraw_all();
+        self.os.first_after_resize = true;
         self.after_every_event(&to_java);
     }
     
     /// Called when the MakepadSurface needs to be redrawn.
     pub fn from_java_draw(&mut self, to_java: AndroidToJava) {
-        
         if self.new_next_frames.len() != 0 {
             self.call_next_frame_event(self.os.time_now());
         }
@@ -114,6 +115,11 @@ impl Cx {
             
             //android_app.egl.make_current();
             self.opengl_compile_shaders(Some(&cache_path));
+        }
+
+        if self.os.first_after_resize{
+            self.os.first_after_resize= false;
+            self.redraw_all();
         }
         
         self.handle_repaint(&to_java);
@@ -299,6 +305,7 @@ impl CxOsApi for Cx {
 impl Default for CxOs {
     fn default() -> Self {
         Self {
+            first_after_resize: true,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             time_start: Instant::now(),
@@ -308,6 +315,7 @@ impl Default for CxOs {
 }
 
 pub struct CxOs {
+    pub first_after_resize:bool,
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub time_start: Instant,
