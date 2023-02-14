@@ -45,6 +45,8 @@ pub type jthrowable = *mut _jobject;
 pub type jweak = jobject;
 pub type jfieldID = *mut _jfieldID;
 pub type jmethodID = *mut _jmethodID;
+ 
+pub const JNI_ABORT: i32 = 2; 
 
 #[repr(C)]
 pub struct JNINativeMethod {

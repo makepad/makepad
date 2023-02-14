@@ -580,8 +580,6 @@ impl<'a> LiveParser<'a> {
             },
             LiveToken::Dependency {index, len} => {
                 self.skip_token();
-                
-                
                 ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
