@@ -103,9 +103,9 @@ impl<'a> AndroidToJava<'a> {
     }
     
         
-    /// Cancels the timeout with the given id.
+    /// reads an asset
     ///
-    /// It is your responsibility to make sure that timeout ids are unique.
+    ///
     pub fn read_asset(&self, file:&str)->Option<Vec<u8>> {
         unsafe {
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
