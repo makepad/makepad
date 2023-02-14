@@ -189,7 +189,7 @@ impl Cx {
                         self.dependencies.insert(dep.into_string(), CxDependency {
                             data: None
                         });
-                    },
+                    }, 
                     _ => {
                     }
                 }

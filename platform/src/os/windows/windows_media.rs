@@ -1,6 +1,11 @@
 
 use {
     std::sync::{Arc,Mutex},
+    self::super::{
+        winrt_midi::*,
+        wasapi::*,
+        media_foundation::*,        
+    },
     crate::{
         cx::Cx,
         audio::*,
@@ -9,9 +14,7 @@ use {
         thread::Signal,
         event::Event,
         media_api::CxMediaApi,
-        os::windows::winrt_midi::*,
-        os::windows::wasapi::*,
-        os::windows::media_foundation::*,
+
     }
 };
 
