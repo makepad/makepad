@@ -7,38 +7,43 @@ rustup target add x86_64-unknown-linux-gnu  &>/dev/null
 rustup target add x86_64-apple-darwin  &>/dev/null
 rustup target add x86_64-apple-darwin  &>/dev/null
 rustup target add aarch64-apple-darwin  &>/dev/null
+rustup target add aarch64-linux-android &>/dev/null
 
-rustup target add x86_64-pc-windows-gnu --toolchain nightly  &>/dev/null
-rustup target add x86_64-pc-windows-msvc --toolchain nightly  &>/dev/null
-rustup target add wasm32-unknown-unknown --toolchain nightly  &>/dev/null
-rustup target add x86_64-unknown-linux-gnu --toolchain nightly  &>/dev/null
-rustup target add x86_64-apple-darwin --toolchain nightly  &>/dev/null
-rustup target add x86_64-apple-darwin --toolchain nightly  &>/dev/null
-rustup target add aarch64-apple-darwin --toolchain nightly  &>/dev/null
+rustup target add x86_64-pc-windows-gnu --toolchain nightly &>/dev/null
+rustup target add x86_64-pc-windows-msvc --toolchain nightly &>/dev/null
+rustup target add wasm32-unknown-unknown --toolchain nightly &>/dev/null
+rustup target add x86_64-unknown-linux-gnu --toolchain nightly &>/dev/null
+rustup target add x86_64-apple-darwin --toolchain nightly &>/dev/null
+rustup target add x86_64-apple-darwin --toolchain nightly &>/dev/null
+rustup target add aarch64-apple-darwin --toolchain nightly &>/dev/null
+rustup target add aarch64-linux-android --toolchain nightly &>/dev/null
 
 echo "Checking Windows GNU stable"
-cargo check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-gnu
+cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-gnu --message-format=json
 echo "Checking Windows MSVC stable"
-cargo check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-msvc
+cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-msvc --message-format=json
 echo "Checking Linux X11 stable"
-cargo check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu
+cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu --message-format=json
 echo "Checking Apple macos intel stable"
-cargo check -q -p makepad-example-ironfish --release --target=x86_64-apple-darwin
+cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-apple-darwin --message-format=json
 echo "Checking Apple macos arm stable"
-cargo check -q -p makepad-example-ironfish --release --target=aarch64-apple-darwin
+cargo +stable check -q -p makepad-example-ironfish --release --target=aarch64-apple-darwin --message-format=json
 echo "Checking Wasm stable"
-cargo check -q -p makepad-example-ironfish --release --target=wasm32-unknown-unknown
-
+cargo +stable check -q -p makepad-example-ironfish --release --target=wasm32-unknown-unknown --message-format=json
+echo "Checking android stable"
+cargo +stable check --lib -q -p makepad-example-ironfish --release --target=aarch64-linux-android --message-format=json
 
 echo "Checking Windows GNU nightly"
-MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-gnu
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-gnu --message-format=json
 echo "Checking Windows MSVC nightly"
-MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-msvc
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-msvc --message-format=json
 echo "Checking Linux X11 nightly"
-MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-unknown-linux-gnu --message-format=json
 echo "Checking Apple macos intel nightly"
-MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-apple-darwin
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=x86_64-apple-darwin --message-format=json
 echo "Checking Apple macos  intel nightly"
-MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=aarch64-apple-darwin
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=aarch64-apple-darwin --message-format=json
 echo "Checking Wasm nightly"
-MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=wasm32-unknown-unknown
+MAKEPAD=lines cargo +nightly check -q -p makepad-example-ironfish --release --target=wasm32-unknown-unknown --message-format=json
+echo "Checking android nightly"
+MAKEPAD=lines cargo +nightly check --lib -q -p makepad-example-ironfish --release --target=aarch64-linux-android --message-format=json

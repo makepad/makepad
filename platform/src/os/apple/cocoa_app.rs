@@ -494,8 +494,6 @@ impl CocoaApp {
                 }
             },
             NSEventType::NSEventTypePressure => {
-                
-                
             },
             _ => (),
         }
