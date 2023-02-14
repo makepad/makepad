@@ -30,7 +30,7 @@ live_design!{
     const SPACING_PANELS = 10.0
     const SPACING_CONTROLS = 3.0
     const SPACING_BASE_PADDING = 7.5
-    const HEIGHT_AUDIOVIZ = 150 
+    const HEIGHT_AUDIOVIZ = 50 
     const COLOR_OSC = #xFFFF99FF // yellow
     const COLOR_MUSIC = #xC // gray
     const COLOR_ENV = #xF9A894 // light red

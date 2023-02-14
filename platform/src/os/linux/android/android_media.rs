@@ -4,6 +4,7 @@ use {
     self::super::{
         aaudio::*,
         android_jni::*,
+        amidi::*
     },
     crate::{
         cx::Cx,
@@ -20,6 +21,8 @@ use {
 pub struct CxAndroidMedia {
     pub (crate) aaudio_change: Signal,
     pub (crate) aaudio: Option<Arc<Mutex<AAudioAccess >> >,
+    pub (crate) amidi_change: Signal,
+    pub (crate) amidi: Option<Arc<Mutex<AMidiAccess >> >,
 }
 
 impl Cx {
@@ -30,12 +33,12 @@ impl Cx {
                 descs
             }));
         }
-    }
-}
-
-pub struct OsMidiOutput {}
-impl OsMidiOutput {
-    pub fn send(&self, _port_id: Option<MidiPortId>, _d: MidiData) {
+        if self.os.media.amidi_change.check_and_clear() {
+            let descs = self.os.media.amidi().lock().unwrap().get_updated_descs(to_java);
+            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
+                descs,
+            }));
+        }
     }
 }
 
@@ -46,16 +49,22 @@ impl CxAndroidMedia {
         }
         self.aaudio.as_ref().unwrap().clone()
     }
+    pub fn amidi(&mut self) -> Arc<Mutex<AMidiAccess >> {
+        if self.amidi.is_none() {
+            self.amidi = Some(AMidiAccess::new(self.amidi_change.clone()));
+        }
+        self.amidi.as_ref().unwrap().clone()
+    }
 }
 
 impl CxMediaApi for Cx {
     
     fn midi_input(&mut self) -> MidiInput {
-        MidiInput(None)
+        self.os.media.amidi().lock().unwrap().create_midi_input()
     }
     
     fn midi_output(&mut self) -> MidiOutput {
-        MidiOutput(None)
+        MidiOutput(Some(OsMidiOutput(self.os.media.amidi())))
     }
     
     fn midi_reset(&mut self) {
