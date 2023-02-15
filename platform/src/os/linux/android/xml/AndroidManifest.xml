@@ -20,5 +20,10 @@
     </application>
     <uses-sdk android:targetSdkVersion="33"/>
     <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
+    <uses-feature android:name="android.software.midi" android:required="true"/>
+    <uses-permission android:name="android.permission.BLUETOOTH"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
 </manifest>
 

@@ -34,10 +34,11 @@ impl Cx {
             }));
         }
         if self.os.media.amidi_change.check_and_clear() {
-            let descs = self.os.media.amidi().lock().unwrap().get_updated_descs(to_java);
-            self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
-                descs,
-            }));
+            if let Some(descs) = self.os.media.amidi().lock().unwrap().get_updated_descs(to_java){
+                self.call_event_handler(&Event::MidiPorts(MidiPortsEvent {
+                    descs,
+                }));
+            }
         }
     }
 }

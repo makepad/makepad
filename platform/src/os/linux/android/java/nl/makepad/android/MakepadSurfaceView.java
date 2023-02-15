@@ -1,5 +1,7 @@
 package nl.makepad.android;
 
+import android.Manifest;
+
 import android.content.Context;
 import android.content.res.AssetManager;
 import android.graphics.Canvas;
@@ -11,11 +13,23 @@ import android.view.View;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.util.Log;
+import android.os.Bundle;
+import android.os.ParcelUuid;
 
+import android.media.midi.MidiManager;
+import android.media.midi.MidiDeviceInfo;
+import android.media.midi.MidiDevice;
 import android.media.AudioManager;
 import android.media.AudioDeviceInfo;
+
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+
 import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.Set;
+import java.util.UUID;
 import java.io.File;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -28,7 +42,7 @@ import javax.microedition.khronos.egl.EGLDisplay;
 import javax.microedition.khronos.egl.EGLSurface;
 import javax.microedition.khronos.opengles.GL10;
 
-public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Callback, View.OnTouchListener, Makepad.Callback {
+public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Callback, View.OnTouchListener, Makepad.Callback, MidiManager.OnDeviceOpenedListener{
     public MakepadSurfaceView(Context context, long cx) {
         super(context);
         setWillNotDraw(false);
@@ -54,14 +68,6 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         String apk_path = context.getCacheDir().getAbsolutePath();
         String cache_path = context.getCacheDir().getAbsolutePath();
         
-       /* try{
-            AssetManager assetFiles = context.getAssets();
-            String[] files = assetFiles.list("makepad/makepad_widgets/resources");
-            for(String s:files){
-                Log.d("Makepad", s);
-            }
-        }catch(Exception e){};*/
-
         Makepad.init(mCx, cache_path, this);
 
         int[] attrib_list = new int[]{
@@ -199,7 +205,39 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             return null;
         }
     }
-    
+
+    @SuppressWarnings("deprecation")
+    public void openAllMidiDevices(){
+        try{
+            Context context = this.getContext();
+                               
+            BluetoothManager bm = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter ba = bm.getAdapter();   
+            Set<BluetoothDevice> bluetooth_devices = ba.getBondedDevices();
+
+            MidiManager mm = (MidiManager)context.getSystemService(Context.MIDI_SERVICE);
+            for(BluetoothDevice device: bluetooth_devices){
+                if(device.getType() == BluetoothDevice.DEVICE_TYPE_LE){
+                    mm.openBluetoothDevice(device, this, new Handler(Looper.getMainLooper()));
+                }
+            }
+
+            for (MidiDeviceInfo info : mm.getDevices()){
+                mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
+            }
+        }
+        catch(Exception e){
+            Log.e("Makepad", "exception: " + e.getMessage());             
+            Log.e("Makepad", "exception: " + e.toString());
+        }
+    }
+
+    public void onDeviceOpened(MidiDevice device) {
+        // ok WHICH device is it tho
+        String name = device.getInfo().getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
+        Makepad.midiDevice(mCx, name, device, this);
+    }
+
     public void scheduleTimeout(long id, long delay) {
         Runnable runnable = () -> {
             mRunnables.remove(id);
