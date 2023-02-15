@@ -681,6 +681,7 @@ live_design!{
                 draw_slider: {line_color: (COLOR_MUSIC)}
                 min: -4.0
                 max: 4.0
+                precision:0
                 label: "Octaves"
             }
         }
