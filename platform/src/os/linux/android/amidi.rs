@@ -7,6 +7,7 @@ use {
         amidi_sys::*,
     },
     crate::{
+        makepad_live_id::*,
         midi::*,
         thread::Signal,
     }
@@ -28,29 +29,31 @@ type InputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData) >> >>;
 pub struct AlsaMidiOutput {
 }
 
-struct AMidiDevice {
-    
+struct AMidiJavaDevice {
+    device_name: String,
+    port_descs: Vec<MidiPortDesc>,
+    amidi_device: *mut AMidiDevice
 }
 
 pub struct AMidiAccess {
     input_senders: InputSenders,
     init_open_all: bool,
-    devices: Vec<AMidiDevice>
+    change_signal: Signal,
+    devices: Vec<AMidiJavaDevice>
 }
 
 impl AMidiAccess {
     pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
-        change_signal.set();
         // lets request to open midi devices
         // for each device we get
         // we should fire a change event
-        
+        change_signal.set();
         let midi_access = Arc::new(Mutex::new(Self {
             init_open_all: true,
+            change_signal,
             devices: Default::default(),
             input_senders: InputSenders::default(),
         }));
-        change_signal.set();
         midi_access
     }
     
@@ -105,12 +108,41 @@ impl AMidiAccess {
         }*/
     }
     
-    pub fn received_midi_device(&mut self, _name: String, device: jobject, to_java: &AndroidToJava) {
+    pub fn received_midi_device(&mut self, device_name: String, java_device: jobject, to_java: &AndroidToJava) {
         unsafe {
             let mut amidi_device = std::ptr::null_mut();
-            crate::log!("GOT HERE {}", _name);
-            AMidiDevice_fromJava(to_java.get_env(), device, &mut amidi_device);
-              
+            AMidiDevice_fromJava(to_java.get_env(), java_device, &mut amidi_device);
+            if amidi_device == std::ptr::null_mut(){
+                crate::log!("Received null midi device");
+            }
+            else{
+                // lets query the ports
+                let mut port_descs = Vec::new();
+                let in_ports = AMidiDevice_getNumInputPorts(amidi_device);
+                let out_ports = AMidiDevice_getNumOutputPorts(amidi_device);
+                for i in 0..in_ports{
+                    let name = format!("{} port {}", device_name, i);
+                    port_descs.push(MidiPortDesc{
+                        name: format!("{} port {}", device_name, i),
+                        port_id: LiveId::from_str_unchecked(&name).into(),
+                        port_type: MidiPortType::Input
+                    });
+                }
+                for i in 0..out_ports{
+                    let name = format!("{} port {}", device_name, i);
+                    port_descs.push(MidiPortDesc{
+                        name: format!("{} port {}", device_name, i),
+                        port_id: LiveId::from_str_unchecked(&name).into(),
+                        port_type: MidiPortType::Output
+                    });
+                }
+                self.devices.push(AMidiJavaDevice{
+                    device_name,
+                    port_descs,
+                    amidi_device
+                })
+            }
+            self.change_signal.set();
         }
         
     }
@@ -121,11 +153,14 @@ impl AMidiAccess {
             to_java.open_all_midi_devices();
             return None
         }
+        let mut descs = Vec::new();
         // lets query our midi devices for ports/etc
-        
+        for device in &self.devices{
+            descs.extend_from_slice(&device.port_descs);
+        }
         //let devices = to_java.get_midi_devices();
         //crate::log!("{:#?}", devices);
-        Some(Vec::new())
+        Some(descs)
     }
     
 }
