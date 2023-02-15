@@ -23,7 +23,7 @@ use {
 pub struct LiveFile {
     pub(crate) reexpand: bool,
     
-    pub(crate) module_id: LiveModuleId,
+    pub module_id: LiveModuleId,
     pub(crate) start_pos: TextPos,
     pub(crate) file_name: String,
     pub(crate) cargo_manifest_path: String,
@@ -45,7 +45,8 @@ pub struct LiveRegistry {
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
     //pub ignore_no_dsl: HashSet<LiveId>,
     pub main_module: Option<LiveFileId>,
-    pub components: LiveComponentRegistries
+    pub components: LiveComponentRegistries,
+    pub package_root: Option<String>
 }
 
 impl Default for LiveRegistry {
@@ -60,7 +61,8 @@ impl Default for LiveRegistry {
             module_id_to_file_id: HashMap::new(),
             live_files: Vec::new(),
             live_type_infos: HashMap::new(),
-            components: LiveComponentRegistries::default()
+            components: LiveComponentRegistries::default(),
+            package_root: None
             //mutated_apply: None,
             //mutated_tokens: None
         }
@@ -104,18 +106,29 @@ impl LiveRegistry {
         &self.live_files[file_id.to_index()].file_name
     }
     
-    pub fn file_id_to_cargo_manifest_path(&self, file_id: LiveFileId) -> &str {
-        &self.live_files[file_id.to_index()].cargo_manifest_path
+    pub fn file_id_to_cargo_manifest_path(&self, file_id: LiveFileId) -> String {
+        let file = &self.live_files[file_id.to_index()];
+        let manifest_path = &file.cargo_manifest_path;
+        if let Some(package_root) = &self.package_root{
+            if file.module_id.0.0 == 0{
+                return package_root.to_string();
+            }
+            return format!("{}/{}", package_root, file.module_id.0); 
+        }
+        manifest_path.to_string()
     }
-
-    pub fn crate_name_to_cargo_manifest_path(&self, crate_name: &str) -> Option<&str> {
+ 
+    pub fn crate_name_to_cargo_manifest_path(&self, crate_name: &str) -> Option<String> {
         let crate_name = crate_name.replace('-',"_");
         let base_crate = LiveId::from_str(&crate_name).unwrap();
         for file in &self.live_files{
             if file.module_id.0 == base_crate{
-                return Some(&file.cargo_manifest_path)
+                if let Some(package_root) = &self.package_root{
+                    return Some(format!("{}/{}", package_root, crate_name)); 
+                }
+                return Some(file.cargo_manifest_path.to_string())
             }
-        }
+        }  
         None
     }
     
