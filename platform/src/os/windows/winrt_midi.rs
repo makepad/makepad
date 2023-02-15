@@ -190,11 +190,15 @@ impl WinRTMidiAccess {
                                     continue; 
                                 }
                                 // open this output
-                                let midi_output = executor::block_on(Self::create_midi_out_port(&port.winrt_id)).unwrap();
-                                midi_outputs.push(WinRTMidiOutput{
-                                    port_id: *port_id,
-                                    midi_output
-                                });
+                                if let Ok(midi_output) = executor::block_on(Self::create_midi_out_port(&port.winrt_id)){
+                                    midi_outputs.push(WinRTMidiOutput{
+                                        port_id: *port_id,
+                                        midi_output
+                                    });
+                                }
+                                else{
+                                    crate::log!("Midi output could not be created {}", port.desc.name);
+                                }
                             }
                         } 
                         let mut index = 0; 
@@ -219,33 +223,37 @@ impl WinRTMidiAccess {
                                     continue;
                                 }
                                 // open this input  
-                                let midi_input = executor::block_on(Self::create_midi_in_port(&port.winrt_id)).unwrap();
-                                let input_senders = midi_access_clone.lock().unwrap().input_senders.clone();
-                                let port_id = *port_id;
-                                let event_token = midi_input.MessageReceived(&TypedEventHandler::<MidiInPort, MidiMessageReceivedEventArgs>::new(move | _, msg | {
-                                    let msg = msg.as_ref().unwrap().Message().unwrap();
-                                    let raw_data = msg.RawData().unwrap();
-                                    let data_reader = DataReader::FromBuffer(&raw_data).unwrap();
-                                    let mut data = [0u8;3];
-                                    if data_reader.ReadBytes(&mut data).is_ok(){
-                                        let mut senders = input_senders.lock().unwrap();
-                                        senders.retain( | s | {
-                                            s.send((port_id, MidiData {
-                                                data,
-                                            })).is_ok()
-                                        });
-                                        if senders.len()>0 {
-                                            // make sure our eventloop runs
-                                            Signal::set_ui_signal();
+                                if let Ok(midi_input) = executor::block_on(Self::create_midi_in_port(&port.winrt_id)){
+                                    let input_senders = midi_access_clone.lock().unwrap().input_senders.clone();
+                                    let port_id = *port_id;
+                                    let event_token = midi_input.MessageReceived(&TypedEventHandler::<MidiInPort, MidiMessageReceivedEventArgs>::new(move | _, msg | {
+                                        let msg = msg.as_ref().unwrap().Message().unwrap();
+                                        let raw_data = msg.RawData().unwrap();
+                                        let data_reader = DataReader::FromBuffer(&raw_data).unwrap();
+                                        let mut data = [0u8;3];
+                                        if data_reader.ReadBytes(&mut data).is_ok(){
+                                            let mut senders = input_senders.lock().unwrap();
+                                            senders.retain( | s | {
+                                                s.send((port_id, MidiData {
+                                                    data,
+                                                })).is_ok()
+                                            });
+                                            if senders.len()>0 {
+                                                // make sure our eventloop runs
+                                                Signal::set_ui_signal();
+                                            }
                                         }
-                                    }
-                                    Ok(())
-                                })).unwrap();
-                                midi_inputs.push(WinRTMidiInput{
-                                    event_token,
-                                    port_id,
-                                    midi_input
-                                });
+                                        Ok(())
+                                    })).unwrap();
+                                    midi_inputs.push(WinRTMidiInput{
+                                        event_token,
+                                        port_id,
+                                        midi_input
+                                    });
+                                }
+                                else{
+                                    crate::log!("Midi input could not be created {}", port.desc.name);
+                                }
                             }
                         }
                         let mut index = 0;
