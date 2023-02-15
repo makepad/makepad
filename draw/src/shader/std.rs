@@ -173,6 +173,24 @@ live_design!{
             return self.result;
         }
         
+        fn fill_keep_premul(inout self, source: vec4) -> vec4 {
+            let f = self.calc_blur(self.shape);
+            self.result = source * f + self.result * (1. - source.a * f);
+            if self.has_clip > 0.5 {
+                let f2 = 1.0 - self.calc_blur(-self.clip);
+                self.result = source * f2 + self.result * (1. - source.a * f2);
+            }
+            return self.result;
+        }
+        
+        fn fill_premul(inout self, color: vec4) -> vec4 {
+            self.fill_keep_premul(color);
+            self.old_shape = self.shape = 1e+20;
+            self.clip = -1e+20;
+            self.has_clip = 0.;
+            return self.result;
+        }
+        
         fn stroke_keep(inout self, color: vec4, width: float) -> vec4 {
             let f = self.calc_blur(abs(self.shape) - width / self.scale_factor);
             let source = vec4(color.rgb * color.a, color.a);

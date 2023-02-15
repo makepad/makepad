@@ -47,7 +47,7 @@ struct PulseInputStream {
 struct PulseInputStruct {
     device_id: AudioDeviceId,
     input_fn: Arc<Mutex<Option<AudioInputFn> > >,
-    audio_buffer: Option<AudioBuffer>,
+    audio_buffer: AudioBuffer,
     ready_state: AtomicU32,
 }
 
@@ -68,7 +68,7 @@ impl PulseInputStream {
             device_id,
             ready_state: AtomicU32::new(0),
             input_fn: pulse.audio_input_cb[index].clone(),
-            audio_buffer: Some(AudioBuffer::default())
+            audio_buffer: AudioBuffer::default()
         }));
         pa_stream_set_state_callback(stream, Some(Self::recording_stream_state_callback), input_ptr as *mut _);
         pa_stream_set_read_callback(stream, Some(Self::recording_stream_read_callback), input_ptr as *mut _);
@@ -134,13 +134,12 @@ impl PulseInputStream {
         }
         let mut input_fn = (*input).input_fn.lock().unwrap();
         if let Some(input_fn) = &mut *input_fn {
-            let mut audio_buffer = input.audio_buffer.take().unwrap();
             let interleaved = std::slice::from_raw_parts(read_ptr, byte_count / 4);
-            audio_buffer.copy_from_interleaved(2, interleaved);
-            input.audio_buffer = Some(input_fn(AudioInfo {
+            input.audio_buffer.copy_from_interleaved(2, interleaved);
+            input_fn(AudioInfo {
                 device_id: input.device_id,
                 time: None
-            }, audio_buffer));
+            }, &input.audio_buffer);
         }        
         pa_stream_drop(stream);
     }
@@ -532,7 +531,7 @@ impl PulseAudioAccess {
                     device_id,
                     device_type: AudioDeviceType::Input,
                     is_default: Some(&source.name) == query.default_source.as_ref(),
-                    channels: 2,
+                    channel_count: 2,
                     name: format!("[Pulse Audio] {}", source.description)
                 });
                 device_descs.push(PulseAudioDesc {
@@ -547,7 +546,7 @@ impl PulseAudioAccess {
                     device_id,
                     device_type: AudioDeviceType::Output,
                     is_default: Some(&sink.name) == query.default_sink.as_ref(),
-                    channels: 2,
+                    channel_count: 2,
                     name: format!("[Pulse Audio] {}", sink.description)
                 });
                 device_descs.push(PulseAudioDesc {

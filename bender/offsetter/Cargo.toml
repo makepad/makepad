@@ -1,0 +1,8 @@
+[package]
+name = "bender_offsetter"
+version = "0.1.0"
+authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+bender_geometry = { path = "../geometry" }

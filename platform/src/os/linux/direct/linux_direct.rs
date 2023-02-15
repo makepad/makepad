@@ -6,7 +6,6 @@ use {
     },
     self::super::super::{
         gl_sys,
-        libc_sys,
         select_timer::SelectTimers,
         linux_media::CxLinuxMedia
     },
@@ -21,7 +20,7 @@ use {
             WebSocket,
             WebSocketAutoReconnect,
             Event,
-            WindowGeom,
+            WindowGeom,  
         },
         window::CxWindowPool,
         pass::CxPassParent,

@@ -29,7 +29,6 @@ use {
             MouseDownEvent,
             MouseMoveEvent,
             MouseUpEvent,
-            TouchState,
             TouchUpdateEvent,
             ScrollEvent,
             WindowGeom,
@@ -119,27 +118,11 @@ impl Cx {
                 
                 live_id!(ToWasmTouchUpdate) => {
                     let e: TouchUpdateEvent = ToWasmTouchUpdate::read_to_wasm(&mut to_wasm).into();
-                    for touch in &e.touches{
-                        if let TouchState::Start = touch.state{
-                            self.fingers.process_tap_count(touch.abs, e.time);
-                        }
-                    }
-                    let e = Event::TouchUpdateEvent(e);
+                    self.fingers.process_touch_update_start(e.time, &e.touches);
+                    let e = Event::TouchUpdate(e);
                     self.call_event_handler(&e);
-                    let e = if let Event::TouchUpdateEvent(e) = e{e}else{panic!()};
-                    for touch in &e.touches{
-                        let digit_id = live_id_num!(touch, touch.uid).into();
-                        match touch.state{
-                            TouchState::Stop=>{
-                                self.fingers.release_digit(digit_id);
-                                self.fingers.remove_hover(digit_id);
-                            }
-                            TouchState::Start | TouchState::Move | TouchState::Stable =>{
-                                self.fingers.cycle_hover_area(digit_id);
-                            }
-                        }
-                    }
-                    self.fingers.switch_captures();
+                    let e = if let Event::TouchUpdate(e) = e{e}else{panic!()};
+                    self.fingers.process_touch_update_end(&e.touches);
                 }
                 
                 live_id!(ToWasmMouseDown) => {

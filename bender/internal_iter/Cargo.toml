@@ -1,0 +1,7 @@
+[package]
+name = "bender_internal_iter"
+version = "0.1.0"
+authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
+edition = "2018"
+
+[dependencies]
