@@ -1697,7 +1697,7 @@ impl App {
         }
         
         if let Event::MidiPorts(ports) = event {
-            //println!("{}", ports);
+            log!("{}", ports);
             cx.use_midi_inputs(&ports.all_inputs());
         }
         
