@@ -163,21 +163,21 @@ live_design!{
     FishDropDown = <DropDown> {
         walk: {width: Fit}
         layout: {padding: {top: (SPACING_BASE_PADDING), right: 18.0, bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
-        
+
         draw_label: {
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-Text.ttf"}},
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
                         mix(
-                            (COLOR_TEXT_H2),
-                            (COLOR_TEXT_H2),
+                            (#xFFF8),
+                            (#xFFF8),
                             self.focus
                         ),
-                        (COLOR_TEXT_H2),
+                        (#xFFFF),
                         self.hover
                     ),
-                    (COLOR_TEXT_H2),
+                    (#x000A),
                     self.pressed
                 )
             }
@@ -198,30 +198,33 @@ live_design!{
                 }
             }
         }
+
         draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                self.get_bg(sdf);
+                // triangle
+                let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                let sz = 2.5;
+                
+                sdf.move_to(c.x - sz, c.y - sz);
+                sdf.line_to(c.x + sz, c.y - sz);
+                sdf.line_to(c.x, c.y + sz * 0.75);
+                sdf.close_path();
+                
+                sdf.fill(mix(#FFFA, #FFFF, self.hover));
+                
+                return sdf.result
+            }
+
             fn get_bg(self, inout sdf: Sdf2d) {
-                sdf.box(
-                    1,
-                    1,
-                    self.rect_size.x - 2,
-                    self.rect_size.y - 2,
-                    3
+                sdf.rect(
+                    0,
+                    0,
+                    self.rect_size.x,
+                    self.rect_size.y
                 )
-                sdf.stroke_keep(
-                    mix(
-                        mix((COLOR_HIDDEN_WHITE), (COLOR_HIDDEN_WHITE), pow(self.pos.y, .25)),
-                        mix((COLOR_BEVEL_HIGHLIGHT), #x00000044, pow(self.pos.y, .25)),
-                        self.hover
-                    ),
-                    1.
-                );
-                sdf.fill(
-                    mix(
-                        #FFFFFF00,
-                        #FFFFFF10,
-                        self.hover
-                    )
-                );
+                sdf.fill((COLOR_HIDDEN_WHITE))
             }
         }
     }
@@ -685,72 +688,11 @@ live_design!{
 
 
     
-    SequencerControls = <GradientY> {
-        walk: {height: Fit, width: Fill, margin: { top: 5, right: 10, bottom: 10, left: 10 }}
+    SequencerControls = <Frame> {
+        walk: {height: Fit, width: Fill, margin: { top: 0, right: 10, bottom: 5, left: 10 }}
         layout: {flow: Down, padding: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: 0.0, left: (SPACING_BASE_PADDING)}}
 
-        draw_bg: {
-            instance border_width: 1.0
-            instance border_color: #ffff
-            instance inset: vec4(1.0, 1.0, 1.0, 1.0)
-            instance radius: 2.5
-            instance dither: 1.0
-            color: (#x00000008),
-            color2: (#x0004)
-            instance border_color: #x1A
-            instance border_color2: #x28
-            instance border_color3: #x50
-
-            fn get_color(self) -> vec4 {
-                let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
-                return mix(self.color, self.color2, self.pos.y + dither)
-            }
-
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.box(
-                    self.inset.x + self.border_width,
-                    self.inset.y + self.border_width,
-                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
-                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
-                    max(1.0, self.radius)
-                )
-                sdf.fill_keep(self.get_color())
-                if self.border_width > 0.0 {
-                    sdf.stroke(
-                        mix(
-                            mix(self.border_color, self.border_color2, clamp(self.pos.y * 10, 0, 1)),
-                            mix(self.border_color2, self.border_color3, self.pos.y),
-                            self.pos.y
-                        ),
-                        self.border_width
-                    )
-                }
-                return sdf.result;
-            }
-        }
         
-        <Frame> {
-            walk: {height: Fit, width: Fill}
-            layout: {flow: Right, align: {x: 0.0, y: 0.5}, spacing: (SPACING_CONTROLS)}
-            
-            playpause = <PlayPause> {}
-            
-            speed = <InstrumentSlider> {
-                walk: {width: Fill}
-                slider = {
-                    draw_slider: {line_color: (COLOR_MUSIC)}
-                    min: 0.0
-                    max: 240.0
-                    label: "BPM"
-                }
-            }
-        }
-
-        <Divider> {
-            walk: { margin: {top: (SPACING_BASE_PADDING), right: 0, bottom: (SPACING_BASE_PADDING) }}
-        }
-
         <Frame> {
             walk: {height: Fit, width: Fill}
             layout: {flow: Right, spacing: (SPACING_CONTROLS), padding: {bottom: 10, top: 5}}
@@ -764,7 +706,7 @@ live_design!{
             }
             
             scaletype = <InstrumentDropdown> {
-                walk: {height: Fit, width: Fill}
+                walk: {height: Fit, width: Fit}
                 dropdown = {
                     labels: ["Minor", "Major", "Dorian", "Pentatonic"]
                     values: [Minor, Major, Dorian, Pentatonic]
@@ -788,39 +730,47 @@ live_design!{
                 walk: {width: Fit, height: Fit}
             }
         }
+
         
     }
     
     PianoControls = <GradientY> {
-        layout: {flow: Down, padding: 0}
-        walk: {height: Fit, width: 110, margin: {top: -5, right: 0, bottom: 0, left: (SPACING_BASE_PADDING * 2)} }
+        layout: {flow: Down, padding: 0, spacing: (SPACING_BASE_PADDING)}
+        walk: {height: Fit, width: 120, margin: 0.0 }
         draw_bg: {color: (COLOR_HIDDEN_WHITE), color2: (COLOR_HIDDEN_WHITE)}
 
             <Frame> {
-                layout: {flow: Right, align: {x: 0.0, y: 0.5}, padding: 0}
-                walk: {width: Fill, height: Fit, margin: { bottom: -7.0 } }
+                layout: {flow: Right, align: {x: 0.0, y: 0.0}, padding: 0}
+                walk: {width: Fill, height: Fit, margin: 0.0 }
+                
+                <SubheaderContainer> {
+                        walk: {margin: 0}
+                    <FishSubTitle> {
+                        label = {
+                            text: "Arp",
+                            draw_label: {color: (COLOR_MUSIC)},
+                        }
+                    }
 
-                <FishSubTitle> {
-                    label = {
-                        text: "Arp",
-                        draw_label: {color: (COLOR_MUSIC)},
+                    <FillerH> {} 
+
+                    arp = <InstrumentCheckbox> {
+                        walk: {margin: 0}
+                        layout: {padding: 0}
+                        checkbox = {
+                            label: " "
+                            layout: { padding: {top: 0.0, right: 5.0, bottom: 0.0, left: 0.0}}
+                            walk: { margin: 0.0 }
+                        }
+                        walk: {width: Fit, height: Fit, margin: 0}
                     }
                 }
 
-                arp = <InstrumentCheckbox> {
-                    checkbox = {
-                        label: " "
-                        layout: { padding: { top: 7.5, right: 0, bottom: 7.5, left: 0 } }
-                        walk: { margin: {left: -7.5}  }
-                    }
-                    layout: {padding: 0}
-                    walk: {width: Fit, height: Fit, margin: 0}
-                }
 
             }
 
             arpoctaves = <InstrumentBipolarSlider> {
-                walk: {width: 100, margin: 0}
+                walk: {width: Fill, margin: 0}
                 layout: {padding: 0}
                 slider = {
                     draw_slider: {line_color: (COLOR_MUSIC)}
@@ -856,8 +806,76 @@ live_design!{
                 }
             }
             
-            sequencer = <Sequencer> {walk: {width: Fill, height: 300, margin: {top: 10}} }
-            <SequencerControls> {}
+            <GradientY> {
+                walk: {height: Fit}
+                layout: {flow: Down}
+                draw_bg: {
+                    instance border_width: 1.0
+                    instance border_color: #ffff
+                    instance inset: vec4(1.0, 1.0, 1.0, 1.0)
+                    instance radius: 2.5
+                    instance dither: 1.0
+                    color: (#x00000008),
+                    color2: (#x0004)
+                    instance border_color: #x1A
+                    instance border_color2: #x28
+                    instance border_color3: #x50
+
+                    fn get_color(self) -> vec4 {
+                        let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
+                        return mix(self.color, self.color2, pow(self.pos.y, 0.5) + dither)
+                    }
+
+                    fn pixel(self) -> vec4 {
+                        let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                        sdf.box(
+                            self.inset.x + self.border_width,
+                            self.inset.y + self.border_width,
+                            self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                            self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                            max(1.0, self.radius)
+                        )
+                        sdf.fill_keep(self.get_color())
+                        if self.border_width > 0.0 {
+                            sdf.stroke(
+                                mix(
+                                    mix(self.border_color, self.border_color2, clamp(self.pos.y * 10, 0, 1)),
+                                    mix(self.border_color2, self.border_color3, self.pos.y),
+                                    self.pos.y
+                                ),
+                                self.border_width
+                            )
+                        }
+                        return sdf.result;
+                    }
+                }
+
+                <Frame> {
+                    walk: {height: Fit, width: Fill}
+                    layout: {flow: Right, align: {x: 0.0, y: 0.5}, spacing: 15, padding: {top: 7.5, right: 12.5, bottom: 0, left: 12.5 } }
+                    
+                    playpause = <PlayPause> {}
+                    
+                    speed = <InstrumentSlider> {
+                        walk: {width: Fill}
+                        slider = {
+                            draw_slider: {line_color: (COLOR_MUSIC)}
+                            min: 0.0
+                            max: 240.0
+                            label: "BPM"
+                        }
+                    }
+                }
+
+                <Divider> { walk: { margin: {top: (SPACING_BASE_PADDING), right: 0, bottom: 0.0 }} }
+
+                sequencer = <Sequencer> {walk: {width: Fill, height: 300, margin: {top: 10}} }
+
+                <Divider> { walk: { margin: {top: (SPACING_BASE_PADDING), right: 0, bottom: 0.0 }} }
+
+                <SequencerControls> {}
+
+            }
         }
     }
     
@@ -1481,27 +1499,43 @@ live_design!{
     }
     
     Play = <FishPanel> {
-        layout: {flow: Right, padding: {top: 10}}
+        layout: {flow: Right, padding: {top: 10}, spacing: 0.0 }
         walk: { height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2), bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
         draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
 
         <PianoControls> {}
 
         piano = <Piano> {
-            walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING * 2); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING * 2)} }
+            walk: {height: Fit, width: Fill, margin: {top: 0, right: (SPACING_BASE_PADDING); bottom: (SPACING_BASE_PADDING * 2), left: (SPACING_BASE_PADDING)} }
         }
 
-        porta = <InstrumentSlider> {
-            walk: { width: 100, margin: { right: 10 } }
-            layout: { padding: {right: 10 } }
-            slider = {
-                draw_slider: {line_color: (COLOR_MUSIC)}
-                min: 0.0
-                max: 1.0
-                label: "Portamento"
+        <Frame> {
+            layout: {flow: Down, padding: 0, spacing: (SPACING_BASE_PADDING)}
+            walk: {height: Fit, width: 120, margin: 0.0 }
+
+            <SubheaderContainer> {
+                walk: {margin: 0.0 }
+                // layout: {padding: 0.0}
+                <FishSubTitle> {
+                    label = {
+                        text: "Settings",
+                        draw_label: {color: (COLOR_MUSIC)},
+                    }
+                }
+            }
+            
+            porta = <InstrumentSlider> {
+                walk: { width: Fill, margin: 0.0 }
+                layout: { padding: 0.0 }
+                slider = {
+                    walk: { width: Fill } 
+                    draw_slider: {line_color: (COLOR_MUSIC)}
+                    min: 0.0
+                    max: 1.0
+                    label: "Portamento"
+                }
             }
         }
-        
     }
     
     // APP
