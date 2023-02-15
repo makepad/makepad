@@ -14,7 +14,7 @@ rm -rf $APK_DIR/*
 pushd $APK_DIR
     # Compile Java to JVM bytecode. This generates one or more class files.
     echo "Compiling java"
-    JAVA_HOME=$JDK_DIR $JDK_DIR/bin/javac -classpath $SDK_DIR/android-33-ext4/android.jar -d . $JAVA_FILES
+    JAVA_HOME=$JDK_DIR $JDK_DIR/bin/javac -classpath $SDK_DIR/android-33-ext4/android.jar -Xlint:deprecation -d . $JAVA_FILES
     # Convert JVM bytecode to Dalvik bytecode. This generates a classes.dex file.
     echo "Creating dex file"
     JAVA_HOME=$JDK_DIR $SDK_DIR/android-13/d8 --classpath $SDK_DIR/android-33-ext4/android.jar $(find . -name "*.class")

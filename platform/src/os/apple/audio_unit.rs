@@ -120,7 +120,6 @@ impl AudioUnitAccess {
                                     time: Some(time)
                                 }, output)
                             }
-                            output
                         });
                         running.audio_unit = Some(audio_unit);
                     }
@@ -371,7 +370,7 @@ impl AudioUnitAccess {
                         has_failed: self.failed_devices.lock().unwrap().contains(&device_id),
                         device_id,
                         device_type: AudioDeviceType::Input,
-                        channels: input_channels,
+                        channel_count: input_channels,
                         is_default: core_device_id == default_input_id,
                         name: device_name.clone(),
                     }
@@ -385,7 +384,7 @@ impl AudioUnitAccess {
                         has_failed: self.failed_devices.lock().unwrap().contains(&device_id),
                         device_id,
                         device_type: AudioDeviceType::Output,
-                        channels: input_channels,
+                        channel_count: input_channels,
                         is_default: core_device_id == default_output_id,
                         name: device_name.clone(),
                     }
@@ -995,7 +994,7 @@ impl AudioUnit {
         }
     }
     
-    pub fn set_input_handler<F: Fn(AudioTime, AudioBuffer) -> AudioBuffer + Send + Sync + 'static>(&self, audio_callback: F) {
+    pub fn set_input_handler<F: Fn(AudioTime, &AudioBuffer) + Send + Sync + 'static>(&self, audio_callback: F) {
         match self.unit_query {
             AudioUnitQuery::Input => (),
             x => panic!("cannot call set_input_handler on this device {:?}", x)
@@ -1024,7 +1023,7 @@ impl AudioUnit {
                             sample_time: (*time_stamp).mSampleTime,
                             host_time: (*time_stamp).mHostTime,
                             rate_scalar: (*time_stamp).mRateScalar
-                        }, buffer);
+                        }, &buffer);
                     }
                 );
                 let () = msg_send![self.au_audio_unit, setInputHandler: &input_handler];
