@@ -30,6 +30,10 @@ pub struct AndroidToJava<'a> {
 }
 
 impl<'a> AndroidToJava<'a> {
+    pub fn get_env(&self)->*mut JNIEnv{
+        self.env
+    }
+    
     /// Swaps the buffers of the MakepadSurface.
     pub fn swap_buffers(&self) {
         unsafe {
@@ -139,11 +143,26 @@ impl<'a> AndroidToJava<'a> {
             let method_id = ((**self.env).GetMethodID.unwrap())(
                 self.env,  
                 class,
-                name.as_ptr(),
+                name.as_ptr(), 
                 signature.as_ptr(), 
             );
             let string_array = ((**self.env).CallObjectMethod.unwrap())(self.env, self.callback, method_id, flag);
             return java_string_array_to_vec(self.env, string_array);
+        }
+    }
+     
+    pub fn open_all_midi_devices(&self){
+        unsafe {
+            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
+            let name = CString::new("openAllMidiDevices").unwrap();
+            let signature = CString::new("()V").unwrap();
+            let method_id = ((**self.env).GetMethodID.unwrap())(
+                self.env,  
+                class,
+                name.as_ptr(),
+                signature.as_ptr(), 
+            );
+            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
         }
     }
 }
@@ -370,6 +389,26 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_timeout(
 ) {
     (*(cx as *mut Cx)).from_java_timeout(
         id,
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_midiDevice(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    name: jstring,
+    midi_device: jobject,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_midi_device(
+        jstring_to_string(env, name),
+        midi_device,
         AndroidToJava {
             env,
             callback,

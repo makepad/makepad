@@ -5,6 +5,7 @@ use std::ffi::{c_char, c_void};
 
 pub type va_list = *mut c_void;
 
+#[repr(C)]
 pub union jvalue {
     pub z: jboolean,
     pub b: jbyte,
@@ -89,6 +90,7 @@ pub struct JNIInvokeInterface_ {
     >,
 }
 
+#[repr(C)]
 pub struct JNINativeInterface_ {
     pub reserved0: *mut c_void,
     pub reserved1: *mut c_void,

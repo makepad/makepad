@@ -4,6 +4,7 @@ use {
     std::time::Instant,
     self::super::{
         android_media::CxAndroidMedia,
+        jni_sys::jobject,
         android_jni::{AndroidToJava},
     },
     self::super::super::{
@@ -163,10 +164,14 @@ impl Cx {
     }
     
     fn after_every_event(&mut self, to_java: &AndroidToJava) {
-        self.handle_platform_ops(&to_java);
+        self.handle_platform_ops(&to_java); 
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             to_java.schedule_redraw();
         }
+    }
+    
+    pub fn from_java_midi_device(&mut self, name:String, midi_device: jobject, to_java: AndroidToJava){
+        self.os.media.amidi().lock().unwrap().received_midi_device(name, midi_device, &to_java);
     }
     
     pub fn draw_pass_to_fullscreen(
@@ -178,9 +183,9 @@ impl Cx {
         
         self.setup_render_pass(pass_id, self.os.dpi_factor);
         
-        // keep repainting in a loop
+        // keep repainting in a loop  
         self.passes[pass_id].paint_dirty = false;
-        
+         
         unsafe {
             gl_sys::Viewport(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
