@@ -1,4 +1,5 @@
 package nl.makepad.android;
+import android.Manifest;
 
 import android.os.Bundle;
 import android.app.Activity;
@@ -12,6 +13,7 @@ public class MakepadActivity extends Activity {
         super.onCreate(savedInstanceState);
         mCx = Makepad.newCx();
         setContentView(new MakepadSurfaceView(this, mCx));
+        requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 123);
     }
 
     @Override

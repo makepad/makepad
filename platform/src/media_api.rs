@@ -18,7 +18,7 @@ pub trait CxMediaApi {
     fn audio_output<F>(&mut self, index:usize, f: F) where F: FnMut(AudioInfo, &mut AudioBuffer) + Send  + 'static{
         self.audio_output_box(index, Box::new(f))
     }
-    fn audio_input<F>(&mut self, index:usize, f: F) where F: FnMut(AudioInfo, AudioBuffer)->AudioBuffer + Send  + 'static{
+    fn audio_input<F>(&mut self, index:usize, f: F) where F: FnMut(AudioInfo, &AudioBuffer) + Send  + 'static{
         self.audio_input_box(index, Box::new(f))
     }
     

@@ -788,23 +788,23 @@ impl LiveDependency{
             let origin_doc = live_registry.token_id_to_origin_doc(node.origin.token_id().unwrap());
             let mut path = String::new();
             origin_doc.get_string(string_start, string_count, &mut path);
-            
             if let Some(path) = path.strip_prefix("crate://self/"){
                 let file_id = node.origin.token_id().unwrap().file_id().unwrap();
-                let manifest_path = live_registry.file_id_to_cargo_manifest_path(file_id);
-                return Self(format!("{}/{}", manifest_path, path));
+                let mut final_path = live_registry.file_id_to_cargo_manifest_path(file_id);
+                final_path.push('/');
+                final_path.push_str(path);
+                return Self(final_path);
             }
-            else if let Some(path) = path.strip_prefix("crate://"){
+            else 
+            if let Some(path) = path.strip_prefix("crate://"){
                 let mut split = path.split('/');
                 if let Some(crate_name) = split.next(){
-                    if let Some(cmp) = live_registry.crate_name_to_cargo_manifest_path(crate_name){
-                        let mut path = cmp.to_string();
-                        path.push('/');
+                    if let Some(mut final_path) = live_registry.crate_name_to_cargo_manifest_path(crate_name){
                         while let Some(next) = split.next(){
-                            path.push('/');
-                            path.push_str(next);
+                            final_path.push('/');
+                            final_path.push_str(next);
                         }
-                        return Self(path);
+                        return Self(final_path);
                     }
                 }                
             }
