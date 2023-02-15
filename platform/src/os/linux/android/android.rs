@@ -185,7 +185,7 @@ impl Cx {
         
         // keep repainting in a loop  
         self.passes[pass_id].paint_dirty = false;
-         
+          
         unsafe {
             gl_sys::Viewport(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
