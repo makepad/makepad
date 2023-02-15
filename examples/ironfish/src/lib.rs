@@ -72,7 +72,7 @@ live_design!{
     }
 
     Divider = <Frame> {
-        walk: {width: Fill, height: Fit, margin: {top: (SSPACING_2 * 2), right: 0, bottom: (SSPACING_2 * 2.5), left: 0}}
+        walk: {width: Fill, height: Fit, margin: {top: (SSPACING_3), right: 0, bottom: (SSPACING_3), left: (SSPACING_0)}}
         layout: {flow: Down}
         <Box> {
             walk: {width: Fill, height: 1.0}
@@ -98,7 +98,7 @@ live_design!{
     
     SubheaderContainer = <Box> {
         draw_bg: { color: #xFFFFFF10 }
-        walk: {width: Fill, height: Fit, margin: {bottom: (SSPACING_2), top: (SSPACING_2 * 2) }}
+        walk: {width: Fill, height: Fit, margin: {bottom: (SSPACING_2), top: (SSPACING_3) }}
         layout: {padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_1) }}
     }
 
@@ -288,10 +288,10 @@ live_design!{
         label: "CutOff1"
         label_text: {text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_TEXT_H2)}
         text_input: {
-            cursor_margin_bottom: 3.0,
-            cursor_margin_top: 4.0,
-            select_pad_edges: 3.0
-            cursor_size: 2.0,
+            cursor_margin_bottom: (SSPACING_1),
+            cursor_margin_top: (SSPACING_1),
+            select_pad_edges: (SSPACING_1),
+            cursor_size: (SSPACING_1),
             empty_message: "0",
             numeric_only: true,
             draw_bg: {
@@ -472,7 +472,7 @@ live_design!{
     }
     
     FishTitle = <Box> {
-        walk: {width: Fit, height: Fit, margin: {bottom: 5.0}}
+        walk: {width: Fit, height: Fit, margin: {bottom: (SSPACING_1)}}
         layout: {padding: <SPACING_2> {}}
         label = <Label> {
             draw_label: {
@@ -487,7 +487,7 @@ live_design!{
         layout: {flow: Right }
         walk: {height: Fit, width: Fill, margin: { bottom: (SSPACING_2)} }
         title = <FishTitle> {
-            walk: {height: Fit, width: Fill, margin: 0}
+            walk: {height: Fit, width: Fill, margin: <SPACING_0> {}}
             layout: {padding: <SPACING_2> {} }
         }
         menu = <Frame> {
@@ -510,7 +510,7 @@ live_design!{
     }
     
     PlayPause = <InstrumentCheckbox> {
-        walk: {width: Fit, height: Fit, margin: 10.0}
+        walk: {width: Fit, height: Fit, margin: <SPACING_3> {} }
         layout: {align: {x: 0.0, y: 0.5}}
         checkbox = {
             walk: {width: 20, height: 20, margin: { right: -30 }}
@@ -658,13 +658,13 @@ live_design!{
     }
     
     SequencerControls = <Frame> {
-        walk: {height: Fit, width: Fill, margin: { top: 0, right: 10, bottom: 5, left: 10 }}
+        walk: {height: Fit, width: Fill, margin: { top: (SSPACING_0), right: (SSPACING_3), bottom: (SSPACING_2), left: (SSPACING_3) }}
         layout: {flow: Down, padding: <SPACING_2> {} }
 
         
         <Frame> {
             walk: {height: Fit, width: Fill}
-            layout: {flow: Right, spacing: (SSPACING_1), padding: {bottom: 10, top: 5}}
+            layout: {flow: Right, spacing: (SSPACING_1), padding: {bottom: (SSPACING_3), top: (SSPACING_2)}}
             
             rootnote = <InstrumentDropdown> {
                 walk: {height: Fit, width: Fit}
@@ -703,15 +703,15 @@ live_design!{
     
     PianoControls = <GradientY> {
         layout: {flow: Down, padding: <SPACING_0> {}, spacing: (SSPACING_2)}
-        walk: {height: Fit, width: 120, margin: 0.0 }
+        walk: {height: Fit, width: 120, margin: <SPACING_0> {} }
         draw_bg: {color: (COLOR_HIDDEN_WHITE), color2: (COLOR_HIDDEN_WHITE)}
 
             <Frame> {
                 layout: {flow: Right, align: {x: 0.0, y: 0.0}, padding: <SPACING_0> {} }
-                walk: {width: Fill, height: Fit, margin: 0.0 }
+                walk: {width: Fill, height: Fit, margin: <SPACING_0> {} }
                 
                 <SubheaderContainer> {
-                        walk: {margin: 0}
+                        walk: {margin: <SPACING_0> {}}
                     <FishSubTitle> {
                         label = {
                             text: "Arp",
@@ -722,14 +722,14 @@ live_design!{
                     <FillerH> {} 
 
                     arp = <InstrumentCheckbox> {
-                        walk: {margin: 0}
+                        walk: {margin: <SPACING_0> {}}
                         layout: {padding: <SPACING_0> {} }
                         checkbox = {
                             label: " "
                             layout: { padding: {top: (SSPACING_0), right: 5.0, bottom: (SSPACING_0), left: (SSPACING_0)}}
-                            walk: { margin: 0.0 }
+                            walk: { margin: <SPACING_0> {} }
                         }
-                        walk: {width: Fit, height: Fit, margin: 0}
+                        walk: {width: Fit, height: Fit, margin: <SPACING_0> {}}
                     }
                 }
 
@@ -737,7 +737,7 @@ live_design!{
             }
 
             arpoctaves = <InstrumentBipolarSlider> {
-                walk: {width: Fill, margin: 0}
+                walk: {width: Fill, margin: <SPACING_0> {}}
                 layout: {padding: <SPACING_0> {} }
                 slider = {
                     draw_slider: {line_color: (COLOR_MUSIC)}
@@ -752,7 +752,7 @@ live_design!{
     
     SequencerPanel = <Box> {
         layout: {flow: Down}
-        walk: {margin: 0}
+        walk: {margin: <SPACING_0> {}}
                     
         <FishPanel> {
             walk: {width: Fill, height: Fill}
@@ -833,11 +833,11 @@ live_design!{
                     }
                 }
 
-                <Divider> { walk: { margin: {top: (SSPACING_2), right: 0, bottom: 0.0 }} }
+                <Divider> { walk: { margin: {top: (SSPACING_2), right: (SSPACING_0), bottom: (SSPACING_0) }} }
 
-                sequencer = <Sequencer> {walk: {width: Fill, height: 300, margin: {top: 10}} }
+                sequencer = <Sequencer> {walk: {width: Fill, height: 300, margin: {top: (SSPACING_3)}} }
 
-                <Divider> { walk: { margin: {top: (SSPACING_2), right: 0, bottom: 0.0 }} }
+                <Divider> { walk: { margin: {top: (SSPACING_2), right: (SSPACING_0), bottom: (SSPACING_0) }} }
 
                 <SequencerControls> {}
 
@@ -854,7 +854,7 @@ live_design!{
             walk: {width: Fill, height: Fit}
             
             <SubheaderContainer> {
-                walk: {margin: { top: 0 }}
+                walk: {margin: { top: (SSPACING_0) }}
                 <FishSubTitle> {
                     label = {
                         text: "Bitcrush",
@@ -865,14 +865,14 @@ live_design!{
                 <FillerV> {}
 
                 crushenable = <InstrumentCheckbox> {
-                    walk: {margin: 0}
+                    walk: {margin: <SPACING_0> {}}
                     layout: {padding: <SPACING_0> {} }
                     checkbox = {
                         label: " "
                         layout: { padding: {top: (SSPACING_0), right: 5.0, bottom: (SSPACING_0), left: (SSPACING_0)}}
-                        walk: { margin: 0.0 }
+                        walk: { margin: <SPACING_0> {} }
                     }
-                    walk: {width: Fit, height: Fit, margin: { top: 0 } }
+                    walk: {width: Fit, height: Fit, margin: { top: (SSPACING_0) } }
                 }
             }
         }
@@ -1380,7 +1380,7 @@ live_design!{
             }
         
             <SubheaderContainer> {
-                walk: {margin: {top: 0 }}
+                walk: {margin: {top: (SSPACING_0) }}
                 <FishSubTitle> {
                     label = {
                         text: "Mixer",
@@ -1418,7 +1418,7 @@ live_design!{
             }
 
             <SubheaderContainer> {
-                walk: {margin: {top: 0 }}
+                walk: {margin: {top: (SSPACING_0) }}
                 <FishSubTitle> {
                     label = {
                         text: "Volume",
@@ -1464,21 +1464,21 @@ live_design!{
     
     Play = <FishPanel> {
         layout: {flow: Right, padding: {top: (SSPACING_3)}, spacing: 0.0 }
-        walk: { height: Fit, width: Fill, margin: {top: 0, right: (SSPACING_2 * 2), bottom: (SSPACING_2 * 2), left: (SSPACING_2 * 2)} }
+        walk: { height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)} }
         draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
 
         <PianoControls> {}
 
         piano = <Piano> {
-            walk: {height: Fit, width: Fill, margin: {top: 0, right: (SSPACING_2); bottom: (SSPACING_2 * 2), left: (SSPACING_2)} }
+            walk: {height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_2); bottom: (SSPACING_3), left: (SSPACING_2)} }
         }
 
         <Frame> {
             layout: {flow: Down, padding: <SPACING_0> {}, spacing: (SSPACING_2)}
-            walk: {height: Fit, width: 120, margin: 0.0 }
+            walk: {height: Fit, width: 120, margin: <SPACING_0> {} }
 
             <SubheaderContainer> {
-                walk: {margin: 0.0 }
+                walk: {margin: <SPACING_0> {} }
                 <FishSubTitle> {
                     label = {
                         text: "Settings",
@@ -1488,7 +1488,7 @@ live_design!{
             }
             
             porta = <InstrumentSlider> {
-                walk: { width: Fill, margin: 0.0 }
+                walk: { width: Fill, margin: <SPACING_0> {} }
                 layout: { padding: <SPACING_0> {} }
                 slider = {
                     walk: { width: Fill } 
