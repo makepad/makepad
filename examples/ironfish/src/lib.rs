@@ -1390,6 +1390,7 @@ live_design!{
             }
 
             <MixerPanel> {walk: {width: Fill, height: Fit}}
+
             <Frame> {
                 walk: {width: Fill, height: Fit}
                 layout: { flow: Right, spacing: 7.5 }
