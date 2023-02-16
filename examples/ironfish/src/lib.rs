@@ -53,16 +53,22 @@ live_design!{
     const COLOR_FILTER = #x88FF88
     const COLOR_FX = #x99EEFF
 
-    const COLOR_TEXT_H1 = #x000000CC
-    const COLOR_TEXT_H2 = #xFFFFFF66
+    const COLOR_AUVIZ_1 = #x0004
+    const COLOR_AUVIZ_2 = #x000C
 
+    const COLOR_TEXT_H1 = #x000000CC
+    
     const COLOR_DIVIDER = #x000000AA
-    const COLOR_TEXT_H2_HOVER = #xD
     const COLOR_BEVEL_SHADOW = #x00000066
-    const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF44
-    const COLOR_CONTROL_INSET = #x00000066
-    const COLOR_BG_GRADIENT_BRIGHT = #xFFFFFF20
+    
     const COLOR_BG_GRADIENT_DARK = #xFFFFFF0A
+    const COLOR_BG_GRADIENT_BRIGHT = #xFFFFFF20
+    const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF40
+    const COLOR_TEXT_H2 = #xFFFFFF66
+    const COLOR_TEXT_H2_HOVER = #xFFFFFFDD
+
+    const COLOR_UP_FULL = #xFFFF
+    const COLOR_UP_2 = #xFFFFFF10
 
     // HELPERS
     FillerH = <Frame> {
@@ -99,17 +105,30 @@ live_design!{
     }
     
     SubheaderContainer = <Box> {
-        draw_bg: { color: #xFFFFFF10 }
+        draw_bg: { color: (COLOR_UP_2) }
         walk: {width: Fill, height: Fit, margin: {bottom: (SSPACING_2), top: (SSPACING_2) }}
         layout: { padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_1) }}
     }
 
+    FishSubTitle = <Frame> {
+        walk: {width: Fit, height: Fit}
+        layout: {padding: <SPACING_2> {}}
+        
+        label = <Label> {
+            draw_label: {
+                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                color: (COLOR_TEXT_H2)
+            }
+            text: "replace me!"
+        }
+    }
+    
     FishPanel = <GradientY> {
         layout: {flow: Down, padding: <SPACING_2> {} }
         walk: {width: Fill, height: Fit}
         draw_bg: {
             instance border_width: 1.0
-            instance border_color: #ffff
+            instance border_color: (COLOR_UP_FULL)
             instance inset: vec4(1.0, 1.0, 1.0, 1.0)
             instance radius: 2.5
             instance dither: 1.0
@@ -272,7 +291,7 @@ live_design!{
                             #FFFFFF20,
                             self.hover
                         ),
-                        mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 0.3)),
+                        mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 0.3)),
                         self.pressed
                     )
                 );
@@ -312,8 +331,8 @@ live_design!{
                 sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 1);
                 sdf.fill_keep(
                     mix(
-                        mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 1.0)),
-                        mix((COLOR_CONTROL_INSET) * 1.75, (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 1.0)),
+                        mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 1.0)),
+                        mix((COLOR_BEVEL_SHADOW) * 1.75, (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 1.0)),
                         self.drag
                     )
                 ) // Control backdrop gradient
@@ -389,12 +408,11 @@ live_design!{
                         mix(self.border_color, self.border_color2, clamp(self.pos.y - 0.2, 0, 1)),
                         self.border_width
                     )
-                    // sdf.fill(mix(#x0006, #x0008, self.hover));
 
                     sdf.fill(
                         mix(
-                            mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 1.0)),
-                            mix((COLOR_CONTROL_INSET) * 1.75, (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 1.0)),
+                            mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 1.0)),
+                            mix((COLOR_BEVEL_SHADOW) * 1.75, (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 1.0)),
                             self.hover
                         )
                     )
@@ -497,19 +515,6 @@ live_design!{
         }
     }
     
-    FishSubTitle = <Frame> {
-        walk: {width: Fit, height: Fit}
-        layout: {padding: <SPACING_2> {}}
-        
-        label = <Label> {
-            draw_label: {
-                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-                color: (COLOR_TEXT_H2)
-            }
-            text: "replace me!"
-        }
-    }
-    
     PlayPause = <InstrumentCheckbox> {
         walk: {width: Fit, height: Fit, margin: <SPACING_3> {} }
         layout: {align: {x: 0.0, y: 0.5}}
@@ -558,7 +563,7 @@ live_design!{
         
         display = <GraphPaper> {}
         
-        <Frame> { // TODO: REPLACE WITH DEDICATED WIDGET?
+        <Frame> {
             walk: {width: Fill, height: Fit}
             layout: {flow: Right, spacing: (SSPACING_1)}
             attack = <InstrumentSlider> {
@@ -702,7 +707,7 @@ live_design!{
         }
     }
     
-    PianoControls = <GradientY> {
+    Arp = <GradientY> {
         layout: {flow: Down, padding: <SPACING_0> {}, spacing: (SSPACING_2)}
         walk: {height: Fit, width: 120, margin: <SPACING_0> {} }
         draw_bg: {color: (COLOR_HIDDEN_WHITE), color2: (COLOR_HIDDEN_WHITE)}
@@ -751,6 +756,33 @@ live_design!{
             }
     }
     
+    PianoSettings = <Frame> {
+        layout: {flow: Down, padding: <SPACING_0> {}, spacing: (SSPACING_2)}
+        walk: {height: Fit, width: 120, margin: <SPACING_0> {} }
+
+        <SubheaderContainer> {
+            walk: { margin: <SPACING_0> {} }
+            <FishSubTitle> {
+                label = {
+                    text: "Settings",
+                    draw_label: {color: (COLOR_MUSIC)},
+                }
+            }
+        }
+        
+        porta = <InstrumentSlider> {
+            walk: { width: Fill, margin: <SPACING_0> {} }
+            layout: { padding: <SPACING_0> {} }
+            slider = {
+                walk: { width: Fill } 
+                draw_slider: {line_color: (COLOR_MUSIC)}
+                min: 0.0
+                max: 1.0
+                label: "Portamento"
+            }
+        }
+    }
+
     SequencerPanel = <Box> {
         layout: {flow: Down}
         walk: {margin: <SPACING_0> {}}
@@ -1364,7 +1396,7 @@ live_design!{
     
     FishPanelSoundSources = <FishPanelContainer> {
         walk: {width: Fill, height: Fill}
-        layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
+        layout: {padding: <SPACING_0> {}, spacing: (SSPACING_0), flow: Down}
         
         <FishPanel> {
             walk: {height: Fill}
@@ -1397,6 +1429,9 @@ live_design!{
                 osc1 = <OscPanel> {}
                 osc2 = <OscPanel> {}
             }
+
+            <FillerV> {}
+            panic = <FishButton> {text: "Panic", walk: {width: Fill}}
         }
     }
     
@@ -1461,44 +1496,16 @@ live_design!{
             <DelayFXPanel> {}
         }
     }
+        
     
     Play = <FishPanel> {
         layout: {flow: Right, padding: {top: (SSPACING_3)}, spacing: (SSPACING_0) }
         walk: { height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)} }
         draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
 
-        <PianoControls> {}
-
-        piano = <Piano> {
-            walk: {height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_2); bottom: (SSPACING_3), left: (SSPACING_2)} }
-        }
-
-        <Frame> {
-            layout: {flow: Down, padding: <SPACING_0> {}, spacing: (SSPACING_2)}
-            walk: {height: Fit, width: 120, margin: <SPACING_0> {} }
-
-            <SubheaderContainer> {
-                walk: { margin: <SPACING_0> {} }
-                <FishSubTitle> {
-                    label = {
-                        text: "Settings",
-                        draw_label: {color: (COLOR_MUSIC)},
-                    }
-                }
-            }
-            
-            porta = <InstrumentSlider> {
-                walk: { width: Fill, margin: <SPACING_0> {} }
-                layout: { padding: <SPACING_0> {} }
-                slider = {
-                    walk: { width: Fill } 
-                    draw_slider: {line_color: (COLOR_MUSIC)}
-                    min: 0.0
-                    max: 1.0
-                    label: "Portamento"
-                }
-            }
-        }
+        <Arp> {}
+        piano = <Piano> { walk: {height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_2); bottom: (SSPACING_3), left: (SSPACING_2)} } }
+        <PianoSettings> {}
     }
     
     // APP
@@ -1527,9 +1534,8 @@ live_design!{
                     walk: {width: Fill, height: Fit, margin: <SPACING_4> {} }
                     layout: {spacing: (SSPACING_1)}
                     
-                    panic = <FishButton> {text: "Panic", walk: {width: Fit}}
-                    // save1 = <FishButton> {text: "1"}
                 }
+
                 <Image> {
                     image: d"crate://self/resources/tinrs.png",
                     walk: {width: (1000 * 0.2), height: (175 * 0.2), margin: <SPACING_4> {} }
@@ -1538,7 +1544,7 @@ live_design!{
 
             <GradientY> {
                 walk: {width: Fill, height: (HEIGHT_AUDIOVIZ)}
-                draw_bg: { color: #0004, color2: #000C }
+                draw_bg: { color: (COLOR_AUVIZ_1), color2: (COLOR_AUVIZ_2) }
                 display_audio = <DisplayAudio> {
                     walk: {height: Fill, width: Fill}
                 }
