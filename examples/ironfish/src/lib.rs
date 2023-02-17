@@ -43,28 +43,30 @@ live_design!{
     SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
 
-    const COLOR_HIDDEN_BLACK = #x00000000
-    const COLOR_AUVIZ_1 = #x00000044
-    const COLOR_BEVEL_SHADOW = #x00000066
-    const COLOR_DIVIDER = #x000000AA
-    const COLOR_DOWN_5 = #x000000CC
+    const COLOR_DOWN_0 = #x00000000
+    const COLOR_DOWN_2 = #x00000022
+    const COLOR_DOWN_3 = #x00000044
+    const COLOR_DOWN_4 = #x00000066
+    const COLOR_DOWN_5 = #x000000AA
+    const COLOR_DOWN_6 = #x000000CC
     
-    const COLOR_HIDDEN_WHITE = #xFFFFFF00
-    const COLOR_BG_GRADIENT_DARK = #xFFFFFF0A
+    const COLOR_UP_0 = #xFFFFFF00
+    const COLOR_UP_1 = #xFFFFFF0A
     const COLOR_UP_2 = #xFFFFFF10
-    const COLOR_BG_GRADIENT_BRIGHT = #xFFFFFF20
-    const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF40
-    const COLOR_TEXT_H2 = #xFFFFFF66
-    const COLOR_TEXT_H2_HOVER = #xFFFFFFDD
-
-    const COLOR_AUVIZ_2 = (COLOR_DOWN_5)
+    const COLOR_UP_3 = #xFFFFFF20
+    const COLOR_UP_4 = #xFFFFFF40
+    const COLOR_UP_5 = #xFFFFFF66
+    const COLOR_UP_6 = #xFFFFFFCC
 
     const COLOR_OSC = #xFFFF99FF
-    const COLOR_MUSIC = #xC
     const COLOR_ENV = #xF9A894
-    const COLOR_SEQ = #xFFFFFFAA
     const COLOR_FILTER = #x88FF88
     const COLOR_FX = #x99EEFF
+    const COLOR_DEFAULT = (COLOR_UP_6) 
+
+    const COLOR_VIZ_1 = (COLOR_DOWN_2)
+    const COLOR_VIZ_2 = (COLOR_DOWN_6)
+    const COLOR_DIVIDER = (COLOR_DOWN_5)
 
     // HELPERS
     FillerH = <Frame> {
@@ -84,13 +86,13 @@ live_design!{
         }
         <Box> {
             walk: {width: Fill, height: 1.0}
-            draw_bg: {color: (COLOR_BEVEL_HIGHLIGHT)}
+            draw_bg: {color: (COLOR_UP_4)}
         }
     }
 
     // WIDGETS
     ElementBox = <Frame> {
-        draw_bg: {color: (COLOR_HIDDEN_BLACK)}
+        draw_bg: {color: (COLOR_DOWN_0)}
         walk: {width: Fill, height: Fit}
         layout: {flow: Down, padding: <SPACING_1> {}, spacing: (SSPACING_1)}
     }
@@ -113,7 +115,7 @@ live_design!{
         label = <Label> {
             draw_label: {
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-                color: (COLOR_TEXT_H2)
+                color: (COLOR_UP_5)
             }
             text: "replace me!"
         }
@@ -128,8 +130,8 @@ live_design!{
             instance inset: vec4(1.0, 1.0, 1.0, 1.0)
             instance radius: 2.5
             instance dither: 1.0
-            color: (COLOR_BG_GRADIENT_BRIGHT),
-            color2: (COLOR_BG_GRADIENT_DARK)
+            color: (COLOR_UP_3),
+            color2: (COLOR_UP_1)
             instance border_color: #x6
             instance border_color2: #x4
             instance border_color3: #x3A
@@ -193,7 +195,7 @@ live_design!{
                 walk: {width: Fill, height: Fit}
 
                 layout: {
-                    padding: {left: (SSPACING_4), top: (SSPACING_1), bottom: (SSPACING_1), right: (SSPACING_4)},
+                    padding: {left: (SSPACING_4), top: (SSPACING_2), bottom: (SSPACING_2), right: (SSPACING_4)},
                 }
 
                 draw_bg: {
@@ -228,7 +230,7 @@ live_design!{
                     self.rect_size.x,
                     self.rect_size.y
                 )
-                sdf.fill((COLOR_HIDDEN_WHITE))
+                sdf.fill((COLOR_UP_0))
             }
         }
     }
@@ -244,11 +246,11 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        (COLOR_TEXT_H2),
-                        (COLOR_TEXT_H2),
+                        (COLOR_UP_5),
+                        (COLOR_UP_5),
                         self.hover
                     ),
-                    (COLOR_TEXT_H2),
+                    (COLOR_UP_5),
                     self.pressed
                 )
             }
@@ -271,11 +273,11 @@ live_design!{
                 sdf.stroke_keep(
                     mix(
                         mix(
-                            mix(#xFFFFFF66, #x00000066, pow(self.pos.y, .2)),
-                            mix((COLOR_BEVEL_HIGHLIGHT), #x00000044, pow(self.pos.y, 0.25)),
+                            mix(#xFFFFFF66, (COLOR_DOWN_4), pow(self.pos.y, .2)),
+                            mix((COLOR_UP_4), #x00000044, pow(self.pos.y, 0.25)),
                             self.hover
                         ),
-                        mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 0.75)),
+                        mix((COLOR_DOWN_4), (COLOR_UP_4), pow(self.pos.y, 0.75)),
                         self.pressed
                     ),
                     1.
@@ -287,7 +289,7 @@ live_design!{
                             #FFFFFF20,
                             self.hover
                         ),
-                        mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 0.3)),
+                        mix((COLOR_DOWN_4), (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 0.3)),
                         self.pressed
                     )
                 );
@@ -303,7 +305,7 @@ live_design!{
             height: 36,
         }
         label: "CutOff1"
-        label_text: {text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_TEXT_H2)}
+        label_text: {text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_UP_5)}
         text_input: {
             cursor_margin_bottom: (SSPACING_1),
             cursor_margin_top: (SSPACING_1),
@@ -312,7 +314,7 @@ live_design!{
             empty_message: "0",
             numeric_only: true,
             draw_bg: {
-                color: (COLOR_HIDDEN_BLACK)
+                color: (COLOR_DOWN_0)
             },
         }
         draw_slider: {
@@ -327,8 +329,8 @@ live_design!{
                 sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 1);
                 sdf.fill_keep(
                     mix(
-                        mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 1.0)),
-                        mix((COLOR_BEVEL_SHADOW) * 1.75, (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 1.0)),
+                        mix((COLOR_DOWN_4), (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 1.0)),
+                        mix((COLOR_DOWN_4) * 1.75, (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 1.0)),
                         self.drag
                     )
                 ) // Control backdrop gradient
@@ -337,7 +339,7 @@ live_design!{
                 let in_side = 5.0;
                 let in_top = 5.0; // Ridge: vertical position
                 sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
-                sdf.fill(mix(#x00000066, #00000088, self.drag)); // Ridge color
+                sdf.fill(mix((COLOR_DOWN_4), #00000088, self.drag)); // Ridge color
                 let in_top = 7.0;
                 sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
                 sdf.fill(#FFFFFF18); // Ridge: Rim light catcher
@@ -346,7 +348,7 @@ live_design!{
                 sdf.move_to(mix(in_side + 3.5, self.rect_size.x * 0.5, self.bipolar), top + in_top);
                 
                 sdf.line_to(nub_x + in_side + nub_size * 0.5, top + in_top);
-                sdf.stroke_keep(mix((COLOR_HIDDEN_WHITE), self.line_color, self.drag), 1.5)
+                sdf.stroke_keep(mix((COLOR_UP_0), self.line_color, self.drag), 1.5)
                 sdf.stroke(
                     mix(mix(self.line_color * 0.85, self.line_color, self.hover), #xFFFFFF80, self.drag),
                     1
@@ -407,8 +409,8 @@ live_design!{
 
                     sdf.fill(
                         mix(
-                            mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 1.0)),
-                            mix((COLOR_BEVEL_SHADOW) * 1.75, (COLOR_BEVEL_SHADOW) * 0.1, pow(self.pos.y, 1.0)),
+                            mix((COLOR_DOWN_4), (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 1.0)),
+                            mix((COLOR_DOWN_4) * 1.75, (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 1.0)),
                             self.hover
                         )
                     )
@@ -424,7 +426,7 @@ live_design!{
             }
             draw_label: {
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-                color: (COLOR_TEXT_H2)
+                color: (COLOR_UP_5)
             }
         }
     }
@@ -434,7 +436,7 @@ live_design!{
         label = <Label> {
             walk: {width: Fit}
             draw_label: {
-                color: (COLOR_TEXT_H2)
+                color: (COLOR_UP_5)
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
             }
         }
@@ -492,7 +494,7 @@ live_design!{
         label = <Label> {
             draw_label: {
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-                color: (COLOR_DOWN_5)
+                color: (COLOR_DOWN_6)
             }
             text: "replace me!"
         }
@@ -529,7 +531,7 @@ live_design!{
                     sdf.close_path();
                     sdf.fill_keep(
                         mix(
-                            mix((COLOR_TEXT_H2) * 0.75, (COLOR_TEXT_H2), self.hover),
+                            mix((COLOR_UP_5) * 0.75, (COLOR_UP_5), self.hover),
                             mix(
                                 mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
                                 mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
@@ -706,7 +708,7 @@ live_design!{
     Arp = <GradientY> {
         layout: {flow: Down, padding: <SPACING_0> {}, spacing: (SSPACING_2)}
         walk: {height: Fit, width: 120, margin: <SPACING_0> {} }
-        draw_bg: {color: (COLOR_HIDDEN_WHITE), color2: (COLOR_HIDDEN_WHITE)}
+        draw_bg: {color: (COLOR_UP_0), color2: (COLOR_UP_0)}
 
             <Frame> {
                 layout: {flow: Right, align: {x: 0.0, y: 0.0}, padding: <SPACING_0> {} }
@@ -717,7 +719,7 @@ live_design!{
                     <FishSubTitle> {
                         label = {
                             text: "Arp",
-                            draw_label: {color: (COLOR_MUSIC)},
+                            draw_label: {color: (COLOR_DEFAULT)},
                         }
                     }
 
@@ -742,7 +744,7 @@ live_design!{
                 walk: {width: Fill, margin: <SPACING_0> {}}
                 layout: {padding: <SPACING_0> {} }
                 slider = {
-                    draw_slider: {line_color: (COLOR_MUSIC)}
+                    draw_slider: {line_color: (COLOR_DEFAULT)}
                     min: -4.0
                     max: 4.0
                     step: 1.0
@@ -761,7 +763,7 @@ live_design!{
             <FishSubTitle> {
                 label = {
                     text: "Settings",
-                    draw_label: {color: (COLOR_MUSIC)},
+                    draw_label: {color: (COLOR_DEFAULT)},
                 }
             }
         }
@@ -771,7 +773,7 @@ live_design!{
             layout: { padding: <SPACING_0> {} }
             slider = {
                 walk: { width: Fill } 
-                draw_slider: {line_color: (COLOR_MUSIC)}
+                draw_slider: {line_color: (COLOR_DEFAULT)}
                 min: 0.0
                 max: 1.0
                 label: "Portamento"
@@ -786,7 +788,7 @@ live_design!{
         <FishPanel> {
             walk: {width: Fill, height: Fill}
             layout: {flow: Down, spacing: (SSPACING_0), padding: {top: (SSPACING_2)}}
-            draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
+            draw_bg: {color: (COLOR_UP_3), color2: (COLOR_UP_1)}
 
             <FishHeader> {
                 title = {
@@ -794,7 +796,7 @@ live_design!{
                     label = {
                         text: "Sequencer",
                     },
-                    draw_bg: {color: (COLOR_SEQ)}
+                    draw_bg: {color: (COLOR_DEFAULT)}
                 }
                 menu = {
                     walk: {width: Fit}
@@ -854,7 +856,7 @@ live_design!{
                     speed = <InstrumentSlider> {
                         walk: {width: Fill}
                         slider = {
-                            draw_slider: {line_color: (COLOR_MUSIC)}
+                            draw_slider: {line_color: (COLOR_DEFAULT)}
                             min: 0.0
                             max: 240.0
                             label: "BPM"
@@ -1168,7 +1170,7 @@ live_design!{
                                     self.rect_size.x,
                                     self.rect_size.y
                                 )
-                                sdf.fill((COLOR_HIDDEN_WHITE))
+                                sdf.fill((COLOR_UP_0))
                             }
                         }
 
@@ -1497,7 +1499,7 @@ live_design!{
     Play = <FishPanel> {
         layout: {flow: Right, padding: {top: (SSPACING_3)}, spacing: (SSPACING_0) }
         walk: { height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)} }
-        draw_bg: {color: (COLOR_BG_GRADIENT_BRIGHT), color2: (COLOR_BG_GRADIENT_DARK)}
+        draw_bg: {color: (COLOR_UP_3), color2: (COLOR_UP_1)}
 
         <Arp> {}
         piano = <Piano> { walk: {height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_2); bottom: (SSPACING_3), left: (SSPACING_2)} } }
@@ -1540,7 +1542,7 @@ live_design!{
 
             <GradientY> {
                 walk: {width: Fill, height: (HEIGHT_AUDIOVIZ)}
-                draw_bg: { color: (COLOR_AUVIZ_1), color2: (COLOR_AUVIZ_2) }
+                draw_bg: { color: (COLOR_VIZ_1), color2: (COLOR_VIZ_2) }
                 display_audio = <DisplayAudio> {
                     walk: {height: Fill, width: Fill}
                 }
