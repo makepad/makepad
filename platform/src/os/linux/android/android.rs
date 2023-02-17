@@ -4,7 +4,8 @@ use {
     std::time::Instant,
     self::super::{
         android_media::CxAndroidMedia,
-        android_jni::{AndroidCallback, TouchAction, TouchPointer},
+        jni_sys::jobject,
+        android_jni::{AndroidToJava},
     },
     self::super::super::{
         gl_sys,
@@ -12,10 +13,11 @@ use {
     },
     crate::{
         cx_api::{CxOsOp, CxOsApi},
-        makepad_error_log::*,
-        makepad_math::*, 
+        makepad_math::*,
         thread::Signal,
         event::{
+            TouchPoint,
+            TouchUpdateEvent,
             WindowGeomChangeEvent,
             TimerEvent,
             WebSocket,
@@ -23,7 +25,7 @@ use {
             Event,
             WindowGeom,
         },
-        window::CxWindowPool,
+        window::CxWindowPool, 
         pass::CxPassParent,
         cx::{Cx, OsType, AndroidParams},
         gpu_info::GpuPerformance,
@@ -31,16 +33,19 @@ use {
         pass::{PassClearColor, PassClearDepth, PassId},
     }
 };
-
+ 
 #[link(name = "EGL")]
 extern "C" {
     fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
 }
 
 impl Cx {
-    
+     
     /// Called when EGL is initialized.
-    pub fn android_init(&mut self, params: AndroidParams, callback: AndroidCallback<'_>) {
+    pub fn from_java_init(&mut self, params: AndroidParams, to_java: AndroidToJava) {
+        // lets load dependencies here.
+        self.android_load_dependencies(&to_java);
+        
         self.os_type = OsType::Android(params);
         self.gpu_info.performance = GpuPerformance::Tier1;
         self.call_event_handler(&Event::Construct);
@@ -49,15 +54,28 @@ impl Cx {
         unsafe {gl_sys::load_with( | s | {
             let s = CString::new(s).unwrap();
             eglGetProcAddress(s.as_ptr())
-        })}; 
-        
-        callback.schedule_timeout(0, 0);
-        callback.schedule_redraw();
-        self.after_every_event(&callback);
+        })};
+         
+        to_java.schedule_timeout(0, 0);
+        to_java.schedule_redraw();
+        self.after_every_event(&to_java);
+    }
+    
+    pub fn android_load_dependencies(&mut self, to_java: &AndroidToJava) {
+        for (path,dep) in &mut self.dependencies{
+            if let Some(data) = to_java.read_asset(path){
+                dep.data = Some(Ok(data))
+            }
+            else{
+                let message = format!("cannot load dependency {}", path);
+                crate::makepad_error_log::error!("Android asset failed: {}", message);
+                dep.data = Some(Err(message));
+            }
+        }
     }
     
     /// Called when the MakepadSurface is resized.
-    pub fn android_resize(&mut self, width: i32, height: i32, callback: AndroidCallback<'_>) {
+    pub fn from_java_resize(&mut self, width: i32, height: i32, to_java: AndroidToJava) {
         self.os.display_size = dvec2(width as f64, height as f64);
         let window_id = CxWindowPool::id_zero();
         let window = &mut self.windows[window_id];
@@ -72,81 +90,102 @@ impl Cx {
             position: dvec2(0.0, 0.0),
             inner_size: size,
             outer_size: size,
-        }; 
+        };
         let new_geom = window.window_geom.clone();
         self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
             window_id,
-            new_geom,
+            new_geom, 
             old_geom
         }));
         if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
             self.redraw_pass_and_child_passes(main_pass_id);
         }
-        self.after_every_event(&callback);
+        self.redraw_all();
+        self.os.first_after_resize = true;
+        self.after_every_event(&to_java);
     }
     
     /// Called when the MakepadSurface needs to be redrawn.
-    pub fn android_draw(&mut self, callback: AndroidCallback<'_>) {
-        
+    pub fn from_java_draw(&mut self, to_java: AndroidToJava) {
         if self.new_next_frames.len() != 0 {
             self.call_next_frame_event(self.os.time_now());
         }
         if self.need_redrawing() {
             self.call_draw_event();
-            let cache_path = if let OsType::Android(params) = &self.os_type{params.cache_path.clone()}else{panic!()};
+            let cache_path = if let OsType::Android(params) = &self.os_type {params.cache_path.clone()}else {panic!()};
             
             //android_app.egl.make_current();
             self.opengl_compile_shaders(Some(&cache_path));
         }
+
+        if self.os.first_after_resize{
+            self.os.first_after_resize= false;
+            self.redraw_all();
+        }
         
-        self.handle_repaint(&callback); 
-        self.after_every_event(&callback);
+        self.handle_repaint(&to_java);
+        self.after_every_event(&to_java);
     }
     
     /// Called when a touch event happened on the MakepadSurface.
-    pub fn android_touch(&mut self, _action: TouchAction, _pointers: &[TouchPointer], callback: AndroidCallback<'_>) {
-        log!("POINTERS {:?} {:?}",_action, _pointers);
-        /*nsafe {
-            gl_sys::ClearColor(pointers[0].x / 1000.0, pointers[0].y / 2000.0, 0.0, 1.0);
-        }*/
-        //callback.schedule_redraw();
-        self.after_every_event(&callback);
+    pub fn from_java_touch_update(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
+        let time = self.os.time_now();
+        for touch in &mut touches{
+            touch.abs /= self.os.dpi_factor;
+        }
+        self.fingers.process_touch_update_start(time, &touches);
+        let e = Event::TouchUpdate(
+            TouchUpdateEvent {
+                time,
+                window_id: CxWindowPool::id_zero(),
+                touches,
+                modifiers: Default::default()
+            } 
+        );
+        self.call_event_handler(&e);
+        let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
+        self.fingers.process_touch_update_end(&e.touches);
+        self.after_every_event(&to_java);
     }
-       
+    
     /// Called when a timeout expired.
-    pub fn android_timeout(&mut self, timer_id: i64, callback: AndroidCallback<'_>) {
+    pub fn from_java_timeout(&mut self, timer_id: i64, to_java: AndroidToJava) {
         if timer_id == 0 {
             if Signal::check_and_clear_ui_signal() {
-                self.handle_media_signals();
+                self.handle_media_signals(&to_java);
                 self.call_event_handler(&Event::Signal);
             }
-            callback.schedule_timeout(0, 16);
+            to_java.schedule_timeout(0, 16);
         }
         else {
             self.call_event_handler(&Event::Timer(TimerEvent {timer_id: timer_id as u64}))
         }
-        self.after_every_event(&callback); 
+        self.after_every_event(&to_java);
     }
     
-    fn after_every_event(&mut self, callback: &AndroidCallback<'_>) {
-        self.handle_platform_ops(&callback);
+    fn after_every_event(&mut self, to_java: &AndroidToJava) {
+        self.handle_platform_ops(&to_java); 
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
-            callback.schedule_redraw();
+            to_java.schedule_redraw();
         }
+    }
+    
+    pub fn from_java_midi_device(&mut self, name:String, midi_device: jobject, to_java: AndroidToJava){
+        self.os.media.amidi().lock().unwrap().received_midi_device(name, midi_device, &to_java);
     }
     
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
-        callback: &AndroidCallback<'_>,
+        to_java: &AndroidToJava,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
         self.setup_render_pass(pass_id, self.os.dpi_factor);
         
-        // keep repainting in a loop
+        // keep repainting in a loop  
         self.passes[pass_id].paint_dirty = false;
-        
+          
         unsafe {
             gl_sys::Viewport(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
@@ -185,13 +224,13 @@ impl Cx {
             zbias_step,
         );
         
-        callback.swap_buffers();
+        to_java.swap_buffers();
         //unsafe {
         //direct_app.drm.swap_buffers_and_wait(&direct_app.egl);
         //}
     }
     
-    pub (crate) fn handle_repaint(&mut self, callback: &AndroidCallback<'_>) {
+    pub (crate) fn handle_repaint(&mut self, to_java: &AndroidToJava) {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
@@ -199,7 +238,7 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_window_id) => {
-                    self.draw_pass_to_fullscreen(*pass_id, callback);
+                    self.draw_pass_to_fullscreen(*pass_id, to_java);
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -212,7 +251,7 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self, callback: &AndroidCallback<'_>) -> EventFlow {
+    fn handle_platform_ops(&mut self, to_java: &AndroidToJava) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -235,10 +274,10 @@ impl Cx {
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats: _} => {
                     //android_app.start_timer(timer_id, interval, repeats);
-                    callback.schedule_timeout(timer_id as i64, (interval / 1000.0) as i64);
+                    to_java.schedule_timeout(timer_id as i64, (interval / 1000.0) as i64);
                 },
                 CxOsOp::StopTimer(timer_id) => {
-                    callback.cancel_timeout(timer_id as i64);
+                    to_java.cancel_timeout(timer_id as i64);
                     //android_app.stop_timer(timer_id);
                 },
                 _ => ()
@@ -250,9 +289,9 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init(&mut self) {
+        self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         self.live_expand();
         self.live_scan_dependencies();
-        self.native_load_dependencies();
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
@@ -265,25 +304,27 @@ impl CxOsApi for Cx {
     
     fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
         todo!()
-    } 
+    }
 }
 
 impl Default for CxOs {
     fn default() -> Self {
         Self {
+            first_after_resize: true,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             time_start: Instant::now(),
-            _media: CxAndroidMedia::default()
+            media: CxAndroidMedia::default()
         }
     }
 }
 
 pub struct CxOs {
+    pub first_after_resize:bool,
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub time_start: Instant,
-    pub (crate) _media: CxAndroidMedia,
+    pub (crate) media: CxAndroidMedia,
 }
 
 impl CxOs {

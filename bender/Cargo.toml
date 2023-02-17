@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "arena",
+    "clipper",
+    "filler",
+    "geometry",
+    "internal_iter",
+    "offsetter",
+    "stroker",
+    "tessellator",
+    "viewer",
+]
