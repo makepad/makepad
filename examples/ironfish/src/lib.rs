@@ -56,7 +56,6 @@ live_design!{
     const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF40
     const COLOR_TEXT_H2 = #xFFFFFF66
     const COLOR_TEXT_H2_HOVER = #xFFFFFFDD
-    const COLOR_UP_FULL = #xFFFFFFFF
 
     const COLOR_AUVIZ_2 = (COLOR_DOWN_5)
 
