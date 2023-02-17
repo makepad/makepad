@@ -28,7 +28,7 @@ extern "C" {
     pub fn js_console_error(chars: u32, len: u32);
 }
 
-pub fn console_error_impl(val: &str) {
+pub fn console_error_impl(val: &str) { 
     unsafe {
         __android_log_write(1, "Makepad\0".as_ptr(), val.as_ptr());
     }

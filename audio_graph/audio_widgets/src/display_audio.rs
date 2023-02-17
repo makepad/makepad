@@ -25,7 +25,7 @@ live_design!{
                 let scale = half * 2.0;
                 sdf.hline(half + audio * scale, abs(audio) * scale);
                 let color = Pal::iq1(0.35+2.0*step)*0.8;
-                sdf.fill(vec4(color,1.0))
+                sdf.fill_premul(vec4(color,0.0))
                 step += 1.0/16.0;
             }
             return sdf.result
