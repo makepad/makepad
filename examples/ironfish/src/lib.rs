@@ -43,32 +43,29 @@ live_design!{
     SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
 
-    const COLOR_HIDDEN_WHITE = #xFFFFFF00
     const COLOR_HIDDEN_BLACK = #x00000000
+    const COLOR_AUVIZ_1 = #x00000044
+    const COLOR_BEVEL_SHADOW = #x00000066
+    const COLOR_DIVIDER = #x000000AA
+    const COLOR_DOWN_5 = #x000000CC
     
+    const COLOR_HIDDEN_WHITE = #xFFFFFF00
+    const COLOR_BG_GRADIENT_DARK = #xFFFFFF0A
+    const COLOR_UP_2 = #xFFFFFF10
+    const COLOR_BG_GRADIENT_BRIGHT = #xFFFFFF20
+    const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF40
+    const COLOR_TEXT_H2 = #xFFFFFF66
+    const COLOR_TEXT_H2_HOVER = #xFFFFFFDD
+    const COLOR_UP_FULL = #xFFFFFFFF
+
+    const COLOR_AUVIZ_2 = (COLOR_DOWN_5)
+
     const COLOR_OSC = #xFFFF99FF
     const COLOR_MUSIC = #xC
     const COLOR_ENV = #xF9A894
     const COLOR_SEQ = #xFFFFFFAA
     const COLOR_FILTER = #x88FF88
     const COLOR_FX = #x99EEFF
-
-    const COLOR_AUVIZ_1 = #x0004
-    const COLOR_AUVIZ_2 = #x000C
-
-    const COLOR_TEXT_H1 = #x000000CC
-    
-    const COLOR_DIVIDER = #x000000AA
-    const COLOR_BEVEL_SHADOW = #x00000066
-    
-    const COLOR_BG_GRADIENT_DARK = #xFFFFFF0A
-    const COLOR_BG_GRADIENT_BRIGHT = #xFFFFFF20
-    const COLOR_BEVEL_HIGHLIGHT = #xFFFFFF40
-    const COLOR_TEXT_H2 = #xFFFFFF66
-    const COLOR_TEXT_H2_HOVER = #xFFFFFFDD
-
-    const COLOR_UP_FULL = #xFFFF
-    const COLOR_UP_2 = #xFFFFFF10
 
     // HELPERS
     FillerH = <Frame> {
@@ -496,7 +493,7 @@ live_design!{
         label = <Label> {
             draw_label: {
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
-                color: (COLOR_TEXT_H1)
+                color: (COLOR_DOWN_5)
             }
             text: "replace me!"
         }
