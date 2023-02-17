@@ -44,7 +44,7 @@ pub enum Event {
     MouseDown(MouseDownEvent),
     MouseMove(MouseMoveEvent),
     MouseUp(MouseUpEvent),
-    TouchUpdateEvent(TouchUpdateEvent),
+    TouchUpdate(TouchUpdateEvent),
     Scroll(ScrollEvent),
     
     Timer(TimerEvent),
@@ -109,7 +109,7 @@ impl Event{
             Self::MouseDown(_)|
             Self::MouseMove(_)|
             Self::MouseUp(_)|
-            Self::TouchUpdateEvent(_)|
+            Self::TouchUpdate(_)|
             Self::Scroll(_)=>true,
             _=>false
         }

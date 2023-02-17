@@ -113,7 +113,7 @@ impl AlsaAudioAccess {
                             device_id,
                             device_type: AudioDeviceType::Input,
                             is_default: false,
-                            channels: 2,
+                            channel_count: 2,
                             name: format!("[ALSA] {}",desc_str)
                         };
                         if ioid == "" || ioid == "Input" {
@@ -212,12 +212,12 @@ impl AlsaAudioAccess {
                             Ok(_) => ()
                         }
                         if let Some(fbox) = &mut *audio_input_cb.lock().unwrap() {
-                            audio_buffer = fbox(
+                            fbox(
                                 AudioInfo {
                                     device_id,
                                     time: None,
                                 },
-                                audio_buffer
+                                &audio_buffer
                             );
                         }
                     }

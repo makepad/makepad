@@ -1,0 +1,10 @@
+[package]
+name = "bender_filler"
+version = "0.1.0"
+authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+bender_clipper = { path = "../clipper" }
+bender_geometry = { path = "../geometry" }
+bender_tessellator = { path = "../tessellator" }
