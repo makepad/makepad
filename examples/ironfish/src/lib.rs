@@ -109,7 +109,7 @@ live_design!{
     }
 
     FishSubTitle = <Frame> {
-        walk: {width: Fit, height: Fit}
+        walk: {width: Fit, height: Fit, margin: {top: 1} }
         layout: {padding: <SPACING_2> {}}
         
         label = <Label> {
@@ -390,6 +390,20 @@ live_design!{
         checkbox = <CheckBox> {
             layout: { padding: { top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23 } }
             label: "CutOff1"
+            state: {
+                selected = {
+                    default: off
+                    off = {
+                        from: {all: Forward {duration: 0.1}}
+                        apply: {draw_check: {selected: 0.0}}
+                    }
+                    on = {
+                        cursor: Arrow,
+                        from: {all: Forward {duration: 0.1}}
+                        apply: {draw_check: {selected: 1.0}}
+                    }
+                }
+            }
             draw_check: {
                 instance border_width: 1.0
                 instance border_color: #x06
@@ -492,6 +506,7 @@ live_design!{
         walk: {width: Fit, height: Fit, margin: {bottom: (SSPACING_1)}}
         layout: {padding: <SPACING_2> {}}
         label = <Label> {
+            walk: {margin: {top: 1}}
             draw_label: {
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
                 color: (COLOR_DOWN_6)
