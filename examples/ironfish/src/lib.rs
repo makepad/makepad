@@ -97,24 +97,6 @@ live_design!{
         layout: {flow: Down, padding: <SPACING_1> {}, spacing: (SSPACING_1)}
     }
     
-<<<<<<< HEAD
-    FishTab = <RadioButton> {
-        walk: {height: Fill, width: Fit}
-        layout: {align: {x: 0.0, y: 0.5}}
-        draw_radio: {
-            radio_type: Tab,
-            color_inactive: #x00000000,
-            color_active: #x00000000
-        }
-        draw_label: {
-            color_selected: (COLOR_TEXT_H2_HOVER),
-            color_unselected: (COLOR_TEXT_H2),
-            color_unselected_hover: (COLOR_TEXT_H2_HOVER),
-            text_style:
-            {
-                font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"},
-                font_size: (FONT_SIZE_H2)
-=======
     FishPanelContainer = <CachedFrame> {
         layout: {flow: Down},
         walk: {width: Fill, height: Fit}
@@ -134,7 +116,6 @@ live_design!{
             draw_label: {
                 text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
                 color: (COLOR_UP_5)
->>>>>>> ba0f9bc955e9e430d2657682db01a82f6d649d7e
             }
             text: "replace me!"
         }
