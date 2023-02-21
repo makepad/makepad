@@ -22,8 +22,8 @@ pub struct OsMidiOutput {
 }
 
 impl OsMidiOutput {
-    pub fn send(&self, _port_id: Option<MidiPortId>, _d: MidiData) {
-        //let _ = self.0.lock().unwrap().send_midi(port_id, d);
+    pub fn send(&self, port_id: Option<MidiPortId>, data: MidiData) {
+        self.amidi.lock().unwrap().send_midi(port_id, data);
     }
 }
 
@@ -156,8 +156,12 @@ impl AMidiAccess {
         }
     }
     
-    pub fn send_midi(&mut self, _port_id: Option<MidiPortId>, _d: MidiData) {
-        
+    pub fn send_midi(&mut self, port_id: Option<MidiPortId>,data: MidiData) {
+        for output in &self.outputs {
+            if port_id.is_none() || port_id == Some(output.port_id){
+                unsafe{AMidiInputPort_send(output.amidi_port, data.data.as_ptr() as *const _, 3)};
+            } 
+        }
     }
     
     pub fn create_midi_input(&mut self, amidi: Arc<Mutex<Self >>) -> MidiInput {
