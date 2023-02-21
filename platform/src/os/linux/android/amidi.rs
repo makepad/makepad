@@ -69,7 +69,7 @@ impl AMidiInput {
         unsafe {AMidiOutputPort_close(self.amidi_port)};
     }
 }
-
+ 
 impl AMidiOutput {
     fn new(port_id: MidiPortId, device: &AMidiDevicePtr, port: usize) -> Option<Self> {
         let mut amidi_port = std::ptr::null_mut();
