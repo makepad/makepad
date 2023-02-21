@@ -14,5 +14,5 @@ pub mod apple_media;
 pub mod av_capture;
 pub(crate) use self::metal::*;
 pub(crate) use self::macos::*;
-pub(crate) use self::core_midi::{OsMidiOutput};
+pub(crate) use self::core_midi::{OsMidiInput, OsMidiOutput};
 
