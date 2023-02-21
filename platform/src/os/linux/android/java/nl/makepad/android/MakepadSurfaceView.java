@@ -19,7 +19,9 @@ import android.os.ParcelUuid;
 import android.media.midi.MidiManager;
 import android.media.midi.MidiDeviceInfo;
 import android.media.midi.MidiDevice;
+import android.media.midi.MidiReceiver;
 import android.media.AudioManager;
+import android.media.midi.MidiOutputPort;
 import android.media.AudioDeviceInfo;
 
 import android.bluetooth.BluetoothManager;
@@ -42,7 +44,15 @@ import javax.microedition.khronos.egl.EGLDisplay;
 import javax.microedition.khronos.egl.EGLSurface;
 import javax.microedition.khronos.opengles.GL10;
 
-public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Callback, View.OnTouchListener, Makepad.Callback, MidiManager.OnDeviceOpenedListener{
+
+
+
+public class MakepadSurfaceView extends SurfaceView implements 
+SurfaceHolder.Callback, 
+View.OnTouchListener, 
+Makepad.Callback, 
+MidiManager.OnDeviceOpenedListener
+{
     public MakepadSurfaceView(Context context, long cx) {
         super(context);
         setWillNotDraw(false);
@@ -223,7 +233,7 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             }
 
             for (MidiDeviceInfo info : mm.getDevices()){
-                mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
+                //mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
             }
         }
         catch(Exception e){
@@ -234,8 +244,11 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     public void onDeviceOpened(MidiDevice device) {
         // ok WHICH device is it tho
-        String name = device.getInfo().getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
-        Makepad.midiDevice(mCx, name, device, this);
+        MidiDeviceInfo info = device.getInfo();
+        if(info != null){
+            String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
+            Makepad.midiDevice(mCx, name, device, this);
+        }
     }
 
     public void scheduleTimeout(long id, long delay) {

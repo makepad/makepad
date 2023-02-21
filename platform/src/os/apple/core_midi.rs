@@ -14,6 +14,17 @@ use {
 #[derive(Clone)]
 pub struct OsMidiOutput(pub (crate) Arc<Mutex<CoreMidiAccess >>);
 
+pub struct OsMidiInput(mpsc::Receiver<(MidiPortId, MidiData) >);
+
+impl OsMidiInput {
+    pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
+        if let Ok((port_id, data)) = self.0.try_recv() {
+            return Some((port_id, data))
+        }
+        None
+    }
+}
+
 impl OsMidiOutput {
     pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
         let mut words = [0u32; 64];
@@ -65,6 +76,8 @@ pub struct CoreMidiPort {
     endpoint: MIDIEndpointRef,
     desc: MidiPortDesc
 }
+
+type MidiInputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData) >> >>;
 
 pub struct CoreMidiAccess {
     change_signal: Signal,
@@ -179,7 +192,7 @@ impl CoreMidiAccess {
         let senders = self.input_senders.clone();
         let (send, recv) = mpsc::channel();
         senders.lock().unwrap().push(send);
-        MidiInput(Some(recv))
+        MidiInput(Some(OsMidiInput(recv)))
     }
     
 
