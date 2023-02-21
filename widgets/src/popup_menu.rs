@@ -11,15 +11,21 @@ live_design!{
     import makepad_widgets::theme::*;
     
     DrawBg = {{DrawBg}} {
+        instance color: #0
+        instance color_selected: #0ff
+
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             
             sdf.clear(mix(
-                COLOR_BG_EDITOR,
-                COLOR_BG_SELECTED,
+                self.color,
+                self.color_selected,
+                // COLOR_BG_EDITOR,
+                // COLOR_BG_SELECTED,
                 self.hover
-            ));
-             
+            ))
+
+            // 
             // we have 3 points, and need to rotate around its center
             let sz = 3.;
             let dx = 2.0;
@@ -107,7 +113,6 @@ live_design!{
         draw_bg: {
             
             instance color: #0
-            
             instance border_width: 0.0,
             instance border_color: #0000,
             instance inset: vec4(0.0, 0.0, 0.0, 0.0),
