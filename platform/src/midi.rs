@@ -2,11 +2,10 @@ use {
     std::sync::{Arc, Mutex},
     std::sync::mpsc,
     crate::{
-        os::{OsMidiOutput},
+        os::{OsMidiOutput,OsMidiInput},
         makepad_live_id::{LiveId, FromLiveId},
     }
 };
-
 
 #[derive(Clone, Debug)]
 pub struct MidiPortsEvent {
@@ -56,17 +55,12 @@ impl std::fmt::Debug for MidiPortDesc {
 }
 
 #[derive(Default)]
-pub struct MidiInput(pub (crate) Option<mpsc::Receiver<(MidiPortId, MidiData) >>);
+pub struct MidiInput(pub (crate) Option<OsMidiInput>);
 unsafe impl Send for MidiInput {}
-
-pub type MidiInputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData) >> >>;
 
 impl MidiInput {
     pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
-        if let Some(recv) = &mut self.0 {
-            return recv.try_recv().ok()
-        }
-        None
+        self.0.as_mut().unwrap().receive()
     }
 }
 

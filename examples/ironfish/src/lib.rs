@@ -81,7 +81,6 @@ live_design!{
         }
     }
     
-    
     FishTab = <RadioButton> {
         walk: {height: Fill, width: Fit}
         layout: {align: {x: 0.0, y: 0.5}}
