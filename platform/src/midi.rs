@@ -1,6 +1,4 @@
 use {
-    std::sync::{Arc, Mutex},
-    std::sync::mpsc,
     crate::{
         os::{OsMidiOutput,OsMidiInput},
         makepad_live_id::{LiveId, FromLiveId},
