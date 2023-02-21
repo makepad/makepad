@@ -20,11 +20,22 @@ use {
 #[derive(Clone)]
 pub struct OsMidiOutput(pub (crate) Arc<Mutex<AlsaMidiAccess >>);
 
+pub struct OsMidiInput(mpsc::Receiver<(MidiPortId, MidiData) >);
+
 impl OsMidiOutput {
     pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
         // alright lets send some midi.
         // send some midi here
         let _ = self.0.lock().unwrap().send_midi(port_id, d);
+    }
+}
+
+impl OsMidiInput {
+    pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
+        if let Ok((port_id, data)) = self.0.try_recv() {
+            return Some((port_id, data))
+        }
+        None
     }
 }
 
@@ -397,7 +408,7 @@ impl AlsaMidiAccess {
         let senders = self.input_senders.clone();
         let (send, recv) = mpsc::channel();
         senders.lock().unwrap().push(send);
-        MidiInput(Some(recv))
+        MidiInput(Some(OsMidiInput(recv)))
     }
     
     pub fn midi_reset(&mut self) {

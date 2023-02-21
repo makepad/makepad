@@ -1,5 +1,5 @@
 use {
-    std::sync::{mpsc,mpsc::TryRecvError},
+    std::sync::{mpsc,mpsc::TryRecvError, Arc, Mutex},
     crate::{
         //makepad_wasm_bridge::*,
         midi::*,
@@ -15,10 +15,22 @@ use {
     }
 };
 
+type MidiInputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData) >> >>;
+
 pub struct OsMidiOutput{
     sender: mpsc::Sender<(Option<MidiPortId>, MidiData)>
 }
 
+pub struct OsMidiInput(mpsc::Receiver<(MidiPortId, MidiData) >);
+
+impl OsMidiInput {
+    pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
+        if let Ok((port_id, data)) = self.0.try_recv() {
+            return Some((port_id, data))
+        }
+        None
+    }
+} 
 impl OsMidiOutput{
     pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
         let _ = self.sender.send((port_id, d));
@@ -41,7 +53,7 @@ impl WebMidiAccess{
         let senders = self.input_senders.clone();
         let (send, recv) = mpsc::channel();
         senders.lock().unwrap().push(send);
-        MidiInput(Some(recv))
+        MidiInput(Some(OsMidiInput(recv)))
     }
     
     pub fn create_midi_output(&mut self)->MidiOutput{
