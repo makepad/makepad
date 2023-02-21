@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)]
 
-use  std::os::raw::c_void;
+use std::os::raw::c_void;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -25,20 +25,20 @@ pub type aaudio_data_callback_result_t = i32;
 pub type aaudio_performance_mode_t = i32;
 
 pub type AAudioStream_dataCallback = ::std::option::Option<
-    unsafe extern "C" fn(
-        stream: *mut AAudioStream,
-        userData: *mut c_void,
-        audioData: *mut c_void,
-        numFrames: i32,
-    ) -> aaudio_data_callback_result_t,
+unsafe extern "C" fn(
+    stream: *mut AAudioStream,
+    userData: *mut c_void,
+    audioData: *mut c_void,
+    numFrames: i32,
+) -> aaudio_data_callback_result_t,
 >;
 
 pub type AAudioStream_errorCallback = ::std::option::Option<
-    unsafe extern "C" fn(
-        stream: *mut AAudioStream,
-        userData: *mut ::std::os::raw::c_void,
-        error: aaudio_result_t,
-    ),
+unsafe extern "C" fn(
+    stream: *mut AAudioStream,
+    userData: *mut ::std::os::raw::c_void,
+    error: aaudio_result_t,
+),
 >;
 
 #[link(name = "aaudio")]
@@ -99,6 +99,7 @@ extern "C" {
         callback: AAudioStream_errorCallback,
         userData: *mut ::std::os::raw::c_void,
     );
+
 }
 
 pub const AAUDIO_PERFORMANCE_MODE_LOW_LATENCY: aaudio_performance_mode_t = 12;

@@ -182,7 +182,7 @@ impl Cx {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
         self.setup_render_pass(pass_id, self.os.dpi_factor);
-        
+         
         // keep repainting in a loop  
         self.passes[pass_id].paint_dirty = false;
           
