@@ -94,8 +94,20 @@ struct AMidiDevicePtr {
     amidi_device: *mut AMidiDevice
 }
 
+impl AMidiDevicePtr{
+    fn release(self) {
+        unsafe {AMidiDevice_release(self.amidi_device)};
+    }
+}
+
+enum AMidiState{
+    OpenAllDevices,
+    OnErrorReload,
+    Ready
+}
+
 pub struct AMidiAccess {
-    init_open_all: bool,
+    state: AMidiState,
     change_signal: Signal,
     devices: Vec<AMidiDevicePtr>,
     senders: Vec<mpsc::Sender<(MidiPortId, MidiData) >>,
@@ -110,7 +122,7 @@ impl AMidiAccess {
         // we should fire a change event
         change_signal.set();
         let midi_access = Arc::new(Mutex::new(Self {
-            init_open_all: true,
+            state: AMidiState::OpenAllDevices,
             change_signal,
             devices: Default::default(),
             senders: Vec::new(),
@@ -123,9 +135,9 @@ impl AMidiAccess {
     pub fn read_inputs(&mut self) {
         const MAX_DATA: usize = 3*128;
         let mut data = [0u8; MAX_DATA]; 
-        loop {
+        loop { 
             let mut any_messages = false;
-            for input in &self.inputs {
+            for input in &mut self.inputs {
                 let mut opcode = 0;
                 let mut time_stamp = 0;
                 let mut bytes_recv = 0;
@@ -145,12 +157,19 @@ impl AMidiAccess {
                             s.send((input.port_id, data)).is_ok()
                         });
                     }
+                } 
+                else if messages < 0{
+                    self.state = AMidiState::OnErrorReload;
+                    self.change_signal.set();
+                    // ok so this doesnt work. now what
+                    // we should kinda retry 'slowly' like once every second
                 }
-                if messages <0{
-                    crate::log!("ERROR RECEIVING");
-                }
+                // skip the error case for now. rely on other ways
             }
-            if !any_messages { 
+            if !any_messages {  
+                // ok so. if we go into a reconnect loop here thats bad.
+                // we kinda wanna try a reconnect on this particular device
+                
                 break;
             }
         }
@@ -173,12 +192,33 @@ impl AMidiAccess {
         }))
     }
     
-    pub fn midi_reset(&mut self) {
-        
+    
+    fn midi_disconnect(&mut self) {
+        let mut devices = Vec::new();
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        std::mem::swap(&mut devices, &mut self.devices);
+        std::mem::swap(&mut inputs, &mut self.inputs);
+        std::mem::swap(&mut outputs, &mut self.outputs);
+        for input in inputs{
+            input.close()
+        }
+        for output in outputs{
+            output.close()
+        }
+        for device in devices{
+            device.release();
+        }
     }
     
-    fn find_device_for_port_id(&self, port_id: MidiPortId) -> Option<(usize, usize)> {
-        for (device_index, device) in self.devices.iter().enumerate() {
+    pub fn midi_reset(&mut self) {
+        self.midi_disconnect();
+        self.state = AMidiState::OpenAllDevices;
+        self.change_signal.set();
+    }
+    
+    fn find_device_for_port_id(devices: &[AMidiDevicePtr], port_id: MidiPortId) -> Option<(usize, usize)> {
+        for (device_index, device) in devices.iter().enumerate() {
             for (port_index, desc) in device.port_descs.iter().enumerate() {
                 if desc.port_id == port_id {
                     return Some((device_index, port_index))
@@ -193,7 +233,7 @@ impl AMidiAccess {
         for port_id in ports {
             if self.outputs.iter_mut().find( | p | p.port_id == *port_id).is_none() {
                 // new this one
-                if let Some((device_index, port_index)) = self.find_device_for_port_id(*port_id) {
+                if let Some((device_index, port_index)) = Self::find_device_for_port_id(&self.devices,*port_id) {
                     if let Some(output_port) = AMidiOutput::new(
                         *port_id,
                         &self.devices[device_index],
@@ -223,7 +263,7 @@ impl AMidiAccess {
         for port_id in ports { 
             if self.inputs.iter_mut().find( | p | p.port_id == *port_id).is_none() {
                 // new this one
-                if let Some((device_index, port_index)) = self.find_device_for_port_id(*port_id) {
+                if let Some((device_index, port_index)) = Self::find_device_for_port_id(&self.devices, *port_id) {
                     if let Some(input_port) = AMidiInput::new(
                         *port_id,
                         &self.devices[device_index],
@@ -295,19 +335,26 @@ impl AMidiAccess {
     } 
     
     pub fn get_updated_descs(&mut self, to_java: &AndroidToJava) -> Option<Vec<MidiPortDesc >> {
-        if self.init_open_all {
-            self.init_open_all = false;
-            to_java.open_all_midi_devices();
-            return None
+        match self.state{
+            AMidiState::OpenAllDevices=>{
+                to_java.open_all_midi_devices(0);
+                self.state = AMidiState::Ready;
+                None
+            }
+            AMidiState::OnErrorReload=>{
+                self.midi_disconnect();
+                to_java.open_all_midi_devices(1000);
+                self.state = AMidiState::Ready;
+                None
+            }
+            AMidiState::Ready=>{
+                let mut descs = Vec::new();
+                for device in &self.devices { 
+                    descs.extend_from_slice(&device.port_descs);
+                }
+                Some(descs) 
+            }
         }
-        let mut descs = Vec::new();
-        // lets query our midi devices for ports/etc
-        for device in &self.devices { 
-            descs.extend_from_slice(&device.port_descs);
-        }
-        //let devices = to_java.get_midi_devices();
-        //crate::log!("{:#?}", devices);
-        Some(descs) 
     }
     
 }

@@ -151,18 +151,18 @@ impl<'a> AndroidToJava<'a> {
         }
     }
      
-    pub fn open_all_midi_devices(&self){
+    pub fn open_all_midi_devices(&self, delay:jlong){
         unsafe {
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
             let name = CString::new("openAllMidiDevices").unwrap();
-            let signature = CString::new("()V").unwrap();
+            let signature = CString::new("(J)V").unwrap();
             let method_id = ((**self.env).GetMethodID.unwrap())(
                 self.env,  
                 class,
                 name.as_ptr(),
                 signature.as_ptr(), 
             );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
+            ((**self.env).CallLongMethod.unwrap())(self.env, self.callback, method_id, delay);
         }
     }
 }
