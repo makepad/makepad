@@ -44,7 +44,7 @@ impl DrawList {
 }
 
 #[derive(Default)]
-pub struct CxDrawListPool(IdPool<CxDrawList>);
+pub struct CxDrawListPool(pub (crate) IdPool<CxDrawList>);
 impl CxDrawListPool {
     pub fn alloc(&mut self) -> DrawList {
         DrawList(self.0.alloc())
@@ -213,7 +213,7 @@ impl CxDrawListUniforms {
 
 #[derive(Default)]
 pub struct CxDrawItems {
-    buffer: Vec<CxDrawItem>,
+    pub(crate) buffer: Vec<CxDrawItem>,
     used: usize
 }
 

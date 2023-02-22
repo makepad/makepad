@@ -44,7 +44,7 @@ impl Pass {
 }
 
 #[derive(Default)]
-pub struct CxPassPool(IdPool<CxPass>);
+pub struct CxPassPool(pub (crate) IdPool<CxPass>);
 impl CxPassPool {
     fn alloc(&mut self) -> Pass {
         Pass(self.0.alloc())
