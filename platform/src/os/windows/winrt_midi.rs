@@ -28,12 +28,23 @@ use {
 
 type WindowsResult<T> = crate::windows_crate::core::Result<T>;
 
+pub struct OsMidiInput(mpsc::Receiver<(MidiPortId, MidiData) >);
+
 #[derive(Clone)]
 pub struct OsMidiOutput(pub (crate) Arc<Mutex<WinRTMidiAccess >>);
 
 impl OsMidiOutput {
     pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
         let _ =  self.0.lock().unwrap().event_sender.send(WinRTMidiEvent::SendMidi(port_id, d));
+    }
+}
+
+impl OsMidiInput {
+    pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
+        if let Ok((port_id, data)) = self.0.try_recv() {
+            return Some((port_id, data))
+        }
+        None
     }
 }
 
@@ -296,7 +307,7 @@ impl WinRTMidiAccess {
         let senders = self.input_senders.clone();
         let (send, recv) = mpsc::channel();
         senders.lock().unwrap().push(send);
-        MidiInput(Some(recv))
+        MidiInput(Some(OsMidiInput(recv)))
     }
     
     pub fn midi_reset(&self){

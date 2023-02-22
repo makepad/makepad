@@ -14,5 +14,5 @@ pub mod windows;
 
 pub(crate) use crate::os::windows::d3d11::*; 
 pub(crate) use crate::os::windows::windows::*;
-pub(crate) use crate::os::windows::winrt_midi::{OsMidiOutput};
+pub(crate) use crate::os::windows::winrt_midi::{OsMidiInput, OsMidiOutput};
 

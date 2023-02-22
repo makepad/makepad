@@ -419,8 +419,7 @@ impl AAudioAccess {
             while i < self.audio_inputs.len() {
                 if self.audio_inputs[i].is_in_error_state.swap(false, Ordering::SeqCst)
                     || !devices.contains(&self.audio_inputs[i].device_id) {
-                    let item = self.audio_inputs.remove(i);
-                    unsafe {item.terminate()};
+                    unsafe {self.audio_inputs.remove(i).terminate()};
                 }
                 else {
                     i += 1;
@@ -459,8 +458,7 @@ impl AAudioAccess {
             while i < self.audio_outputs.len() {
                 if self.audio_outputs[i].is_in_error_state.swap(false, Ordering::SeqCst)
                     || !devices.contains(&self.audio_outputs[i].device_id) {
-                    let item = self.audio_outputs.remove(i);
-                    unsafe {item.terminate()};
+                    unsafe{self.audio_outputs.remove(i).terminate()};
                 }
                 else {
                     i += 1;
