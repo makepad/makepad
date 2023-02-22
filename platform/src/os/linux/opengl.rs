@@ -51,20 +51,29 @@ impl Cx {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
                 
-                
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
                     draw_call
                 }else {
                     continue;
                 };
                 
-                let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                let sh = &self.draw_shaders.shaders[draw_call.draw_shader.draw_shader_id];
                 if sh.os_shader_id.is_none() { // shader didnt compile somehow
                     continue;
                 }
-                let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
+                let shp = &mut self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
                 
-                if draw_call.instance_dirty {
+                if shp.gl_shader.is_none(){
+                    shp.gl_shader = Some(GlShader::new(
+                        &shp.vertex,
+                        &shp.pixel,
+                        &sh.mapping,
+                        self.os_type.get_cache_dir().as_ref()
+                    ));
+                }
+                let shgl = shp.gl_shader.as_ref().unwrap();
+                
+                if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none(){
                     draw_call.instance_dirty = false;
                     draw_item.os.inst_vb.update_with_f32_data(draw_item.instances.as_ref().unwrap());
                 }
@@ -125,20 +134,19 @@ impl Cx {
                     vao.inst_vb = draw_item.os.inst_vb.gl_buffer;
                     vao.geom_vb = geometry.os.vb.gl_buffer;
                     vao.geom_ib = geometry.os.ib.gl_buffer;
-                    
                     unsafe {
                         gl_sys::BindVertexArray(vao.vao);
                         
                         // bind the vertex and indexbuffers
                         gl_sys::BindBuffer(gl_sys::ARRAY_BUFFER, vao.geom_vb.unwrap());
-                        for attr in &shp.geometries {
+                        for attr in &shgl.geometries {
                             gl_sys::VertexAttribPointer(attr.loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                             gl_sys::EnableVertexAttribArray(attr.loc);
                         }
                         
                         gl_sys::BindBuffer(gl_sys::ARRAY_BUFFER, vao.inst_vb.unwrap());
                         
-                        for attr in &shp.instances {
+                        for attr in &shgl.instances {
                             gl_sys::VertexAttribPointer(attr.loc, attr.size, gl_sys::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                             gl_sys::EnableVertexAttribArray(attr.loc);
                             gl_sys::VertexAttribDivisor(attr.loc, 1 as gl_sys::GLuint);
@@ -151,7 +159,7 @@ impl Cx {
                 }
                 
                 unsafe {
-                    gl_sys::UseProgram(shp.program);
+                    gl_sys::UseProgram(shgl.program);
                     
                     gl_sys::BindVertexArray(draw_item.os.vao.as_ref().unwrap().vao);
                     let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
@@ -160,15 +168,15 @@ impl Cx {
                     let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
                     let draw_uniforms = draw_call.draw_uniforms.as_slice();
                     
-                    CxOsDrawShader::set_uniform_array(&shp.pass_uniforms, pass_uniforms);
-                    CxOsDrawShader::set_uniform_array(&shp.view_uniforms, draw_list_uniforms);
-                    CxOsDrawShader::set_uniform_array(&shp.draw_uniforms, draw_uniforms);
-                    CxOsDrawShader::set_uniform_array(&shp.user_uniforms, &draw_call.user_uniforms);
-                    CxOsDrawShader::set_uniform_array(&shp.live_uniforms, &sh.mapping.live_uniforms_buf);
+                    GlShader::set_uniform_array(&shgl.pass_uniforms, pass_uniforms);
+                    GlShader::set_uniform_array(&shgl.view_uniforms, draw_list_uniforms);
+                    GlShader::set_uniform_array(&shgl.draw_uniforms, draw_uniforms);
+                    GlShader::set_uniform_array(&shgl.user_uniforms, &draw_call.user_uniforms);
+                    GlShader::set_uniform_array(&shgl.live_uniforms, &sh.mapping.live_uniforms_buf);
                     
                     let ct = &sh.mapping.const_table.table;
                     if ct.len()>0 {
-                        CxOsDrawShader::set_uniform_array(&shp.const_table_uniform, ct);
+                        GlShader::set_uniform_array(&shgl.const_table_uniform, ct);
                     }
                     
                     // lets set our textures
@@ -179,7 +187,7 @@ impl Cx {
                             continue;
                         };
                         let cxtexture = &mut self.textures[texture_id];
-                        if cxtexture.update_image {
+                        if cxtexture.update_image || cxtexture.image_u32.len() != 0 && cxtexture.os.gl_texture.is_none(){
                             cxtexture.update_image = false;
                             cxtexture.os.update_platform_texture_image2d(
                                 cxtexture.desc.width.unwrap() as u32,
@@ -203,7 +211,7 @@ impl Cx {
                         else {
                             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
                         }
-                        gl_sys::Uniform1i(shp.textures[i].loc, i as i32);
+                        gl_sys::Uniform1i(shgl.textures[i].loc, i as i32);
                     }
                     
                     gl_sys::DrawElementsInstanced(
@@ -389,7 +397,7 @@ impl Cx {
         }
     }
     
-    pub fn opengl_compile_shaders(&mut self, cache_dir: Option<&str>) {
+    pub fn opengl_compile_shaders(&mut self) {
         //let p = profile_start();
         for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
@@ -420,7 +428,7 @@ impl Cx {
                 }
                 
                 if cx_shader.os_shader_id.is_none() {
-                    let shp = CxOsDrawShader::new(&vertex, &pixel, &cx_shader.mapping, cache_dir);
+                    let shp = CxOsDrawShader::new(&vertex, &pixel);
                     cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                     self.draw_shaders.os_shaders.push(shp);
                 }
@@ -433,9 +441,14 @@ impl Cx {
 
 #[derive(Clone)]
 pub struct CxOsDrawShader {
-    pub program: u32,
+    pub gl_shader: Option<GlShader>,
     pub vertex: String,
     pub pixel: String,
+}
+
+#[derive(Clone)]
+pub struct GlShader {
+    pub program: u32,
     pub geometries: Vec<OpenglAttribute>,
     pub instances: Vec<OpenglAttribute>,
     pub textures: Vec<OpenglUniform>,
@@ -447,33 +460,9 @@ pub struct CxOsDrawShader {
     pub const_table_uniform: OpenglUniform,
 }
 
-impl CxOsDrawShader {
-    pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, cache_dir: Option<&str>) -> Self {
-        
-        let vertex = format!("
-            #version 100
-            precision highp float;
-            precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}} 
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
-            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", vertex);
-        
-        let pixel = format!("
-            #version 100
-            #extension GL_OES_standard_derivatives : enable
-            precision highp float;
-            precision highp int;
-            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
-            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
-            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
-            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
-            {}\0", pixel);
-        
-        unsafe fn read_cache(vertex:&str, pixel:&str, cache_dir:Option<&str>)->Option<gl_sys::GLuint>{ 
+impl GlShader{
+    pub fn new(vertex: &str, pixel: &str, mapping: &CxDrawShaderMapping, cache_dir: Option<&String>)->Self{
+        unsafe fn read_cache(vertex:&str, pixel:&str, cache_dir:Option<&String>)->Option<gl_sys::GLuint>{ 
             if let Some(cache_dir) = cache_dir {
                 let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
                 if let Ok(mut cache_file) = File::open(format!("{}/shader_{:08x}.bin", cache_dir, shader_hash.0)) {
@@ -523,9 +512,6 @@ impl CxOsDrawShader {
                 gl_sys::DeleteShader(fs);
                 program
             };
-                
-            let geometries = Self::opengl_get_attributes(program, "packed_geometry_", mapping.geometries.total_slots);
-            let instances = Self::opengl_get_attributes(program, "packed_instance_", mapping.instances.total_slots);
             
             if let Some(cache_dir) = cache_dir {
                 let mut binary = Vec::new();
@@ -547,14 +533,11 @@ impl CxOsDrawShader {
                     }
                 } 
             }
-            
-            // lets fetch the uniform positions for our uniforms
-            CxOsDrawShader {
+
+            Self{
                 program,
-                vertex,
-                pixel,
-                geometries,
-                instances,
+                geometries:Self::opengl_get_attributes(program, "packed_geometry_", mapping.geometries.total_slots),
+                instances: Self::opengl_get_attributes(program, "packed_instance_", mapping.instances.total_slots),
                 textures: Self::opengl_get_texture_slots(program, &mapping.textures),
                 pass_uniforms: Self::opengl_get_uniform(program, "pass_table"),
                 view_uniforms: Self::opengl_get_uniform(program, "view_table"),
@@ -565,6 +548,7 @@ impl CxOsDrawShader {
             }
         }
     }
+
     
     pub fn set_uniform_array(loc: &OpenglUniform, array: &[f32]) {
         unsafe {
@@ -690,7 +674,53 @@ impl CxOsDrawShader {
         }
         gl_texture_slots
     }
-    
+
+    pub fn free_resources(self){
+        unsafe{
+            gl_sys::DeleteShader(self.program);
+        }
+    }
+}
+
+impl CxOsDrawShader {
+    pub fn new(vertex: &str, pixel: &str) -> Self {
+        
+        let vertex = format!("
+            #version 100
+            precision highp float;
+            precision highp int;
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}} 
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
+            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
+            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
+            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
+            {}\0", vertex);
+        
+        let pixel = format!("
+            #version 100
+            #extension GL_OES_standard_derivatives : enable
+            precision highp float;
+            precision highp int;
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}}
+            vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
+            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
+            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
+            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
+            {}\0", pixel);
+        
+            // lets fetch the uniform positions for our uniforms
+        CxOsDrawShader {
+            vertex,
+            pixel,
+            gl_shader: None,
+        }
+    }
+
+    pub fn free_resources(&mut self){
+        if let Some(gl_shader) = self.gl_shader.take(){
+            gl_shader.free_resources();
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -714,6 +744,14 @@ pub struct CxOsGeometry {
     pub ib: OpenglBuffer,
 }
 
+impl CxOsGeometry{
+    pub fn free_resources(&mut self){
+        self.vb.free_resources();
+        self.ib.free_resources();
+    }
+}
+    
+
 /*
 #[derive(Default, Clone)]
 pub struct OpenglTextureSlot {
@@ -734,6 +772,11 @@ pub struct CxOsDrawCallVao {
     pub geom_ib: Option<u32>,
 }
 
+impl CxOsDrawCallVao {
+    pub fn free(self){
+        unsafe{gl_sys::DeleteVertexArrays(1, &self.vao)};
+    }    
+}
 
 #[derive(Default, Clone)]
 pub struct CxOsDrawCall {
@@ -742,6 +785,12 @@ pub struct CxOsDrawCall {
 }
 
 impl CxOsDrawCall {
+    pub fn free_resources(&mut self){
+        self.inst_vb.free_resources();
+        if let Some(vao) = self.vao.take(){
+            vao.free();
+        }
+    }    
 }
 
 #[derive(Default, Clone)]
@@ -789,7 +838,6 @@ impl CxOsTexture {
             gl_sys::BindTexture(gl_sys::TEXTURE_2D, 0);
         }
     }
-    
     
     pub fn update_platform_render_target(&mut self, desc: &TextureDesc, default_size: DVec2, is_depth: bool) -> bool {
         let width = desc.width.unwrap_or(default_size.x as usize) as u64;
@@ -870,12 +918,29 @@ impl CxOsTexture {
         return true;
     }
     
+    pub fn free_resources(&mut self){
+        if let Some(gl_texture) = self.gl_texture.take(){
+            unsafe{gl_sys::DeleteTextures(1, &gl_texture)};
+        }
+        if let Some(gl_renderbuffer) = self.gl_renderbuffer.take(){
+            unsafe{gl_sys::DeleteRenderbuffers(1, &gl_renderbuffer)};
+        }
+    }
+    
 }
 
 #[derive(Default, Clone)]
 pub struct CxOsPass {
     pub gl_framebuffer: Option<u32>,
-    pub gl_bugfix_depthbuffer: Option<u32>
+}
+
+impl CxOsPass{
+    
+    pub fn free_resources(&mut self){
+        if let Some(gl_framebuffer) = self.gl_framebuffer.take(){
+            unsafe{gl_sys::DeleteFramebuffers(1, &gl_framebuffer)};
+        }
+    }    
 }
 
 #[derive(Default, Clone)]
@@ -922,6 +987,13 @@ impl OpenglBuffer {
             );
         }
     }
+    
+    pub fn free_resources(&mut self){
+        if let Some(gl_buffer) = self.gl_buffer.take(){
+            unsafe{gl_sys::DeleteBuffers(1, &gl_buffer)};
+        }
+    }
+
 }
 
 /*

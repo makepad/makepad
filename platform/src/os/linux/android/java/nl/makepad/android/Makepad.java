@@ -16,13 +16,17 @@ public class Makepad {
     static {
         System.loadLibrary("makepad");
     }
-
-    static native long newCx();
-    static native void dropCx(long cx);
-    static native void init(long cx, String cache_path, Callback callback);
-    static native void resize(long cx, int width, int height, Callback callback);
-    static native void draw(long cx, Callback callback);
-    static native void touch(long cx, MotionEvent event, Callback callback);
-    static native void timeout(long cx, long id, Callback callback);
-    static native void midiDevice(long cx, String name, Object midi_device, Callback callback);
+    // Event calls from Java to Rust
+    static native long onNewCx();
+    static native void onDropCx(long cx);
+    static native long onPause(long cx, Callback callback);
+    static native void onResume(long cx, Callback callback);
+    static native long onNewGL(long cx, Callback callback);
+    static native void onFreeGL(long cx, Callback callback);
+    static native void onInit(long cx, String cache_path, Callback callback);
+    static native void onResize(long cx, int width, int height, Callback callback);
+    static native void onDraw(long cx, Callback callback);
+    static native void onTouch(long cx, MotionEvent event, Callback callback);
+    static native void onTimeout(long cx, long id, Callback callback);
+    static native void onMidiDeviceOpened(long cx, String name, Object midi_device, Callback callback);
 }
