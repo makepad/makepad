@@ -10,7 +10,7 @@ public class Makepad {
         void cancelTimeout(long id);
         byte[] readAsset(String path);
         String[] getAudioDevices(long flag);
-        void openAllMidiDevices();
+        void openAllMidiDevices(long delay);
     }
 
     static {

@@ -30,6 +30,7 @@ extern "C" {
         midiDeviceObj: jobject,
         outDevicePtrPtr: *mut *mut AMidiDevice,
     ) -> media_status_t;
+    pub fn AMidiDevice_release(midiDevice: *const AMidiDevice) -> media_status_t;
     
     pub fn AMidiDevice_getNumInputPorts(device: *const AMidiDevice) -> c_long;
     pub fn AMidiDevice_getNumOutputPorts(device: *const AMidiDevice) -> c_long;
