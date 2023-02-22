@@ -19,7 +19,9 @@ import android.os.ParcelUuid;
 import android.media.midi.MidiManager;
 import android.media.midi.MidiDeviceInfo;
 import android.media.midi.MidiDevice;
+import android.media.midi.MidiReceiver;
 import android.media.AudioManager;
+import android.media.midi.MidiOutputPort;
 import android.media.AudioDeviceInfo;
 
 import android.bluetooth.BluetoothManager;
@@ -42,7 +44,15 @@ import javax.microedition.khronos.egl.EGLDisplay;
 import javax.microedition.khronos.egl.EGLSurface;
 import javax.microedition.khronos.opengles.GL10;
 
-public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Callback, View.OnTouchListener, Makepad.Callback, MidiManager.OnDeviceOpenedListener{
+
+
+
+public class MakepadSurfaceView extends SurfaceView implements 
+SurfaceHolder.Callback, 
+View.OnTouchListener, 
+Makepad.Callback, 
+MidiManager.OnDeviceOpenedListener
+{
     public MakepadSurfaceView(Context context, long cx) {
         super(context);
         setWillNotDraw(false);
@@ -207,35 +217,58 @@ public class MakepadSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     }
 
     @SuppressWarnings("deprecation")
-    public void openAllMidiDevices(){
-        try{
-            Context context = this.getContext();
-                               
-            BluetoothManager bm = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
-            BluetoothAdapter ba = bm.getAdapter();   
-            Set<BluetoothDevice> bluetooth_devices = ba.getBondedDevices();
-
-            MidiManager mm = (MidiManager)context.getSystemService(Context.MIDI_SERVICE);
-            for(BluetoothDevice device: bluetooth_devices){
-                if(device.getType() == BluetoothDevice.DEVICE_TYPE_LE){
-                    mm.openBluetoothDevice(device, this, new Handler(Looper.getMainLooper()));
+    public void openAllMidiDevices(long delay){
+        Runnable runnable = () -> {
+            try{
+                Context context = this.getContext();
+                                
+                BluetoothManager bm = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+                BluetoothAdapter ba = bm.getAdapter();   
+                Set<BluetoothDevice> bluetooth_devices = ba.getBondedDevices();
+                ArrayList<String> bt_names = new ArrayList<String>();
+                MidiManager mm = (MidiManager)context.getSystemService(Context.MIDI_SERVICE);
+                for(BluetoothDevice device: bluetooth_devices){
+                    if(device.getType() == BluetoothDevice.DEVICE_TYPE_LE){
+                        String name =device.getName();
+                        Log.e("Makepad", "BT DEVICE: " + name);
+                        bt_names.add(name);
+                        mm.openBluetoothDevice(device, this, new Handler(Looper.getMainLooper()));
+                    }
+                }
+                // this appears to give you nonworking BLE midi devices. So we skip those by name (not perfect but ok)
+                for (MidiDeviceInfo info : mm.getDevices()){
+                    String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
+                    boolean found = false;
+                    for (String bt_name : bt_names){
+                        if (bt_name.equals(name)){
+                            found = true;
+                            break;
+                        }
+                    }
+                    if(!found){
+                        mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
+                    }
                 }
             }
-
-            for (MidiDeviceInfo info : mm.getDevices()){
-                mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
+            catch(Exception e){
+                Log.e("Makepad", "exception: " + e.getMessage());             
+                Log.e("Makepad", "exception: " + e.toString());
             }
+        };
+        if(delay != 0){
+            mHandler.postDelayed(runnable, delay);
         }
-        catch(Exception e){
-            Log.e("Makepad", "exception: " + e.getMessage());             
-            Log.e("Makepad", "exception: " + e.toString());
+        else{ // run now
+            runnable.run();
         }
     }
 
     public void onDeviceOpened(MidiDevice device) {
-        // ok WHICH device is it tho
-        String name = device.getInfo().getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
-        Makepad.midiDevice(mCx, name, device, this);
+        MidiDeviceInfo info = device.getInfo();
+        if(info != null){
+            String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
+            Makepad.midiDevice(mCx, name, device, this);
+        }
     }
 
     public void scheduleTimeout(long id, long delay) {
