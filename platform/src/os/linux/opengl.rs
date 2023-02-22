@@ -843,7 +843,7 @@ impl CxOsTexture {
         let width = desc.width.unwrap_or(default_size.x as usize) as u64;
         let height = desc.height.unwrap_or(default_size.y as usize) as u64;
         
-        if self.width == width && self.height == height && self.alloc_desc == *desc {
+        if self.gl_texture.is_some() && self.width == width && self.height == height && self.alloc_desc == *desc {
             return false
         }
         
