@@ -12,6 +12,7 @@ mkdir -p $APK_DIR
 rm -rf $APK_DIR/*
 
 pushd $APK_DIR
+
     # Compile Java to JVM bytecode. This generates one or more class files.
     echo "Compiling java"
     JAVA_HOME=$JDK_DIR $JDK_DIR/bin/javac -classpath $SDK_DIR/android-33-ext4/android.jar -Xlint:deprecation -d . $JAVA_FILES
