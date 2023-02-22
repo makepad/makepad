@@ -28,7 +28,7 @@ impl Geometry{
 }
 
 #[derive(Default)]
-pub struct CxGeometryPool(IdPool<CxGeometry>);
+pub struct CxGeometryPool(pub (crate) IdPool<CxGeometry>);
 
 impl CxGeometryPool{
     pub fn alloc(&mut self)->Geometry{
