@@ -15,10 +15,10 @@ impl Cx{
         self.os.handle_web_midi_signals();
     }
 }
+ 
 
-
-impl CxMediaApi for Cx {
-    
+impl CxMediaApi for Cx { 
+     
     fn midi_input(&mut self) -> MidiInput {
         self.os.web_midi_access.create_midi_input()
     }
@@ -26,7 +26,7 @@ impl CxMediaApi for Cx {
     fn midi_output(&mut self) -> MidiOutput {
         self.os.web_midi_access.create_midi_output()
     }
-    
+     
     fn midi_reset(&mut self) {
     }
     
