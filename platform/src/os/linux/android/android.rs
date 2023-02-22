@@ -52,9 +52,16 @@ impl Cx {
     } 
     
     pub fn from_java_on_pause(&mut self,  _to_java: AndroidToJava) {
+        self.call_event_handler(&Event::Pause);
     }
      
     pub fn from_java_on_resume(&mut self, _to_java: AndroidToJava) {
+        self.call_event_handler(&Event::Resume);
+        let window_id = CxWindowPool::id_zero();
+        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+            self.redraw_pass_and_child_passes(main_pass_id);
+        }
+        self.redraw_all();
     }
 
     pub fn from_java_on_new_gl(&mut self,  to_java: AndroidToJava) {
