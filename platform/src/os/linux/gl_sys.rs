@@ -109,7 +109,11 @@ pub const PROGRAM_BINARY_LENGTH: types::GLenum = 0x8741;
 #[inline] pub unsafe fn GetError() -> types::GLenum { mem::transmute::<_, extern "system" fn() -> types::GLenum>(storage::GetError.f)() }
 #[inline] pub unsafe fn Finish() -> () { mem::transmute::<_, extern "system" fn() -> ()>(storage::Finish.f)() }
 #[inline] pub unsafe fn GetProgramBinary(program: types::GLuint, bufSize: types::GLsizei, length: *mut types::GLsizei, binaryFormat: *mut types::GLenum, binary: *mut raw::c_void) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLsizei, *mut types::GLsizei, *mut types::GLenum, *mut raw::c_void) -> ()>(storage::GetProgramBinary.f)(program, bufSize, length, binaryFormat, binary) }
-#[inline] pub unsafe fn ProgramBinary(program: types::GLuint, binaryFormat: types::GLenum, binary: *const raw::c_void, length: types::GLsizei) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLenum, *const raw::c_void, types::GLsizei) -> ()>(storage::ProgramBinary.f)(program, binaryFormat, binary, length) }
+#[inline] pub unsafe fn ProgramBinary(program: types::GLuint, binaryFormat: types::GLenum, binary: *const raw::c_void, length: types::GLsizei) -> () { mem::transmute::<_, extern "system" fn(types::GLuint, types::GLenum, *const raw::c_void, types::GLsizei) -> ()>(storage::ProgramBinary.f)(program, binaryFormat, binary, length) }            
+#[inline] pub unsafe fn DeleteRenderbuffers(n: types::GLsizei, renderbuffers: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteRenderbuffers.f)(n, renderbuffers) }
+#[inline] pub unsafe fn DeleteBuffers(n: types::GLsizei, buffers: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteBuffers.f)(n, buffers) }
+#[inline] pub unsafe fn DeleteFramebuffers(n: types::GLsizei, framebuffers: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteFramebuffers.f)(n, framebuffers) }
+#[inline] pub unsafe fn DeleteVertexArrays(n: types::GLsizei, arrays: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteVertexArrays.f)(n, arrays) }
 
 mod storage {
     use super::FnPtr;
@@ -165,6 +169,10 @@ mod storage {
     pub static mut Finish: FnPtr = FnPtr::default();
     pub static mut GetProgramBinary: FnPtr = FnPtr::default();
     pub static mut ProgramBinary: FnPtr = FnPtr::default();
+    pub static mut DeleteRenderbuffers: FnPtr = FnPtr::default();
+    pub static mut DeleteBuffers: FnPtr = FnPtr::default();
+    pub static mut DeleteFramebuffers: FnPtr = FnPtr::default();
+    pub static mut DeleteVertexArrays: FnPtr = FnPtr::default();
 }
 
 pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const raw::c_void {
@@ -219,7 +227,11 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::Finish = FnPtr::new(metaloadfn(&mut loadfn, "glFinish", &[]));
     storage::ClearDepthf = FnPtr::new(metaloadfn(&mut loadfn, "glClearDepthf", &["glClearDepthfOES"]));
     storage::GetProgramBinary = FnPtr::new(metaloadfn(&mut loadfn, "glGetProgramBinary", &["glGetProgramBinaryOES"]));
-    storage::ProgramBinary = FnPtr::new(metaloadfn(&mut loadfn, "glProgramBinary", &["glProgramBinaryOES"]))
+    storage::ProgramBinary = FnPtr::new(metaloadfn(&mut loadfn, "glProgramBinary", &["glProgramBinaryOES"]));
+    storage::DeleteRenderbuffers = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteRenderbuffers", &["glDeleteRenderbuffersEXT"]));
+    storage::DeleteBuffers = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteBuffers", &["glDeleteBuffersARB"]));
+    storage::DeleteFramebuffers = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteFramebuffers", &["glDeleteFramebuffersEXT"]));
+    storage::DeleteVertexArrays = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteVertexArrays", &["glDeleteVertexArraysAPPLE", "glDeleteVertexArraysOES"]))
 }
 
 #[inline(never)]
