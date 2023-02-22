@@ -221,7 +221,7 @@ impl CxFontsAtlas {
         font_id
     }
     
-    pub fn reset_font_atlas_and_redraw(&mut self) {
+    pub fn reset_fonts_atlas(&mut self) {
         for cxfont in &mut self.fonts {
             if let Some(cxfont) = cxfont {
                 cxfont.atlas_pages.clear();
@@ -231,8 +231,6 @@ impl CxFontsAtlas {
         self.alloc.ypos = 0.;
         self.alloc.hmax = 0.;
         self.clear_buffer = true;
-        todo!();
-        //self.redraw_all();
     }
     
     pub fn get_internal_font_atlas_texture_id(&self) -> TextureId {
@@ -419,6 +417,13 @@ impl<'a> Cx2d<'a> {
             
             let fonts_atlas = CxFontsAtlas::new(texture_id);
             cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
+        }
+    }
+    
+    pub fn reset_fonts_atlas(cx:&mut Cx){
+        if cx.has_global::<CxFontsAtlasRc>() {
+            let mut fonts_atlas = cx.get_global::<CxFontsAtlasRc>().0.borrow_mut();
+            fonts_atlas.reset_fonts_atlas();
         }
     }
         

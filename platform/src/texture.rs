@@ -30,7 +30,7 @@ impl Texture {
 }
 
 #[derive(Default)]
-pub struct CxTexturePool(IdPool<CxTexture>);
+pub struct CxTexturePool(pub (crate) IdPool<CxTexture>);
 impl CxTexturePool {
     pub fn alloc(&mut self) -> Texture {
         Texture(self.0.alloc())
