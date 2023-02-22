@@ -274,7 +274,7 @@ live_design!{
                     mix(
                         mix(
                             mix(#xFFFFFF66, (COLOR_DOWN_4), pow(self.pos.y, .2)),
-                            mix((COLOR_UP_4), #x00000044, pow(self.pos.y, 0.25)),
+                            mix((COLOR_UP_5), (COLOR_DOWN_4), pow(self.pos.y, 0.25)),
                             self.hover
                         ),
                         mix((COLOR_DOWN_4), (COLOR_UP_4), pow(self.pos.y, 0.75)),
@@ -530,9 +530,9 @@ live_design!{
     
     PlayPause = <InstrumentCheckbox> {
         walk: {width: Fit, height: Fit, margin: <SPACING_3> {} }
-        layout: {align: {x: 0.0, y: 0.5}}
+        layout: {align: {x: 0.5, y: 0.5}}
         checkbox = {
-            walk: {width: 20, height: 20, margin: { right: -30 }}
+            walk: {width: 30, height: 30, margin: { right: -30 }}
             label: ""
             draw_check: {
                 fn pixel(self) -> vec4 {
@@ -540,29 +540,48 @@ live_design!{
                     let left = 3;
                     let sz = 20.0;
                     let c = vec2(left + sz, self.rect_size.y);
-                    sdf.move_to(0.0, 0.0);
-                    sdf.line_to(c.x * 0.75, c.y * 0.5);
-                    sdf.line_to(0.0, c.y);
-                    sdf.close_path();
-                    sdf.fill_keep(
-                        mix(
-                            mix((COLOR_UP_5) * 0.75, (COLOR_UP_5), self.hover),
-                            mix(
-                                mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
-                                mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
-                                self.hover
-                            ),
-                            self.selected
-                        )
+                    sdf.box(
+                        0.,
+                        0.,
+                        self.rect_size.x,
+                        self.rect_size.y,
+                        3.0
                     )
+                    sdf.fill_keep(
+                        mix(#x888, #x181818, pow(self.pos.y, 0.3))
+                    );
                     sdf.stroke_keep(
                         mix(
-                            mix(#xFFFFFF66, #xFFFFFF10, pow(self.pos.y, 0.5)),
+                            mix(#FFFFFF66, #x00000088, pow(self.pos.y, 0.25)),
                             #xFFFFFF80,
                             self.selected
                         ),
-                        1.
+                        4.
                     )
+
+                    // sdf.move_to(0.0, 0.0);
+                    // sdf.line_to(c.x * 0.75, c.y * 0.5);
+                    // sdf.line_to(0.0, c.y);
+                    // sdf.close_path();
+                    // sdf.fill_keep(
+                    //     mix(
+                    //         mix((COLOR_UP_5) * 0.75, (COLOR_UP_5), self.hover),
+                    //         mix(
+                    //             mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                    //             mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                    //             self.hover
+                    //         ),
+                    //         self.selected
+                    //     )
+                    // )
+                    // sdf.stroke_keep(
+                    //     mix(
+                    //         mix(#xFFFFFF66, #xFFFFFF10, pow(self.pos.y, 0.5)),
+                    //         #xFFFFFF80,
+                    //         self.selected
+                    //     ),
+                    //     1.
+                    // )
                     return sdf.result
                 }
             }
@@ -1444,7 +1463,6 @@ live_design!{
             }
 
             <FillerV> {}
-            panic = <FishButton> {text: "Panic", walk: {width: Fill}}
         }
     }
     
@@ -1543,6 +1561,8 @@ live_design!{
                 walk: {width: Fill, height: Fit}
                 layout: {flow: Right, spacing: (SSPACING_0), padding: {bottom: -65.0 }}
                 
+                panic = <FishButton> {text: "Panic", walk: {width: Fit, margin: <SPACING_4> {} }}
+
                 <Frame> {
                     walk: {width: Fill, height: Fit, margin: <SPACING_4> {} }
                     layout: {spacing: (SSPACING_1)}
