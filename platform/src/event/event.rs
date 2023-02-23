@@ -28,6 +28,9 @@ use {
 pub enum Event {
     Construct,
     Destruct,
+    
+    Pause,
+    Resume,
 
     Draw(DrawEvent),
     LiveEdit(LiveEditEvent),

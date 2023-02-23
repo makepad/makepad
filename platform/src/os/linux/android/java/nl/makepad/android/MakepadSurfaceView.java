@@ -1,41 +1,14 @@
 package nl.makepad.android;
 
 import android.Manifest;
-
 import android.content.Context;
-import android.content.res.AssetManager;
 import android.graphics.Canvas;
 import android.opengl.GLES20;
-import android.os.Handler;
-import android.os.Looper;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.util.Log;
-import android.os.Bundle;
-import android.os.ParcelUuid;
-
-import android.media.midi.MidiManager;
-import android.media.midi.MidiDeviceInfo;
-import android.media.midi.MidiDevice;
-import android.media.midi.MidiReceiver;
-import android.media.AudioManager;
-import android.media.midi.MidiOutputPort;
-import android.media.AudioDeviceInfo;
-
-import android.bluetooth.BluetoothManager;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
-
-import java.util.HashMap;
-import java.util.ArrayList;
-import java.util.Set;
-import java.util.UUID;
-import java.io.File;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
 
 import javax.microedition.khronos.egl.EGL10;
 import javax.microedition.khronos.egl.EGLConfig;
@@ -44,25 +17,18 @@ import javax.microedition.khronos.egl.EGLDisplay;
 import javax.microedition.khronos.egl.EGLSurface;
 import javax.microedition.khronos.opengles.GL10;
 
-
-
-
 public class MakepadSurfaceView extends SurfaceView implements 
 SurfaceHolder.Callback, 
-View.OnTouchListener, 
-Makepad.Callback, 
-MidiManager.OnDeviceOpenedListener
+View.OnTouchListener
 {
     public MakepadSurfaceView(Context context, long cx) {
         super(context);
+
         setWillNotDraw(false);
         getHolder().addCallback(this);
         setOnTouchListener(this);
 
         mCx = cx;
-
-        mHandler = new Handler(Looper.getMainLooper());
-        mRunnables = new HashMap<Long, Runnable>();
 
         mEgl = (EGL10) EGLContext.getEGL();
 
@@ -75,11 +41,6 @@ MidiManager.OnDeviceOpenedListener
         if (!mEgl.eglInitialize(mEglDisplay, version)) {
             throw new RuntimeException("eglInitialize failed");
         }
-        String apk_path = context.getCacheDir().getAbsolutePath();
-        String cache_path = context.getCacheDir().getAbsolutePath();
-        
-        Makepad.init(mCx, cache_path, this);
-
         int[] attrib_list = new int[]{
                 EGL10.EGL_RED_SIZE, 8,
                 EGL10.EGL_GREEN_SIZE, 8,
@@ -109,11 +70,11 @@ MidiManager.OnDeviceOpenedListener
     }
 
     @Override
-    public void onDraw(Canvas canvas) {
+    public void onDraw(Canvas canvas) {      
         if (!mEgl.eglMakeCurrent(mEglDisplay, mEglSurface, mEglSurface, mEglContext)) {
             throw new RuntimeException("eglMakeCurrent failed");
         }
-        Makepad.draw(mCx, this);
+        Makepad.onDraw(mCx, (Makepad.Callback)this.getContext());
     }
 
     public void surfaceCreated(SurfaceHolder holder) {
@@ -138,16 +99,16 @@ MidiManager.OnDeviceOpenedListener
 
     public void surfaceDestroyed(SurfaceHolder holder) {
         if (!mEgl.eglDestroySurface(mEglDisplay, mEglSurface)) {
-            throw new RuntimeException("eglMakeCurrent failed");
+            throw new RuntimeException("eglDestroySurface failed");
         }
     }
 
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-        Makepad.resize(mCx, width, height, this);
+        Makepad.onResize(mCx, width, height, (Makepad.Callback)this.getContext());
     }
 
     public boolean onTouch(View view, MotionEvent event) {
-        Makepad.touch(mCx, event,this);
+        Makepad.onTouch(mCx, event, (Makepad.Callback)this.getContext());
         return true;
     }
 
@@ -157,139 +118,8 @@ MidiManager.OnDeviceOpenedListener
         }
     }
 
-    public void scheduleRedraw() {
-        invalidate();
-    }
-
-    public byte[] readAsset(String path){
-       Context context = this.getContext();
-       try{
-            InputStream in = context.getAssets().open(path);
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            int byteCount = 0;
-            byte[] buffer = new byte[4096];
-            while (true) {
-                int read = in.read(buffer);
-                if (read == -1) {
-                    break;
-                }
-                out.write(buffer, 0, read);
-                byteCount += read;
-            }
-            return out.toByteArray();
-        }catch(Exception e){
-            return null;
-        }
-    }
-    
-    public String[] getAudioDevices(long flag){
-        try{
-          
-            Context context = this.getContext();
-            AudioManager am = (AudioManager)context.getSystemService(Context.AUDIO_SERVICE);
-            AudioDeviceInfo[] devices = null;
-            ArrayList<String> out = new ArrayList<String>();
-            if(flag == 0){
-                devices = am.getDevices(AudioManager.GET_DEVICES_INPUTS);
-            }
-            else{
-                devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
-            }
-            for(AudioDeviceInfo device: devices){
-                int[] channel_counts = device.getChannelCounts();
-                for(int cc: channel_counts){
-                    out.add(String.format(
-                        "%d$$%d$$%d$$%s", 
-                        device.getId(), 
-                        device.getType(), 
-                        cc,
-                        device.getProductName().toString()
-                    ));
-                }
-            }
-            return out.toArray(new String[0]);
-        }
-        catch(Exception e){
-            Log.e("Makepad", "exception: " + e.getMessage());             
-            Log.e("Makepad", "exception: " + e.toString());
-            return null;
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    public void openAllMidiDevices(long delay){
-        Runnable runnable = () -> {
-            try{
-                Context context = this.getContext();
-                                
-                BluetoothManager bm = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
-                BluetoothAdapter ba = bm.getAdapter();   
-                Set<BluetoothDevice> bluetooth_devices = ba.getBondedDevices();
-                ArrayList<String> bt_names = new ArrayList<String>();
-                MidiManager mm = (MidiManager)context.getSystemService(Context.MIDI_SERVICE);
-                for(BluetoothDevice device: bluetooth_devices){
-                    if(device.getType() == BluetoothDevice.DEVICE_TYPE_LE){
-                        String name =device.getName();
-                        Log.e("Makepad", "BT DEVICE: " + name);
-                        bt_names.add(name);
-                        mm.openBluetoothDevice(device, this, new Handler(Looper.getMainLooper()));
-                    }
-                }
-                // this appears to give you nonworking BLE midi devices. So we skip those by name (not perfect but ok)
-                for (MidiDeviceInfo info : mm.getDevices()){
-                    String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
-                    boolean found = false;
-                    for (String bt_name : bt_names){
-                        if (bt_name.equals(name)){
-                            found = true;
-                            break;
-                        }
-                    }
-                    if(!found){
-                        mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
-                    }
-                }
-            }
-            catch(Exception e){
-                Log.e("Makepad", "exception: " + e.getMessage());             
-                Log.e("Makepad", "exception: " + e.toString());
-            }
-        };
-        if(delay != 0){
-            mHandler.postDelayed(runnable, delay);
-        }
-        else{ // run now
-            runnable.run();
-        }
-    }
-
-    public void onDeviceOpened(MidiDevice device) {
-        MidiDeviceInfo info = device.getInfo();
-        if(info != null){
-            String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
-            Makepad.midiDevice(mCx, name, device, this);
-        }
-    }
-
-    public void scheduleTimeout(long id, long delay) {
-        Runnable runnable = () -> {
-            mRunnables.remove(id);
-            Makepad.timeout(mCx, id, this);
-        };
-        mRunnables.put(id, runnable);
-        mHandler.postDelayed(runnable, delay);
-    }
-
-    public void cancelTimeout(long id) {
-        mHandler.removeCallbacks(mRunnables.get(id));
-        mRunnables.remove(id);
-    }
-
     private static final int EGL_CONTEXT_CLIENT_VERSION = 0x3098;
-
     private long mCx;
-    private Handler mHandler;
-    private HashMap<Long, Runnable> mRunnables;
     private EGL10 mEgl;
     private EGLDisplay mEglDisplay;
     private EGLConfig mEglConfig;

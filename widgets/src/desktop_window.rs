@@ -248,6 +248,9 @@ impl DesktopWindow {
         if is_for_other_window {
             return dispatch_action(cx, DesktopWindowEvent::EventForOtherWindow)
         }
+        if let Event::Resume = event{
+            Cx2d::reset_fonts_atlas(cx);
+        }
         if let Event::MouseMove(ev) = event {
             if let OsType::LinuxDirect = cx.os_type() {
                 // ok move our mouse cursor

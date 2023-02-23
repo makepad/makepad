@@ -170,6 +170,16 @@ impl OsType {
             _ => false
         }
     }
+    
+    
+    pub fn get_cache_dir(&self)->Option<String>{
+        if let OsType::Android(params) = self {
+            Some(params.cache_path.clone())
+        }
+        else {
+            None
+        }
+    }
 }
 
 impl Cx {
