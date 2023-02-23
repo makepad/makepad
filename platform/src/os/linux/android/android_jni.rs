@@ -8,7 +8,7 @@ use {
         area::Area,
         makepad_math::*,
         event::*,
-        cx::{Cx,AndroidParams},
+        cx::{Cx, AndroidParams},
     },
     std::{
         cell::Cell,
@@ -30,7 +30,7 @@ pub struct AndroidToJava<'a> {
 }
 
 impl<'a> AndroidToJava<'a> {
-    pub fn get_env(&self)->*mut JNIEnv{
+    pub fn get_env(&self) -> *mut JNIEnv {
         self.env
     }
     
@@ -106,11 +106,11 @@ impl<'a> AndroidToJava<'a> {
         }
     }
     
-        
+    
     /// reads an asset
     ///
     ///
-    pub fn read_asset(&self, file:&str)->Option<Vec<u8>> {
+    pub fn read_asset(&self, file: &str) -> Option<Vec<u8 >> {
         unsafe {
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
             
@@ -125,42 +125,42 @@ impl<'a> AndroidToJava<'a> {
                 signature.as_ptr(),
             );
             let byte_array = ((**self.env).CallObjectMethod.unwrap())(self.env, self.callback, method_id, file);
-            if byte_array == std::ptr::null_mut(){
+            if byte_array == std::ptr::null_mut() {
                 return None
             }
-            else{
+            else {
                 return Some(java_byte_array_to_vec(self.env, byte_array));
             }
         }
     }
     
-    pub fn get_audio_devices(&self, flag:jlong)->Vec<String> {
+    pub fn get_audio_devices(&self, flag: jlong) -> Vec<String> {
         unsafe {
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
             
             let name = CString::new("getAudioDevices").unwrap();
             let signature = CString::new("(J)[Ljava/lang/String;").unwrap();
             let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,  
+                self.env,
                 class,
-                name.as_ptr(), 
-                signature.as_ptr(), 
+                name.as_ptr(),
+                signature.as_ptr(),
             );
             let string_array = ((**self.env).CallObjectMethod.unwrap())(self.env, self.callback, method_id, flag);
             return java_string_array_to_vec(self.env, string_array);
         }
     }
-     
-    pub fn open_all_midi_devices(&self, delay:jlong){
+    
+    pub fn open_all_midi_devices(&self, delay: jlong) {
         unsafe {
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
             let name = CString::new("openAllMidiDevices").unwrap();
             let signature = CString::new("(J)V").unwrap();
             let method_id = ((**self.env).GetMethodID.unwrap())(
-                self.env,  
+                self.env,
                 class,
                 name.as_ptr(),
-                signature.as_ptr(), 
+                signature.as_ptr(),
             );
             ((**self.env).CallLongMethod.unwrap())(self.env, self.callback, method_id, delay);
         }
@@ -169,34 +169,75 @@ impl<'a> AndroidToJava<'a> {
 
 // The functions here correspond to the static functions on the `Makepad` class in Java.
 
-    
+// Java_nl_makepad_android_Makepad_newCx is found in main_app.rs
+
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_dropCx(_: JNIEnv, _: jclass, _app: jlong) {
-    //log!("DROP!"); 
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onDropCx(_: JNIEnv, _: jclass, _cx: jlong) {
+    //log!("DROP!");
     //drop(Box::from_raw(app as *mut Cx));
 }
 
-unsafe fn jstring_to_string(env:*mut JNIEnv, java_string: jstring)->String{
+#[no_mangle]
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onPause(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_pause(AndroidToJava {env, callback, phantom: PhantomData});
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onResume(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_resume(AndroidToJava {env, callback, phantom: PhantomData});
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onNewGL(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_new_gl(AndroidToJava {env, callback, phantom: PhantomData});
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onFreeGL(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_free_gl(AndroidToJava {env, callback, phantom: PhantomData});
+}
+
+unsafe fn jstring_to_string(env: *mut JNIEnv, java_string: jstring) -> String {
     let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
     let rust_string = std::ffi::CStr::from_ptr(chars).to_str().unwrap().to_string();
     (**env).ReleaseStringUTFChars.unwrap()(env, java_string, chars);
     rust_string
 }
 
-unsafe fn java_string_array_to_vec(env:*mut JNIEnv, object_array: jobject)->Vec<String>{
-    if object_array == std::ptr::null_mut(){
+unsafe fn java_string_array_to_vec(env: *mut JNIEnv, object_array: jobject) -> Vec<String> {
+    if object_array == std::ptr::null_mut() {
         return Vec::new();
     }
     let mut out = Vec::new();
     let length = (**env).GetArrayLength.unwrap()(env, object_array);
-    for i in 0..length{
+    for i in 0..length {
         let string = (**env).GetObjectArrayElement.unwrap()(env, object_array, i as jsize);
         out.push(jstring_to_string(env, string));
     }
     out
 }
 
-unsafe fn java_byte_array_to_vec(env:*mut JNIEnv, byte_array: jobject)->Vec<u8>{
+unsafe fn java_byte_array_to_vec(env: *mut JNIEnv, byte_array: jobject) -> Vec<u8> {
     let bytes = (**env).GetByteArrayElements.unwrap()(env, byte_array, std::ptr::null_mut());
     let length = (**env).GetArrayLength.unwrap()(env, byte_array);
     let mut out_bytes = Vec::new();
@@ -207,31 +248,32 @@ unsafe fn java_byte_array_to_vec(env:*mut JNIEnv, byte_array: jobject)->Vec<u8>{
 }
 
 
-pub struct AndroidInitParams{
+pub struct AndroidInitParams {
     pub cache_path: String,
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_init(
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onInit(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
     cache_path: jstring,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_init(
-        AndroidParams{ 
+    (*(cx as *mut Cx)).from_java_on_init(
+        AndroidParams {
             cache_path: jstring_to_string(env, cache_path),
         },
-        AndroidToJava { 
-        env,
-        callback,
-        phantom: PhantomData,
-    });
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        }
+    );
 }
 
-#[no_mangle] 
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_resize(
+#[no_mangle]
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onResize(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -239,7 +281,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_resize(
     height: jint,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_resize(
+    (*(cx as *mut Cx)).from_java_on_resize(
         width,
         height,
         AndroidToJava {
@@ -251,13 +293,13 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_resize(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_draw(
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onDraw(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_draw(AndroidToJava {
+    (*(cx as *mut Cx)).from_java_on_draw(AndroidToJava {
         env,
         callback,
         phantom: PhantomData,
@@ -265,7 +307,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_draw(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_touch(
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onTouch(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -362,14 +404,14 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_touch(
             uid: id as u64,
             rotation_angle,
             force,
-            radius: dvec2(1.0,1.0),
+            radius: dvec2(1.0, 1.0),
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             abs: dvec2(x as f64, y as f64),
         });
     }
     
-    (*(cx as *mut Cx)).from_java_touch_update(
+    (*(cx as *mut Cx)).from_java_on_touch(
         touches,
         AndroidToJava {
             env,
@@ -380,14 +422,14 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_touch(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_timeout(
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onTimeout(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
     id: jlong,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_timeout(
+    (*(cx as *mut Cx)).from_java_on_timeout(
         id,
         AndroidToJava {
             env,
@@ -398,7 +440,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_timeout(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_midiDevice(
+pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onMidiDeviceOpened(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -406,7 +448,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_midiDevice(
     midi_device: jobject,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_midi_device(
+    (*(cx as *mut Cx)).from_java_on_midi_device_opened(
         jstring_to_string(env, name),
         midi_device,
         AndroidToJava {

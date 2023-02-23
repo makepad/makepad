@@ -289,7 +289,7 @@ impl AMidiAccess {
         }
     }
     
-    pub fn received_midi_device(&mut self, device_name: String, java_device: jobject, to_java: &AndroidToJava) {
+    pub fn midi_device_opened(&mut self, device_name: String, java_device: jobject, to_java: &AndroidToJava) {
         
         unsafe {
             if self.devices.iter().find( | v | v.device_name == device_name).is_some() {
