@@ -24,6 +24,9 @@
 # https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg
 # put in $SRC/NDK
 
+# android v4 support, rename aar to zip, unpack, rename classes.jar to support/android-support-v4-28.0.0.jar
+# https://maven.google.com/web/index.html?q=v4#com.android.support:support-compat:28.0.0
+
 # $SRC/openjdk/ is the openJDK distribution for m1 from https://jdk.java.net/archive/ version 16
 # version 19 had this error:  Unsupported class file major version 63 with d8. 
 # version 16 also has this warning: One or more classes has class file version >= 56 which is not officially supported.
@@ -44,6 +47,7 @@ mkdir -p $DST
 
 mkdir -p $DST/openjdk/bin
 cp $SRC/openjdk/bin/java $DST/openjdk/bin
+cp $SRC/openjdk/bin/jar $DST/openjdk/bin
 cp $SRC/openjdk/bin/javac $DST/openjdk/bin
 
 mkdir -p $DST/openjdk/lib/jli
@@ -66,6 +70,9 @@ cp $SRC/openjdk/lib/libzip.dylib $DST/openjdk/lib
 
 mkdir -p $DST/openjdk/conf/security 
 cp -a $SRC/openjdk/conf/security/* $DST/openjdk/conf/security/
+
+mkdir -p $DST/support
+cp -a $SRC/support/* $DST/support
 
 # build tools
 

@@ -172,7 +172,7 @@ pub struct BitCrushSettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct DelaySettings {
-    #[live(0.5)] delaysend: f32a,
+    #[live(0.15)] delaysend: f32a,
     #[live(0.8)] delayfeedback: f32a,
     #[live(0.0)] cross: f32a,
     #[live(0.5)] difference: f32a
@@ -856,8 +856,8 @@ pub struct ChorusSettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct ReverbSettings {
-    #[live(0.5)] mix: f32a,
-    #[live(0.0)] feedback: f32a
+    #[live(0.05)] mix: f32a,
+    #[live(0.04)] feedback: f32a
 }
 
 #[derive(Copy, Clone)]
@@ -1362,7 +1362,7 @@ impl IronFishVoice {
                 for i in startidxmut..proc + startidxmut
                 {
                     
-                    let output = self.compute_one(state, &settings, touch, lfo, osc1_gain, osc2_gain, mod_envelope) * (6.28 * 0.006);
+                    let output = self.compute_one(state, &settings, touch, lfo, osc1_gain, osc2_gain, mod_envelope) * (6.28 * 0.02);
                     left_disp[i] = output as f32;
                     right_disp[i] = output as f32;
                     left[i] += output as f32;
@@ -1385,8 +1385,8 @@ impl IronFishVoice {
                 self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
                 self.updatenote(proc, settings, state, sps_detune_tab);
                 for i in startidxmut..proc + startidxmut
-                {
-                    let output = self.compute_one(state, &settings, touch, lfo, osc1_gain, osc2_gain, mod_envelope) * (6.28 * 0.006);
+                {  
+                    let output = self.compute_one(state, &settings, touch, lfo, osc1_gain, osc2_gain, mod_envelope) * (6.28 * 0.02);
                     left[i] += output as f32;
                     right[i] += output as f32;
                 }

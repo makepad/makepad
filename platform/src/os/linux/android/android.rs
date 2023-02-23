@@ -25,7 +25,7 @@ use {
             Event,
             WindowGeom,
         },
-        window::CxWindowPool, 
+        window::CxWindowPool,
         pass::CxPassParent,
         cx::{Cx, OsType, AndroidParams},
         gpu_info::GpuPerformance,
@@ -33,40 +33,81 @@ use {
         pass::{PassClearColor, PassClearDepth, PassId},
     }
 };
- 
+
 #[link(name = "EGL")]
 extern "C" {
     fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
 }
 
 impl Cx {
-     
+    
     /// Called when EGL is initialized.
-    pub fn from_java_init(&mut self, params: AndroidParams, to_java: AndroidToJava) {
+    pub fn from_java_on_init(&mut self, params: AndroidParams, to_java: AndroidToJava) {
         // lets load dependencies here.
         self.android_load_dependencies(&to_java);
         
         self.os_type = OsType::Android(params);
         self.gpu_info.performance = GpuPerformance::Tier1;
         self.call_event_handler(&Event::Construct);
+    } 
+    
+    pub fn from_java_on_pause(&mut self,  _to_java: AndroidToJava) {
+        self.call_event_handler(&Event::Pause);
+    }
+     
+    pub fn from_java_on_resume(&mut self, _to_java: AndroidToJava) {
+        self.call_event_handler(&Event::Resume);
+        let window_id = CxWindowPool::id_zero();
+        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+            self.redraw_pass_and_child_passes(main_pass_id);
+        }
         self.redraw_all();
-         
-        unsafe {gl_sys::load_with( | s | {
+    }
+
+    pub fn from_java_on_new_gl(&mut self,  to_java: AndroidToJava) {
+        // init GL
+        self.redraw_all(); 
+        unsafe {gl_sys::load_with( | s | {   
             let s = CString::new(s).unwrap();
-            eglGetProcAddress(s.as_ptr())
+            eglGetProcAddress(s.as_ptr()) 
         })};
-         
-        to_java.schedule_timeout(0, 0);
-        to_java.schedule_redraw();
+        
+        to_java.schedule_timeout(0, 0); 
+        to_java.schedule_redraw(); 
         self.after_every_event(&to_java);
+    }    
+ 
+    pub fn from_java_on_free_gl(&mut self,  to_java: AndroidToJava) {
+        // lets destroy all of our gl resources
+        for texture in &mut self.textures.0.pool{
+            texture.os.free_resources();
+        }
+        // delete all geometry buffers
+        for geometry in &mut self.geometries.0.pool{
+            geometry.os.free_resources();
+        }
+
+        for pass in &mut self.passes.0.pool{
+            pass.os.free_resources();
+        }
+        // ok now we walk the views and remove all vaos and indexbuffers
+        for draw_list in &mut self.draw_lists.0.pool{
+            for item in &mut draw_list.draw_items.buffer{
+                item.os.free_resources();
+            }
+        }
+        
+        for shader in &mut self.draw_shaders.os_shaders{
+            shader.free_resources();
+        }
     }
     
     pub fn android_load_dependencies(&mut self, to_java: &AndroidToJava) {
-        for (path,dep) in &mut self.dependencies{
-            if let Some(data) = to_java.read_asset(path){
+        for (path, dep) in &mut self.dependencies {
+            if let Some(data) = to_java.read_asset(path) {
                 dep.data = Some(Ok(data))
             }
-            else{
+            else {
                 let message = format!("cannot load dependency {}", path);
                 crate::makepad_error_log::error!("Android asset failed: {}", message);
                 dep.data = Some(Err(message));
@@ -75,7 +116,7 @@ impl Cx {
     }
     
     /// Called when the MakepadSurface is resized.
-    pub fn from_java_resize(&mut self, width: i32, height: i32, to_java: AndroidToJava) {
+    pub fn from_java_on_resize(&mut self, width: i32, height: i32, to_java: AndroidToJava) {
         self.os.display_size = dvec2(width as f64, height as f64);
         let window_id = CxWindowPool::id_zero();
         let window = &mut self.windows[window_id];
@@ -94,7 +135,7 @@ impl Cx {
         let new_geom = window.window_geom.clone();
         self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
             window_id,
-            new_geom, 
+            new_geom,
             old_geom
         }));
         if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
@@ -106,20 +147,19 @@ impl Cx {
     }
     
     /// Called when the MakepadSurface needs to be redrawn.
-    pub fn from_java_draw(&mut self, to_java: AndroidToJava) {
+    pub fn from_java_on_draw(&mut self, to_java: AndroidToJava) {
         if self.new_next_frames.len() != 0 {
             self.call_next_frame_event(self.os.time_now());
         }
         if self.need_redrawing() {
             self.call_draw_event();
-            let cache_path = if let OsType::Android(params) = &self.os_type {params.cache_path.clone()}else {panic!()};
             
             //android_app.egl.make_current();
-            self.opengl_compile_shaders(Some(&cache_path));
+            self.opengl_compile_shaders();
         }
-
-        if self.os.first_after_resize{
-            self.os.first_after_resize= false;
+        
+        if self.os.first_after_resize {
+            self.os.first_after_resize = false;
             self.redraw_all();
         }
         
@@ -128,9 +168,9 @@ impl Cx {
     }
     
     /// Called when a touch event happened on the MakepadSurface.
-    pub fn from_java_touch_update(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
+    pub fn from_java_on_touch(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
         let time = self.os.time_now();
-        for touch in &mut touches{
+        for touch in &mut touches {
             touch.abs /= self.os.dpi_factor;
         }
         self.fingers.process_touch_update_start(time, &touches);
@@ -140,7 +180,7 @@ impl Cx {
                 window_id: CxWindowPool::id_zero(),
                 touches,
                 modifiers: Default::default()
-            } 
+            }
         );
         self.call_event_handler(&e);
         let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
@@ -149,7 +189,7 @@ impl Cx {
     }
     
     /// Called when a timeout expired.
-    pub fn from_java_timeout(&mut self, timer_id: i64, to_java: AndroidToJava) {
+    pub fn from_java_on_timeout(&mut self, timer_id: i64, to_java: AndroidToJava) {
         if timer_id == 0 {
             if Signal::check_and_clear_ui_signal() {
                 self.handle_media_signals(&to_java);
@@ -164,14 +204,14 @@ impl Cx {
     }
     
     fn after_every_event(&mut self, to_java: &AndroidToJava) {
-        self.handle_platform_ops(&to_java); 
+        self.handle_platform_ops(&to_java);
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             to_java.schedule_redraw();
         }
     }
     
-    pub fn from_java_midi_device(&mut self, name:String, midi_device: jobject, to_java: AndroidToJava){
-        self.os.media.amidi().lock().unwrap().received_midi_device(name, midi_device, &to_java);
+    pub fn from_java_on_midi_device_opened(&mut self, name: String, midi_device: jobject, to_java: AndroidToJava) {
+        self.os.media.amidi().lock().unwrap().midi_device_opened(name, midi_device, &to_java);
     }
     
     pub fn draw_pass_to_fullscreen(
@@ -182,10 +222,10 @@ impl Cx {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
         self.setup_render_pass(pass_id, self.os.dpi_factor);
-         
-        // keep repainting in a loop  
+        
+        // keep repainting in a loop 
         self.passes[pass_id].paint_dirty = false;
-          
+        
         unsafe {
             gl_sys::Viewport(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
@@ -282,7 +322,7 @@ impl Cx {
                 },
                 _ => ()
             }
-        }
+        }  
         EventFlow::Poll
     }
 }
@@ -320,7 +360,7 @@ impl Default for CxOs {
 }
 
 pub struct CxOs {
-    pub first_after_resize:bool,
+    pub first_after_resize: bool,
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub time_start: Instant,
