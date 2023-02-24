@@ -41,7 +41,7 @@ class AudioWorklet extends AudioWorkletProcessor {
             this._context = {
                 exports: wasm.exports,
                 memory: env.memory,
-                closure_ptr: thread_info.closure_ptr,
+                context_ptr: thread_info.context_ptr,
             }
         }, error => {
             this.port.postMessage({
@@ -57,8 +57,8 @@ class AudioWorklet extends AudioWorkletProcessor {
             
             let frames = outputs[0][0].length;
             let channels = outputs[0].length;
-            
-            let output_ptr = context.exports.wasm_audio_entrypoint(context.closure_ptr, frames, channels);
+
+            let output_ptr = context.exports.wasm_audio_output_entrypoint(context.context_ptr, frames, channels);
             
             if (context.buffer_ref_len_check != context.memory.buffer.byteLength) {
                 context.f32 = new Float32Array(context.memory.buffer);

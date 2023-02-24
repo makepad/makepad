@@ -139,6 +139,9 @@ impl LiveHook for DesktopWindow {
              OsType::Android(_)=>{
                 self.ui.get_frame(id!(caption_bar)).set_visible(false);
             }
+            OsType::Web(_)=>{
+                self.ui.get_frame(id!(caption_bar)).set_visible(false);
+            }
             _=>()
         }
     }

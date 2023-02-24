@@ -277,19 +277,26 @@ export class WasmWebBrowser extends WasmBridge {
         this.free_data_u8(args.data);
     }
     
-    FromWasmSpawnAudioOutput(args) {
+    FromWasmStopAudioOutput(args) {
+        if(!this.audio_context){
+            return
+        }
+        this.audio_context.close();
+        this.audio_context = null;
+    }
         
+    FromWasmSpawnAudioOutput(args) {
         if (this.audio_context) {
             return
         }
         const start_worklet = async () => {
-            await this.audio_context.audioWorklet.addModule("/makepad/platform/src/os/web_browser/audio_worklet.js", {credentials: 'omit'});
+            await this.audio_context.audioWorklet.addModule("/makepad/platform/src/os/web/audio_worklet.js", {credentials: 'omit'});
             
             const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
                 numberOfOutputs: 1,
                 outputChannelCount: [2],
-                processorOptions: {thread_info: this.alloc_thread_stack(args.closure_ptr)}
+                processorOptions: {thread_info: this.alloc_thread_stack(args.context_ptr)}
             });
             
             audio_worklet.port.onmessage = (e) => {
@@ -324,11 +331,28 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.audio_context = new AudioContext({
             latencyHint: "interactive",
-            sampleRate: 44100
+            sampleRate: 48000
         });
         start_worklet();
         window.addEventListener('mousedown', user_interact_hook)
         window.addEventListener('touchstart', user_interact_hook)
+    }
+    
+    FromWasmQueryAudioDevices(args){
+        navigator.mediaDevices?.enumerateDevices().then((devices_enum)=>{
+            let devices = []
+            for(let device of devices_enum){
+                if(device.kind == "audiooutput" || device.kind == "audioinput"){
+                    devices.push({
+                        web_device_id: ""+device.deviceId,
+                        label: ""+device.label,
+                        is_output: device.kind == "audiooutput"
+                    });
+                }
+            }
+            this.to_wasm.ToWasmAudioDeviceList({devices});
+            this.do_wasm_pump();
+        })
     }
     
     FromWasmStartMidiInput() {
@@ -372,7 +396,7 @@ export class WasmWebBrowser extends WasmBridge {
         
     }
     
-    alloc_thread_stack(closure_ptr) {
+    alloc_thread_stack(context_ptr) {
         let tls_size = this.exports.__tls_size.value;
         tls_size += 8 - (tls_size & 7); // align it to 8 bytes
         let stack_size = this.thread_stack_size; // 8mb
@@ -385,7 +409,7 @@ export class WasmWebBrowser extends WasmBridge {
             stack_ptr,
             module: this.wasm._module,
             memory: this.wasm._memory,
-            closure_ptr
+            context_ptr
         }
     }
     
@@ -410,7 +434,7 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
         
-        worker.postMessage(this.alloc_thread_stack(args.closure_ptr));
+        worker.postMessage(this.alloc_thread_stack(args.context_ptr));
         
         worker.addEventListener("message", (e) => {
             this.post_signal_to_wasm(e.data.signal_hi, e.data.signal_lo);

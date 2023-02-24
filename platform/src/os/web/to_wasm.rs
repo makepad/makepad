@@ -4,7 +4,7 @@ use {
         makepad_live_id::*,
         makepad_wasm_bridge::*,
         makepad_math::{dvec2, DVec2, Vec3, Quat, Transform},
-        cx::{OsType, XrCapabilities, WebBrowserParams},
+        cx::{OsType, XrCapabilities, WebParams},
         window::CxWindowPool,
         area::Area,
         //midi::{MidiData},
@@ -48,7 +48,7 @@ pub struct WBrowserInfo {
 
 impl Into<OsType> for WBrowserInfo {
     fn into(self) -> OsType {
-        OsType::WebBrowser(WebBrowserParams{
+        OsType::Web(WebParams{
             protocol: self.protocol,
             hostname: self.hostname,
             host: self.host,
@@ -638,4 +638,16 @@ pub struct WMidiInputInfo {
 #[derive(ToWasm)]
 pub struct ToWasmMidiInputList {
     pub inputs: Vec<WMidiInputInfo>
+}
+
+#[derive(ToWasm)]
+pub struct WAudioDevice {
+    pub web_device_id: String,
+    pub label: String,
+    pub is_output: bool,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmAudioDeviceList {
+    pub devices: Vec<WAudioDevice>
 }
