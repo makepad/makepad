@@ -3,7 +3,7 @@ use {
     self::super::{
         web::CxOs,
         to_wasm::ToWasmAudioDeviceList,
-        from_wasm::{FromWasmQueryAudioDevices, FromWasmSpawnAudioOutput, FromWasmStopAudioOutput}
+        from_wasm::{FromWasmQueryAudioDevices, FromWasmStartAudioOutput, FromWasmStopAudioOutput}
     },
     crate::{
         makepad_live_id::*,
@@ -107,7 +107,7 @@ impl WebAudioAccess {
         else {
             "".to_string()
         };
-        os.from_wasm(FromWasmSpawnAudioOutput {
+        os.from_wasm(FromWasmStartAudioOutput {
             web_device_id,
             context_ptr: self.self_arc as u32
         });

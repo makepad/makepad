@@ -20,13 +20,6 @@ onmessage = async function(e) {
         js_console_log: (chars_ptr, len) => {
             console.log(chars_to_string(chars_ptr, len))
         },
-        js_post_signal: (signal_hi, signal_lo) => {
-            postMessage({
-                message_type: "signal",
-                signal_hi,
-                signal_lo
-            });
-        }
     };
     
     WebAssembly.instantiate(thread_info.module, {env}).then(wasm => {
