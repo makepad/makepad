@@ -2,16 +2,15 @@
 use {
     std::rc::Rc,
     std::cell::RefCell,
+    self::super::{
+        web_midi::WebMidiAccess,
+        web_media::CxWebMedia,
+        from_wasm::*,
+        to_wasm::*,
+    },
     crate::{
         makepad_live_id::*,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
-        os::{
-            web_midi::WebMidiAccess,
-            web::{
-                from_wasm::*,
-                to_wasm::*,
-            },
-        },
         thread::Signal,
         window::{
             CxWindowPool
@@ -248,7 +247,10 @@ impl Cx {
                         data: tw.data.into_vec_u8()
                     }));
                 }
-                
+                live_id!(ToWasmAudioDeviceList)=>{
+                    let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
+                    self.os.web_audio().lock().unwrap().to_wasm_audio_device_list(tw);
+                }
                 msg_id => {
                     // swap the message into an event to avoid a copy
                     let offset = to_wasm.u32_offset;
@@ -385,66 +387,69 @@ impl CxOsApi for Cx {
         self.live_scan_dependencies();
         
         self.os.append_to_wasm_js(&[
-            ToWasmGetDeps::to_string(),
-            ToWasmInit::to_string(),
-            ToWasmResizeWindow::to_string(),
-            ToWasmAnimationFrame::to_string(),
+            ToWasmGetDeps::to_js_code(),
+            ToWasmInit::to_js_code(),
+            ToWasmResizeWindow::to_js_code(),
+            ToWasmAnimationFrame::to_js_code(),
             
-            ToWasmTouchUpdate::to_string(),
-            ToWasmMouseDown::to_string(),
-            ToWasmMouseMove::to_string(),
-            ToWasmMouseUp::to_string(),
-            ToWasmScroll::to_string(),
+            ToWasmTouchUpdate::to_js_code(),
+            ToWasmMouseDown::to_js_code(),
+            ToWasmMouseMove::to_js_code(),
+            ToWasmMouseUp::to_js_code(),
+            ToWasmScroll::to_js_code(),
             
-            ToWasmKeyDown::to_string(),
-            ToWasmKeyUp::to_string(),
-            ToWasmTextInput::to_string(),
-            ToWasmTextCopy::to_string(),
-            ToWasmTimerFired::to_string(),
-            ToWasmPaintDirty::to_string(),
-            ToWasmRedrawAll::to_string(),
-            ToWasmXRUpdate::to_string(),
-            ToWasmAppGotFocus::to_string(),
-            ToWasmAppLostFocus::to_string(),
-            ToWasmWebSocketOpen::to_string(),
-            ToWasmWebSocketClose::to_string(),
-            ToWasmWebSocketError::to_string(),
-            ToWasmWebSocketMessage::to_string(),
-            ToWasmSignal::to_string(),
-            ToWasmMidiInputData::to_string(),
-            ToWasmMidiInputList::to_string(),
+            ToWasmKeyDown::to_js_code(),
+            ToWasmKeyUp::to_js_code(),
+            ToWasmTextInput::to_js_code(),
+            ToWasmTextCopy::to_js_code(),
+            ToWasmTimerFired::to_js_code(),
+            ToWasmPaintDirty::to_js_code(),
+            ToWasmRedrawAll::to_js_code(),
+            ToWasmXRUpdate::to_js_code(),
+            ToWasmAppGotFocus::to_js_code(),
+            ToWasmAppLostFocus::to_js_code(),
+            ToWasmWebSocketOpen::to_js_code(),
+            ToWasmWebSocketClose::to_js_code(),
+            ToWasmWebSocketError::to_js_code(),
+            ToWasmWebSocketMessage::to_js_code(),
+            ToWasmSignal::to_js_code(),
+            ToWasmMidiInputData::to_js_code(),
+            ToWasmMidiInputList::to_js_code(),
+            ToWasmAudioDeviceList::to_js_code()
         ]);
         
         self.os.append_from_wasm_js(&[
-            FromWasmLoadDeps::to_string(),
-            FromWasmStartTimer::to_string(),
-            FromWasmStopTimer::to_string(),
-            FromWasmFullScreen::to_string(),
-            FromWasmNormalScreen::to_string(),
-            FromWasmRequestAnimationFrame::to_string(),
-            FromWasmSetDocumentTitle::to_string(),
-            FromWasmSetMouseCursor::to_string(),
-            FromWasmTextCopyResponse::to_string(),
-            FromWasmShowTextIME::to_string(),
-            FromWasmHideTextIME::to_string(),
-            FromWasmCreateThread::to_string(),
-            FromWasmWebSocketOpen::to_string(),
-            FromWasmWebSocketSend::to_string(),
-            FromWasmXrStartPresenting::to_string(),
-            FromWasmXrStopPresenting::to_string(),
+            FromWasmLoadDeps::to_js_code(),
+            FromWasmStartTimer::to_js_code(),
+            FromWasmStopTimer::to_js_code(),
+            FromWasmFullScreen::to_js_code(),
+            FromWasmNormalScreen::to_js_code(),
+            FromWasmRequestAnimationFrame::to_js_code(),
+            FromWasmSetDocumentTitle::to_js_code(),
+            FromWasmSetMouseCursor::to_js_code(),
+            FromWasmTextCopyResponse::to_js_code(),
+            FromWasmShowTextIME::to_js_code(),
+            FromWasmHideTextIME::to_js_code(),
+            FromWasmCreateThread::to_js_code(),
+            FromWasmWebSocketOpen::to_js_code(),
+            FromWasmWebSocketSend::to_js_code(),
+            FromWasmXrStartPresenting::to_js_code(),
+            FromWasmXrStopPresenting::to_js_code(),
             
-            FromWasmCompileWebGLShader::to_string(),
-            FromWasmAllocArrayBuffer::to_string(),
-            FromWasmAllocIndexBuffer::to_string(),
-            FromWasmAllocVao::to_string(),
-            FromWasmAllocTextureImage2D::to_string(),
-            FromWasmBeginRenderTexture::to_string(),
-            FromWasmBeginRenderCanvas::to_string(),
-            FromWasmSetDefaultDepthAndBlendMode::to_string(),
-            FromWasmDrawCall::to_string(),
+            FromWasmCompileWebGLShader::to_js_code(),
+            FromWasmAllocArrayBuffer::to_js_code(),
+            FromWasmAllocIndexBuffer::to_js_code(),
+            FromWasmAllocVao::to_js_code(),
+            FromWasmAllocTextureImage2D::to_js_code(),
+            FromWasmBeginRenderTexture::to_js_code(),
+            FromWasmBeginRenderCanvas::to_js_code(),
+            FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
+            FromWasmDrawCall::to_js_code(),
             
-            FromWasmStartMidiInput::to_string(),
-            FromWasmSpawnAudioOutput::to_string(),            
+            FromWasmStartMidiInput::to_js_code(),
+            FromWasmSpawnAudioOutput::to_js_code(),
+            FromWasmStopAudioOutput::to_js_code(),
+            FromWasmQueryAudioDevices::to_js_code()
         ]);
     }
     
@@ -524,7 +529,9 @@ pub struct CxOs {
     pub (crate) web_midi_access: WebMidiAccess,
     
     pub (crate) to_wasm_js: Vec<String>,
-    pub (crate) from_wasm_js: Vec<String>
+    pub (crate) from_wasm_js: Vec<String>,
+    
+    pub (crate) media: CxWebMedia
 }
 
 impl CxOs {
