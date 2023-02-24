@@ -131,7 +131,7 @@ pub struct AndroidParams {
 }
 
 #[derive(Clone, Debug)]
-pub struct WebBrowserParams {
+pub struct WebParams {
     pub protocol: String,
     pub host: String,
     pub hostname: String,
@@ -154,7 +154,7 @@ pub enum OsType {
     Android(AndroidParams),
     LinuxWindow (LinuxWindowParams),
     LinuxDirect,
-    WebBrowser(WebBrowserParams)
+    Web(WebParams)
 }
 
 #[derive(Default)]
@@ -166,7 +166,7 @@ pub struct XrCapabilities {
 impl OsType {
     pub fn is_web(&self) -> bool {
         match self {
-            OsType::WebBrowser {..} => true,
+            OsType::Web(_) => true,
             _ => false
         }
     }

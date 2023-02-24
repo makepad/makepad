@@ -47,7 +47,7 @@ pub struct WebMidiAccess{
     pub (crate) output_receivers: Vec<mpsc::Receiver<(Option<MidiPortId>, MidiData)>>,
     pub (crate) input_senders: MidiInputSenders,
 }
-
+ 
 impl WebMidiAccess{ 
     pub fn create_midi_input(&mut self)->MidiInput{
         let senders = self.input_senders.clone();
