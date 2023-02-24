@@ -142,6 +142,10 @@ pub struct FromWasmCreateThread {
 }
 
 
+#[derive(FromWasm)]
+pub struct FromWasmQueryAudioDevices {
+}
+
 
 
 // WebGL API
@@ -270,9 +274,13 @@ pub struct FromWasmMidiOutput {
 
 #[derive(FromWasm)]
 pub struct FromWasmSpawnAudioOutput {
-    pub closure_ptr: u32,
+    pub web_device_id: String,
+    pub context_ptr: u32,
 }
 
+#[derive(FromWasm)]
+pub struct FromWasmStopAudioOutput {
+}
 
 
 
