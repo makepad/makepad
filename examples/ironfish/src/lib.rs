@@ -541,10 +541,10 @@ live_design!{
                     let c = vec2(self.rect_size.x, self.rect_size.y);
                     let pad = 0.35;
                     sdf.box(
-                        0.,
-                        0.,
-                        self.rect_size.x,
-                        self.rect_size.y,
+                        1,
+                        1,
+                        self.rect_size.x-2,
+                        self.rect_size.y-2,
                         4.0
                     )
 

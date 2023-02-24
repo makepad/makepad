@@ -29,13 +29,13 @@ export class WasmWebBrowser extends WasmBridge {
             vr_supported: false,
             ar_supported: false
         };
-        this.signals_lo = [];
-        this.signals_hi = [];
         this.xr_supported = false;
         this.signal_timeout = null;
         this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.init_detection();
+        this.midi_inputs = [];
+        this.midi_outputs = [];
     }
     
     async load_deps() {
@@ -63,7 +63,7 @@ export class WasmWebBrowser extends WasmBridge {
         let results = await this.load_deps_promise;
         let deps = [];
         for (let result of results) {
-            if(result !== undefined){
+            if (result !== undefined) {
                 deps.push({
                     path: result.path,
                     data: result.buffer
@@ -71,7 +71,7 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }
         this.update_window_info();
-
+        
         this.to_wasm.ToWasmInit({
             xr_capabilities: this.xr_capabilities,
             window_info: this.window_info,
@@ -93,8 +93,8 @@ export class WasmWebBrowser extends WasmBridge {
             loaders[i].parentNode.removeChild(loaders[i])
         }
     }
-
-
+    
+    
     FromWasmLoadDeps(args) {
         let promises = [];
         for (let path of args.deps) {
@@ -278,14 +278,14 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmStopAudioOutput(args) {
-        if(!this.audio_context){
+        if (!this.audio_context) {
             return
         }
         this.audio_context.close();
         this.audio_context = null;
     }
-        
-    FromWasmSpawnAudioOutput(args) {
+    
+    FromWasmStartAudioOutput(args) {
         if (this.audio_context) {
             return
         }
@@ -308,11 +308,6 @@ export class WasmWebBrowser extends WasmBridge {
                     
                     case "console_error":
                     console.error(data.value);
-                    break;
-                    
-                    case "signal":
-                    this.to_wasm.ToWasmSignal(data)
-                    this.do_wasm_pump();
                     break;
                 }
             };
@@ -338,14 +333,14 @@ export class WasmWebBrowser extends WasmBridge {
         window.addEventListener('touchstart', user_interact_hook)
     }
     
-    FromWasmQueryAudioDevices(args){
-        navigator.mediaDevices?.enumerateDevices().then((devices_enum)=>{
+    FromWasmQueryAudioDevices(args) {
+        navigator.mediaDevices?.enumerateDevices().then((devices_enum) => {
             let devices = []
-            for(let device of devices_enum){
-                if(device.kind == "audiooutput" || device.kind == "audioinput"){
+            for (let device of devices_enum) {
+                if (device.kind == "audiooutput" || device.kind == "audioinput") {
                     devices.push({
-                        web_device_id: ""+device.deviceId,
-                        label: ""+device.label,
+                        web_device_id: "" + device.deviceId,
+                        label: "" + device.label,
                         is_output: device.kind == "audiooutput"
                     });
                 }
@@ -355,37 +350,75 @@ export class WasmWebBrowser extends WasmBridge {
         })
     }
     
-    FromWasmStartMidiInput() {
+    FromWasmUseMidiInputs(args) {
+        outer:
+        for (let input of this.midi_inputs) {
+            for (let uid of args.input_uids) {
+                if (input.uid == uid) {
+                    input.port.onmidimessage = (e) => {
+                        let data = e.data;
+                        this.to_wasm.ToWasmMidiInputData({
+                            uid,
+                            data: (data[0] << 16) | (data[1] << 8) | data[2],
+                        });
+                        this.do_wasm_pump();
+                    }
+                    continue outer;
+                }
+            }
+            input.onmidimessage = undefined
+        }
+    }
+    
+    FromWasmSendMidiOutput(args){
+        for (let output of this.midi_outputs) {
+            if(output.uid == args.uid){
+                output.port.send([(data>>16)&0xff,(data>>8)&0xff,(data>>0)&0xff]);
+            }
+        }
+    }
+    
+    FromWasmQueryMidiPorts() {
+        if(this.reload_midi_ports){
+            return this.reload_midi_ports();
+        }
         if (navigator.requestMIDIAccess) {
             navigator.requestMIDIAccess().then((midi) => {
-                let reload_midi_ports = () => {
-                    
-                    let inputs = [];
-                    let input_id = 0;
+                this.reload_midi_ports = () => {
+                    this.midi_inputs.length = 0;
+                    this.midi_outputs.length = 0;
+                    let ports = [];
                     for (let input_pair of midi.inputs) {
-                        let input = input_pair[1];
-                        inputs.push({
-                            uid: "" + input.id,
-                            name: input.name,
-                            manufacturer: input.manufacturer,
+                        let port = input_pair[1];
+                        this.midi_inputs.push({
+                            uid: "" + port.id,
+                            port
                         });
-                        input.onmidimessage = (e) => {
-                            let data = e.data;
-                            this.to_wasm.ToWasmMidiInputData({
-                                input_id: input_id,
-                                data: (data[0] << 16) | (data[1] << 8) | data[2],
-                            });
-                            this.do_wasm_pump();
-                        }
-                        input_id += 1;
+                        ports.push({
+                            uid: "" + port.id,
+                            name: port.name,
+                            is_output: false
+                        });
                     }
-                    this.to_wasm.ToWasmMidiInputList({inputs});
+                    for (let output_pair of midi.outputs) {
+                        let port = output_pair[1];
+                        this.midi_outputs.push({
+                            uid: "" + port.id,
+                            port
+                        });
+                        ports.push({
+                            uid: "" + port.id,
+                            name: port.name,
+                            is_output: true
+                        });
+                    }
+                    this.to_wasm.ToWasmMidiPortList({ports});
                     this.do_wasm_pump();
                 }
                 midi.onstatechange = (e) => {
-                    reload_midi_ports();
+                    this.reload_midi_ports();
                 }
-                reload_midi_ports();
+                this.reload_midi_ports();
             }, () => {
                 console.error("Cannot open midi");
             });
@@ -436,16 +469,12 @@ export class WasmWebBrowser extends WasmBridge {
         
         worker.postMessage(this.alloc_thread_stack(args.context_ptr));
         
-        worker.addEventListener("message", (e) => {
-            this.post_signal_to_wasm(e.data.signal_hi, e.data.signal_lo);
-        })
-        
         this.workers.push(worker);
     }
     
-    start_signal_poll(){
+    start_signal_poll() {
         this.poll_timer = window.setInterval(e => {
-            if (this.exports.wasm_check_signal() == 1){
+            if (this.exports.wasm_check_signal() == 1) {
                 this.to_wasm.ToWasmSignal();
                 this.do_wasm_pump();
             }
@@ -534,7 +563,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.window_info.can_fullscreen = can_fullscreen();
     }
     
-    query_xr_capabilities(){
+    query_xr_capabilities() {
         let promises = [];
         if (navigator.xr !== undefined) {
             promises.push(navigator.xr.isSessionSupported('immersive-vr').then(supported => {
@@ -604,18 +633,18 @@ export class WasmWebBrowser extends WasmBridge {
                 + "height:400000px;\n"
                 + "background-color:transparent\n"
                 + "}\n"
-           
+          
             document.body.appendChild(style)
             ts.appendChild(ts_inner);
             document.body.appendChild(ts);
             canvas = ts;
-           
+          
             ts.scrollTop = 200000;
             ts.scrollLeft = 200000;
             let last_scroll_top = ts.scrollTop;
             let last_scroll_left = ts.scrollLeft;
             let scroll_timeout = null;
-           
+          
             this.handlers.on_overlay_scroll = e => {
                 let new_scroll_top = ts.scrollTop;
                 let new_scroll_left = ts.scrollLeft;
@@ -623,16 +652,16 @@ export class WasmWebBrowser extends WasmBridge {
                 let dy = new_scroll_top - last_scroll_top;
                 last_scroll_top = new_scroll_top;
                 last_scroll_left = new_scroll_left;
-               
+              
                 window.clearTimeout(scroll_timeout);
-               
+              
                 scroll_timeout = window.setTimeout(_ => {
                     ts.scrollTop = 200000;
                     ts.scrollLeft = 200000;
                     last_scroll_top = ts.scrollTop;
                     last_scroll_left = ts.scrollLeft;
                 }, 200);
-               
+              
                 let finger = overlay_scroll_pointer;
                 if (overlay_scroll_pointer) {
                     this.to_wasm.ToWasmScroll({
@@ -647,7 +676,7 @@ export class WasmWebBrowser extends WasmBridge {
                     this.do_wasm_pump();
                 }
             }
-           
+          
             ts.addEventListener('scroll', e => this.handlers.on_overlay_scroll(e))
         }*/
         

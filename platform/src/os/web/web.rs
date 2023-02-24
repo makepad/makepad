@@ -3,7 +3,6 @@ use {
     std::rc::Rc,
     std::cell::RefCell,
     self::super::{
-        web_midi::WebMidiAccess,
         web_media::CxWebMedia,
         from_wasm::*,
         to_wasm::*,
@@ -251,6 +250,14 @@ impl Cx {
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
                     self.os.web_audio().lock().unwrap().to_wasm_audio_device_list(tw);
                 }
+                live_id!(ToWasmMidiPortList)=>{
+                    let tw = ToWasmMidiPortList::read_to_wasm(&mut to_wasm);
+                    self.os.web_midi().lock().unwrap().to_wasm_midi_port_list(tw);
+                }
+                live_id!(ToWasmMidiInputData)=>{
+                    let tw = ToWasmMidiInputData::read_to_wasm(&mut to_wasm);
+                    self.os.web_midi().lock().unwrap().to_wasm_midi_input_data(tw);
+                }
                 msg_id => {
                     // swap the message into an event to avoid a copy
                     let offset = to_wasm.u32_offset;
@@ -414,7 +421,7 @@ impl CxOsApi for Cx {
             ToWasmWebSocketMessage::to_js_code(),
             ToWasmSignal::to_js_code(),
             ToWasmMidiInputData::to_js_code(),
-            ToWasmMidiInputList::to_js_code(),
+            ToWasmMidiPortList::to_js_code(),
             ToWasmAudioDeviceList::to_js_code()
         ]);
         
@@ -446,10 +453,12 @@ impl CxOsApi for Cx {
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
             FromWasmDrawCall::to_js_code(),
             
-            FromWasmStartMidiInput::to_js_code(),
-            FromWasmSpawnAudioOutput::to_js_code(),
+            FromWasmUseMidiInputs::to_js_code(),
+            FromWasmSendMidiOutput::to_js_code(),
+            FromWasmQueryAudioDevices::to_js_code(),
+            FromWasmStartAudioOutput::to_js_code(),
             FromWasmStopAudioOutput::to_js_code(),
-            FromWasmQueryAudioDevices::to_js_code()
+            FromWasmQueryMidiPorts::to_js_code()
         ]);
     }
     
@@ -525,8 +534,6 @@ pub struct CxOs {
     pub (crate) vaos: usize,
     
     pub (crate) xr_last_inputs: Option<Vec<XRInput >>,
-    
-    pub (crate) web_midi_access: WebMidiAccess,
     
     pub (crate) to_wasm_js: Vec<String>,
     pub (crate) from_wasm_js: Vec<String>,
