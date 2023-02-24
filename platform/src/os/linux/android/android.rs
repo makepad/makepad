@@ -77,7 +77,7 @@ impl Cx {
         self.after_every_event(&to_java);
     }    
  
-    pub fn from_java_on_free_gl(&mut self,  to_java: AndroidToJava) {
+    pub fn from_java_on_free_gl(&mut self,  _to_java: AndroidToJava) {
         // lets destroy all of our gl resources
         for texture in &mut self.textures.0.pool{
             texture.os.free_resources();

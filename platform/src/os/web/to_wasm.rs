@@ -624,20 +624,20 @@ pub struct ToWasmWebSocketMessage {
 
 #[derive(ToWasm)]
 pub struct ToWasmMidiInputData {
-    pub input_id: u32,
+    pub uid: String,
     pub data: u32,
 }
 
 #[derive(ToWasm)]
-pub struct WMidiInputInfo {
-    pub manufacturer: String,
+pub struct WMidiPortInfo {
     pub name: String,
     pub uid: String,
+    pub is_output: bool
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmMidiInputList {
-    pub inputs: Vec<WMidiInputInfo>
+pub struct ToWasmMidiPortList {
+    pub ports: Vec<WMidiPortInfo>,
 }
 
 #[derive(ToWasm)]

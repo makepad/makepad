@@ -119,7 +119,7 @@ impl Cx {
                 if self.need_redrawing() {
                     self.call_draw_event();
                     opengl_cx.make_current();
-                    self.opengl_compile_shaders(None);
+                    self.opengl_compile_shaders();
                 }
                 // ok here we send out to all our childprocesses
                 
