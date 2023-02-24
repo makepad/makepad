@@ -532,56 +532,91 @@ live_design!{
         walk: {width: Fit, height: Fit, margin: <SPACING_3> {} }
         layout: {align: {x: 0.5, y: 0.5}}
         checkbox = {
-            walk: {width: 30, height: 30, margin: { right: -30 }}
+            walk: {width: 30, height: 30, margin: { right: -20 }}
             label: ""
             draw_check: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                    let left = 3;
-                    let sz = 20.0;
-                    let c = vec2(left + sz, self.rect_size.y);
+                    let sz = self.rect_size.x;
+                    let c = vec2(self.rect_size.x, self.rect_size.y);
+                    let pad = 0.35;
                     sdf.box(
                         0.,
                         0.,
                         self.rect_size.x,
                         self.rect_size.y,
-                        3.0
-                    )
-                    sdf.fill_keep(
-                        mix(#x888, #x181818, pow(self.pos.y, 0.3))
-                    );
-                    sdf.stroke_keep(
-                        mix(
-                            mix(#FFFFFF66, #x00000088, pow(self.pos.y, 0.25)),
-                            #xFFFFFF80,
-                            self.selected
-                        ),
-                        4.
+                        4.0
                     )
 
-                    // sdf.move_to(0.0, 0.0);
-                    // sdf.line_to(c.x * 0.75, c.y * 0.5);
-                    // sdf.line_to(0.0, c.y);
-                    // sdf.close_path();
-                    // sdf.fill_keep(
-                    //     mix(
-                    //         mix((COLOR_UP_5) * 0.75, (COLOR_UP_5), self.hover),
-                    //         mix(
-                    //             mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
-                    //             mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
-                    //             self.hover
-                    //         ),
-                    //         self.selected
-                    //     )
-                    // )
-                    // sdf.stroke_keep(
-                    //     mix(
-                    //         mix(#xFFFFFF66, #xFFFFFF10, pow(self.pos.y, 0.5)),
-                    //         #xFFFFFF80,
-                    //         self.selected
-                    //     ),
-                    //     1.
-                    // )
+                    sdf.fill_keep(
+                        mix(
+                            mix(
+                                #x00000010,
+                                mix(#x00000066, #x00000022, pow(self.pos.y, 0.5)),
+                                self.hover
+                            ),
+                            mix(
+                                mix(#x00000088, #x00000000, pow(self.pos.y, 0.75)),
+                                mix(#x000000AA, #x00000040, pow(self.pos.y, 0.75)),
+                                self.hover
+                            ),
+                            self.selected
+                        )
+                    )
+
+                    sdf.stroke_keep(
+                        mix(
+                            mix(
+                                #x000000AA,
+                                mix(#xFFFFFF10, #xFFFFFF22, self.pos.y),
+                                self.selected
+                            ),
+                            mix(
+                                #x000000FF,
+                                mix(#x00000000, #x00000022, self.pos.y),
+                                self.selected
+                            ),
+                            self.hover
+                        ),
+                        1.
+                    )
+
+                    sdf.subtract()
+
+                    let padx = c.x * pad;
+                    let pady = c.y * pad;
+
+                    sdf.move_to(c.x - sz + padx, c.y - sz + pady);
+                    sdf.line_to(c.x - padx, c.y * 0.5);
+                    sdf.line_to(0.0 + padx, c.y - pady);
+                    sdf.close_path();
+
+                    sdf.fill_keep(
+                        mix(
+                            mix(
+                                mix(#x00000088, #x000000AA, self.pos.y),
+                                mix(#x000000CC, #x000000CC, self.pos.y),
+                                self.hover
+                            ),
+                            mix((#fff), (COLOR_OSC), self.pos.y),
+                            self.selected
+                        )
+                    )
+
+                    sdf.stroke(
+                        mix(
+                            mix(
+                                mix(#x00000088, #x00000000, self.pos.y),
+                                #00000000,
+                                self.hover
+                            ),
+                            #FFFFFF00,
+                            self.selected
+                        ),
+                        1.0
+                    )
+
+
                     return sdf.result
                 }
             }
@@ -1566,7 +1601,6 @@ live_design!{
                 <Frame> {
                     walk: {width: Fill, height: Fit, margin: <SPACING_4> {} }
                     layout: {spacing: (SSPACING_1)}
-                    
                 }
 
                 <Image> {
