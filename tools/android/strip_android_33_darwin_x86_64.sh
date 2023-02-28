@@ -14,31 +14,46 @@
 
 # android-13:
 # Downloading https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip
+# Downloading https://dl.google.com/android/repository/build-tools_r33.0.1-linux.zip
+# Downloading https://dl.google.com/android/repository/build-tools_r33.0.1-windows.zip
 # put in $SRC/android-13
 
 # platform tools (adb)
 # Downloading https://dl.google.com/android/repository/platform-tools_r33.0.3-darwin.zip
+# Downloading https://dl.google.com/android/repository/platform-tools_r33.0.3-linux.zip
+# Downloading https://dl.google.com/android/repository/platform-tools_r33.0.3-windows.zip
 # put in $SRC/platform-tools
 
 # NDK comes from
 # https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg
+# https://dl.google.com/android/repository/android-ndk-r25c-windows.zip
+# https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
 # put in $SRC/NDK
 
 # android v4 support, rename aar to zip, unpack, rename classes.jar to support/android-support-v4-28.0.0.jar
 # https://maven.google.com/web/index.html?q=v4#com.android.support:support-compat:28.0.0
 
-# $SRC/openjdk/ is the openJDK distribution for m1 from https://jdk.java.net/archive/ version 16
+# $SRC/openjdk/ is the openJDK distribution for m1 from https://jdk.java.net/archive/ version 17.0.2
+# https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_windows-x64_bin.zip
+# https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-aarch64_bin.tar.gz
+# https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-x64_bin.tar.gz
+# https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_linux-aarch64_bin.tar.gz
+# https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_linux-x64_bin.tar.gz
+
 # version 19 had this error:  Unsupported class file major version 63 with d8. 
-# version 16 also has this warning: One or more classes has class file version >= 56 which is not officially supported.
+# version 17 also has this warning: One or more classes has class file version >= 56 which is not officially supported.
 # however atleast we get an M1 native build with 16,
 # openJDK 11 which is apparently in android studio doesnt have an m1 build.
 # Copy the Contents/Home/* directory to openjdk/*
- 
+
 # this is the input directory where you expand all the files above
-SRC=android_33_darwin_x86_64
+SRC=android_33_aarch64_apple_darwin
 
 # this is the destination directory
-DST=android_33_darwin_x86_64_to_aarch64
+DST=android_33_aarch64_apple_darwin_to_aarch64_linux_android
+
+# lets download the sources and unzip them
+
 
 rm -rf $DST
 mkdir -p $DST
