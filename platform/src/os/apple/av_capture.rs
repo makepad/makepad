@@ -7,7 +7,7 @@ use {
         os::apple::cocoa_delegate::AvVideoCaptureCallback,
         os::apple::apple_util::*,
         os::apple::apple_sys::*,
-        objc_block,
+        makepad_objc_sys::objc_block,
     },
 };
 

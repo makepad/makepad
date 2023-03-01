@@ -11,8 +11,8 @@ use {
         os::apple::cocoa_delegate::*,
         os::apple::cocoa_app::*,
         os::apple::apple_util::*,
-        objc_block,
-        objc_block_invoke,
+        makepad_objc_sys::objc_block,
+        makepad_objc_sys::objc_block_invoke,
     },
 };
 
