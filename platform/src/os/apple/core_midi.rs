@@ -7,7 +7,7 @@ use {
         midi::*,
         os::apple::apple_sys::*,
         os::apple::apple_util::*,
-        objc_block,
+        makepad_objc_sys::objc_block,
     },
 };
 
