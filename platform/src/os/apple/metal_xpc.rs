@@ -6,8 +6,8 @@ use {
     std::ptr::NonNull,
     crate::{
         makepad_error_log::*,
-        objc_block,
-        objc_block_invoke,
+        makepad_objc_sys::objc_block,
+        makepad_objc_sys::objc_block_invoke,
         os::{
             apple::apple_sys::*,
             apple_util::{
