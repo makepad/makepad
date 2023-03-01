@@ -16,10 +16,10 @@ makepad-shader-compiler = { path = "./shader_compiler", version = "0.3.0" }
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "0.3.0" }
 
 [target.aarch64-apple-darwin.dependencies]
-makepad-objc-sys = { path = "./bind/objc-sys", version = "0.3.0" }
+makepad-objc-sys = { path = "../libs/objc-sys", version = "0.3.0" }
 
 [target.x86_64-apple-darwin.dependencies]
-makepad-objc-sys = { path = "./bind/objc-sys", version = "0.3.0" }
+makepad-objc-sys = { path = "../libs/objc-sys", version = "0.3.0" }
 
 [target.aarch64-unknown-linux-gnu.dependencies] 
 
@@ -29,7 +29,7 @@ version = "0.3"
 
 [target.'cfg(windows)'.dependencies.makepad-windows]
 #version = "0.44"
-path = "./bind/windows"
+path = "../libs/windows"
 features = [ 
     "Win32_Foundation", 
     "Win32_UI_WindowsAndMessaging",

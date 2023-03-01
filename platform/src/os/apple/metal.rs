@@ -7,6 +7,7 @@ use {
         sel_impl,
     },
     crate::{
+        makepad_objc_sys::objc_block,
         makepad_shader_compiler::{
             generate_metal,
             generate_metal::MetalGeneratedShader,
