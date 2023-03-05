@@ -12,11 +12,8 @@ workspace.exclude = [
 workspace.members = [
     "examples/numbers", 
     "examples/fractal_zoom", 
-    "examples/cmdline_example",
     "examples/ironfish",
     "examples/simple",
-    "examples/touch",
-    "examples/teamtalk",
     "examples/video_mixer",
     "libs/wasm_bridge/test",
     "studio",

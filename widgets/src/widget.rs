@@ -42,7 +42,8 @@ pub trait Widget: LiveApply {
         WidgetResult::not_found()
     }
     
-    fn widget_uid(&self)->WidgetUid;
+   // fn widget_uid(&self)->WidgetUid;
+    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as *const () as u64)}
     
     fn bind_to(&mut self, _cx: &mut Cx, _db: &mut DataBinding,  _act: &WidgetActions, _data_id: &[LiveId]) {}
         
