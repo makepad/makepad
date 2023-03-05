@@ -38,7 +38,7 @@ mod component_map;
 mod media_api;
 
 #[macro_use]
-mod main_app;
+mod app_main;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;

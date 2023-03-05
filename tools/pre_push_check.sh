@@ -1,22 +1,22 @@
-echo "Updating rust"
-rustup update &>/dev/null
-rustup target add x86_64-pc-windows-gnu &>/dev/null
-rustup target add x86_64-pc-windows-msvc &>/dev/null
-rustup target add wasm32-unknown-unknown &>/dev/null
-rustup target add x86_64-unknown-linux-gnu  &>/dev/null
-rustup target add x86_64-apple-darwin  &>/dev/null
-rustup target add x86_64-apple-darwin  &>/dev/null
-rustup target add aarch64-apple-darwin  &>/dev/null
-rustup target add aarch64-linux-android &>/dev/null
+#echo "Updating rust"
+#rustup update &>/dev/null
+#rustup target add x86_64-pc-windows-gnu &>/dev/null
+#rustup target add x86_64-pc-windows-msvc &>/dev/null
+#rustup target add wasm32-unknown-unknown &>/dev/null
+#rustup target add x86_64-unknown-linux-gnu  &>/dev/null
+#rustup target add x86_64-apple-darwin  &>/dev/null
+#rustup target add x86_64-apple-darwin  &>/dev/null
+#rustup target add aarch64-apple-darwin  &>/dev/null
+#rustup target add aarch64-linux-android &>/dev/null
 
-rustup target add x86_64-pc-windows-gnu --toolchain nightly &>/dev/null
-rustup target add x86_64-pc-windows-msvc --toolchain nightly &>/dev/null
-rustup target add wasm32-unknown-unknown --toolchain nightly &>/dev/null
-rustup target add x86_64-unknown-linux-gnu --toolchain nightly &>/dev/null
-rustup target add x86_64-apple-darwin --toolchain nightly &>/dev/null
-rustup target add x86_64-apple-darwin --toolchain nightly &>/dev/null
-rustup target add aarch64-apple-darwin --toolchain nightly &>/dev/null
-rustup target add aarch64-linux-android --toolchain nightly &>/dev/null
+#rustup target add x86_64-pc-windows-gnu --toolchain nightly &>/dev/null
+#rustup target add x86_64-pc-windows-msvc --toolchain nightly &>/dev/null
+#rustup target add wasm32-unknown-unknown --toolchain nightly &>/dev/null
+#rustup target add x86_64-unknown-linux-gnu --toolchain nightly &>/dev/null
+#rustup target add x86_64-apple-darwin --toolchain nightly &>/dev/null
+#rustup target add x86_64-apple-darwin --toolchain nightly &>/dev/null
+#rustup target add aarch64-apple-darwin --toolchain nightly &>/dev/null
+#rustup target add aarch64-linux-android --toolchain nightly &>/dev/null
 
 echo "Checking Windows GNU stable"
 cargo +stable check -q -p makepad-example-ironfish --release --target=x86_64-pc-windows-gnu --message-format=json

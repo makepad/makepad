@@ -1,9 +1,9 @@
 
 #[macro_export]
-macro_rules!main_app {
+macro_rules!app_main {
     ( $ app: ident) => {
         #[cfg(not(any(target_arch = "wasm32", target_os="android")))]
-        pub fn main() {
+        pub fn app_main() {
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Cx::new(Box::new(move | cx, event | {
                 

@@ -1,57 +1,55 @@
-use makepad_audio_graph;
-use makepad_audio_graph::makepad_widgets;
+#![cfg_attr(feature = "nightly", feature(portable_simd))]
+
+pub use makepad_widgets;
 use makepad_widgets::*;
 use makepad_draw::*;
+mod mandelbrot;
+
+#[cfg(feature = "nightly")]
+mod mandelbrot_simd;
 
 live_design!{
     import makepad_widgets::frame::*;
-    import makepad_draw::shader::std::*;
     registry Widget::*;
     App = {{App}} {
         ui: {
-            walk: {width: Fill, height: Fill},
-            draw_bg: {
-                shape:Rect
-                fn pixel(self) -> vec4 {
-                    //return #f00
-                    return Pal::premul(#3)
-                    //return vec4(1.0,0.0,0.0,1.0);
-                }
+            walk:{width: Fill, height: Fill},
+            
+            <Mandelbrot> {
+                walk:{width: Fill, height: Fill}
             }
-            piano = <Piano>{walk:{abs_pos:vec2(10,40)}}
         }
     }
 }
-main_app!(App);
-
+app_main!(App);
+ 
 #[derive(Live, LiveHook)]
 pub struct App {
-    window: DesktopWindow,
     ui: FrameRef,
+    window: DesktopWindow,
 }
 
 impl App {
     pub fn live_design(cx: &mut Cx) {
-        makepad_audio_graph::live_design(cx);
+        makepad_widgets::live_design(cx);
+        mandelbrot::live_design(cx);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Draw(event) = event {
             return self.draw(&mut Cx2d::new(cx, event));
         }
-        self.ui.handle_event(cx, event);
+        
         self.window.handle_event(cx, event);
+        
+        self.ui.handle_event(cx, event);
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
         if self.window.begin(cx).is_not_redrawing() {
             return;
         }
-        
         while self.ui.draw(cx).is_not_done(){};
-        
-        self.ui.redraw(cx);
-        
         self.window.end(cx);
     }
 }

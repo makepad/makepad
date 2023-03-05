@@ -170,8 +170,6 @@ impl FoldButton {
 }
 
 impl Widget for FoldButton {
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-
     fn redraw(&mut self, cx: &mut Cx) {
         self.draw_bg.redraw(cx);
     }

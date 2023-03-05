@@ -1654,7 +1654,7 @@ live_design!{
         }
     }
 }
-main_app!(App);
+app_main!(App);
 
 #[derive(Live)]
 pub struct App {

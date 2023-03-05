@@ -11,6 +11,7 @@ metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
 
 [dependencies]
 makepad-miniz = { path = "../../libs/miniz", version = "0.3.0" }
+makepad-networking = { path = "../../libs/networking", version = "0.3.0" }
 
 [features]
 nightly=[]
