@@ -15,6 +15,5 @@ makepad-audio-widgets = { path = "../../audio_graph/audio_widgets", version = "0
 #makepad-miniz = { path = "../../libs/miniz", version = "0.3.0" }
 #makepad-base64 = { path = "../../libs/base64", version = "0.3.0" }
 
-# [[bin]]
-# name = "makepad-example-ironfish"
-# path = "src/main.rs
+[lib]
+path = "src/app.rs"

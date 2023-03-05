@@ -310,8 +310,6 @@ impl Widget for Slider {
         self.draw_slider.redraw(cx);
     }
     
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-    
     fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
         self.handle_event_fn(cx, event, &mut | cx, action | {

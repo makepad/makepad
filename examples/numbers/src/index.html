@@ -4,7 +4,22 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Fast numbers example</title>
-    <script type='module' src='main.js'></script>
+    <script type='module'>
+        import {WasmWebGL} from "/makepad/platform/src/os/web_browser/web_gl.js"
+        
+        const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
+            "/makepad/target/wasm32-unknown-unknown/release/makepad-example-numbers.wasm"
+        );
+        
+        class MyWasmApp {
+            constructor(wasm) {
+                let canvas = document.getElementsByClassName('full_canvas')[0];
+                this.bridge = new WasmWebGL (wasm, this, canvas);
+            }
+        } 
+        
+        let app = new MyWasmApp(wasm);
+    </script>
     <script type='module' src='/makepad/platform/src/os/web_browser/auto_reload.js'></script>
     <link rel='stylesheet' type='text/css' href='/makepad/platform/src/os/web_browser/full_canvas.css'>
 	</head> 

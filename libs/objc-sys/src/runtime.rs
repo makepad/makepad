@@ -8,6 +8,10 @@ use malloc_buf::MallocBuffer;
 use encode;
 use {Encode, Encoding};
 
+pub type ObjcId = *mut Object;
+#[allow(non_upper_case_globals)]
+pub const nil: ObjcId = 0 as ObjcId;
+
 #[cfg(not(target_arch = "aarch64"))]
 pub type BOOL = ::std::os::raw::c_schar;
 

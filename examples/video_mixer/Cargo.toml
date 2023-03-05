@@ -10,5 +10,7 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "shZoP-LMDS_D9QdOWJ-1eEmE1m4="
 
 [dependencies]
-makepad-audio-graph = { path = "../../audio_graph", version = "0.3.0" }
+makepad-widgets = { path = "../../widgets", version = "0.3.0" }
 
+[lib]
+path = "src/app.rs"

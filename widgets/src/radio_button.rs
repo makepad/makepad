@@ -234,8 +234,6 @@ impl RadioButton {
 }
 
 impl Widget for RadioButton {
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-    
     fn bind_to(&mut self, _cx: &mut Cx, _db: &mut DataBinding, _act: &WidgetActions, _path: &[LiveId]) {
     }
     
