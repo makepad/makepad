@@ -10,3 +10,5 @@ metadata.makepad-auto-version = "5POKajmZt90sjG2MIw5C9dizbBo="
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "0.3.0" }
 
+[lib]
+path = "src/app.rs"

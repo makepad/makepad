@@ -5,7 +5,7 @@
 #![allow(non_snake_case)]
 pub use {
     makepad_objc_sys::{
-        runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO,},
+        runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO, ObjcId, nil},
         declare::{ClassDecl, ProtocolDecl},
         msg_send,
         sel,
@@ -25,8 +25,7 @@ use crate::os::apple::apple_util::four_char_as_u32;
 
 //use bitflags::bitflags;
 
-pub type ObjcId = *mut Object;
-pub const nil: ObjcId = 0 as ObjcId;
+
 
 pub struct RcObjcId(NonNull<Object>);
 
@@ -76,6 +75,9 @@ extern {
 
 #[link(name = "Foundation", kind = "framework")]
 extern {
+    pub fn dispatch_queue_create(label: *const u8, attr: ObjcId,) -> ObjcId;
+    pub fn dispatch_release(object: ObjcId);
+
     pub static NSNotificationCenter: ObjcId;
     pub static NSRunLoopCommonModes: ObjcId;
     pub static NSDefaultRunLoopMode: ObjcId;
@@ -224,9 +226,6 @@ extern {
     pub fn CMVideoFormatDescriptionGetDimensions(videoDesc: CMFormatDescriptionRef) -> CMVideoDimensions;
     pub fn CMFormatDescriptionGetMediaSubType(desc: CMFormatDescriptionRef) -> u32;
     pub fn CMSampleBufferGetImageBuffer(sbuf: CMSampleBufferRef) -> CVImageBufferRef;
-    
-    pub fn dispatch_queue_create(label: *const std::os::raw::c_char, attr: ObjcId,) -> ObjcId;
-    pub fn dispatch_release(object: ObjcId);
 }
 
 #[link(name = "CoreVideo", kind = "framework")]
@@ -240,7 +239,7 @@ extern {
     pub fn CVPixelBufferGetBaseAddress(pixelBuffer: CVPixelBufferRef) -> *mut c_void;
     pub fn CVPixelBufferGetWidth(pixelBuffer: CVPixelBufferRef) -> usize;
     pub fn CVPixelBufferGetHeight(pixelBuffer: CVPixelBufferRef) -> usize;
-}    
+}
 
 
 // Foundation
@@ -1118,7 +1117,8 @@ pub enum AudioObjectPropertySelector {
 pub enum AudioObjectPropertyScope {
     Global = four_char_as_u32("glob"),
     Output = four_char_as_u32("outp"),
-    Input = four_char_as_u32("inpt")}
+    Input = four_char_as_u32("inpt")
+}
 
 #[repr(u32)]
 pub enum AudioObjectPropertyElement {

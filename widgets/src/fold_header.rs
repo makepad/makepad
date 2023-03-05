@@ -64,8 +64,6 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-
     fn handle_widget_event_fn(
         &mut self,
         cx: &mut Cx,

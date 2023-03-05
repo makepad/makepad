@@ -1,5 +1,6 @@
 #![allow(unused)]
 use makepad_miniz::zip_file::*;
+use makepad_networking::HttpsConnection;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -99,6 +100,12 @@ fn download_full_sdk(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result
     mkdir(sdk_dir) ?;
     
     fn curl(step: usize, sdk_dir: &Path, url: &str) -> Result<(), String> {
+            println!("HERE");
+        let https = HttpsConnection::connect("https://makepad.dev","https");
+        loop{
+            println!("HERE");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         println!("---- Downloading {step}/5: {} ----", url);
         shell(&sdk_dir, "curl", &[url, "--output", sdk_dir.join(url_file_name(url)).to_str().unwrap()]) ?;
         Ok(())

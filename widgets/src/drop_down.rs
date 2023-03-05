@@ -363,8 +363,6 @@ impl DropDown {
 }
 
 impl Widget for DropDown {
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-    
     fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions, path: &[LiveId]) {
         match db {
             DataBinding::FromWidgets {nodes, ..} => if let Some(item) = act.find_single_action(self.widget_uid()) {
