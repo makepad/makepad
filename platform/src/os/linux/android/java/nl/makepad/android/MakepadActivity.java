@@ -46,7 +46,7 @@ Makepad.Callback{
     protected void onCreate(Bundle savedInstanceState) {
         // this causes a pause/resume cycle.
         //if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED){
-        requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 123);
+        requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.CAMERA}, 123);
         //}
 
         super.onCreate(savedInstanceState);
