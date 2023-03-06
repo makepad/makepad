@@ -88,7 +88,6 @@ pub struct TextureDesc {
     pub format: TextureFormat,
     pub width: Option<usize>,
     pub height: Option<usize>,
-    pub multisample: Option<usize>
 }
 
 impl Default for TextureDesc {
@@ -97,7 +96,6 @@ impl Default for TextureDesc {
             format: TextureFormat::Default,
             width: None,
             height: None,
-            multisample: None
         }
     }
 }

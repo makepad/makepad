@@ -83,6 +83,28 @@ impl<T> ToUIReceiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.receiver.try_recv()
     }
+    
+    pub fn try_recv_flush(&self) -> Result<T, TryRecvError> {
+        let mut store_last = None;
+        loop{
+            match self.receiver.try_recv() {
+                Ok(last) => {
+                    store_last = Some(last);
+                },
+                Err(TryRecvError::Empty) => {
+                    if let Some(last) = store_last{
+                        return Ok(last)
+                    }
+                    else {
+                        return Err(TryRecvError::Empty)
+                    }
+                },
+                Err(TryRecvError::Disconnected) => {
+                    return  Err(TryRecvError::Disconnected)
+                }
+            }
+        }
+    }
 }
 
 impl<T> ToUISender<T> {

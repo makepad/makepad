@@ -172,15 +172,15 @@ impl Widget for Splitter {
         if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }
-        if let DrawState::DrawA = self.draw_state.get() {
+        if let Some(DrawState::DrawA) = self.draw_state.get() {
             self.a.draw_walk_widget(cx) ?;
             self.draw_state.set(DrawState::DrawSplit);
         }
-        if let DrawState::DrawSplit = self.draw_state.get() {
+        if let Some(DrawState::DrawSplit) = self.draw_state.get() {
             self.middle(cx);
             self.draw_state.set(DrawState::DrawB)
         }
-        if let DrawState::DrawB = self.draw_state.get() {
+        if let Some(DrawState::DrawB) = self.draw_state.get() {
             self.b.draw_walk_widget(cx) ?;
             self.end(cx);
             self.draw_state.end();

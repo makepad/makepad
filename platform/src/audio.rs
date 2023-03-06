@@ -81,21 +81,37 @@ impl AudioDevicesEvent{
         Vec::new()
     }
     
-    pub fn match_output(&self, matches: &[&'static str])->Vec<AudioDeviceId>{
+    pub fn match_outputs(&self, outputs: &[&str])->Vec<AudioDeviceId>{
+        let mut results = Vec::new();
         for d in &self.descs{
             if d.device_type.is_output(){
-                let mut mismatch  = false;
-                for m in matches{
-                    if d.name.find(m).is_none(){
-                        mismatch = true;
+                for output in outputs{
+                    if d.name.find(output).is_some(){
+                        results.push(d.device_id);
+                        break;
                     }
-                }
-                if !mismatch{
-                    return vec![d.device_id]
                 }
             }
         }
-        return self.default_output()
+        if results.len() == 0{
+            return self.default_output()
+        }
+        results
+    }
+    
+    pub fn match_inputs(&self, inputs: &[&str])->Vec<AudioDeviceId>{
+        let mut results = Vec::new();
+        for d in &self.descs{
+            if d.device_type.is_input(){
+                for input in inputs{
+                    if d.name.find(input).is_some(){
+                        results.push(d.device_id);
+                        break;
+                    }
+                }
+            }
+        }
+        return results
     }
     
 }
