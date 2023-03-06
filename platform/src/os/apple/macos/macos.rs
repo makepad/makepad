@@ -50,7 +50,7 @@ impl Cx {
             }
         }
         
-        self.os_type = OsType::OSX;
+        self.os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         let cx = Rc::new(RefCell::new(self));
         

@@ -25,7 +25,7 @@ pub trait CxMediaApi {
     fn audio_output_box(&mut self, index:usize, f: AudioOutputFn);
     fn audio_input_box(&mut self, index:usize, f: AudioInputFn);
 
-    fn video_input<F>(&mut self, index:usize, f: F) where F: FnMut(VideoFrame) + Send  + 'static{
+    fn video_input<F>(&mut self, index:usize, f: F) where F: FnMut(VideoBufferRef) + Send  + 'static{
         self.video_input_box(index, Box::new(f))
     }
     

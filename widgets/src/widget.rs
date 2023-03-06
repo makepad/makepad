@@ -465,8 +465,8 @@ impl<T: Clone> DrawStateWrap<T> {
         }
     }
     
-    pub fn get(&self) -> T {
-        self.state.clone().unwrap()
+    pub fn get(&self) -> Option<T> {
+        self.state.clone()
     }
     
     pub fn set(&mut self, value: T) {

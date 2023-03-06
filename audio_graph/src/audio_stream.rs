@@ -1,5 +1,4 @@
 
-// ok so. an audio stream. its an object with a 'sender'
 use {
     crate::{
         makepad_platform::audio::*,
