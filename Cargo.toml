@@ -15,6 +15,7 @@ workspace.members = [
     "examples/ironfish",
     "examples/simple",
     "examples/video_mixer",
+    "examples/video_sender",
     "libs/wasm_bridge/test",
     "studio",
     "tools/cargo_makepad",

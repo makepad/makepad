@@ -4,7 +4,8 @@ use {
     self::super::{
         aaudio::*,
         android_jni::*,
-        amidi::*
+        amidi::*,
+        acamera::*,
     },
     crate::{
         cx::Cx,
@@ -23,6 +24,9 @@ pub struct CxAndroidMedia {
     pub (crate) aaudio: Option<Arc<Mutex<AAudioAccess >> >,
     pub (crate) amidi_change: Signal,
     pub (crate) amidi: Option<Arc<Mutex<AMidiAccess >> >,
+    pub (crate) acamera_change: Signal,
+    pub (crate) acamera: Option<Arc<Mutex<ACameraAccess >> >,
+    
 }
 
 impl Cx {
@@ -41,6 +45,12 @@ impl Cx {
                 }));
             }
         }
+        if self.os.media.acamera_change.check_and_clear(){
+            let descs = self.os.media.acamera().lock().unwrap().get_updated_descs();
+            self.call_event_handler(&Event::VideoInputs(VideoInputsEvent{
+                descs
+            }));
+        }
     }
 }
 
@@ -56,6 +66,12 @@ impl CxAndroidMedia {
             self.amidi = Some(AMidiAccess::new(self.amidi_change.clone()));
         }
         self.amidi.as_ref().unwrap().clone()
+    }
+    pub fn acamera(&mut self) -> Arc<Mutex<ACameraAccess >> {
+        if self.acamera.is_none() {
+            self.acamera = Some(ACameraAccess::new(self.acamera_change.clone()));
+        }
+        self.acamera.as_ref().unwrap().clone()
     }
 }
 
@@ -99,10 +115,12 @@ impl CxMediaApi for Cx {
         *self.os.media.aaudio().lock().unwrap().audio_input_cb[index].lock().unwrap() = Some(f);
     }
     
-    fn video_input_box(&mut self, _index: usize, _f: VideoInputFn) {
+    fn video_input_box(&mut self, index: usize, f: VideoInputFn) {
+        *self.os.media.acamera().lock().unwrap().video_input_cb[index].lock().unwrap() = Some(f);
     }
     
-    fn use_video_input(&mut self, _inputs: &[(VideoInputId, VideoFormatId)]) {
+    fn use_video_input(&mut self, inputs: &[(VideoInputId, VideoFormatId)]) {
+        self.os.media.acamera().lock().unwrap().use_video_input(inputs);
     }
 }
 

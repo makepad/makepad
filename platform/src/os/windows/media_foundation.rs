@@ -79,17 +79,17 @@ struct MfInput {
 }
 
 impl MfInput {
-    fn activate(&mut self, video_desc: VideoDesc, callback: Arc<Mutex<Option<Box<dyn FnMut(VideoBufferRef) + Send + 'static >> > >) {
+    fn activate(&mut self, video_format: VideoFormat, callback: Arc<Mutex<Option<Box<dyn FnMut(VideoBufferRef) + Send + 'static >> > >) {
         if self.active_format.is_some() {panic!()};
-        self.active_format = Some(video_desc.format_id);
+        self.active_format = Some(video_format.format_id);
         let cb = self.reader_callback.as_impl();
         *cb.config.lock().unwrap() = Some(SourceReaderConfig{
-            video_desc,
+            video_format,
             callback
         });
         *cb.source_reader.lock().unwrap() = Some(self.source_reader.clone());
         unsafe { // trigger first frame
-            let mt = self.media_types.iter().find( | v | v.format_id == video_desc.format_id).unwrap();
+            let mt = self.media_types.iter().find( | v | v.format_id == video_format.format_id).unwrap();
             //let desc = self.desc.formats.iter().find( | v | v.format_id == format_id).unwrap();
             self.source_reader.SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, None, &mt.media_type).unwrap();
             self.source_reader.ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, 0, None, None, None, None).unwrap();
@@ -105,7 +105,7 @@ struct MfMediaType {
 }
 
 pub struct MediaFoundationAccess {
-    pub video_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(VideoBufferRef) + Send + 'static >> > >; MAX_VIDEO_DEVICE_INDEX],
+    pub video_input_cb: [Arc<Mutex<Option<VideoInputFn> > >; MAX_VIDEO_DEVICE_INDEX],
     inputs: Vec<MfInput>,
     _enumerator: IMMDeviceEnumerator,
     _change_listener: IMMNotificationClient
@@ -135,7 +135,7 @@ impl MediaFoundationAccess {
         // enable these video capture devices / disabling others
         for (index, (input_id, format_id)) in inputs.iter().enumerate() {
             if let Some(input) = self.inputs.iter_mut().find( | v | v.desc.input_id == *input_id) {
-                let video_format = input.desc.descs.iter().find(|f| f.format_id == *format_id).unwrap();
+                let video_format = input.desc.formats.iter().find(|f| f.format_id == *format_id).unwrap();
                 if input.active_format.is_none() { // activate
                     input.activate(*video_format, self.video_input_cb[index].clone());
                 }
@@ -201,7 +201,7 @@ impl MediaFoundationAccess {
                     
                     attributes.SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, &reader_callback).unwrap();
                     
-                    let mut descs = Vec::new();
+                    let mut formats = Vec::new();
                     let mut media_types = Vec::new();
                     let source: IMFMediaSource = device.ActivateObject().unwrap();
                     let source_reader = MFCreateSourceReaderFromMediaSource(&source, &attributes).unwrap();
@@ -230,12 +230,12 @@ impl MediaFoundationAccess {
                             media_type,
                             format_id
                         });
-                        descs.push(VideoDesc {
+                        formats.push(VideoFormat {
                             format_id,
                             width: width as usize,
                             height: height as usize,
                             pixel_format,
-                            frame_rate
+                            frame_rate:Some(frame_rate)
                         });
                         
                         index += 1;
@@ -247,7 +247,7 @@ impl MediaFoundationAccess {
                         desc: VideoInputDesc {
                             input_id: LiveId::from_str_unchecked(&symlink).into(),
                             name,
-                            descs
+                            formats
                         },
                         symlink,
                         media_types,
@@ -277,8 +277,8 @@ impl MediaFoundationAccess {
 
 
 struct SourceReaderConfig{
-    video_desc: VideoDesc,
-    callback:Arc<Mutex<Option<Box<dyn FnMut(VideoBufferRef) + Send + 'static >> > >
+    video_format: VideoFormat,
+    callback:Arc<Mutex<Option<VideoInputFn> > >
 }
 
 struct SourceReaderCallback {
@@ -317,7 +317,7 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
                                 let ptr = ptr as *mut u32;
                                 let data = std::slice::from_raw_parts_mut(ptr, len as usize>>2);
                                 cb(VideoBufferRef{
-                                    desc: config.video_desc,
+                                    format: config.video_format,
                                     data
                                 });
                                 buffer.Unlock().unwrap();

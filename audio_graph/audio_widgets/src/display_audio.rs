@@ -20,7 +20,7 @@ live_design!{
             //return mix(#f00,#0f0, left+0.5);
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             let step = 0.0;
-            for i in 0..1 {
+            for i in 0..4 {
                 let wave = sample2d(self.wave_texture, vec2(self.pos.x, step));
                 let right = (wave.y + wave.z / 256.0 - 0.5) * 3.0;
                 let left = (wave.w + wave.x / 256.0 - 0.5) * 3.0;
@@ -57,7 +57,7 @@ pub struct DisplayAudio {
     draw_wave: DrawWave,
     wave_texture: Texture,
     #[rust] data_offset: [usize; 32],
-    #[rust([true; 32])] active: [bool; 32],
+    #[rust([0; 32])] active: [usize; 32],
 }
 
 #[derive(Clone, WidgetAction)]
@@ -110,10 +110,13 @@ impl DisplayAudio {
 
         self.wave_texture.swap_image_u32(cx, &mut wave_buf);
         self.data_offset[voice] = (self.data_offset[voice] + frames) % (WAVE_SIZE_X);
-        if self.active[voice] || is_active {
-            self.draw_wave.redraw(cx);
+        if is_active{
+            self.active[voice] = 6
         }
-        self.active[voice] = is_active;
+        if self.active[voice]>0 { 
+            self.draw_wave.redraw(cx);
+            self.active[voice] -= 1;
+        }
     }
 }
 
