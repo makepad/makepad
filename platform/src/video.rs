@@ -19,6 +19,7 @@ pub enum VideoPixelFormat {
     RGB24,
     YUY2,
     NV12,
+    YUV420,
     GRAY,
     MJPEG,
     Unsupported(u32)
@@ -27,9 +28,10 @@ pub enum VideoPixelFormat {
 impl VideoPixelFormat{
     fn quality_priority(&self)->usize{
         match self{
-            Self::RGB24 => 5,
-            Self::YUY2 => 4,
-            Self::NV12 => 3 ,
+            Self::RGB24 => 6,
+            Self::YUY2 => 5,
+            Self::NV12 => 4 ,
+            Self::YUV420=> 3,
             Self::MJPEG => 2,
             Self::GRAY => 1,
             Self::Unsupported(_)=>0
@@ -38,30 +40,30 @@ impl VideoPixelFormat{
 }
 
 pub struct VideoBufferRef<'a>{
-    pub desc: VideoDesc,
+    pub format: VideoFormat,
     pub data: &'a[u32]
 }
 
 impl<'a> VideoBufferRef<'a>{
     pub fn to_buffer(&self)->VideoBuffer{
         VideoBuffer{
-            desc: self.desc.clone(),
+            format: self.format.clone(),
             data: self.data.to_vec()
         }
     }
 }
 
 pub struct VideoBuffer{
-    pub desc:VideoDesc,
+    pub format:VideoFormat,
     pub data: Vec<u32>
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct VideoDesc {
+pub struct VideoFormat {
     pub format_id: VideoFormatId,
     pub width: usize,
     pub height: usize,
-    pub frame_rate: f64,
+    pub frame_rate: Option<f64>,
     pub pixel_format: VideoPixelFormat
 }
 
@@ -69,7 +71,7 @@ pub struct VideoDesc {
 pub struct VideoInputDesc {
     pub input_id: VideoInputId,
     pub name: String,
-    pub descs: Vec<VideoDesc>
+    pub formats: Vec<VideoFormat>
 }
 
 #[derive(Clone)]
@@ -84,24 +86,26 @@ impl VideoInputsEvent {
             let mut max_frame_rate = 0.0;
             let mut max_quality = 0;
             let mut format_id = None;
-            for desc in &device.descs {
-                let pixels = desc.width * desc.height;
+            for format in &device.formats {
+                let pixels = format.width * format.height;
                 if pixels >= max_pixels{
                     max_pixels = pixels
                 }
             }
-            for desc in &device.descs {
-                let pixels = desc.width * desc.height;
-                if pixels == max_pixels && desc.frame_rate >= max_frame_rate {
-                    max_frame_rate = desc.frame_rate;
+            for format in &device.formats {
+                if let Some(frame_rate) = format.frame_rate{
+                    let pixels = format.width * format.height;
+                    if pixels == max_pixels && frame_rate >= max_frame_rate {
+                        max_frame_rate = frame_rate;
+                    }
                 }
             }
-            for desc in &device.descs {
-                let pixels = desc.width * desc.height;
-                let quality = desc.pixel_format.quality_priority();
-                if pixels == max_pixels && desc.frame_rate == max_frame_rate && quality >= max_quality{
+            for format in &device.formats {
+                let pixels = format.width * format.height;
+                let quality = format.pixel_format.quality_priority();
+                if pixels == max_pixels && format.frame_rate.unwrap_or(0.0) == max_frame_rate && quality >= max_quality{
                     max_quality = quality;
-                    format_id = Some(desc.format_id)
+                    format_id = Some(format.format_id)
                 }
             }
             if let Some(format_id) = format_id{
@@ -117,16 +121,18 @@ impl VideoInputsEvent {
             let mut max_quality = 0;
             let mut format_id = None;
 
-            for desc in &device.descs {
-                if width == desc.width && height == desc.height && desc.frame_rate >= max_frame_rate {
-                    max_frame_rate = desc.frame_rate;
+            for format in &device.formats {
+                if let Some(frame_rate) = format.frame_rate{
+                    if width == format.width && height == format.height && frame_rate >= max_frame_rate {
+                        max_frame_rate = frame_rate;
+                    }
                 }
             }
-            for desc in &device.descs {
-                let quality = desc.pixel_format.quality_priority();
-                if width == desc.width && height == desc.height && desc.frame_rate == max_frame_rate && quality >= max_quality{
+            for format in &device.formats {
+                let quality = format.pixel_format.quality_priority();
+                if width == format.width && height == format.height && format.frame_rate.unwrap_or(0.0) == max_frame_rate && quality >= max_quality{
                     max_quality = quality;
-                    format_id = Some(desc.format_id)
+                    format_id = Some(format.format_id)
                 }
             }
             if let Some(format_id) = format_id{
@@ -142,8 +148,8 @@ impl std::fmt::Debug for VideoInputsEvent {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         for desc in &self.descs {
             write!(f, "Capture Device: {}\n", desc.name).unwrap();
-            for desc in &desc.descs {
-                write!(f, "    format: w:{} h:{} framerate:{} pixel:{:?} \n", desc.width, desc.height, desc.frame_rate, desc.pixel_format).unwrap();
+            for format in &desc.formats {
+                write!(f, "    format: w:{} h:{} framerate:{:?} pixel:{:?} \n", format.width, format.height, format.frame_rate, format.pixel_format).unwrap();
             }
         }
         Ok(())

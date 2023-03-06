@@ -160,7 +160,7 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::Signal => {
-                while let Some((port, data)) = self.midi_input.receive(){
+                while let Some((_, data)) = self.midi_input.receive(){
                     match data.decode(){
                         MidiEvent::ControlChange(cc)=>{
                             if cc.param == 2{self.mixer.channel[0].set(cc.value as f32 / 63.0)};
