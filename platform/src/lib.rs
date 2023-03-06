@@ -35,6 +35,8 @@ mod geometry;
 mod debug;
 mod component_map;
 
+pub mod audio_stream;
+
 mod media_api;
 
 #[macro_use]

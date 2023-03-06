@@ -25,7 +25,7 @@ struct AvVideoInput {
 
 pub struct AvCaptureAccess {
     pub access_granted: bool,
-    pub video_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >; MAX_VIDEO_DEVICE_INDEX],
+    pub video_input_cb: [Arc<Mutex<Option<Box<dyn FnMut(VideoBufferRef) + Send + 'static >> > >; MAX_VIDEO_DEVICE_INDEX],
     inputs: Vec<AvVideoInput>,
     sessions: Vec<AvCaptureSession>,
 }
@@ -40,11 +40,11 @@ pub struct AvCaptureSession {
 
 impl AvCaptureSession {
     fn start_session(
-        capture_cb: Arc<Mutex<Option<Box<dyn FnMut(VideoFrame) + Send + 'static >> > >,
+        capture_cb: Arc<Mutex<Option<Box<dyn FnMut(VideoBufferRef) + Send + 'static >> > >,
         input_id: VideoInputId,
         format: &AvFormatObj,
         device: &RcObjcId,
-        video_format: VideoFormat
+        desc: VideoDesc
     ) -> Self {
         // lets start a capture session with a callback
         unsafe {
@@ -60,17 +60,20 @@ impl AvCaptureSession {
             let callback = AvVideoCaptureCallback::new(Box::new(move | sample_buffer | {
                 if let Some(cb) = &mut *capture_cb.lock().unwrap() {
                     let image_buffer = CMSampleBufferGetImageBuffer(sample_buffer);
+                    let bytes_per_row = CVPixelBufferGetBytesPerRow(image_buffer);
+                    //println!("bytes per row: {}", bpr*2160);
                     CVPixelBufferLockBaseAddress(image_buffer, 0);
                     let len = CVPixelBufferGetDataSize(image_buffer);
                     let ptr = CVPixelBufferGetBaseAddress(image_buffer);
                     let height = CVPixelBufferGetHeight(image_buffer) as usize;
                     let width = CVPixelBufferGetWidth(image_buffer) as usize;
-                    let data = std::slice::from_raw_parts_mut(ptr as *mut u8, len as usize);
-                    if width != video_format.width || height != video_format.height {
-                        println!("Video format not correct got {} x {} for {:?}", width, height, video_format);
+                    let len_used = bytes_per_row * height;
+                    let data = std::slice::from_raw_parts_mut(ptr as *mut u32, (len as usize).min(len_used) / 4);
+                    if width != desc.width || height != desc.height {
+                        println!("Video format not correct got {} x {} for {:?}", width, height, desc);
                     }
-                    cb(VideoFrame {
-                        video_format,
+                    cb(VideoBufferRef {
+                        desc,
                         data
                     });
                     CVPixelBufferUnlockBaseAddress(image_buffer, 0);
@@ -178,14 +181,14 @@ impl AvCaptureAccess {
                 let input = self.inputs.iter().find( | v | v.desc.input_id == d.0).unwrap();
                 let av_format = input.av_formats.iter().find( | v | v.format_id == d.1).unwrap();
                 let video_capture_cb = self.video_input_cb[index].clone();
-                let video_format = input.desc.formats.iter().find( | v | v.format_id == d.1).unwrap();
-                println!("{:?}", video_format);
+                let video_desc = input.desc.descs.iter().find( | v | v.format_id == d.1).unwrap();
+                println!("{:?}", video_desc);
                 self.sessions.push(AvCaptureSession::start_session(
                     video_capture_cb,
                     d.0,
                     av_format,
                     &input.device_obj,
-                    *video_format
+                    *video_desc
                 ));
             }
         }
@@ -220,7 +223,7 @@ impl AvCaptureAccess {
                 let uuid = nsstring_to_string(msg_send![device_obj, modelID]);
                 let format_objs: ObjcId = msg_send![device_obj, formats];
                 let format_count: usize = msg_send![format_objs, count];
-                let mut formats = Vec::new();
+                let mut descs = Vec::new();
                 let mut av_formats = Vec::new();
                 for j in 0..format_count {
                     let format_obj: ObjcId = msg_send![format_objs, objectAtIndex: j];
@@ -254,7 +257,7 @@ impl AvCaptureAccess {
                             min_frame_duration: max_frame_duration,
                             format_obj: RcObjcId::from_unowned(NonNull::new(format_obj).unwrap()),
                         });
-                        formats.push(VideoFormat {
+                        descs.push(VideoDesc {
                             format_id,
                             width: res.width as usize,
                             height: res.height as usize,
@@ -270,7 +273,7 @@ impl AvCaptureAccess {
                         min_frame_duration,
                         format_obj: RcObjcId::from_unowned(NonNull::new(format_obj).unwrap()),
                     });
-                    formats.push(VideoFormat {
+                    descs.push(VideoDesc {
                         format_id,
                         width: res.width as usize,
                         height: res.height as usize,
@@ -283,7 +286,7 @@ impl AvCaptureAccess {
                     desc: VideoInputDesc {
                         input_id: LiveId::from_str_unchecked(&uuid).into(),
                         name,
-                        formats
+                        descs
                     },
                     av_formats
                 });

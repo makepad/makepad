@@ -434,7 +434,6 @@ impl LiveHook for Frame {
                     format: TextureFormat::ImageBGRA,
                     width: Some(image_buffer.width),
                     height: Some(image_buffer.height),
-                    multisample: None
                 });
                 self.image_texture.swap_image_u32(cx, &mut image_buffer.data);
             }
@@ -497,11 +496,24 @@ impl FrameRef {
         WidgetDraw::done()
     }
     
-    pub fn set_visible(&mut self, visible: bool) {
+    pub fn set_visible(&self, visible: bool) {
         if let Some(mut inner) = self.inner_mut() {
             inner.visible = visible
         }
     }
+    
+    pub fn set_texture(&self, slot:usize, texture: &Texture) {
+        if let Some(mut inner) = self.inner_mut() {
+            inner.draw_bg.set_texture(slot, texture);
+        }
+    }
+    
+    pub fn set_uniform(&self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
+        if let Some(mut inner) = self.inner_mut() {
+            inner.draw_bg.set_uniform(cx, uniform, value);
+        }
+    }
+    
     
     pub fn set_scroll_pos(&self, cx: &mut Cx, v: DVec2) {
         if let Some(mut inner) = self.inner_mut() {
@@ -819,7 +831,7 @@ impl Frame {
             }
         }
         
-        while let DrawState::Drawing(step) = self.draw_state.get() {
+        while let Some(DrawState::Drawing(step)) = self.draw_state.get() {
             if step < self.draw_order.len() {
                 let id = self.draw_order[step];
                 if let Some(child) = self.children.get_mut(&id) {
@@ -838,7 +850,7 @@ impl Frame {
             }
         }
         
-        while let DrawState::DeferWalk(step) = self.draw_state.get() {
+        while let Some(DrawState::DeferWalk(step)) = self.draw_state.get() {
             if step < self.defer_walks.len() {
                 let (id, dw) = &self.defer_walks[step];
                 if let Some(child) = self.children.get_mut(&id) {

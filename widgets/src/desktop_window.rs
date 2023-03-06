@@ -13,8 +13,8 @@ live_design!{
     registry Widget::*;
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
-   
-     DesktopWindow = {{DesktopWindow}} {
+    
+    DesktopWindow = {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
         var caption = "Makepad"
         ui: {
@@ -68,9 +68,9 @@ live_design!{
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                sdf.move_to(1.0,1.0);
-                sdf.line_to(self.rect_size.x-1.0, self.rect_size.y*0.5)
-                sdf.line_to(self.rect_size.x*0.5, self.rect_size.y-1.0)
+                sdf.move_to(1.0, 1.0);
+                sdf.line_to(self.rect_size.x - 1.0, self.rect_size.y * 0.5)
+                sdf.line_to(self.rect_size.x * 0.5, self.rect_size.y - 1.0)
                 sdf.close_path();
                 sdf.fill_keep(self.get_color())
                 if self.border_width > 0.0 {
@@ -102,7 +102,7 @@ pub struct DesktopWindow {
     pass: Pass,
     depth_texture: Texture,
     
-    ui: FrameRef,
+    pub ui: FrameRef,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![
@@ -129,29 +129,32 @@ impl LiveHook for DesktopWindow {
             self.ui.get_frame(id!(web_xr)).set_visible(true);
             log!("VR IS SUPPORTED");
         }
-        match cx.os_type(){
-             OsType::Windows=>{
+        match cx.os_type() {
+            OsType::Windows => {
                 self.ui.get_frame(id!(caption_bar)).set_visible(true);
                 self.ui.get_frame(id!(windows_buttons)).set_visible(true);
-             }
-             OsType::LinuxWindow(_) |
-             OsType::LinuxDirect |
-             OsType::Android(_)=>{
+            }
+            OsType::Macos => {
                 self.ui.get_frame(id!(caption_bar)).set_visible(false);
             }
-            OsType::Web(_)=>{
+            OsType::LinuxWindow(_) |
+            OsType::LinuxDirect |
+            OsType::Android(_) => {
                 self.ui.get_frame(id!(caption_bar)).set_visible(false);
             }
-            _=>()
+            OsType::Web(_) => {
+                self.ui.get_frame(id!(caption_bar)).set_visible(false);
+            }
+            _ => ()
         }
     }
 }
- 
+
 #[derive(Clone)]
 pub enum DesktopWindowEvent {
     EventForOtherWindow,
     WindowClosed,
-    WindowGeomChange(WindowGeomChangeEvent), 
+    WindowGeomChange(WindowGeomChangeEvent),
     None
 }
 
@@ -251,7 +254,7 @@ impl DesktopWindow {
         if is_for_other_window {
             return dispatch_action(cx, DesktopWindowEvent::EventForOtherWindow)
         }
-        if let Event::Resume = event{
+        if let Event::Resume = event {
             Cx2d::reset_fonts_atlas(cx);
         }
         if let Event::MouseMove(ev) = event {

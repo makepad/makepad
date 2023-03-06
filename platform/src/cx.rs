@@ -149,7 +149,7 @@ pub struct LinuxWindowParams {
 pub enum OsType {
     Unknown,
     Windows,
-    OSX,
+    Macos,
     IOS,
     Android(AndroidParams),
     LinuxWindow (LinuxWindowParams),
