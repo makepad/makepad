@@ -1,7 +1,8 @@
+// Audio stream is strictly a utility class to combine multiple input streams
 
 use {
     crate::{
-        makepad_platform::audio::*,
+        audio::*,
     },
     std::sync::{Arc, Mutex},
     std::sync::mpsc::{
@@ -23,6 +24,8 @@ pub struct AudioStreamReceiver(Arc<Mutex<ReceiverInner>>);
 
 pub struct ReceiverInner {
     pub routes: Vec<AudioRoute>,
+    min_buf: usize,
+    max_buf: usize,
     stream_recv: Receiver<(u64, AudioBuffer)>,
 }
 
@@ -35,17 +38,19 @@ pub struct AudioRoute {
 }
 
 impl AudioStreamSender {
-    pub fn create_pair() -> (AudioStreamSender, AudioStreamReceiver) {
+    pub fn create_pair(min_buf:usize, max_buf: usize) -> (AudioStreamSender, AudioStreamReceiver) {
         let (stream_send, stream_recv) = channel::<(u64, AudioBuffer)>();
         (AudioStreamSender {
             stream_send,
         }, AudioStreamReceiver(Arc::new(Mutex::new(ReceiverInner {
             stream_recv,
+            min_buf,
+            max_buf,
             routes: Vec::new()
         }))))
     }
     
-    pub fn write_buffer(&self, route_id: u64, buffer: AudioBuffer) -> Result<(), SendError<(u64, AudioBuffer) >> {
+    pub fn send(&self, route_id: u64, buffer: AudioBuffer) -> Result<(), SendError<(u64, AudioBuffer) >> {
         self.stream_send.send((route_id, buffer))
     }
 }
@@ -96,15 +101,17 @@ impl AudioStreamReceiver {
         self.try_recv_stream();
     }
     
-    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer, min_buf: usize) -> usize {
+    pub fn read_buffer(&mut self, route_num: usize, output: &mut AudioBuffer) -> usize {
         let mut iself = self.0.lock().unwrap();
+        let min_buf = iself.min_buf;
+        let max_buf = iself.max_buf;
         let route = if let Some(route) = iself.routes.get_mut(route_num) {
             route
         }
         else {
             return 0;
         };
-        
+
         // ok if we dont have enough data in our stack for output, just output nothing
         let mut total = 0;
         for buf in route.buffers.iter() { 
@@ -116,10 +123,11 @@ impl AudioStreamReceiver {
             return 0
         }
          
-        // flush down the buffer
-        while total > output.frame_count() * 4{
+        // what if we have too much buffer.. we should take the 'end' of the buffers
+        while total - route.buffers.first().unwrap().frame_count() > output.frame_count() * max_buf{
             let buf = route.buffers.remove(0);
             total -= buf.frame_count();
+            route.start_offset = 0;
         }
         
         // ok so we need to eat from the start of the buffer vec until output is filled

@@ -887,7 +887,6 @@ impl CxOsTexture {
                 width,
                 height,
                 format: desc.format,
-                multisample: desc.multisample,
                 texture,
             });
             
@@ -966,7 +965,6 @@ impl CxOsTexture {
                 width,
                 height,
                 format: desc.format,
-                multisample: desc.multisample,
                 texture,
             });
         }
@@ -989,7 +987,6 @@ impl CxOsTexture {
             width,
             height,
             format: TextureFormat::RenderBGRA,
-            multisample: None,
             texture,
         });
     }
@@ -1056,7 +1053,6 @@ impl CxOsTexture {
             width,
             height,
             format: desc.format,
-            multisample: desc.multisample,
             texture,
         });
     }
@@ -1067,7 +1063,6 @@ struct CxOsTextureInner {
     width: u64,
     height: u64,
     format: TextureFormat,
-    multisample: Option<usize>,
     texture: RcObjcId
 }
 
@@ -1080,9 +1075,6 @@ impl CxOsTextureInner {
             return true;
         }
         if inner.format != desc.format {
-            return true;
-        }
-        if inner.multisample != desc.multisample {
             return true;
         }
         false

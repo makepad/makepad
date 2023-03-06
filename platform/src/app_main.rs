@@ -41,7 +41,7 @@ macro_rules!app_main {
         }
         
         #[cfg(target_arch = "wasm32")]
-        pub fn main() {}
+        pub fn app_main() {}
         
         #[export_name = "wasm_create_app"]
         #[cfg(target_arch = "wasm32")]
