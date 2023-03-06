@@ -1,9 +1,9 @@
 #!/bin/zsh
 APK_DIR="./target/android_apk/build"
 REL_ROOT="../../.."
-SDK_DIR="./tools/android/android_33_darwin_x86_64_to_aarch64"
-PKG="makepad-example-ironfish"
-FILE="makepad_example_ironfish"
+SDK_DIR="./tools/android/android_33_aarch64_apple_darwin_to_aarch64_linux_android"
+PKG="makepad-example-video-sender"
+FILE="makepad_example_video_sender"
 JDK_DIR=$SDK_DIR/openjdk
 
 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$SDK_DIR/NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang" cargo +nightly rustc --lib --crate-type=cdylib -p $PKG --release --target=aarch64-linux-android --message-format=json

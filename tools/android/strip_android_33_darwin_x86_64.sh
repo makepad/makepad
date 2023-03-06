@@ -138,7 +138,7 @@ cp $SRC/$SYSLIB/libEGL.so $DST/$SYSLIB
 cp $SRC/$SYSLIB/libdl.so $DST/$SYSLIB    
 cp $SRC/$SYSLIB/libaaudio.so $DST/$SYSLIB   
 cp $SRC/$SYSLIB/libamidi.so $DST/$SYSLIB
-
+cp $SRC/$SYSLIB/libcamera2ndk.so $DST/$SYSLIB
 # these files are needed by the rust linker but are actually no-ops so we just copy libc to stand in as a fake 
 cp $DST/$SYSLIB/libc.so $DST/$SYSLIB/libgcc.so
 cp $DST/$SYSLIB/libc.so $DST/$SYSLIB/libunwind.so
