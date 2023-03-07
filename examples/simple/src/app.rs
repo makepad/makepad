@@ -24,6 +24,7 @@ live_design! {
         // `ui` field on the Rust struct `App`, the latter will be initialized from the DSL object
         // here below.
         ui: {
+            show_bg: true
             // The `layout` property determines how child widgets are laid out within a frame. In
             // this case, child widgets flow downward, with 20 pixels of spacing in between them,
             // and centered horizontally with respect to the entire frame.
@@ -46,7 +47,7 @@ live_design! {
                 height: Fill
             },
             draw_bg: {
-                shape: Solid
+                
 
                 // The `fn pixel(self) -> vec4` syntax is used to define a property named `pixel`,
                 // the value of which is a shader. We use our own custom DSL to define shaders. It's
@@ -83,7 +84,7 @@ live_design! {
 
             // A label to display the counter.
             label1 = <Label> {
-                label: {
+                draw_label: {
                     color: #f
                 },
                 text: "Counter: 0"
@@ -109,7 +110,7 @@ app_main!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     // A chromeless window for our application. Used to contain our frame widget.
-    window: BareWindow,
+    window: DesktopWindow,
     // A frame widget. Used to contain our button and label.
     ui: FrameRef,
     
@@ -168,7 +169,6 @@ impl App {
         if self.window.begin(cx).is_not_redrawing() {
             return;
         }
-        
         // Draw the frame to the window.
         let _ = self.ui.draw(cx);
 

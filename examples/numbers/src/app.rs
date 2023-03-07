@@ -31,7 +31,6 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-
         if let Event::Draw(event) = event {
             return self.draw(&mut Cx2d::new(cx, event));
         }

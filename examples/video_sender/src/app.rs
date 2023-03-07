@@ -109,7 +109,7 @@ impl App {
                 return self.draw(&mut Cx2d::new(cx, event));
             }
             Event::Construct => {
-                self.start_inputs(cx);
+               self.start_inputs(cx);
             }
             Event::VideoInputs(devices) => {
                 //log!("Got devices! {:?}", devices);
