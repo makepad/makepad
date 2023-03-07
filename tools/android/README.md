@@ -10,4 +10,6 @@ cargo run -p cargo-makepad --release -- android rustup-toolchain-install
 
 cargo run -p cargo-makepad --release -- android install-sdk
 
+cargo run -p cargo-makepad --release -- android base-apk
+
 cargo run -p cargo-makepad --release -- android run -p makepad-example-ironfish
