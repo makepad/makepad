@@ -15,12 +15,13 @@ pub struct ACameraDevice{
     camera_id_str: String,
     desc: VideoInputDesc,
 }
-
+ 
 pub struct ACaptureSession{
 }
 
 impl ACaptureSession{
     fn start(_cb:Arc<Mutex<Option<VideoInputFn> > >, _manager:*mut ACameraManager, _camera_id: &str, _format: VideoFormat)->Option<Self>{
+        
         None
     }
     
