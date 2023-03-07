@@ -17,7 +17,7 @@ impl HttpsConnection {
         let connection = nw_connection_create(endpoint, parameters);
         let queue = dispatch_queue_create("https\0".as_ptr(), nil);
         
-        let mut state_change_handler = objc_block!(move | state: nw_connection_state, error: ObjcId | {
+        let mut state_change_handler = objc_block!(move | state: nw_connection_state, _error: ObjcId | {
             println!("{:?}", state);
             match state {
                 nw_connection_state::invalid => {

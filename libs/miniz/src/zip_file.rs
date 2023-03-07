@@ -230,11 +230,11 @@ impl CentralDirectoryFileHeader{
         zip_data.seek(SeekFrom::Start(self.relative_offset_of_local_header as u64)).map_err(|_| ZipError::CantSeekToFileHeader)?;
         let header = LocalFileHeader::from_stream(zip_data)?;
         if header.compression_method == COMPRESS_METHOD_UNCOMPRESSED{
-            let decompressed = read_binary(zip_data, header.uncompressed_size as usize)?;
+            let decompressed = read_binary(zip_data, self.uncompressed_size as usize)?;
             return Ok(decompressed)
         }
         else if header.compression_method == COMPRESS_METHOD_DEFLATED{
-            let compressed = read_binary(zip_data, header.compressed_size as usize)?;
+            let compressed = read_binary(zip_data, self.compressed_size as usize)?;
             if let Ok(decompressed) = decompress_to_vec(&compressed){
                 return Ok(decompressed);
             }
