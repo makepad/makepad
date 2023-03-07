@@ -40,7 +40,7 @@ pub fn build(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<PathBu
         &args_out
     ) ?;
 
-    println!("Packaging android application");
+    //println!("Packaging android application");
     
     let cwd = std::env::current_dir().unwrap();
     let out_dir = cwd.join("target/aarch64-linux-android-apk").join(target);
@@ -107,13 +107,13 @@ pub fn build(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<PathBu
 pub fn run(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<(), String> {
     let dst_apk = build(sdk_dir, host_os, args)?;
     let cwd = std::env::current_dir().unwrap();
-    println!("Installing android application");
+    //println!("Installing android application");
     shell_env_cap(&[], &cwd, &sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
         "install",
         "-r",
         &dst_apk.to_str().unwrap(),
     ]) ?;
-    println!("Starting android application");
+    println!("Starting android application: {}", dst_apk.file_name().unwrap().to_str().unwrap());
     shell_env_cap(&[], &cwd, &sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
         "shell",
         "am",

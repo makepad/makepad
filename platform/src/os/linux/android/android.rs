@@ -253,7 +253,7 @@ impl Cx {
             }
         }
         Self::set_default_depth_and_blend_mode();
-        
+         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
