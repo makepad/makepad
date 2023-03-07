@@ -6,7 +6,7 @@ use {
     }
 };
 // include the SIMD path if we support it
-#[cfg(feature = "nightly")]
+//#[cfg(feature = "nightly")]
 use crate::mandelbrot_simd::*;
 
 // Our live DSL to define the shader and UI def
@@ -160,12 +160,7 @@ impl TileCache {
             textures.push(texture);
         }
         // preallocate buffers otherwise safari barfs in the worker
-        let use_cores = match cx.cpu_cores() {
-            1 | 2 | 3 => 1,
-            4 => 2,
-            5 => 3,
-            _ => 14
-        };
+        let use_cores = cx.cpu_cores().min(3)-2;
         Self {
             textures,
             current: Vec::new(),
@@ -457,7 +452,7 @@ impl Mandelbrot {
     
     // the SIMD tile rendering, uses the threadpool to draw the tile
     
-    #[cfg(feature = "nightly")]
+    //#[cfg(feature = "nightly")]
     pub fn render_tile(&mut self, mut tile: Tile, fractal_zoom: f64, is_zooming: bool) {
         let max_iter = self.max_iter;
         // we pull a cloneable sender from the to_ui message channel for the worker
@@ -486,7 +481,7 @@ impl Mandelbrot {
     }
     
     // Normal tile rendering, uses the threadpool to draw the tile
-    #[cfg(not(feature = "nightly"))]
+    /*#[cfg(not(feature = "nightly"))]
     pub fn render_tile(&mut self, mut tile: Tile, _fractal_zoom: f64, _is_zooming: bool) {
         let max_iter = self.max_iter;
         // we pull a cloneable sender from the to_ui message channel for the worker
@@ -500,7 +495,7 @@ impl Mandelbrot {
             mandelbrot_f64(&mut tile, max_iter);
             to_ui.send(ToUI::TileDone {tile}).unwrap();
         })
-    }
+    }*/
     
     pub fn generate_tiles_around_finger(&mut self, cx: &mut Cx, zoom: f64, finger: DVec2) {
         self.generate_tiles(
