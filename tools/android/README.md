@@ -4,7 +4,7 @@ git clone https://github.com/makepad/makepad
 
 cd makepad
 
-git checkout 970d19e1f4ecfb9a3df47a9df02b61346bbad3b4
+git checkout 994ba35ed838e23ecd6c09a18410aaa74c142c8f
 
 cargo run -p cargo-makepad --release -- android rustup-toolchain-install
 
