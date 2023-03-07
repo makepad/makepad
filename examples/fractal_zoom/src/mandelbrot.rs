@@ -156,7 +156,6 @@ impl TileCache {
                 format: TextureFormat::ImageBGRA,
                 width: Some(TILE_SIZE_X),
                 height: Some(TILE_SIZE_Y),
-                multisample: None
             });
             textures.push(texture);
         }
