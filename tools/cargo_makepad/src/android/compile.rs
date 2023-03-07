@@ -121,6 +121,7 @@ pub fn run(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<(), Strin
         "-n",
         "nl.makepad.android/nl.makepad.android.MakepadActivity"
     ]) ?;
+    #[allow(unused_assignments)]
     let mut pid = None;
     loop{
         if let Ok(thing) = shell_env_cap(&[], &cwd, &sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[

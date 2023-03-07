@@ -1,6 +1,8 @@
 mod compile;
 mod sdk;
 mod shell;
+use crate::android::shell::*;
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum HostOs {
     WindowsX64,
@@ -66,6 +68,15 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let sdk_dir = cwd.join(&sdk_path.unwrap());
     
     match args[0].as_ref() {
+        "rustup-toolchain-install"=>{
+            shell(&std::env::current_dir().unwrap(),"rustup",&[
+                "target",
+                "add",
+                "aarch64-linux-android",
+                "--toolchain",
+                "nightly"
+            ])
+        }
         "download-sdk" => {
             return sdk::download_sdk(&sdk_dir, host_os, &args[1..])
         }

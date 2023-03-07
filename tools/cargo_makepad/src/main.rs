@@ -42,22 +42,22 @@ fn show_help(err: &str){
 fn main() {
     // alright so. we have android
     //let test_args = "cargo makepad android build -p makepad-example-ironfish";
-    let test_args = "cargo makepad android run -p makepad-example-ironfish";
+   /* let test_args = "cargo makepad android run -p makepad-example-ironfish";
     let args:Vec<String> = test_args.split(" ").map(|s| s.to_string()).collect();
     let args = &args[2..];
-    
-    /*let args:Vec<String> = std::env::args().collect();
+    */
+    let args:Vec<String> = std::env::args().collect();
     if args.len()<3{
         return show_help("not enough arguments");
     }
-    let args = &args[1..];*/
+    let args = &args[1..];
    
     if args.len() == 0{
         return show_help("");
     }
     match args[0].as_ref(){
         "android" => if let Err(e) = handle_android(&args[1..]){
-            show_help(&e);
+            println!("Got error: {}", e);
         }
         _=> show_help("not implemented yet")
     }
