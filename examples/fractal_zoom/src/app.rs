@@ -1,11 +1,11 @@
-#![cfg_attr(feature = "nightly", feature(portable_simd))]
+#![feature(portable_simd)]
 
 pub use makepad_widgets;
 use makepad_widgets::*;
 use makepad_draw::*;
 mod mandelbrot;
 
-#[cfg(feature = "nightly")]
+//#[cfg(feature = "nightly")]
 mod mandelbrot_simd;
 
 live_design!{
