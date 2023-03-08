@@ -211,7 +211,7 @@ impl Cx {
     }
     
     pub fn from_java_on_midi_device_opened(&mut self, name: String, midi_device: jobject, to_java: AndroidToJava) {
-        self.os.media.amidi().lock().unwrap().midi_device_opened(name, midi_device, &to_java);
+        self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device, &to_java);
     }
     
     pub fn draw_pass_to_fullscreen(

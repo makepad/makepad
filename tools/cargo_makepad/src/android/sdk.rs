@@ -194,6 +194,8 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 (&format!("{SYSLIB}/libaaudio.so"),false),
                 (&format!("{SYSLIB}/libamidi.so"),false),
                 (&format!("{SYSLIB}/libcamera2ndk.so"),false),
+                (&format!("{SYSLIB}/libnativewindow.so"),false),
+                (&format!("{SYSLIB}/libmediandk.so"),false),
                 (&format!("{SYSLIB}/libc.so|{SYSLIB}/libgcc.so"),false),
                 (&format!("{SYSLIB}/libc.so|{SYSLIB}/libunwind.so"),false),
             ])?;
