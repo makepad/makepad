@@ -28,14 +28,14 @@ impl ACaptureSession{
     
     fn start(_cb:Arc<Mutex<Option<VideoInputFn> > >, manager:*mut ACameraManager, camera_id: &CString, _format: VideoFormat)->Option<Self>{
         
-        let device_callbacks = ACameraDevice_StateCallbacks{
+        let mut device_callbacks = ACameraDevice_StateCallbacks{
             onError: Some(Self::state_on_error),
             onDisconnected: Some(Self::state_on_disconnected),
             context: std::ptr::null_mut(),
         };
         let mut camera_device = std::ptr::null_mut();
         
-        ACameraManager_openCamera(manager, camera_id.as_ptr(), &device_callbacks, &mut camera_device);
+        ACameraManager_openCamera(manager, camera_id.as_ptr(), &mut device_callbacks, &mut camera_device);
         
         //ACameraDevice_createCaptureRequest(device, TEMPLATE_PREVIEW, &request);
         None
