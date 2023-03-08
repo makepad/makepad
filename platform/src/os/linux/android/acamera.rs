@@ -1,5 +1,6 @@
 use {
-    std::ffi::CStr,
+    std::ffi::{CStr,CString},
+    std::os::raw::{c_void,c_int},
     std::sync::{Arc, Mutex},
     self::super::{
         acamera_sys::*
@@ -12,7 +13,7 @@ use {
 };
 
 pub struct ACameraDevice{
-    camera_id_str: String,
+    camera_id_str: CString,
     desc: VideoInputDesc,
 }
  
@@ -20,8 +21,23 @@ pub struct ACaptureSession{
 }
 
 impl ACaptureSession{
-    fn start(_cb:Arc<Mutex<Option<VideoInputFn> > >, _manager:*mut ACameraManager, _camera_id: &str, _format: VideoFormat)->Option<Self>{
+    unsafe extern "C" fn state_on_disconnected(context: *mut c_void, device: *mut ACameraDevice){
+    }
+    unsafe extern "C" fn state_on_error(context: *mut c_void, device: *mut ACameraDevice, error: c_int){
+    }
+    
+    fn start(_cb:Arc<Mutex<Option<VideoInputFn> > >, manager:*mut ACameraManager, camera_id: &CString, _format: VideoFormat)->Option<Self>{
         
+        let device_callbacks = ACameraDevice_StateCallbacks{
+            onError: Some(Self::state_on_error),
+            onDisconnected: Some(Self::state_on_disconnect),
+            context: std::ptr::null_mut(),
+        };
+        let mut camera_device = std::ptr::null_mut();
+        
+        ACameraManager_openCamera(manager, camera_id.as_ptr(), &device_callbacks, &mut camera_device);
+        
+        //ACameraDevice_createCaptureRequest(device, TEMPLATE_PREVIEW, &request);
         None
     }
     
@@ -85,7 +101,7 @@ impl ACameraAccess {
                 let camera_id = camera_ids[i];
                 let mut meta_data = std::ptr::null_mut();
                 ACameraManager_getCameraCharacteristics(self.manager, camera_id, &mut meta_data);
-                let camera_id_str = CStr::from_ptr(camera_id).to_str().unwrap();
+                let camera_id_str = CStr::from_ptr(camera_id).clone();
                 //let mut tag_count = 0;
                 //let mut tags = std::ptr::null();
                 //ACameraMetadata_getAllTags(meta_data, &mut tag_count, &mut tags);
@@ -138,14 +154,14 @@ impl ACameraAccess {
                     }
                     //crate::log!("GOT FORMAT {} {} {}", format, width, height);
                 }
-                let input_id = LiveId::from_str_unchecked(&format!("{}", camera_id_str)).into();
+                let input_id = LiveId::from_str_unchecked(&format!("{:?}", camera_id_str)).into();
                 let desc = VideoInputDesc{
                     input_id,
                     name: name.to_string(),
                     formats
                 };
                 self.devices.push(ACameraDevice{
-                    camera_id_str: camera_id_str.into(),
+                    camera_id_str:camera_id_str.into(),
                     desc
                 });
                 ACameraMetadata_free(meta_data);

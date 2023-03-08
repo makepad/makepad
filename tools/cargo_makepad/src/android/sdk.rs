@@ -31,7 +31,6 @@ const URL_OPENJDK_17_0_2_MACOS_AARCH64: &'static str = "https://download.java.ne
 const URL_OPENJDK_17_0_2_MACOS_X64: &'static str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-x64_bin.tar.gz";
 const URL_OPENJDK_17_0_2_LINUX_X64: &'static str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_linux-x64_bin.tar.gz";
 
-
 fn url_file_name(url: &str) -> &str {
     url.rsplit_once("/").unwrap().1
 }
@@ -79,9 +78,6 @@ pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result
     Ok(())
 }
 
-// ok lets parse some zip files for the fun of it so we can install on windows without too much shit
-
-
 pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(), String> {
     
     let src_dir = &sdk_dir.join("sources");
@@ -89,26 +85,27 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
     fn unzip(step: usize, src_dir:&Path, sdk_dir: &Path, url: &str, files: &[(&str, bool)]) -> Result<(), String> {
         let url_file_name = url_file_name(url);
         println!("---- Unzipping {step}/5: {} ----", url_file_name);
-        // lets open this file
         let mut zip_file = File::open(src_dir.join(url_file_name))
             .map_err( | _ | format!("Cant open file {url_file_name}")) ?;
         
+        // Hahahah i parsed my own zipfile. That was easier than using someones bad abstraction.
         let directory = zip_read_central_directory(&mut zip_file)
             .map_err( | e | format!("Can't read zipfile {url_file_name} {:?}", e)) ?;
-        // alright we have a directory. lets dump it
+
         fn extract_file(directory: &ZipCentralDirectory, zip_file: &mut File, file_name: &str, output_file: &Path, exec:bool) -> Result<(), String> {
             if let Some(file_header) = directory.file_headers.iter().find( | v | v.file_name == file_name) {
                 let data = file_header.extract(zip_file).map_err( | e | {
-                    //println!("CANT EXTRACT {:?}", e);
                     format!("Can't extract file from {file_name} {:?}", e)
                 }) ?;
-                // ok lets create the output_ddir
-                // then write the file
+
                 mkdir(output_file.parent().unwrap()) ?;
+
                 let mut output = File::create(output_file)
                     .map_err( | _ | format!("Cant open output file {:?}",output_file)) ?;
+
                 output.write(&data)
                     .map_err( | _ | format!("Cant write output file {:?}",output_file)) ?;
+
                 if exec{
                     use std::os::unix::fs::PermissionsExt;
                     fs::set_permissions(output_file, PermissionsExt::from_mode(0o744))
@@ -134,7 +131,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
         let url_file_name = url_file_name(url);
         println!("---- Untarring {step}/5: {} ----", url_file_name);
         shell(&src_dir, "tar", &["-xf", src_dir.join(url_file_name).to_str().unwrap()]) ?;
-        //let base_path = sdk_dir.join(src_base);
+
         for (file_path, exec) in files{
             cp(&src_dir.join(src_base).join(file_path), &sdk_dir.join(dst_base).join(file_path), *exec)?;
         } 
@@ -144,11 +141,12 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
     fn dmg_extract(step: usize, src_dir:&Path, sdk_dir: &Path, url: &str, src_base: &str, files: &[(&str, bool)]) -> Result<(), String> {
         let url_file_name = url_file_name(url);
         println!("---- Mounting and extracting dmg {step}/5: {} ----", url_file_name);
+        
         let mount_point = &src_dir.join(&format!("mount_{url_file_name}"));
         mkdir(mount_point) ?;
+        
         shell(&src_dir, "hdiutil", &["attach", "-quiet", "-mountpoint", mount_point.to_str().unwrap(), src_dir.join(url_file_name).to_str().unwrap()]) ?;
-        //let base_path = mount_point.join(src_base);
-        // lets read the input file
+
         for (file_path, exec) in files{
             let (file_path, output_path) = if let Some((a,b)) = file_path.split_once("|"){(a,b)}else{(*file_path,*file_path)};
             
@@ -170,8 +168,8 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 ("android-13/apksigner", true),
                 ("android-13/zipalign", true),
                 ("android-13/d8", true),
-                ("android-13/lib/apksigner.jar", true),
-                ("android-13/lib/d8.jar", true),
+                ("android-13/lib/apksigner.jar", false),
+                ("android-13/lib/d8.jar", false),
             ]) ?;
             unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_MACOS, &[
                 ("platform-tools/adb", true),
