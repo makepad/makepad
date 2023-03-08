@@ -260,6 +260,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onInit(
     cache_path: jstring,
     callback: jobject,
 ) {
+    crate::makepad_error_log::init_panic_hook();
     (*(cx as *mut Cx)).from_java_on_init(
         AndroidParams {
             cache_path: jstring_to_string(env, cache_path),

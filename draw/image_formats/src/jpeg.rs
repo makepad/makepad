@@ -241,6 +241,9 @@ fn unpack_sequential(reader: &mut Reader, coeffs: &mut [i32], dcht: &Table, acht
             let code = reader.getn(cat as usize);
             let coeff = make_coeff(cat, code as isize) as i32;
             i += run;
+            if i>=64{
+                break; 
+            }
             coeffs[FOLDING[i as usize] as usize] = coeff;
             //println!("coeffs[{}] = {}",i,coeff);
         }
