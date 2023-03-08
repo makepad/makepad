@@ -30,7 +30,7 @@ impl ACaptureSession{
         
         let device_callbacks = ACameraDevice_StateCallbacks{
             onError: Some(Self::state_on_error),
-            onDisconnected: Some(Self::state_on_disconnect),
+            onDisconnected: Some(Self::state_on_disconnected),
             context: std::ptr::null_mut(),
         };
         let mut camera_device = std::ptr::null_mut();
