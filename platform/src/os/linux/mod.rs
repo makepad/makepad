@@ -42,5 +42,5 @@ pub(crate) use self::opengl::*;
 pub(crate) use self::alsa_midi::{OsMidiInput, OsMidiOutput};
 
 #[cfg(target_os="android")]
-pub(crate) use self::android::amidi::{OsMidiInput, OsMidiOutput};
+pub(crate) use self::android::android_midi::{OsMidiInput, OsMidiOutput};
 
