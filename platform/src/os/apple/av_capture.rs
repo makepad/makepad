@@ -74,7 +74,7 @@ impl AvCaptureSession {
                     }
                     cb(VideoBufferRef {
                         format,
-                        data
+                        data: VideoBufferRefData::U32(data) 
                     });
                     CVPixelBufferUnlockBaseAddress(image_buffer, 0);
                 }
