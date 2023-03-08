@@ -34,7 +34,10 @@ pub fn build(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<PathBu
         args_out.push(&arg);
     }
     shell_env(
-        &[("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", &sdk_dir.join("NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang").to_str().unwrap())],
+        &[
+            ("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", &sdk_dir.join("NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang").to_str().unwrap()),
+            ("MAKEPAD", "lines")
+        ],
         &cwd,
         "cargo",
         &args_out
@@ -137,7 +140,7 @@ pub fn run(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<(), Strin
         "logcat",
         "--pid",
         &pid.unwrap(),
-        "*:S Makepad:D"
+        "Makepad:D *:S"
     ]) ?;
     Ok(())
 }

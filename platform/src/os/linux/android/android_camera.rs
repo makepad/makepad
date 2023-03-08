@@ -26,18 +26,49 @@ pub struct AndroidCaptureSession{
     image_window: *mut ANativeWindow,
     image_reader: *mut AImageReader,
     capture_request:*mut ACaptureRequest,
+    capture_context: *mut AndroidCaptureContext
+}
+
+pub struct AndroidCaptureContext{
+    input_fn:Arc<Mutex<Option<VideoInputFn> > >,
+    format: VideoFormat
 }
 
 impl AndroidCaptureSession{
     unsafe extern "C" fn device_on_disconnected(_context: *mut c_void, _device: *mut ACameraDevice){}
     unsafe extern "C" fn device_on_error(_context: *mut c_void, _device: *mut ACameraDevice, _error: c_int){}
     
-    unsafe extern "C" fn image_on_image_available(_context: *mut c_void, reader: *mut AImageReader){
+    unsafe extern "C" fn image_on_image_available(context: *mut c_void, reader: *mut AImageReader){
+        let context = &*(context as *mut AndroidCaptureContext);
+        
         let mut image = std::ptr::null_mut();
         AImageReader_acquireNextImage(reader, &mut image);
         let mut data = std::ptr::null_mut();
         let mut len = 0;
         AImage_getPlaneData(image, 0, &mut data, &mut len);
+        
+        match context.format.pixel_format{
+            VideoPixelFormat::MJPEG=>{
+                if let Some(cb) = &mut *context.input_fn.lock().unwrap() {
+                    let data = std::slice::from_raw_parts_mut(data as *mut u8, len as usize);
+                    cb(VideoBufferRef{
+                        format: context.format,
+                        data: VideoBufferRefData::U8(data)
+                    })
+                }
+            }
+            VideoPixelFormat::YUV420=>{
+                if let Some(cb) = &mut *context.input_fn.lock().unwrap() {
+                    let data = std::slice::from_raw_parts_mut(data as *mut u32, (len as usize)/4);
+                    cb(VideoBufferRef{
+                        format: context.format,
+                        data: VideoBufferRefData::U32(data)
+                    })
+                }
+            }
+            _=>()
+        }
+        
         // here we have an image!
         AImage_delete(image);
     }
@@ -54,12 +85,16 @@ impl AndroidCaptureSession{
     unsafe extern "C" fn session_on_ready(_context: *mut c_void, _session: *mut ACameraCaptureSession){}
     unsafe extern "C" fn session_on_active(_context: *mut c_void, _session: *mut ACameraCaptureSession){}
     
-    unsafe fn start(_cb:Arc<Mutex<Option<VideoInputFn> > >, manager:*mut ACameraManager, camera_id: &CString, format: VideoFormat)->Option<Self>{
+    unsafe fn start(input_fn:Arc<Mutex<Option<VideoInputFn> > >, manager:*mut ACameraManager, camera_id: &CString, format: VideoFormat)->Option<Self>{
+        let capture_context = Box::into_raw(Box::new(AndroidCaptureContext{
+            format,
+            input_fn
+        }));
         
         let mut device_callbacks = ACameraDevice_StateCallbacks{
             onError: Some(Self::device_on_error),
             onDisconnected: Some(Self::device_on_disconnected),
-            context: std::ptr::null_mut(),
+            context: capture_context as *mut _,
         };
         let mut camera_device = std::ptr::null_mut();
         
@@ -85,10 +120,10 @@ impl AndroidCaptureSession{
             }
         };
         
-        AImageReader_new(format.width as _, format.height as _, aimage_format, 2, &mut image_reader);
+        AImageReader_new(format.width as _, format.height as _, aimage_format, 32, &mut image_reader);
         
         let mut image_listener = AImageReader_ImageListener{
-            context: std::ptr::null_mut(),
+            context: capture_context as *mut _,
             onImageAvailable: Some(Self::image_on_image_available)
         };
         
@@ -111,7 +146,7 @@ impl AndroidCaptureSession{
         ACaptureSessionOutputContainer_add(output_container, image_output);
         
         let session_callbacks = ACameraCaptureSession_stateCallbacks{
-            context: std::ptr::null_mut(),
+            context: capture_context as *mut _,
             onClosed: Some(Self::session_on_closed),
             onReady: Some(Self::session_on_ready),
             onActive: Some(Self::session_on_active),
@@ -122,7 +157,7 @@ impl AndroidCaptureSession{
         ACameraDevice_createCaptureSession(camera_device, output_container, &session_callbacks, &mut capture_session);
         
         let mut capture_callbacks = ACameraCaptureSession_captureCallbacks{
-            context: std::ptr::null_mut(),
+            context: capture_context as *mut _,
             onCaptureStarted: Some(Self::capture_on_started),
             onCaptureProgressed: Some(Self::capture_on_progressed),
             onCaptureCompleted: Some(Self::capture_on_completed),
@@ -142,7 +177,8 @@ impl AndroidCaptureSession{
             capture_request,
             capture_session,
             output_container,
-            camera_device
+            camera_device,
+            capture_context
         })
     }
     
@@ -157,6 +193,7 @@ impl AndroidCaptureSession{
         ANativeWindow_release(self.image_window);
         AImageReader_delete(self.image_reader);
         ACameraDevice_close(self.camera_device);
+        let _ = Box::from_raw(self.capture_context);
     }
 }
 
@@ -217,10 +254,7 @@ impl AndroidCameraAccess {
                 let mut meta_data = std::ptr::null_mut();
                 ACameraManager_getCameraCharacteristics(self.manager, camera_id, &mut meta_data);
                 let camera_id_str = CStr::from_ptr(camera_id).clone();
-                //let mut tag_count = 0;
-                //let mut tags = std::ptr::null();
-                //ACameraMetadata_getAllTags(meta_data, &mut tag_count, &mut tags);
-                //let tags = std::slice::from_raw_parts(tags, tag_count as usize);
+
                 let mut entry = std::mem::zeroed();
                 if ACameraMetadata_getConstEntry(meta_data, ACAMERA_LENS_FACING, &mut entry) != 0{
                     continue
@@ -251,7 +285,7 @@ impl AndroidCameraAccess {
                     let height = *entry.data.i32_.offset(j + 2);
                     
                     if format == AIMAGE_FORMAT_YUV_420_888 ||
-                    format == AIMAGE_FORMAT_JPEG {
+                       format == AIMAGE_FORMAT_JPEG {
                         let format_id = LiveId::from_str_unchecked(&format!("{} {} {:?}", width, height, format)).into();
                         
                         formats.push(VideoFormat{
@@ -267,18 +301,19 @@ impl AndroidCameraAccess {
                             }
                         });
                     }
-                    //crate::log!("GOT FORMAT {} {} {}", format, width, height);
                 }
-                let input_id = LiveId::from_str_unchecked(&format!("{:?}", camera_id_str)).into();
-                let desc = VideoInputDesc{
-                    input_id,
-                    name: name.to_string(),
-                    formats
-                };
-                self.devices.push(AndroidCameraDevice{
-                    camera_id_str:camera_id_str.into(),
-                    desc
-                });
+                if formats.len()>0{
+                    let input_id = LiveId::from_str_unchecked(&format!("{:?}", camera_id_str)).into();
+                    let desc = VideoInputDesc{
+                        input_id,
+                        name: name.to_string(),
+                        formats
+                    };
+                    self.devices.push(AndroidCameraDevice{
+                        camera_id_str:camera_id_str.into(),
+                        desc
+                    });
+                }
                 ACameraMetadata_free(meta_data);
             }
             
