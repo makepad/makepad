@@ -46,6 +46,7 @@ live_design!{
             }
             
             fn pixel(self) -> vec4 {
+                return #0
                 return self.get_video_pixel();
             }
         }
