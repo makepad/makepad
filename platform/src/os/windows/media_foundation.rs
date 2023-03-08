@@ -318,7 +318,7 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback {
                                 let data = std::slice::from_raw_parts_mut(ptr, len as usize>>2);
                                 cb(VideoBufferRef{
                                     format: config.video_format,
-                                    data
+                                    data: VideoBufferRefData::U32(data)
                                 });
                                 buffer.Unlock().unwrap();
                             }

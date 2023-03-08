@@ -81,7 +81,7 @@ live_design! {
             // existing values.
             
             <Image> {
-                image: d"crate://self/dump155.jpg",
+                image: d"crate://self/dump155.jpg", 
                 walk: {width: 640, height:480}
             }
             button1 = <Button> {
