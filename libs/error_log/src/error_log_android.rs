@@ -1,3 +1,4 @@
+use std::panic;
 use std::ffi::{c_char, c_int};
     
 #[macro_export]
@@ -30,6 +31,14 @@ extern "C" {
 
 pub fn console_error_impl(val: &str) { 
     unsafe {
-        __android_log_write(1, "Makepad\0".as_ptr(), val.as_ptr());
+        __android_log_write(3, "Makepad\0".as_ptr(), val.as_ptr());
     }
 }
+
+pub fn init_panic_hook() {
+    pub fn panic_hook(info: &panic::PanicInfo) {
+        error!("{}", info)
+    }
+    panic::set_hook(Box::new(panic_hook));
+}
+

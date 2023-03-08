@@ -39,24 +39,82 @@ impl VideoPixelFormat{
     }
 }
 
+pub enum VideoBufferRefData<'a>{
+    U8(&'a [u8]),
+    U32(&'a [u32])
+}
+
 pub struct VideoBufferRef<'a>{
     pub format: VideoFormat,
-    pub data: &'a[u32]
+    pub data: VideoBufferRefData<'a>
 }
+
 
 impl<'a> VideoBufferRef<'a>{
     pub fn to_buffer(&self)->VideoBuffer{
         VideoBuffer{
             format: self.format.clone(),
-            data: self.data.to_vec()
+            data: match self.data{
+                VideoBufferRefData::U8(data)=>VideoBufferData::U8(data.to_vec()),
+                VideoBufferRefData::U32(data)=>VideoBufferData::U32(data.to_vec()),
+            }
+        }
+    }
+
+    pub fn as_slice_u32(&mut self)->Option<&[u32]>{
+        match &mut self.data{
+            VideoBufferRefData::U32(v)=>return Some(v),
+            _=>return None
+        }
+    }
+    pub fn as_slice_u8(&mut self)->Option<&[u8]>{
+        match &mut self.data{
+            VideoBufferRefData::U8(v)=>return Some(v),
+            _=>return None
         }
     }
 }
 
+pub enum VideoBufferData{
+    U8(Vec<u8>),
+    U32(Vec<u32>)
+}
+
 pub struct VideoBuffer{
     pub format:VideoFormat,
-    pub data: Vec<u32>
+    pub data: VideoBufferData
 }
+
+impl VideoBuffer{
+    pub fn as_vec_u32(&mut self)->Option<&mut Vec<u32>>{
+        match &mut self.data{
+            VideoBufferData::U32(v)=>return Some(v),
+            _=>return None
+        }
+    }
+    pub fn as_vec_u8(&mut self)->Option<&mut Vec<u8>>{
+        match &mut self.data{
+            VideoBufferData::U8(v)=>return Some(v),
+            _=>return None
+        }
+    }
+}
+
+impl VideoBuffer{
+    pub fn into_vec_u32(self)->Option<Vec<u32>>{
+        match self.data{
+            VideoBufferData::U32(v)=>return Some(v),
+            _=>return None
+        }
+    }
+    pub fn into_vec_u8(self)->Option<Vec<u8>>{
+        match self.data{
+            VideoBufferData::U8(v)=>return Some(v),
+            _=>return None
+        }
+    }
+}
+
 
 #[derive(Clone, Copy, Debug)]
 pub struct VideoFormat {
@@ -132,6 +190,30 @@ impl VideoInputsEvent {
                 let quality = format.pixel_format.quality_priority();
                 if width == format.width && height == format.height && format.frame_rate.unwrap_or(0.0) == max_frame_rate && quality >= max_quality{
                     max_quality = quality;
+                    format_id = Some(format.format_id)
+                }
+            }
+            if let Some(format_id) = format_id{
+                return vec![(device.input_id, format_id)]
+            }
+        }
+        vec![]
+    }
+    
+    pub fn find_format(&self, device_index:usize, width:usize, height:usize, pixel_format: VideoPixelFormat) -> Vec<(VideoInputId,VideoFormatId)> {
+        if let Some(device) = self.descs.get(device_index){
+            let mut max_frame_rate = 0.0;
+            let mut format_id = None;
+
+            for format in &device.formats {
+                if let Some(frame_rate) = format.frame_rate{
+                    if format.pixel_format == pixel_format && width == format.width && height == format.height && frame_rate >= max_frame_rate {
+                        max_frame_rate = frame_rate;
+                    }
+                }
+            }
+            for format in &device.formats {
+                if format.pixel_format == pixel_format && width == format.width && height == format.height && format.frame_rate.unwrap_or(0.0) == max_frame_rate {
                     format_id = Some(format.format_id)
                 }
             }
