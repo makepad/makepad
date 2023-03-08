@@ -13,6 +13,7 @@ use makepad_widgets::*;
 live_design! {
     import makepad_widgets::button::Button;
     import makepad_widgets::label::Label;
+    import makepad_widgets::frame::Image;
 
     // The `{{App}}` syntax is used to inherit a DSL object from a Rust struct. This tells the
     // Makepad runtime that our DSL object corresponds to a Rust struct named `App`. Whenever an
@@ -78,6 +79,11 @@ live_design! {
             // tells the Makepad runtime our DSL object has the same properties as the DSL object
             // named `Button`, except for the properties defined here below, which override any
             // existing values.
+            
+            <Image> {
+                image: d"crate://self/dump155.jpg",
+                walk: {width: 640, height:480}
+            }
             button1 = <Button> {
                 text: "Click to count"
             }

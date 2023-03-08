@@ -228,7 +228,6 @@ impl App {
                 output.channel_mut(0)[j] = audio * 5.0;
                 output.channel_mut(1)[j] = audio * 5.0;
             }
-            //log!("MIXIN {:?}", output.data);
         });
         let video_sender = self.video_recv.sender();
         cx.video_input(0, move | img | {
