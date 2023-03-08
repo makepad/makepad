@@ -17,21 +17,21 @@ use {
 };
 
 
-struct AAudioInput {
+struct AndroidAudioInput {
     device_id: AudioDeviceId,
     stream: *mut AAudioStream,
-    input_stream_ptr: *mut AAudioInputStream,
+    input_stream_ptr: *mut AndroidAudioInputStream,
     is_in_error_state: Arc<AtomicBool>,
 }
 
-struct AAudioOutput {
+struct AndroidAudioOutput {
     device_id: AudioDeviceId,
     stream: *mut AAudioStream,
-    output_stream_ptr: *mut AAudioOutputStream,
+    output_stream_ptr: *mut AndroidAudioOutputStream,
     is_in_error_state: Arc<AtomicBool>,
 }
 
-struct AAudioStreamData {
+struct AndroidAudioStreamData {
     device_id: AudioDeviceId,
     is_in_error_state: Arc<AtomicBool>,
     change_signal: Signal,
@@ -40,35 +40,35 @@ struct AAudioStreamData {
     channel_count: usize
 }
 
-struct AAudioInputStream {
-    data: AAudioStreamData,
+struct AndroidAudioInputStream {
+    data: AndroidAudioStreamData,
     input_fn: Arc<Mutex<Option<AudioInputFn >> >,
 }
 
-struct AAudioOutputStream{
-    data: AAudioStreamData,
+struct AndroidAudioOutputStream{
+    data: AndroidAudioStreamData,
     output_fn: Arc<Mutex<Option<AudioOutputFn >> >,
 }
 
 #[derive(Clone)]
-struct AAudioDeviceDesc {
+struct AndroidAudioDeviceDesc {
     aaudio_id: i32,
     desc: AudioDeviceDesc,
 }
 
-pub struct AAudioAccess {
+pub struct AndroidAudioAccess {
     change_signal: Signal,
     pub audio_input_cb: [Arc<Mutex<Option<AudioInputFn> > >; MAX_AUDIO_DEVICE_INDEX],
     pub audio_output_cb: [Arc<Mutex<Option<AudioOutputFn> > >; MAX_AUDIO_DEVICE_INDEX],
-    audio_inputs: Vec<AAudioInput >,
-    audio_outputs: Vec<AAudioOutput >,
-    device_descs: Vec<AAudioDeviceDesc>,
+    audio_inputs: Vec<AndroidAudioInput >,
+    audio_outputs: Vec<AndroidAudioOutput >,
+    device_descs: Vec<AndroidAudioDeviceDesc>,
     failed_devices: HashSet<AudioDeviceId>,
 }
 #[derive(Debug)]
-pub struct AAudioError(String);
+pub struct AndroidAudioError(String);
 
-impl AAudioError {
+impl AndroidAudioError {
     pub fn from(prefix: &str, err: c_int) -> Result<i32, Self> {
         if err < 0 {
             let err_str = match err {
@@ -91,7 +91,7 @@ impl AAudioError {
                 AAUDIO_ERROR_INVALID_RATE => "AAUDIO_ERROR_INVALID_RATE => :",
                 _ => "Unknown error"
             };
-            Err(AAudioError(format!("AAudio error {} - {}", prefix, err_str)))
+            Err(AndroidAudioError(format!("AAudio error {} - {}", prefix, err_str)))
         }
         else {
             Ok(err)
@@ -101,13 +101,13 @@ impl AAudioError {
 
 macro_rules!aaudio_error {
     ( $ call: expr) => {
-        AAudioError::from(stringify!( $ call), $ call)
+        AndroidAudioError::from(stringify!( $ call), $ call)
     }
 }
 
-impl AAudioStreamData {
-    fn new(desc: &AAudioDeviceDesc, change_signal: Signal) -> Self {
-        AAudioStreamData {
+impl AndroidAudioStreamData {
+    fn new(desc: &AndroidAudioDeviceDesc, change_signal: Signal) -> Self {
+        AndroidAudioStreamData {
             actual_channel_count: desc.desc.channel_count,
             device_id: desc.desc.device_id,
             change_signal,
@@ -129,8 +129,8 @@ impl AAudioStreamData {
         }
     }
     
-    unsafe fn setup_builder(desc: &AAudioDeviceDesc) -> Result<*mut AAudioStreamBuilder,
-    AAudioError> {
+    unsafe fn setup_builder(desc: &AndroidAudioDeviceDesc) -> Result<*mut AAudioStreamBuilder,
+    AndroidAudioError> {
         let mut builder: *mut AAudioStreamBuilder = std::ptr::null_mut();
         
         aaudio_error!(AAudio_createStreamBuilder(&mut builder)) ?;
@@ -158,14 +158,14 @@ impl AAudioStreamData {
     }
 }
 
-impl AAudioOutput {
-    unsafe fn new(desc: &AAudioDeviceDesc, change_signal: Signal, output_fn: Arc<Mutex<Option<AudioOutputFn >> >) -> Result<Self,
-    AAudioError> {
-        let builder = AAudioStreamData::setup_builder(desc) ?;
+impl AndroidAudioOutput {
+    unsafe fn new(desc: &AndroidAudioDeviceDesc, change_signal: Signal, output_fn: Arc<Mutex<Option<AudioOutputFn >> >) -> Result<Self,
+    AndroidAudioError> {
+        let builder = AndroidAudioStreamData::setup_builder(desc) ?;
         AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
-        let output_stream_ptr = Box::into_raw(Box::new(AAudioOutputStream {
+        let output_stream_ptr = Box::into_raw(Box::new(AndroidAudioOutputStream {
             output_fn,
-            data: AAudioStreamData::new(desc, change_signal)
+            data: AndroidAudioStreamData::new(desc, change_signal)
         }));
         AAudioStreamBuilder_setDataCallback(builder, Some(Self::aaudio_stream_data_callback), output_stream_ptr as *mut c_void);
         AAudioStreamBuilder_setErrorCallback(builder, Some(Self::aaudio_stream_error_callback), output_stream_ptr as *mut c_void);
@@ -185,7 +185,7 @@ impl AAudioOutput {
     }
     
     unsafe fn terminate(self) {
-        AAudioStreamData::stop_stream(self.stream);
+        AndroidAudioStreamData::stop_stream(self.stream);
         let _ = Box::from_raw(self.output_stream_ptr);
     }
     
@@ -194,7 +194,7 @@ impl AAudioOutput {
         user_data: *mut c_void,
         _error: aaudio_result_t,
     ) {
-        let wrap = &mut *(user_data as *mut AAudioOutputStream);
+        let wrap = &mut *(user_data as *mut AndroidAudioOutputStream);
         wrap.data.set_error_state();
     }
     
@@ -204,7 +204,7 @@ impl AAudioOutput {
         audio_data: *mut c_void,
         frame_count: i32
     ) -> aaudio_data_callback_result_t {
-        let output_stream = &mut *(user_data as *mut AAudioOutputStream);
+        let output_stream = &mut *(user_data as *mut AndroidAudioOutputStream);
         let mut output_fn = output_stream.output_fn.lock().unwrap();
         let data = &mut output_stream.data;
         if let Some(output_fn) = &mut *output_fn {
@@ -226,14 +226,14 @@ impl AAudioOutput {
 }
 
 
-impl AAudioInput {
-    unsafe fn new(desc: &AAudioDeviceDesc, change_signal: Signal, input_fn: Arc<Mutex<Option<AudioInputFn >> >) -> Result<Self,
-    AAudioError> {
-        let builder = AAudioStreamData::setup_builder(&desc) ?;
+impl AndroidAudioInput {
+    unsafe fn new(desc: &AndroidAudioDeviceDesc, change_signal: Signal, input_fn: Arc<Mutex<Option<AudioInputFn >> >) -> Result<Self,
+    AndroidAudioError> {
+        let builder = AndroidAudioStreamData::setup_builder(&desc) ?;
         
-        let input_stream_ptr = Box::into_raw(Box::new(AAudioInputStream {
+        let input_stream_ptr = Box::into_raw(Box::new(AndroidAudioInputStream {
             input_fn,
-            data: AAudioStreamData::new(desc, change_signal)
+            data: AndroidAudioStreamData::new(desc, change_signal)
         }));
         
         AAudioStreamBuilder_setDataCallback(builder, Some(Self::aaudio_stream_data_callback), input_stream_ptr as *mut c_void);
@@ -254,7 +254,7 @@ impl AAudioInput {
     }
     
     unsafe fn terminate(self) {
-        AAudioStreamData::stop_stream(self.stream);
+        AndroidAudioStreamData::stop_stream(self.stream);
         let _ = Box::from_raw(self.input_stream_ptr);
     }
     
@@ -263,7 +263,7 @@ impl AAudioInput {
         user_data: *mut c_void,
         _error: aaudio_result_t,
     ) {
-        let input_stream_ptr = &mut *(user_data as *mut AAudioInputStream);
+        let input_stream_ptr = &mut *(user_data as *mut AndroidAudioInputStream);
         input_stream_ptr.data.set_error_state();
     }
     
@@ -273,7 +273,7 @@ impl AAudioInput {
         audio_data: *mut c_void,
         frame_count: i32
     ) -> aaudio_data_callback_result_t {
-        let input_stream = &mut *(user_data as *mut AAudioInputStream);
+        let input_stream = &mut *(user_data as *mut AndroidAudioInputStream);
         let mut input_fn = input_stream.input_fn.lock().unwrap();
         let data = &mut input_stream.data;
         if let Some(input_fn) = &mut *input_fn {
@@ -289,13 +289,13 @@ impl AAudioInput {
     }
 }
 
-impl AAudioAccess {
+impl AndroidAudioAccess {
     pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
         change_signal.set();
         // alright Soooo. lets just enumerate the damn audio devices.
         
         Arc::new(Mutex::new(
-            AAudioAccess {
+            AndroidAudioAccess {
                 change_signal,
                 audio_input_cb: Default::default(),
                 audio_output_cb: Default::default(),
@@ -307,7 +307,7 @@ impl AAudioAccess {
         ))
     }
     
-    fn java_ret_to_device(input: &str, device_type: AudioDeviceType) -> Option<AAudioDeviceDesc> {
+    fn java_ret_to_device(input: &str, device_type: AudioDeviceType) -> Option<AndroidAudioDeviceDesc> {
         fn type_id_to_string(ty: u32) -> &'static str {
             match ty {
                 AAUDIO_TYPE_UNKNOWN => "Unknown",
@@ -352,7 +352,7 @@ impl AAudioAccess {
         let ty: u32 = parts[1].parse().unwrap();
         let channel_count: usize = parts[2].parse().unwrap();
         let name = format!("{} {} {} channels", parts[3], type_id_to_string(ty), channel_count);
-        Some(AAudioDeviceDesc {
+        Some(AndroidAudioDeviceDesc {
             aaudio_id,
             desc: AudioDeviceDesc {
                 device_id: LiveId::from_str_unchecked(&name).into(),
@@ -371,7 +371,7 @@ impl AAudioAccess {
         self.device_descs.clear();
         
         let name = format!("Default input 2 channels");
-        self.device_descs.push(AAudioDeviceDesc {
+        self.device_descs.push(AndroidAudioDeviceDesc {
             aaudio_id: 0,
             desc: AudioDeviceDesc {
                 device_id: LiveId::from_str_unchecked(&name).into(),
@@ -383,7 +383,7 @@ impl AAudioAccess {
             }
         });
         let name = format!("Default output 2 channels");
-        self.device_descs.push(AAudioDeviceDesc {
+        self.device_descs.push(AndroidAudioDeviceDesc {
             aaudio_id: 0,
             desc: AudioDeviceDesc {
                 device_id: LiveId::from_str_unchecked(&name).into(),
@@ -438,7 +438,7 @@ impl AAudioAccess {
         };
         for (index, device_desc) in new {
             let input_cb = self.audio_input_cb[index].clone();
-            match unsafe {AAudioInput::new(&device_desc, self.change_signal.clone(), input_cb)} {
+            match unsafe {AndroidAudioInput::new(&device_desc, self.change_signal.clone(), input_cb)} {
                 Ok(new_input) => {
                     self.audio_inputs.push(new_input);
                 }
@@ -478,7 +478,7 @@ impl AAudioAccess {
         };
         for (index, device_desc) in new {
             let output_cb = self.audio_output_cb[index].clone();
-            match unsafe {AAudioOutput::new(&device_desc, self.change_signal.clone(), output_cb)} {
+            match unsafe {AndroidAudioOutput::new(&device_desc, self.change_signal.clone(), output_cb)} {
                 Ok(new_output) => {
                     self.audio_outputs.push(new_output);
                 }

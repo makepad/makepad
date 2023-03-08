@@ -18,7 +18,7 @@ use {
 
 #[derive(Clone)]
 pub struct OsMidiOutput {
-    pub (crate) amidi: Arc<Mutex<AMidiAccess >>
+    pub (crate) amidi: Arc<Mutex<AndroidMidiAccess >>
 }
 
 impl OsMidiOutput {
@@ -28,7 +28,7 @@ impl OsMidiOutput {
 }
 
 pub struct OsMidiInput {
-    amidi: Arc<Mutex<AMidiAccess >>,
+    amidi: Arc<Mutex<AndroidMidiAccess >>,
     recv: mpsc::Receiver<(MidiPortId, MidiData) >
 }
 
@@ -43,18 +43,18 @@ impl OsMidiInput {
     }
 }
 
-pub struct AMidiOutput {
+pub struct AndroidMidiOutput {
     port_id: MidiPortId,
     amidi_port: *mut AMidiInputPort
 }
 
-struct AMidiInput {
+struct AndroidMidiInput {
     port_id: MidiPortId,
     amidi_port: *mut AMidiOutputPort
 }
 
-impl AMidiInput {
-    fn new(port_id: MidiPortId, device: &AMidiDevicePtr, port: usize) -> Option<Self> {
+impl AndroidMidiInput {
+    fn new(port_id: MidiPortId, device: &AndroidMidiDevicePtr, port: usize) -> Option<Self> {
         let mut amidi_port = std::ptr::null_mut();
         if unsafe {AMidiOutputPort_open(device.amidi_device, port as i32, &mut amidi_port)} != 0
             || amidi_port == std::ptr::null_mut() {
@@ -70,8 +70,8 @@ impl AMidiInput {
     }
 }
  
-impl AMidiOutput {
-    fn new(port_id: MidiPortId, device: &AMidiDevicePtr, port: usize) -> Option<Self> {
+impl AndroidMidiOutput {
+    fn new(port_id: MidiPortId, device: &AndroidMidiDevicePtr, port: usize) -> Option<Self> {
         let mut amidi_port = std::ptr::null_mut();
         if unsafe {AMidiInputPort_open(device.amidi_device, port as i32, &mut amidi_port)} != 0
             || amidi_port == std::ptr::null_mut() {
@@ -88,41 +88,41 @@ impl AMidiOutput {
 }
 
 
-struct AMidiDevicePtr {
+struct AndroidMidiDevicePtr {
     device_name: String,
     port_descs: Vec<MidiPortDesc>,
     amidi_device: *mut AMidiDevice
 }
 
-impl AMidiDevicePtr{
+impl AndroidMidiDevicePtr{
     fn release(self) {
         unsafe {AMidiDevice_release(self.amidi_device)};
     }
 }
 
-enum AMidiState{
+enum AndroidMidiState{
     OpenAllDevices,
     OnErrorReload,
     Ready
 }
 
-pub struct AMidiAccess {
-    state: AMidiState,
+pub struct AndroidMidiAccess {
+    state: AndroidMidiState,
     change_signal: Signal,
-    devices: Vec<AMidiDevicePtr>,
+    devices: Vec<AndroidMidiDevicePtr>,
     senders: Vec<mpsc::Sender<(MidiPortId, MidiData) >>,
-    outputs: Vec<AMidiOutput>,
-    inputs: Vec<AMidiInput>
+    outputs: Vec<AndroidMidiOutput>,
+    inputs: Vec<AndroidMidiInput>
 }
 
-impl AMidiAccess {
+impl AndroidMidiAccess {
     pub fn new(change_signal: Signal) -> Arc<Mutex<Self >> {
         // lets request to open midi devices
         // for each device we get
         // we should fire a change event
         change_signal.set();
         let midi_access = Arc::new(Mutex::new(Self {
-            state: AMidiState::OpenAllDevices,
+            state: AndroidMidiState::OpenAllDevices,
             change_signal,
             devices: Default::default(),
             senders: Vec::new(),
@@ -159,7 +159,7 @@ impl AMidiAccess {
                     }
                 } 
                 else if messages < 0{
-                    self.state = AMidiState::OnErrorReload;
+                    self.state = AndroidMidiState::OnErrorReload;
                     self.change_signal.set();
                     // ok so this doesnt work. now what
                     // we should kinda retry 'slowly' like once every second
@@ -213,11 +213,11 @@ impl AMidiAccess {
     
     pub fn midi_reset(&mut self) {
         self.midi_disconnect();
-        self.state = AMidiState::OpenAllDevices;
+        self.state = AndroidMidiState::OpenAllDevices;
         self.change_signal.set();
     }
     
-    fn find_device_for_port_id(devices: &[AMidiDevicePtr], port_id: MidiPortId) -> Option<(usize, usize)> {
+    fn find_device_for_port_id(devices: &[AndroidMidiDevicePtr], port_id: MidiPortId) -> Option<(usize, usize)> {
         for (device_index, device) in devices.iter().enumerate() {
             for (port_index, desc) in device.port_descs.iter().enumerate() {
                 if desc.port_id == port_id {
@@ -234,7 +234,7 @@ impl AMidiAccess {
             if self.outputs.iter_mut().find( | p | p.port_id == *port_id).is_none() {
                 // new this one
                 if let Some((device_index, port_index)) = Self::find_device_for_port_id(&self.devices,*port_id) {
-                    if let Some(output_port) = AMidiOutput::new(
+                    if let Some(output_port) = AndroidMidiOutput::new(
                         *port_id,
                         &self.devices[device_index],
                         port_index,
@@ -264,7 +264,7 @@ impl AMidiAccess {
             if self.inputs.iter_mut().find( | p | p.port_id == *port_id).is_none() {
                 // new this one
                 if let Some((device_index, port_index)) = Self::find_device_for_port_id(&self.devices, *port_id) {
-                    if let Some(input_port) = AMidiInput::new(
+                    if let Some(input_port) = AndroidMidiInput::new(
                         *port_id,
                         &self.devices[device_index],
                         port_index,
@@ -323,7 +323,7 @@ impl AMidiAccess {
                         port_type: MidiPortType::Output
                     });
                 }
-                self.devices.push(AMidiDevicePtr {
+                self.devices.push(AndroidMidiDevicePtr {
                     device_name,
                     port_descs,
                     amidi_device
@@ -336,18 +336,18 @@ impl AMidiAccess {
     
     pub fn get_updated_descs(&mut self, to_java: &AndroidToJava) -> Option<Vec<MidiPortDesc >> {
         match self.state{
-            AMidiState::OpenAllDevices=>{
+            AndroidMidiState::OpenAllDevices=>{
                 to_java.open_all_midi_devices(0);
-                self.state = AMidiState::Ready;
+                self.state = AndroidMidiState::Ready;
                 None
             }
-            AMidiState::OnErrorReload=>{
+            AndroidMidiState::OnErrorReload=>{
                 self.midi_disconnect();
                 to_java.open_all_midi_devices(1000);
-                self.state = AMidiState::Ready;
+                self.state = AndroidMidiState::Ready;
                 None
             }
-            AMidiState::Ready=>{
+            AndroidMidiState::Ready=>{
                 let mut descs = Vec::new();
                 for device in &self.devices { 
                     descs.extend_from_slice(&device.port_descs);
