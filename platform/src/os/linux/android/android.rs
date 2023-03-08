@@ -247,7 +247,7 @@ impl Cx {
         if !self.passes[pass_id].dont_clear {
             unsafe {
                 //gl_sys::BindFramebuffer(gl_sys::FRAMEBUFFER, 0);
-                gl_sys::ClearDepthf(clear_depth as f32);
+                gl_sys::ClearDepthf(clear_depth as f32); 
                 gl_sys::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
                 gl_sys::Clear(gl_sys::COLOR_BUFFER_BIT | gl_sys::DEPTH_BUFFER_BIT);
             }
