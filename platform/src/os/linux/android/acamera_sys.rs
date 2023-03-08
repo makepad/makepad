@@ -92,6 +92,8 @@ pub const TEMPLATE_VIDEO_SNAPSHOT: ACameraDevice_request_template = 4;
 pub const TEMPLATE_ZERO_SHUTTER_LAG: ACameraDevice_request_template = 5;
 pub const TEMPLATE_MANUAL: ACameraDevice_request_template = 6;
 
+
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ACaptureRequest {
@@ -128,7 +130,7 @@ pub type ACameraWindowType = ANativeWindow;
 pub type media_status_t = ::std::os::raw::c_int;
 
 pub type AImageReader_ImageCallback = ::std::option::Option<
-    unsafe extern "C" fn(context: *mut ::std::os::raw::c_void, reader: *mut AImageReader),
+unsafe extern "C" fn(context: *mut ::std::os::raw::c_void, reader: *mut AImageReader),
 >;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -144,7 +146,7 @@ pub struct ACameraOutputTarget {
 }
 
 pub type ACameraCaptureSession_stateCallback = ::std::option::Option<
-    unsafe extern "C" fn(context: *mut ::std::os::raw::c_void, session: *mut ACameraCaptureSession),
+unsafe extern "C" fn(context: *mut ::std::os::raw::c_void, session: *mut ACameraCaptureSession),
 >;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -162,52 +164,52 @@ pub struct ACameraCaptureSession {
 }
 
 pub type ACameraCaptureSession_captureCallback_start = ::std::option::Option<
-    unsafe extern "C" fn(
-        context: *mut ::std::os::raw::c_void,
-        session: *mut ACameraCaptureSession,
-        request: *const ACaptureRequest,
-        timestamp: i64,
-    ),
+unsafe extern "C" fn(
+    context: *mut ::std::os::raw::c_void,
+    session: *mut ACameraCaptureSession,
+    request: *const ACaptureRequest,
+    timestamp: i64,
+),
 >;
 pub type ACameraCaptureSession_captureCallback_result = ::std::option::Option<
-    unsafe extern "C" fn(
-        context: *mut ::std::os::raw::c_void,
-        session: *mut ACameraCaptureSession,
-        request: *mut ACaptureRequest,
-        result: *const ACameraMetadata,
-    ),
+unsafe extern "C" fn(
+    context: *mut ::std::os::raw::c_void,
+    session: *mut ACameraCaptureSession,
+    request: *mut ACaptureRequest,
+    result: *const ACameraMetadata,
+),
 >;
 pub type ACameraCaptureSession_captureCallback_failed = ::std::option::Option<
-    unsafe extern "C" fn(
-        context: *mut ::std::os::raw::c_void,
-        session: *mut ACameraCaptureSession,
-        request: *mut ACaptureRequest,
-        failure: *mut ACameraCaptureFailure,
-    ),
+unsafe extern "C" fn(
+    context: *mut ::std::os::raw::c_void,
+    session: *mut ACameraCaptureSession,
+    request: *mut ACaptureRequest,
+    failure: *mut ACameraCaptureFailure,
+),
 >;
 pub type ACameraCaptureSession_captureCallback_sequenceEnd = ::std::option::Option<
-    unsafe extern "C" fn(
-        context: *mut ::std::os::raw::c_void,
-        session: *mut ACameraCaptureSession,
-        sequenceId: ::std::os::raw::c_int,
-        frameNumber: i64,
-    ),
+unsafe extern "C" fn(
+    context: *mut ::std::os::raw::c_void,
+    session: *mut ACameraCaptureSession,
+    sequenceId: ::std::os::raw::c_int,
+    frameNumber: i64,
+),
 >;
 pub type ACameraCaptureSession_captureCallback_sequenceAbort = ::std::option::Option<
-    unsafe extern "C" fn(
-        context: *mut ::std::os::raw::c_void,
-        session: *mut ACameraCaptureSession,
-        sequenceId: ::std::os::raw::c_int,
-    ),
+unsafe extern "C" fn(
+    context: *mut ::std::os::raw::c_void,
+    session: *mut ACameraCaptureSession,
+    sequenceId: ::std::os::raw::c_int,
+),
 >;
 pub type ACameraCaptureSession_captureCallback_bufferLost = ::std::option::Option<
-    unsafe extern "C" fn(
-        context: *mut ::std::os::raw::c_void,
-        session: *mut ACameraCaptureSession,
-        request: *mut ACaptureRequest,
-        window: *mut ACameraWindowType,
-        frameNumber: i64,
-    ),
+unsafe extern "C" fn(
+    context: *mut ::std::os::raw::c_void,
+    session: *mut ACameraCaptureSession,
+    request: *mut ACaptureRequest,
+    window: *mut ACameraWindowType,
+    frameNumber: i64,
+),
 >;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -229,6 +231,56 @@ pub struct ACameraCaptureFailure {
     pub reason: ::std::os::raw::c_int,
     pub sequenceId: ::std::os::raw::c_int,
     pub wasImageCaptured: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AImage {
+    _unused: [u8; 0],
+}
+
+#[link(name = "nativewindow")]
+extern "C" {
+    pub fn ANativeWindow_acquire(window: *mut ANativeWindow);
+    pub fn ANativeWindow_release(window: *mut ANativeWindow);
+}
+
+#[link(name = "mediandk")]
+extern "C" {
+    
+    pub fn AImageReader_new(
+        width: i32,
+        height: i32,
+        format: u32,
+        maxImages: i32,
+        reader: *mut *mut AImageReader,
+    ) -> media_status_t;
+    
+    pub fn AImageReader_setImageListener(
+        reader: *mut AImageReader,
+        listener: *mut AImageReader_ImageListener,
+    ) -> media_status_t;
+    
+    pub fn AImageReader_getWindow(
+        reader: *mut AImageReader,
+        window: *mut *mut ANativeWindow,
+    ) -> media_status_t;
+    
+    pub fn AImageReader_delete(reader: *mut AImageReader);
+    
+    pub fn AImageReader_acquireNextImage(
+        reader: *mut AImageReader,
+        image: *mut *mut AImage,
+    ) -> media_status_t;
+    
+    pub fn AImage_getPlaneData(
+        image: *const AImage,
+        planeIdx: ::std::os::raw::c_int,
+        data: *mut *mut u8,
+        dataLength: *mut ::std::os::raw::c_int,
+    ) -> media_status_t;
+    pub fn AImage_delete(image: *mut AImage);
+    
 }
 
 #[link(name = "camera2ndk")]
@@ -272,58 +324,39 @@ extern "C" {
         templateId: ACameraDevice_request_template,
         request: *mut *mut ACaptureRequest,
     ) -> camera_status_t;
-
+    
     pub fn ACaptureSessionOutput_create(
         anw: *mut ACameraWindowType,
         output: *mut *mut ACaptureSessionOutput,
     ) -> camera_status_t;
-
+    
     pub fn ACaptureSessionOutputContainer_create(
         container: *mut *mut ACaptureSessionOutputContainer,
     ) -> camera_status_t;
-
+    
     pub fn ACaptureSessionOutputContainer_add(
         container: *mut ACaptureSessionOutputContainer,
         output: *const ACaptureSessionOutput,
     ) -> camera_status_t;
-
-    pub fn AImageReader_new(
-        width: i32,
-        height: i32,
-        format: i32,
-        maxImages: i32,
-        reader: *mut *mut AImageReader,
-    ) -> media_status_t;
     
-    pub fn AImageReader_setImageListener(
-        reader: *mut AImageReader,
-        listener: *mut AImageReader_ImageListener,
-    ) -> media_status_t;    
-
-    pub fn AImageReader_getWindow(
-        reader: *mut AImageReader,
-        window: *mut *mut ANativeWindow,
-    ) -> media_status_t;
-
-    pub fn ANativeWindow_acquire(window: *mut ANativeWindow);
-
+    
     pub fn ACameraOutputTarget_create(
         window: *mut ACameraWindowType,
         output: *mut *mut ACameraOutputTarget,
     ) -> camera_status_t;
-
+    
     pub fn ACaptureRequest_addTarget(
         request: *mut ACaptureRequest,
         output: *const ACameraOutputTarget,
     ) -> camera_status_t;
-
+    
     pub fn ACameraDevice_createCaptureSession(
         device: *mut ACameraDevice,
         outputs: *const ACaptureSessionOutputContainer,
         callbacks: *const ACameraCaptureSession_stateCallbacks,
         session: *mut *mut ACameraCaptureSession,
     ) -> camera_status_t;
-
+    
     pub fn ACameraCaptureSession_setRepeatingRequest(
         session: *mut ACameraCaptureSession,
         callbacks: *mut ACameraCaptureSession_captureCallbacks,
@@ -331,24 +364,26 @@ extern "C" {
         requests: *mut *mut ACaptureRequest,
         captureSequenceId: *mut ::std::os::raw::c_int,
     ) -> camera_status_t;
-
+    
     pub fn ACameraCaptureSession_stopRepeating(
         session: *mut ACameraCaptureSession,
     ) -> camera_status_t;
-
+    
     pub fn ACameraCaptureSession_close(session: *mut ACameraCaptureSession);
-
+    
     pub fn ACaptureSessionOutputContainer_free(container: *mut ACaptureSessionOutputContainer);
-
+    
     pub fn ACaptureSessionOutput_free(output: *mut ACaptureSessionOutput);
-
+    
     pub fn ACameraDevice_close(device: *mut ACameraDevice) -> camera_status_t;
-
-    pub fn AImageReader_delete(reader: *mut AImageReader);
-
-    pub fn ANativeWindow_release(window: *mut ANativeWindow);
-
+    
     pub fn ACaptureRequest_free(request: *mut ACaptureRequest);
+    
+    pub fn ACameraOutputTarget_free(output: *mut ACameraOutputTarget);
 
+    pub fn ACaptureRequest_removeTarget(
+        request: *mut ACaptureRequest,
+        output: *const ACameraOutputTarget,
+    ) -> camera_status_t;
 }
 
