@@ -77,6 +77,15 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
                 "nightly"
             ])
         }
+        "adb"=>{
+            return compile::adb(&sdk_dir, host_os, &args[1..])
+        },
+        "java"=>{
+            return compile::java(&sdk_dir, host_os, &args[1..])
+        },
+        "javac"=>{
+            return compile::javac(&sdk_dir, host_os, &args[1..])
+        },
         "download-sdk" => {
             return sdk::download_sdk(&sdk_dir, host_os, &args[1..])
         }
