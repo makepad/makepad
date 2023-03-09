@@ -20,6 +20,18 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<PathBuf
     
     // alright lets do the rust stuff.
     let cwd = std::env::current_dir().unwrap();
+    
+    let (mut path,linker) = match host_os{
+        HostOs::MacosX64=>(std::env::var("PATH").unwrap(),"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang"),
+        HostOs::MacosAarch64=>(std::env::var("PATH").unwrap(),"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang"),
+        HostOs::WindowsX64=>(std::env::var("PATH").unwrap(),"NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android33-clang.cmd"),
+        HostOs::LinuxX64=>(std::env::var("PATH").unwrap(),"NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"),
+        _=>panic!()
+    };
+    if let HostOs::LinuxX64 = host_os{
+        path = format!("{}:{}", &sdk_dir.join("NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/").to_str().unwrap(), path);
+    }
+    //let path = format!("{}:{}", &sdk_dir.join("NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/").to_str().unwrap(), std::env::var("PATH").unwrap());
     let base_args = &[
         "run",
         "nightly",
@@ -36,18 +48,12 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<PathBuf
         args_out.push(&arg);
     }
     
-    let linker = match host_os{
-        HostOs::MacosX64=>"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
-        HostOs::MacosAarch64=>"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
-        HostOs::WindowsX64=>"NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android33-clang.cmd",
-        HostOs::LinuxX64=>"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
-        _=>panic!()
-    };
-    
     shell_env(
         &[
             ("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", &sdk_dir.join(linker).to_str().unwrap()),
-            ("MAKEPAD", "lines")
+            ("MAKEPAD", "lines"),
+            //("LD","ld"),
+            ("PATH", &path)
         ],
         &cwd,
         "rustup",
