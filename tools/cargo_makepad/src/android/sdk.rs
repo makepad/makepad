@@ -34,6 +34,20 @@ fn url_file_name(url: &str) -> &str {
     url.rsplit_once("/").unwrap().1
 }
 
+pub fn rustup_toolchain_install()-> Result<(), String> {
+    shell(&std::env::current_dir().unwrap(),"rustup",&[
+        "install",
+        "nightly"
+    ])?;    
+    shell(&std::env::current_dir().unwrap(),"rustup",&[
+        "target",
+        "add",
+        "aarch64-linux-android",
+        "--toolchain",
+        "nightly"
+    ])    
+}
+
 pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(), String> {
     // get current working directory
     let src_dir = &sdk_dir.join("sources");
@@ -41,7 +55,7 @@ pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result
     
     fn curl(step: usize, src_dir: &Path, url: &str) -> Result<(), String> {
         //let https = HttpsConnection::connect("https://makepad.dev","https");
-        println!("---- Downloading {step}/5: {} ----", url);
+        println!("Downloading {step}/5: {}", url);
         shell(&src_dir, "curl", &[url, "-#", "--output", src_dir.join(url_file_name(url)).to_str().unwrap()]) ?;
         Ok(())
     }
@@ -72,7 +86,7 @@ pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result
         }
         HostOs::Unsupported => panic!()
     }
-    println!("All Android SDK files downloaded in {:?}\nAs the next step, run: cargo makepad android expand-sdk", sdk_dir);
+    println!("All Android SDK files downloaded in {:?}", sdk_dir);
     // alright lets parse the sdk_path option
     Ok(())
 }
@@ -83,7 +97,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
     
     fn unzip(step: usize, src_dir: &Path, sdk_dir: &Path, url: &str, files: &[(&str, bool)]) -> Result<(), String> {
         let url_file_name = url_file_name(url);
-        println!("---- Unzipping {step}/5: {} ----", url_file_name);
+        println!("Unzipping {step}/5: {}", url_file_name);
         let mut zip_file = File::open(src_dir.join(url_file_name))
             .map_err( | _ | format!("Cant open file {url_file_name}")) ?;
         
@@ -133,7 +147,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
     
     fn untar(step: usize, src_dir: &Path, sdk_dir: &Path, url: &str, files: &[(&str, bool)]) -> Result<(), String> {
         let url_file_name = url_file_name(url);
-        println!("---- Untarring {step}/5: {} ----", url_file_name);
+        println!("Untarring {step}/5: {}", url_file_name);
         shell(&src_dir, "tar", &["-xf", src_dir.join(url_file_name).to_str().unwrap()]) ?;
         
         for (file_path, exec) in files {
@@ -145,7 +159,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
     
     fn dmg_extract(step: usize, src_dir: &Path, sdk_dir: &Path, url: &str, files: &[(&str, bool)]) -> Result<(), String> {
         let url_file_name = url_file_name(url);
-        println!("---- Mounting and extracting dmg {step}/5: {} ----", url_file_name);
+        println!("Mounting and extracting dmg {step}/5: {}", url_file_name);
         
         let mount_point = &src_dir.join(&format!("mount_{url_file_name}"));
         mkdir(mount_point) ?;
@@ -303,6 +317,76 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
             ]) ?;
         }
         HostOs::LinuxX64 => {
+             unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
+                ("android-33-ext4/android.jar", false),
+            ]) ?;
+            unzip(2, src_dir, sdk_dir, URL_BUILD_TOOLS_33_LINUX, &[
+                ("android-13/aapt", true),
+                ("android-13/zipalign", true),
+                ("android-13/lib/apksigner.jar", false),
+                ("android-13/lib/d8.jar", false),
+            ]) ?;
+            unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_LINUX, &[
+                ("platform-tools/adb", true),
+            ]) ?;
+            const NDK_IN: &'static str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64";
+            const SYS_IN: &'static str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
+            const NDK_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/linux-x86_64";
+            const SYS_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
+
+            unzip(4, src_dir, sdk_dir, URL_NDK_33_LINUX, &[
+                (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang"), true),
+                (&copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
+                (&copy_map(NDK_IN, NDK_OUT, "bin/clang-14"), true),
+                (&format!("{NDK_IN}/bin/lld|{SYS_OUT}/ld.lld"), true),
+                //(&copy_map(NDK_IN, NDK_OUT, "bin/ld"), true),
+                //(&copy_map(NDK_IN, NDK_OUT, "bin/ld.lld"), true),
+                //(&copy_map(NDK_IN, NDK_OUT, "bin/lld"), true),
+                (&copy_map(NDK_IN, NDK_OUT, "lib64/libxml2.so.2.9.13"), false),
+                (&copy_map(NDK_IN, NDK_OUT, "lib64/libxml2.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "crtbegin_so.o"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "crtend_so.o"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libc.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libGLESv2.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libm.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "liblog.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libEGL.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libdl.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libaaudio.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libamidi.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libcamera2ndk.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
+                (&copy_map(SYS_IN, SYS_OUT, "libmediandk.so"), false),
+                (&format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
+                (&format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
+            ]) ?;
+            const JDK_IN: &'static str = "jdk-17.0.2";
+            const JDK_OUT: &'static str = "openjdk";
+            untar(5, src_dir, sdk_dir,URL_OPENJDK_17_0_2_LINUX_X64, &[
+                (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
+                (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
+                (&copy_map(JDK_IN, JDK_OUT, "bin/javac"), true),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/libjli.so"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjsig.so"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjvm.so"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/modules"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/tzdb.dat"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/libjava.so"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/libjimage.so"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/libnet.so"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/libnio.so"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/libverify.so"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "lib/libzip.so"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "conf/security/java.policy"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "conf/security/java.security"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/unlimited/default_local.policy"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/unlimited/default_US_export.policy"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_local.policy"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_US_export.policy"), false),
+                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/exempt_local.policy"), false),
+            ]) ?;
+            println!("NOTICE: If clang complains about missing libc++.so install it like this: sudo apt-get install libc++1")
         }
         HostOs::Unsupported => panic!()
     }
