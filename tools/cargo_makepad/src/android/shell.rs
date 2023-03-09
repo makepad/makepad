@@ -74,6 +74,17 @@ pub fn mkdir(path: &Path) -> Result<(), String> {
     }
 }
 
+pub fn rm(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Err(e) => {
+            Err(format!("remove_file {:?} failed {:?}", path, e))
+        },
+        Ok(()) => Ok(())
+    }
+}
+
+
+#[allow(unused)]
 pub fn cp(source_path: &Path, dest_path: &Path, exec: bool) -> Result<(), String> {
     let data = fs::read(source_path)
         .map_err( | _e | format!("Cant open input file {:?}", source_path)) ?;
@@ -82,9 +93,10 @@ pub fn cp(source_path: &Path, dest_path: &Path, exec: bool) -> Result<(), String
         .map_err( | _e | format!("Cant open output file {:?}", dest_path)) ?;
     output.write(&data)
         .map_err( | _e | format!("Cant write output file {:?}", dest_path)) ?;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if exec {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dest_path, PermissionsExt::from_mode(0o744))
+        std::fs::set_permissions(dest_path, PermissionsExt::from_mode(0o744))
             .map_err( | _e | format!("Cant set exec permissions on output file {:?}", dest_path)) ?;
     }
     Ok(())

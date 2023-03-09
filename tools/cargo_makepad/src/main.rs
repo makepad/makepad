@@ -25,6 +25,9 @@ fn show_help(err: &str){
     println!("    android [options] install-sdk                Download and expand the full sdk (combines the next 2 commands)");
     println!("    android [options] download-sdk               Only download the SDK zip files from google and openJDK sources (1.6gb). Needs curl");
     println!("    android [options] expand-sdk                 Only unzip/expand the downloaded SDK");
+    println!("    android [options] adb <adb args>             Run adb plain");
+    println!("    android [options] java <java args>           Run java plain");
+    println!("    android [options] javac <javac args>         Run javacplain");
     println!("");
     println!("    [options] with its default value:");
     println!("");
@@ -40,12 +43,11 @@ fn show_help(err: &str){
     }
 
 fn main() {
-    // alright so. we have android
-    //let test_args = "cargo makepad android build -p makepad-example-ironfish";
-   /* let test_args = "cargo makepad android run -p makepad-example-ironfish";
+   
+    /*let test_args = "cargo makepad android expand-sdk";
     let args:Vec<String> = test_args.split(" ").map(|s| s.to_string()).collect();
-    let args = &args[2..];
-    */
+    let args = &args[2..];*/
+    
     let args:Vec<String> = std::env::args().collect();
     if args.len()<3{
         return show_help("not enough arguments");
