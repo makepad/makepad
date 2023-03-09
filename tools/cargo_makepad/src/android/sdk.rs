@@ -338,7 +338,8 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/clang-14"), true),
-                (&format!("{NDK_IN}/bin/lld|{SYS_OUT}/ld.lld"), true),
+                // this solved an error with note: lld is a generic driver.
+                (&format!("{NDK_IN}/bin/lld|{SYS_OUT}/ld.lld"), true), 
                 //(&copy_map(NDK_IN, NDK_OUT, "bin/ld"), true),
                 //(&copy_map(NDK_IN, NDK_OUT, "bin/ld.lld"), true),
                 //(&copy_map(NDK_IN, NDK_OUT, "bin/lld"), true),
