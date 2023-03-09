@@ -4,7 +4,7 @@ use std::{
 use crate::android::HostOs;
 use crate::android::shell::*;
 
-pub fn build(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<PathBuf, String> {
+pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<PathBuf, String> {
     if args.len()<1 {
         return Err("Not enough arguments to build".into());
     }
@@ -21,25 +21,36 @@ pub fn build(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<PathBu
     // alright lets do the rust stuff.
     let cwd = std::env::current_dir().unwrap();
     let base_args = &[
-        "+nightly",
+        "run",
+        "nightly",
+        "cargo",
         "rustc",
         "--lib",
         "--crate-type=cdylib",
         "--release",
         "--target=aarch64-linux-android"
-    ];
+    ]; 
     let mut args_out = Vec::new();
     args_out.extend_from_slice(base_args);
     for arg in args {
         args_out.push(&arg);
     }
+    
+    let linker = match host_os{
+        HostOs::MacosX64=>"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+        HostOs::MacosAarch64=>"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+        HostOs::WindowsX64=>"NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android33-clang.cmd",
+        HostOs::LinuxX64=>"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+        _=>panic!()
+    };
+    
     shell_env(
         &[
-            ("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", &sdk_dir.join("NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang").to_str().unwrap()),
+            ("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", &sdk_dir.join(linker).to_str().unwrap()),
             ("MAKEPAD", "lines")
         ],
         &cwd,
-        "cargo",
+        "rustup",
         &args_out
     ) ?;
 
@@ -83,11 +94,14 @@ pub fn build(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<PathBu
     ]) ?;
         
     let java_home = sdk_dir.join("openjdk");
-    shell_env_cap(
+
+    shell_env(
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
-        &sdk_dir.join("android-13/apksigner").to_str().unwrap(),
+        &java_home.join("bin/java").to_str().unwrap(),
         &[
+            "-jar",
+            &sdk_dir.join("android-13/lib/apksigner.jar").to_str().unwrap(),
             "sign",
             "-v",
             "-ks",
@@ -145,7 +159,47 @@ pub fn run(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<(), Strin
     Ok(())
 }
 
+pub fn adb(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), String> {
+    let mut args_out = Vec::new();
+    for arg in args {
+        args_out.push(arg.as_ref());
+    }
+    let cwd = std::env::current_dir().unwrap();
+    shell_env(&[], &cwd, &sdk_dir.join("platform-tools/adb").to_str().unwrap(), &args_out)?;
+    Ok(())
+}
 
+pub fn java(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), String> {
+    let mut args_out = Vec::new();
+    for arg in args {
+        args_out.push(arg.as_ref());
+    }
+    let cwd = std::env::current_dir().unwrap();
+    let java_home = sdk_dir.join("openjdk");
+    shell_env(
+        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &cwd,
+        &java_home.join("bin/java").to_str().unwrap(),
+        &args_out
+    ) ?;
+    Ok(())
+}
+
+pub fn javac(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), String> {
+    let mut args_out = Vec::new();
+    for arg in args {
+        args_out.push(arg.as_ref());
+    }
+    let cwd = std::env::current_dir().unwrap();
+    let java_home = sdk_dir.join("openjdk");
+    shell_env(
+        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &cwd,
+        &java_home.join("bin/javac").to_str().unwrap(),
+        &args_out
+    ) ?;
+    Ok(())
+}
 pub fn base_apk(sdk_dir: &Path, _host_os: HostOs, _args: &[String]) -> Result<(), String> {
     // lets compile the makepad base apk and write it to the sdk dir
     let cwd = std::env::current_dir().unwrap();
@@ -168,11 +222,11 @@ pub fn base_apk(sdk_dir: &Path, _host_os: HostOs, _args: &[String]) -> Result<()
             &cwd.join("platform/src/os/linux/android/java/nl/makepad/android/MakepadSurfaceView.java").to_str().unwrap()
         ]
     ) ?;
-    println!("Building dex file");
-    shell_env(
+    
+    /*shell_env(
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
-        &sdk_dir.join("android-13/d8").to_str().unwrap(),
+        &sdk_dir.join("android-13/d8.bat").to_str().unwrap(),
         &[
             "--classpath",
             &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
@@ -183,10 +237,32 @@ pub fn base_apk(sdk_dir: &Path, _host_os: HostOs, _args: &[String]) -> Result<()
             &out_dir.join("nl/makepad/android/MakepadSurfaceView.class").to_str().unwrap(),
             &out_dir.join("nl/makepad/android/Makepad$Callback.class").to_str().unwrap()
         ]
-    ) ?;
-    println!("Creating base apk file");
+    ) ?;*/
+    println!("Building dex file");
     shell_env(
-        &[],
+        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &cwd,
+        &java_home.join("bin/java").to_str().unwrap(),
+        &[
+            "-cp",
+            &sdk_dir.join("android-13/lib/d8.jar").to_str().unwrap(),
+            "com.android.tools.r8.D8",
+            "--classpath",
+            &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
+            "--output",
+            &out_dir.to_str().unwrap(),
+            &out_dir.join("nl/makepad/android/Makepad.class").to_str().unwrap(),
+            &out_dir.join("nl/makepad/android/MakepadActivity.class").to_str().unwrap(),
+            &out_dir.join("nl/makepad/android/MakepadSurfaceView.class").to_str().unwrap(),
+            &out_dir.join("nl/makepad/android/Makepad$Callback.class").to_str().unwrap()
+        ]
+    ) ?;
+    
+    
+    println!("Creating base apk file");
+    let _ = rm(&out_dir.join("makepad_base_apk.apk"));
+    shell_env(
+         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
         &sdk_dir.join("android-13/aapt").to_str().unwrap(),
         &[
