@@ -295,7 +295,9 @@ impl AlsaMidiAccess {
         
         let midi_access_clone = midi_access.clone();
         let change_signal_clone = change_signal.clone();
-        
+        if midi_access_clone.lock().unwrap().client.as_ref().is_err(){
+            return  midi_access;
+        }
         let in_client = midi_access_clone.lock().unwrap().client.as_ref().unwrap().in_client.clone();
         
         std::thread::spawn(move || unsafe {

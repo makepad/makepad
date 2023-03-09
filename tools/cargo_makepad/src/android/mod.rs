@@ -1,7 +1,6 @@
 mod compile;
 mod sdk;
 mod shell;
-use crate::android::shell::*;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum HostOs {
@@ -69,13 +68,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     
     match args[0].as_ref() {
         "rustup-toolchain-install"=>{
-            shell(&std::env::current_dir().unwrap(),"rustup",&[
-                "target",
-                "add",
-                "aarch64-linux-android",
-                "--toolchain",
-                "nightly"
-            ])
+            sdk::rustup_toolchain_install()
         }
         "adb"=>{
             return compile::adb(&sdk_dir, host_os, &args[1..])
@@ -93,6 +86,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             return sdk::expand_sdk(&sdk_dir, host_os, &args[1..])
         }
         "install-sdk" => {
+            sdk::rustup_toolchain_install()?;
             sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;
             sdk::expand_sdk(&sdk_dir, host_os, &args[1..])?;
             println!("Completed! Android SDKs have been installed in {:?}", sdk_dir);

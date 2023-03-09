@@ -14,7 +14,7 @@ fn show_help(err: &str){
     println!("");
     println!("    wasm rustup-toolchain-install                Install the toolchain needed for wasm32 with rustup");
     println!("    wasm build <cargo args>                      Build a wasm project");
-    println!("    wasm host[:8080] <cargo args>                Build and hosts a wasm project, starts a webserver at port 8080 by default");
+    println!("    wasm run[:8080] <cargo args>                 Build and run a wasm project, starts a webserver at port 8080 by default");
     println!("");
     println!("Android commands:");
     println!("");
@@ -27,12 +27,12 @@ fn show_help(err: &str){
     println!("    android [options] expand-sdk                 Only unzip/expand the downloaded SDK");
     println!("    android [options] adb <adb args>             Run adb plain");
     println!("    android [options] java <java args>           Run java plain");
-    println!("    android [options] javac <javac args>         Run javacplain");
+    println!("    android [options] javac <javac args>         Run javac plain");
     println!("");
     println!("    [options] with its default value:");
     println!("");
     println!("       --sdk-path=./android_33_sdk               The path to read/write the android SDK");
-    println!("       --host-os=<linux-aarch64|linux-x64|windows|macos-aarch64|macos-x64>");
+    println!("       --host-os=<linux-x64|windows-x64|macos-aarch64|macos-x64>");
     println!("                                                 Host OS is autodetected but can be overridden here");
     println!("");
     println!("Linux commands:");
