@@ -110,23 +110,35 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
         #[allow(unused)]
         fn extract_file(directory: &ZipCentralDirectory, zip_file: &mut File, file_name: &str, output_file: &Path, exec: bool) -> Result<(), String> {
             if let Some(file_header) = directory.file_headers.iter().find( | v | v.file_name == file_name) {
+                //println!("GOT {:0o} {}",file_header.external_file_attributes>>16, file_header.file_name);
+                let is_symlink = (file_header.external_file_attributes>>16) & 0o120000 == 0o120000;
+
                 let data = file_header.extract(zip_file).map_err( | e | {
                     format!("Can't extract file from {file_name} {:?}", e)
                 }) ?;
                 
                 mkdir(output_file.parent().unwrap()) ?;
-                
-                let mut output = File::create(output_file)
-                    .map_err( | _ | format!("Cant open output file {:?}", output_file)) ?;
-                
-                output.write(&data)
-                    .map_err( | _ | format!("Cant write output file {:?}", output_file)) ?;
-                
-                #[cfg(any(target_os = "macos", target_os = "linux"))]
-                if exec {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(output_file, PermissionsExt::from_mode(0o744))
-                        .map_err( | _ | format!("Cant set exec permissions {:?}", output_file)) ?;
+
+                if is_symlink{
+                    let link_to = std::str::from_utf8(&data).unwrap().to_string();
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    use std::os::unix::fs::symlink;
+                    symlink(&link_to, output_file);
+                }
+                else{
+                    
+                    let mut output = File::create(output_file)
+                        .map_err( | _ | format!("Cant open output file {:?}", output_file)) ?;
+                    
+                    output.write(&data)
+                        .map_err( | _ | format!("Cant write output file {:?}", output_file)) ?;
+                    
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    if exec {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(output_file, PermissionsExt::from_mode(0o744))
+                            .map_err( | _ | format!("Cant set exec permissions {:?}", output_file)) ?;
+                    }
                 }
                 
                 Ok(())
@@ -322,6 +334,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
             ]) ?;
             unzip(2, src_dir, sdk_dir, URL_BUILD_TOOLS_33_LINUX, &[
                 ("android-13/aapt", true),
+                ("android-13/lib64/libc++.so", true),
                 ("android-13/zipalign", true),
                 ("android-13/lib/apksigner.jar", false),
                 ("android-13/lib/d8.jar", false),
@@ -338,13 +351,15 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/clang-14"), true),
-                // this solved an error with note: lld is a generic driver.
-                (&format!("{NDK_IN}/bin/lld|{SYS_OUT}/ld.lld"), true), 
-                //(&copy_map(NDK_IN, NDK_OUT, "bin/ld"), true),
-                //(&copy_map(NDK_IN, NDK_OUT, "bin/ld.lld"), true),
-                //(&copy_map(NDK_IN, NDK_OUT, "bin/lld"), true),
+                // this solved an error with note: lld is a generic driver. 
+                //(&format!("{NDK_IN}/bin/lld|{SYS_OUT}/ld.lld"), true), 
+                (&copy_map(NDK_IN, NDK_OUT, "bin/ld"), true),
+                (&copy_map(NDK_IN, NDK_OUT, "bin/ld.lld"), true),
+                (&copy_map(NDK_IN, NDK_OUT, "bin/lld"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "lib64/libxml2.so.2.9.13"), false),
                 (&copy_map(NDK_IN, NDK_OUT, "lib64/libxml2.so"), false),
+                (&copy_map(NDK_IN, NDK_OUT, "lib64/libc++.so"), false),
+                (&copy_map(NDK_IN, NDK_OUT, "lib64/libc++.so.1"), false),
                 (&copy_map(SYS_IN, SYS_OUT, "crtbegin_so.o"), false),
                 (&copy_map(SYS_IN, SYS_OUT, "crtend_so.o"), false),
                 (&copy_map(SYS_IN, SYS_OUT, "libc.so"), false),
@@ -387,7 +402,6 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_US_export.policy"), false),
                 (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/exempt_local.policy"), false),
             ]) ?;
-            println!("NOTICE: If clang complains about missing libc++.so install it like this: sudo apt-get install libc++1")
         }
         HostOs::Unsupported => panic!()
     }
