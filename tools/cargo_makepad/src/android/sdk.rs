@@ -34,18 +34,18 @@ fn url_file_name(url: &str) -> &str {
     url.rsplit_once("/").unwrap().1
 }
 
-pub fn rustup_toolchain_install()-> Result<(), String> {
-    shell(&std::env::current_dir().unwrap(),"rustup",&[
+pub fn rustup_toolchain_install() -> Result<(), String> {
+    shell(&std::env::current_dir().unwrap(), "rustup", &[
         "install",
         "nightly"
-    ])?;    
-    shell(&std::env::current_dir().unwrap(),"rustup",&[
+    ]) ?;
+    shell(&std::env::current_dir().unwrap(), "rustup", &[
         "target",
         "add",
         "aarch64-linux-android",
         "--toolchain",
         "nightly"
-    ])    
+    ])
 }
 
 pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(), String> {
@@ -110,23 +110,21 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
         #[allow(unused)]
         fn extract_file(directory: &ZipCentralDirectory, zip_file: &mut File, file_name: &str, output_file: &Path, exec: bool) -> Result<(), String> {
             if let Some(file_header) = directory.file_headers.iter().find( | v | v.file_name == file_name) {
-                //println!("GOT {:0o} {}",file_header.external_file_attributes>>16, file_header.file_name);
-                let is_symlink = (file_header.external_file_attributes>>16) & 0o120000 == 0o120000;
-
+                let is_symlink = (file_header.external_file_attributes >> 16) & 0o120000 == 0o120000;
+                
                 let data = file_header.extract(zip_file).map_err( | e | {
                     format!("Can't extract file from {file_name} {:?}", e)
                 }) ?;
                 
                 mkdir(output_file.parent().unwrap()) ?;
-
-                if is_symlink{
+                
+                if is_symlink {
                     let link_to = std::str::from_utf8(&data).unwrap().to_string();
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
                     use std::os::unix::fs::symlink;
                     symlink(&link_to, output_file);
                 }
-                else{
-                    
+                else {
                     let mut output = File::create(output_file)
                         .map_err( | _ | format!("Cant open output file {:?}", output_file)) ?;
                     
@@ -188,7 +186,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
     
     fn copy_map(base_in: &str, base_out: &str, file: &str) -> String {
         format!("{base_in}/{file}|{base_out}/{file}")
-    }    
+    }
     
     match host_os {
         HostOs::WindowsX64 => {
@@ -210,7 +208,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
             const SYS_IN: &'static str = "android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
             const NDK_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/windows-x86_64";
             const SYS_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
-
+            
             unzip(4, src_dir, sdk_dir, URL_NDK_33_WINDOWS, &[
                 (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang"), false),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang.cmd"), false),
@@ -228,7 +226,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 (&copy_map(SYS_IN, SYS_OUT, "libdl.so"), false),
                 (&copy_map(SYS_IN, SYS_OUT, "libaaudio.so"), false),
                 (&copy_map(SYS_IN, SYS_OUT, "libamidi.so"), false),
-                (&copy_map(SYS_IN, SYS_OUT, "libcamera2ndk.so"), false), 
+                (&copy_map(SYS_IN, SYS_OUT, "libcamera2ndk.so"), false),
                 (&copy_map(SYS_IN, SYS_OUT, "libnativewindow.so"), false),
                 (&copy_map(SYS_IN, SYS_OUT, "libmediandk.so"), false),
                 (&format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
@@ -258,7 +256,8 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/unlimited/default_US_export.policy"), false),
                 (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_local.policy"), false),
                 (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/default_US_export.policy"), false),
-                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/exempt_local.policy"), false),            ]) ?;
+                (&copy_map(JDK_IN, JDK_OUT, "conf/security/policy/limited/exempt_local.policy"), false),
+            ]) ?;
         }
         HostOs::MacosX64 | HostOs::MacosAarch64 => {
             unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
@@ -277,7 +276,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
             const NDK_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/darwin-x86_64";
             const SYS_IN: &'static str = "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
             const SYS_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
-
+            
             dmg_extract(4, src_dir, sdk_dir, URL_NDK_33_MACOS, &[
                 (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
@@ -329,7 +328,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
             ]) ?;
         }
         HostOs::LinuxX64 => {
-             unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
+            unzip(1, src_dir, sdk_dir, URL_PLATFORM_33, &[
                 ("android-33-ext4/android.jar", false),
             ]) ?;
             unzip(2, src_dir, sdk_dir, URL_BUILD_TOOLS_33_LINUX, &[
@@ -346,13 +345,13 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
             const SYS_IN: &'static str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
             const NDK_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/linux-x86_64";
             const SYS_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
-
+            
             unzip(4, src_dir, sdk_dir, URL_NDK_33_LINUX, &[
                 (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/clang"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/clang-14"), true),
-                // this solved an error with note: lld is a generic driver. 
-                //(&format!("{NDK_IN}/bin/lld|{SYS_OUT}/ld.lld"), true), 
+                // this solved an error with note: lld is a generic driver.
+                //(&format!("{NDK_IN}/bin/lld|{SYS_OUT}/ld.lld"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/ld"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/ld.lld"), true),
                 (&copy_map(NDK_IN, NDK_OUT, "bin/lld"), true),
@@ -378,7 +377,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
             ]) ?;
             const JDK_IN: &'static str = "jdk-17.0.2";
             const JDK_OUT: &'static str = "openjdk";
-            untar(5, src_dir, sdk_dir,URL_OPENJDK_17_0_2_LINUX_X64, &[
+            untar(5, src_dir, sdk_dir, URL_OPENJDK_17_0_2_LINUX_X64, &[
                 (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
                 (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
                 (&copy_map(JDK_IN, JDK_OUT, "bin/javac"), true),
