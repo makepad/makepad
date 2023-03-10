@@ -73,7 +73,7 @@ pub enum CxOsOp {
 
 impl Cx { 
     pub fn xr_capabilities(&self) -> &XrCapabilities {
-        &self.xr_capabilities
+        &self.xr_capabilities 
     } 
     
     pub fn get_dependency(&self, path: &str) -> Result<&Vec<u8>,
@@ -84,7 +84,7 @@ impl Cx {
                     Ok(data) => Ok(data),
                     Err(s) => Err(s.clone())
                 }
-            }
+            } 
         }
         Err(format!("Dependency not loaded {}", path))
     }
