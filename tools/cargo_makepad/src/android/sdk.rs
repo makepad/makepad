@@ -128,6 +128,7 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                     let link_to = std::str::from_utf8(&data).unwrap().to_string();
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
                     use std::os::unix::fs::symlink;
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     symlink(&link_to, output_file);
                 }
                 else {
