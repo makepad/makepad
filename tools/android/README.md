@@ -1,5 +1,5 @@
 Makepad android quick build example for Macos, Linux-x64 and Windows.
-Please plug an android device set to developer mode into your PC via USB:
+Please plug an android device set to developer mode into your PC via USB. The toolchain install is completely local and does not change things in your path:
 
 git clone https://github.com/makepad/makepad
 
