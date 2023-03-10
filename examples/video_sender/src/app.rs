@@ -154,7 +154,7 @@ impl App {
                     loop{
                         // lock it, take buffer out
                         if let Some(buffer) = send_video_buffer.lock().unwrap().take(){
-                            // lets send over the buffer
+                            // lets send over the wire
                             let buffer = buffer.into_vec_u8().unwrap();
                             let len = (buffer.len() as u32).to_be_bytes();
                             if write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &len){
