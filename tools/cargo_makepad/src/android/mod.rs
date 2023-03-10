@@ -60,11 +60,13 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         }
     }
     if sdk_path.is_none() {
-        sdk_path = Some(host_os.default_path().to_string());
+        sdk_path = Some(format!("{}/{}",env!("CARGO_MANIFEST_DIR"),host_os.default_path().to_string()));
     }
     
     let cwd = std::env::current_dir().unwrap();
     let sdk_dir = cwd.join(&sdk_path.unwrap());
+    // 
+    
     
     match args[0].as_ref() {
         "rustup-toolchain-install"=>{
@@ -85,16 +87,21 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         "expand-sdk" => {
             return sdk::expand_sdk(&sdk_dir, host_os, &args[1..])
         }
+        "remove-sdk-sources" => {
+            return sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
+        }
         "install-sdk" => {
+            println!("Installing all SDK and build dependencies for android\n");
             sdk::rustup_toolchain_install()?;
             sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;
             sdk::expand_sdk(&sdk_dir, host_os, &args[1..])?;
-            println!("Completed! Android SDKs have been installed in {:?}", sdk_dir);
+            sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])?;
+            println!("\nAndroid SDKs have been installed in {:?}\n", sdk_dir);
             return Ok(())
         }
-        "base-apk"=>{
+        /*"base-apk"=>{
             compile::base_apk(&sdk_dir, host_os, &args[1..])
-        }
+        }*/
         "build" =>{
             if let Err(e) = compile::build(&sdk_dir, host_os, &args[1..]){
                 return Err(e)
