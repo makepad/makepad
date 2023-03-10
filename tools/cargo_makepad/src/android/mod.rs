@@ -90,13 +90,13 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         "remove-sdk-sources" => {
             return sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
         }
-        "install-sdk" => {
-            println!("Installing all SDK and build dependencies for android\n");
+        "toolchain-install" => {
+            println!("Installing Android toolchain\n");
             sdk::rustup_toolchain_install()?;
             sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;
             sdk::expand_sdk(&sdk_dir, host_os, &args[1..])?;
             sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])?;
-            println!("\nAndroid SDKs have been installed in {:?}\n", sdk_dir);
+            println!("\nAndroid toolchain has been installed\n");
             return Ok(())
         }
         /*"base-apk"=>{
