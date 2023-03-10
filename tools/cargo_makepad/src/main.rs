@@ -18,16 +18,13 @@ fn show_help(err: &str){
     println!("");
     println!("Android commands:");
     println!("");
-    println!("    android rustup-toolchain-install             Install the toolchains needed for aarch64-linux-android with rustup");
-    println!("    android [options] base-apk                   Compile the makepad base apk file with java");
+    println!("    android [options] install-sdk                Download and install the android sdk");
     println!("    android [options] run <cargo args>           Run an android project on a connected android device via adb");
     println!("    android [options] build <cargo args>         Build an android project");
-    println!("    android [options] install-sdk                Download and expand the full sdk (combines the next 2 commands)");
-    println!("    android [options] download-sdk               Only download the SDK zip files from google and openJDK sources (1.6gb). Needs curl");
-    println!("    android [options] expand-sdk                 Only unzip/expand the downloaded SDK");
     println!("    android [options] adb <adb args>             Run adb plain");
     println!("    android [options] java <java args>           Run java plain");
     println!("    android [options] javac <javac args>         Run javac plain");
+    println!("    android rustup-toolchain-install             Install the toolchains needed for aarch64-linux-android with rustup");
     println!("");
     println!("    [options] with its default value:");
     println!("");

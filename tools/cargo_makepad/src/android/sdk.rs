@@ -35,17 +35,19 @@ fn url_file_name(url: &str) -> &str {
 }
 
 pub fn rustup_toolchain_install() -> Result<(), String> {
-    shell(&std::env::current_dir().unwrap(), "rustup", &[
+    println!("Installing Rust toolchains for android");
+    shell_env_cap(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "install",
         "nightly"
     ]) ?;
-    shell(&std::env::current_dir().unwrap(), "rustup", &[
+    shell_env_cap(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "target",
         "add",
         "aarch64-linux-android",
         "--toolchain",
         "nightly"
-    ])
+    ]) ?;
+    Ok(())
 }
 
 pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(), String> {
@@ -86,9 +88,13 @@ pub fn download_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result
         }
         HostOs::Unsupported => panic!()
     }
-    println!("All Android SDK files downloaded in {:?}", sdk_dir);
     // alright lets parse the sdk_path option
     Ok(())
+}
+
+pub fn remove_sdk_sources(sdk_dir: &Path, _host_os: HostOs, _args: &[String]) -> Result<(), String> {
+    let src_dir = &sdk_dir.join("sources");
+    rmdir(&src_dir) 
 }
 
 pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(), String> {
