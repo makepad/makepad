@@ -114,8 +114,8 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     let out_dir = cwd.join(format!("target/aarch64-linux-android-apk/{underscore_target}/apk"));
     
     // lets remove tmp and out dir
-    rmdir(&tmp_dir) ?;
-    rmdir(&out_dir) ?;
+    let _ = rmdir(&tmp_dir);
+    let _ = rmdir(&out_dir);
     mkdir(&tmp_dir) ?; 
     mkdir(&out_dir) ?;
     // alright lets go and generate the root java file
@@ -332,72 +332,3 @@ pub fn javac(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), St
     ) ?;
     Ok(())
 }
-/*
-pub fn base_apk(sdk_dir: &Path, _host_os: HostOs, _args: &[String]) -> Result<(), String> {
-    // lets compile the makepad base apk and write it to the sdk dir
-    let cwd = std::env::current_dir().unwrap();
-    let out_dir = cwd.join("target/aarch64-linux-android-apk/makepad_base_apk");
-    mkdir(&out_dir) ?;
-    let java_home = sdk_dir.join("openjdk");
-    println!("Compiling makepad java");
-    shell_env(
-        &[("JAVA_HOME", &java_home.to_str().unwrap())],
-        &cwd,
-        &java_home.join("bin/javac").to_str().unwrap(),
-        &[
-            "-classpath", 
-            &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
-            "-Xlint:deprecation",
-            "-d",
-            &out_dir.to_str().unwrap(),
-            &cwd.join("platform/src/os/linux/android/java/dev/makepad/android/Makepad.java").to_str().unwrap(),
-            &cwd.join("platform/src/os/linux/android/java/dev/makepad/android/MakepadActivity.java").to_str().unwrap(),
-            &cwd.join("platform/src/os/linux/android/java/dev/makepad/android/MakepadSurfaceView.java").to_str().unwrap(),
-            &cwd.join("platform/src/os/linux/android/java/dev/makepad_example/android/MakepadExample.java").to_str().unwrap()
-        ]
-    ) ?;
-
-    println!("Building dex file");
-    shell_env(
-        &[("JAVA_HOME", &java_home.to_str().unwrap())],
-        &cwd,
-        &java_home.join("bin/java").to_str().unwrap(),
-        &[
-            "-cp",
-            &sdk_dir.join("android-13/lib/d8.jar").to_str().unwrap(),
-            "com.android.tools.r8.D8",
-            "--classpath",
-            &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
-            "--output",
-            &out_dir.to_str().unwrap(),
-            &out_dir.join("dev/makepad/android/Makepad.class").to_str().unwrap(),
-            &out_dir.join("dev/makepad/android/MakepadActivity.class").to_str().unwrap(),
-            &out_dir.join("dev/makepad/android/MakepadSurfaceView.class").to_str().unwrap(),
-            &out_dir.join("dev/makepad/android/Makepad$Callback.class").to_str().unwrap(),
-            &out_dir.join("dev/makepad_example/android/MakepadExample.class").to_str().unwrap(),
-        ]
-    ) ?;
-    
-    
-    println!("Creating base apk file");
-    let _ = rm(&out_dir.join("makepad_base_apk.apk"));
-    shell_env(
-         &[("JAVA_HOME", &java_home.to_str().unwrap())],
-        &cwd,
-        &sdk_dir.join("android-13/aapt").to_str().unwrap(),
-        &[
-            "package",
-            "-f",
-            "-F",
-            &out_dir.join("makepad_base_apk.apk").to_str().unwrap(),
-            "-I",
-            &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
-            "-M",
-            &cwd.join("platform/src/os/linux/android/xml/AndroidManifest.xml").to_str().unwrap(),
-            &out_dir.to_str().unwrap(),
-        ]
-    ) ?;
-
-    println!("Base apk file completed");
-    Ok(())
-}*/

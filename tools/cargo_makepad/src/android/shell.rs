@@ -66,7 +66,7 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
 
 pub fn write_text(path: &Path, data:&str) -> Result<(), String> {
     mkdir(path.parent().unwrap()) ?;
-    match fs::File::create(path) {
+    match fs::File::create(path) { 
         Err(e) => {
             Err(format!("file create {:?} failed {:?}", path, e))
         },
@@ -80,7 +80,7 @@ pub fn write_text(path: &Path, data:&str) -> Result<(), String> {
 pub fn rmdir(path: &Path) -> Result<(), String> {
     match fs::remove_dir_all(path) {
         Err(e) => {
-            Err(format!("mkdir {:?} failed {:?}", path, e))
+            Err(format!("rmdir {:?} failed {:?}", path, e))
         },
         Ok(()) => Ok(())
     }
@@ -88,7 +88,7 @@ pub fn rmdir(path: &Path) -> Result<(), String> {
 
 
 pub fn mkdir(path: &Path) -> Result<(), String> {
-    match fs::create_dir_all(path) {
+    match fs::create_dir_all(path) { 
         Err(e) => {
             Err(format!("mkdir {:?} failed {:?}", path, e))
         },
