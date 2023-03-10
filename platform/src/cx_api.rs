@@ -71,13 +71,13 @@ pub enum CxOsOp {
     UpdateMenu(Menu)
 }
 
-impl Cx {
+impl Cx { 
     pub fn xr_capabilities(&self) -> &XrCapabilities {
         &self.xr_capabilities
-    }
+    } 
     
     pub fn get_dependency(&self, path: &str) -> Result<&Vec<u8>,
-    String> {
+    String> { 
         if let Some(data) = self.dependencies.get(path) {
             if let Some(data) = &data.data {
                 return match data {

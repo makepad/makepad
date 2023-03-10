@@ -64,6 +64,28 @@ pub fn shell_env_cap(env: &[(&str, &str)], cwd: &Path, cmd: &str, args: &[&str])
     Ok(out)
 }
 
+pub fn write_text(path: &Path, data:&str) -> Result<(), String> {
+    mkdir(path.parent().unwrap()) ?;
+    match fs::File::create(path) {
+        Err(e) => {
+            Err(format!("file create {:?} failed {:?}", path, e))
+        },
+        Ok(mut f) =>{
+            f.write_all(data.as_bytes())
+                .map_err( | _e | format!("Cant write file {:?}", path))
+        }
+    }
+}
+
+pub fn rmdir(path: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(path) {
+        Err(e) => {
+            Err(format!("mkdir {:?} failed {:?}", path, e))
+        },
+        Ok(()) => Ok(())
+    }
+}
+
 
 pub fn mkdir(path: &Path) -> Result<(), String> {
     match fs::create_dir_all(path) {
