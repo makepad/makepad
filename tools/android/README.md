@@ -4,7 +4,7 @@ git clone https://github.com/makepad/makepad
 
 cd makepad
 
-git checkout 9e5f93839ead80335c726739b779ce773718a2b2
+git checkout db3c2a6c98f108a47be7f0a29a8ba244f3e6a68e
 
 cargo run -p cargo-makepad --release -- android toolchain-install
 
