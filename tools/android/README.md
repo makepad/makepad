@@ -1,4 +1,5 @@
-Makepad android quick build example for Macos, Linux-x64 and Windows:
+Makepad android quick build example for Macos, Linux-x64 and Windows.
+Please plug an android device set to developer mode into your PC via USB:
 
 git clone https://github.com/makepad/makepad
 
