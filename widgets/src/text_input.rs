@@ -563,7 +563,7 @@ impl TextInput {
                     }
                     self.change(cx, "", dispatch_action);
                 }
-                KeyCode::Delete => {
+                KeyCode::Delete => {  
                     self.create_undo(UndoGroup::Delete(self.undo_id));
                     if self.cursor_head == self.cursor_tail {
                         if self.cursor_head < self.text.chars().count() {

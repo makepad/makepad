@@ -20,7 +20,7 @@ macro_rules!app_main {
         
         #[cfg(target_os = "android")]
         #[no_mangle]
-        pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onNewCx(_: *const std::ffi::c_void, _: *const std::ffi::c_void) -> i64 {
+        pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onNewCx(_: *const std::ffi::c_void, _: *const std::ffi::c_void) -> i64 {
             pub fn panic_hook(info: &std::panic::PanicInfo) {   
                 error!("{}", info)
             }

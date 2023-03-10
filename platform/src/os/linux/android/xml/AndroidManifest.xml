@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
-    package="nl.makepad.android">
+    package="dev.makepad_example.android">
     <application
+        android:label="MakepadExample"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
         android:allowBackup="true"
         android:supportsRtl="true"
         tools:targetApi="33">
         <meta-data android:name="android.max_aspect" android:value="2.1" />
         <activity
-            android:name="MakepadActivity"
+            android:name="MakepadExample"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true">
             <intent-filter>

@@ -14,8 +14,7 @@ use {
         thread::Signal,
         audio::*,
     }
-};
-
+}; 
 
 struct AndroidAudioInput {
     device_id: AudioDeviceId,

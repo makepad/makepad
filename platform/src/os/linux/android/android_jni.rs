@@ -130,9 +130,9 @@ impl<'a> AndroidToJava<'a> {
             }
             else {
                 return Some(java_byte_array_to_vec(self.env, byte_array));
-            }
+            } 
         }
-    }
+    } 
     
     pub fn get_audio_devices(&self, flag: jlong) -> Vec<String> {
         unsafe {
@@ -172,13 +172,13 @@ impl<'a> AndroidToJava<'a> {
 // Java_nl_makepad_android_Makepad_newCx is found in main_app.rs
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onDropCx(_: JNIEnv, _: jclass, _cx: jlong) {
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onDropCx(_: JNIEnv, _: jclass, _cx: jlong) {
     //log!("DROP!");
     //drop(Box::from_raw(app as *mut Cx));
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onPause(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onPause(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -188,7 +188,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onPause(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onResume(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onResume(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -198,7 +198,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onResume(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onNewGL(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onNewGL(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -208,7 +208,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onNewGL(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onFreeGL(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onFreeGL(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -253,7 +253,7 @@ pub struct AndroidInitParams {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onInit(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onInit(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -274,7 +274,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onInit(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onResize(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onResize(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -294,7 +294,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onResize(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onDraw(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onDraw(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onDraw(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onTouch(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onTouch(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -423,7 +423,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onTouch(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onTimeout(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onTimeout(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -441,7 +441,7 @@ pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onTimeout(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_nl_makepad_android_Makepad_onMidiDeviceOpened(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onMidiDeviceOpened(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
