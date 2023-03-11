@@ -134,6 +134,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     
     // lets build the APK
     let java_home = sdk_dir.join("openjdk");
+    let platform_java = Path::new(env!("CARGO_MANIFEST_DIR"));
     println!("Compiling APK file");
     shell_env(
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
@@ -143,21 +144,21 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             "-classpath", 
             &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
             "-Xlint:deprecation",
-            "-d",
+            "-d", 
             &out_dir.to_str().unwrap(),
-            &cwd.join("platform/src/os/linux/android/java/dev/makepad/android/Makepad.java").to_str().unwrap(),
-            &cwd.join("platform/src/os/linux/android/java/dev/makepad/android/MakepadActivity.java").to_str().unwrap(),
-            &cwd.join("platform/src/os/linux/android/java/dev/makepad/android/MakepadSurfaceView.java").to_str().unwrap(),
+            &platform_java.join("src/android/java/dev/makepad/android/Makepad.java").to_str().unwrap(),
+            &platform_java.join("src/android/java/dev/makepad/android/MakepadActivity.java").to_str().unwrap(),
+            &platform_java.join("src/android/java/dev/makepad/android/MakepadSurfaceView.java").to_str().unwrap(),
             &java_file.to_str().unwrap()
-        ]
-    ) ?;
+        ]   
+    ) ?; 
 
     //println!("Building dex file");
     shell_env_cap( 
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
         &java_home.join("bin/java").to_str().unwrap(),
-        &[
+        &[ 
             "-cp",
             &sdk_dir.join("android-13/lib/d8.jar").to_str().unwrap(),
             "com.android.tools.r8.D8",
@@ -170,7 +171,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             &out_dir.join("dev/makepad/android/MakepadSurfaceView.class").to_str().unwrap(),
             &out_dir.join("dev/makepad/android/Makepad$Callback.class").to_str().unwrap(),
             &java_class.to_str().unwrap(),
-        ]
+        ] 
     ) ?;
 
     let dst_apk = out_dir.join(format!("{underscore_target}.apk"));
