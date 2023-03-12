@@ -62,6 +62,7 @@ impl Cx {
             self.redraw_pass_and_child_passes(main_pass_id);
         }
         self.redraw_all();
+        self.reinitialise_media();
     }
 
     pub fn from_java_on_new_gl(&mut self,  to_java: AndroidToJava) {
