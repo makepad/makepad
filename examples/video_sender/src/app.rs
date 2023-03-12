@@ -64,6 +64,8 @@ live_design!{
     
     App = {{App}} {
         window: {ui: {inner_view = {
+            show_bg:true 
+            bg_draw:{color:#00f}
             video_input1 = <VideoFrame> {
             }
         }}}

@@ -59,17 +59,17 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         return Err("Not enough arguments to build".into());
     }
     let target = if args[0] == "-p" {
-        if args.len()<2 {
+        if args.len()<2 { 
             return Err("Not enough arguments to build".into());
         }
         &args[1]
     }
     else {
         &args[0]
-    };
-    
+    }; 
+      
     // main names used in the process
-    let underscore_target = target.replace("-", "_");
+    let underscore_target = target.replace("-", "_"); 
     let java_url = format!("dev.{underscore_target}.app");
     let app_label = format!("{underscore_target}");
 
@@ -134,7 +134,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     
     // lets build the APK
     let java_home = sdk_dir.join("openjdk");
-    let platform_java = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     println!("Compiling APK file");
     shell_env(
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
@@ -146,9 +146,9 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             "-Xlint:deprecation",
             "-d", 
             &out_dir.to_str().unwrap(),
-            &platform_java.join("src/android/java/dev/makepad/android/Makepad.java").to_str().unwrap(),
-            &platform_java.join("src/android/java/dev/makepad/android/MakepadActivity.java").to_str().unwrap(),
-            &platform_java.join("src/android/java/dev/makepad/android/MakepadSurfaceView.java").to_str().unwrap(),
+            &cargo_manifest_dir.join("src/android/java/dev/makepad/android/Makepad.java").to_str().unwrap(),
+            &cargo_manifest_dir.join("src/android/java/dev/makepad/android/MakepadActivity.java").to_str().unwrap(),
+            &cargo_manifest_dir.join("src/android/java/dev/makepad/android/MakepadSurfaceView.java").to_str().unwrap(),
             &java_file.to_str().unwrap()
         ]   
     ) ?; 
@@ -238,7 +238,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             "sign",
             "-v",
             "-ks",
-            "tools/android/debug.keystore",
+            &cargo_manifest_dir.join("debug.keystore").to_str().unwrap(),
             "--ks-key-alias",
             "androiddebugkey",
             "--ks-pass",

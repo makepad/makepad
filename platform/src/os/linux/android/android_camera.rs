@@ -81,7 +81,8 @@ impl AndroidCaptureSession{
     unsafe extern "C" fn capture_on_sequence_aborted(_context: *mut c_void, _session: *mut ACameraCaptureSession, _sequence_id: ::std::os::raw::c_int){}
     unsafe extern "C" fn capture_on_buffer_lost(_context: *mut c_void, _session: *mut ACameraCaptureSession, _request: *mut ACaptureRequest, _window: *mut ACameraWindowType, _frame_number:i64){}
     
-    unsafe extern "C" fn session_on_closed(_context: *mut c_void, _session: *mut ACameraCaptureSession){}
+    unsafe extern "C" fn session_on_closed(_context: *mut c_void, _session: *mut ACameraCaptureSession){
+    }
     unsafe extern "C" fn session_on_ready(_context: *mut c_void, _session: *mut ACameraCaptureSession){}
     unsafe extern "C" fn session_on_active(_context: *mut c_void, _session: *mut ACameraCaptureSession){}
     
@@ -244,7 +245,7 @@ impl AndroidCameraAccess {
     }
     
     pub fn get_updated_descs(&mut self) -> Vec<VideoInputDesc> {
-        // ok lets query the cameras
+        // ok lets query the cameras 
         unsafe {
             let mut camera_ids_ptr = std::ptr::null_mut();
             ACameraManager_getCameraIdList(self.manager, &mut camera_ids_ptr);
