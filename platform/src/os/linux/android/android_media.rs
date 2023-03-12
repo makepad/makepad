@@ -52,6 +52,19 @@ impl Cx {
             }));
         }
     }
+    
+    pub fn reinitialise_media(&mut self){
+        // lets reinitialize cameras/midi/etc
+        if self.os.media.android_audio.is_some(){
+            self.os.media.android_audio_change.set();
+        }
+        if self.os.media.android_midi.is_some(){
+            self.os.media.android_midi_change.set();
+        }
+        if self.os.media.android_camera.is_some(){
+            self.os.media.android_camera_change.set();
+        }
+    }
 }
 
 impl CxAndroidMedia {
