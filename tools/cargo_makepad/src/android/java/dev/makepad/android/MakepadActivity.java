@@ -57,16 +57,27 @@ Makepad.Callback{
         String apk_path = this.getCacheDir().getAbsolutePath();
         String cache_path = this.getCacheDir().getAbsolutePath();
 
-        //mView = new MakepadSurfaceView(this, mCx);
-        //setContentView(mView);
         Makepad.onInit(mCx, cache_path, this);
         //Makepad.onNewGL(mCx, this);
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        mView = new MakepadSurfaceView(this, mCx);
+        setContentView(mView);
+        Makepad.onNewGL(mCx, this);
     }
 
     @Override
     protected void onPause() {
          super.onPause();
         Makepad.onPause(mCx, this);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
         Makepad.onFreeGL(mCx, this);
     }
 
@@ -74,10 +85,9 @@ Makepad.Callback{
     protected void onResume() {
         super.onResume();
         if(mCx != 0){
-            mView = new MakepadSurfaceView(this, mCx);
-            setContentView(mView);
+            //mView = new MakepadSurfaceView(this, mCx);
+            //setContentView(mView);
             Makepad.onResume(mCx, this);
-            Makepad.onNewGL(mCx, this);
         }
     }
 
@@ -183,6 +193,9 @@ Makepad.Callback{
     }
 
     public void onDeviceOpened(MidiDevice device) {
+        if(device == null){
+            return;
+        }
         MidiDeviceInfo info = device.getInfo();
         if(info != null){
             String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
