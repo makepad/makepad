@@ -102,6 +102,9 @@ impl Table {
 }
 
 fn jpeg_get8(block: &[u8], rp: &mut usize) -> u8 {
+    if *rp >= block.len() {
+        return 0;
+    }
     let mut b = block[*rp];
     //println!("[{:02X}]",b);
     *rp += 1;
@@ -116,11 +119,21 @@ fn jpeg_get8(block: &[u8], rp: &mut usize) -> u8 {
     b
 }
 
+fn jpeg_unget8(block: &[u8], rp: &mut usize) {
+    *rp -= 1;
+    if block[*rp] == 0x00 {
+        if block[*rp - 1] == 0xFF {
+            *rp -= 1;
+        }
+    }
+}
+
 struct Reader<'a> {
     block: &'a [u8],
-    rp: usize,
-    bit: u32,
+    rp: usize, // the next byte to get from the cache
+    bit: u32, // number of bits available in the cache
     cache: u32,
+    //pub debug_enabled: bool,
 }
 
 impl<'a> Reader<'a> {
@@ -134,16 +147,17 @@ impl<'a> Reader<'a> {
             bit += 8;
         }
         Reader {
-            block: block,
-            rp: rp,
-            bit: bit,
-            cache: cache,
+            block,
+            rp,
+            bit,
+            cache,
+            //debug_enabled: false,
         }
     }
     
     fn restock(&mut self) {
         while self.bit <= 24 {
-            let b = if self.rp >= self.block.len() {0} else {jpeg_get8(self.block, &mut self.rp)}; // fill with 0 if at end of block
+            let b = jpeg_get8(self.block, &mut self.rp);
             self.cache |= (b as u32) << (24 - self.bit);
             self.bit += 8;
         }
@@ -161,14 +175,12 @@ impl<'a> Reader<'a> {
     
     pub fn get1(&mut self) -> bool {
         let result = self.peek(1) == 1;
-        //println!(" 1 bit : {}",if result { 1 } else { 0 });
         self.skip(1);
         result
     }
     
     pub fn getn(&mut self, n: usize) -> u32 {
         let result = self.peek(n);
-        //println!("{} bits: ({:0b}) {}",n,self.cache >> (32 - n),result);
         self.skip(n);
         result
     }
@@ -178,7 +190,6 @@ impl<'a> Reader<'a> {
         let d = table.prefix[index as usize];
         let symbol = (d >> 8) & 255;
         let n = d & 255;
-        //println!("{} bits: ({:0b}) runcat {:02X}",n,index >> (16 - n),symbol);
         self.skip(n as usize);
         symbol as u8
     }
@@ -191,35 +202,17 @@ impl<'a> Reader<'a> {
     }
     
     pub fn leave(&mut self) -> usize {
-        //println!("leave: bit = {}, rp = {}",self.bit,self.rp);
-        // superspecial case: no JPEG data read at all (only during initial programming)
-        if (self.bit == 32) && (self.rp == 4) {
-            return 0;
+        //println!("leave: bit = {}, rp = {}, cache = {:08X}, byte-aligned cache = {:08X}",self.bit,self.rp,self.cache,self.cache >> (32 - self.bit));
+
+        // rewind the cache
+        let bytes = (self.bit >> 3) + 1;
+        //println!("rewinding {} bytes",bytes);
+        for _ in 0..bytes {
+            jpeg_unget8(self.block,&mut self.rp);
         }
-        /*// first search FFD9 to elimiate stray FFs past end of buffer
-		if (self.block[self.rp - 5] == 0xFF) && (self.block[self.rp - 4] == 0xD9) {
-			return self.rp - 5;
-		}
-		if (self.block[self.rp - 4] == 0xFF) && (self.block[self.rp - 3] == 0xD9) {
-			return self.rp - 4;
-		}
-		if (self.block[self.rp - 3] == 0xFF) && (self.block[self.rp - 2] == 0xD9) {
-			return self.rp - 3;
-		}
-		if (self.block[self.rp - 2] == 0xFF) && (self.block[self.rp - 1] == 0xD9) {
-			return self.rp - 2;
-		}
-		if (self.block[self.rp - 1] == 0xFF) && (self.block[self.rp] == 0xD9) {
-			return self.rp - 1;
-		}*/
-        // anything else
-        for _i in 0..((self.bit + 7) / 8) - 2 {
-            if (self.block[self.rp - 1] == 0x00) && (self.block[self.rp - 2] == 0xFF) {
-                self.rp -= 1;
-            }
-            self.rp -= 1;
-        }
+
         //println!("and leaving with rp = {} ({:02X} {:02X})",self.rp,self.block[self.rp],self.block[self.rp + 1]);
+
         self.rp
     }
 }
@@ -231,7 +224,7 @@ fn unpack_sequential(reader: &mut Reader, coeffs: &mut [i32], dcht: &Table, acht
         *dc += make_coeff(cat, code as isize) as i32;
     }
     coeffs[FOLDING[0] as usize] = *dc;
-    //println!("DC {}",*dc);
+    //if reader.debug_enabled { println!("DC {}",*dc); }
     let mut i = 1;
     while i < 64 {
         let runcat = reader.get_code(acht);
@@ -242,18 +235,19 @@ fn unpack_sequential(reader: &mut Reader, coeffs: &mut [i32], dcht: &Table, acht
             let coeff = make_coeff(cat, code as isize) as i32;
             i += run;
             if i>=64{
+                println!("fail at i = {}, run {}, cat {}, code {}, coeff {}",i,run,cat,code,coeff);
                 break; 
             }
             coeffs[FOLDING[i as usize] as usize] = coeff;
-            //println!("coeffs[{}] = {}",i,coeff);
+            //if reader.debug_enabled { println!("coeffs[{}] = {}",i,coeff); }
         }
         else {
             if run == 15 { // ZRL
                 i += 15;
-                //println!("ZRL");
+                //if reader.debug_enabled { println!("ZRL"); }
             }
             else { // EOB
-                //println!("EOB");
+                //if reader.debug_enabled { println!("EOB"); }
                 break;
             }
         }
@@ -466,6 +460,9 @@ fn unpack_macroblock(
         *rescnt -= 1;
         if *rescnt == 0 {
             let mut tsp = reader.leave();
+            //if reader.debug_enabled {
+            //    println!("{:02X} {:02X} {:02X} {:02X} [{:02X}] {:02X} {:02X} {:02X}",reader.block[tsp - 4],reader.block[tsp - 3],reader.block[tsp - 2],reader.block[tsp - 1],reader.block[tsp],reader.block[tsp + 1],reader.block[tsp + 2],reader.block[tsp + 3])
+            //}
             if (reader.block[tsp] == 0xFF) && ((reader.block[tsp + 1] >= 0xD0) && (reader.block[tsp + 1] < 0xD8)) {
                 tsp += 2;
                 *rescnt = resint;
@@ -1096,7 +1093,13 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                 let mut eobrun = 0;
                 let mut dc = [0i32; 3];
                 for i in 0..mbtotal {
-                    //println!("macroblock {}:",i);
+                    //if i == 79 {
+                    //    reader.debug_enabled = true;
+                    //}
+                    //else if i == 81 {
+                    //    reader.debug_enabled = false;
+                    //}
+                    //if reader.debug_enabled { println!("macroblock {}:",i); }
                     unpack_macroblock(&mut reader, &mut coeffs[i * cpmb..(i + 1) * cpmb], &dcht, &acht, &dt, &at, &mut dc, start, end, shift, refine, &mut eobrun, itype, &mut rescnt, resint, mask);
                 }
                 sp = (tsp + reader.leave()) - length - 2;
@@ -1125,6 +1128,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
             },
             0xFFDD => { // restart interval
                 resint = from_be16(&src[sp + 4..sp + 6]) as usize;
+                println!("restart interval at {}",resint);
             },
             0xFFE1 => { // EXIF
                 let header = from_be32(&src[sp + 4..sp + 8]);
