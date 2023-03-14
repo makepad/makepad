@@ -1,6 +1,5 @@
 mod compile;
 mod sdk;
-mod shell;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum HostOs {
