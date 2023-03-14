@@ -24,6 +24,7 @@ pub struct ACameraMetadata {
 pub const ACAMERA_LENS_FACING: u32 = 524293;
 pub const ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS: u32 = 851978;
 pub const ACAMERA_CONTROL_AE_TARGET_FPS_RANGE: u32 = 65541;
+ pub const ACAMERA_JPEG_QUALITY:u32 = 458756;
 
 pub const ACAMERA_LENS_FACING_FRONT: u8 = 0;
 pub const ACAMERA_LENS_FACING_BACK: u8 = 1;
@@ -380,10 +381,17 @@ extern "C" {
     pub fn ACaptureRequest_free(request: *mut ACaptureRequest);
     
     pub fn ACameraOutputTarget_free(output: *mut ACameraOutputTarget);
-
+    
     pub fn ACaptureRequest_removeTarget(
         request: *mut ACaptureRequest,
         output: *const ACameraOutputTarget,
+    ) -> camera_status_t;
+    
+    pub fn ACaptureRequest_setEntry_u8(
+        request: *mut ACaptureRequest,
+        tag: u32,
+        count: u32,
+        data: *const u8,
     ) -> camera_status_t;
 }
 

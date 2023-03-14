@@ -182,6 +182,7 @@ impl Cx {
         let live_registry = self.live_registry.borrow();
         
         for file in &live_registry.live_files {
+           //log!("{}. {}", file.module_id.0, file.module_id.1);
             for node in &file.original.nodes {
                 match &node.value {
                     LiveValue::Dependency {..} => {

@@ -2,7 +2,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use crate::android::HostOs;
-use crate::android::shell::*;
+use crate::shell::*;
 
 fn manifest_xml(label:&str, class_name:&str, url:&str)->String{
     format!(r#"<?xml version="1.0" encoding="utf-8"?>
@@ -70,7 +70,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
       
     // main names used in the process
     let underscore_target = target.replace("-", "_"); 
-    let java_url = format!("dev.{underscore_target}.app");
+    let java_url = format!("dev.{underscore_target}.makepad");
     let app_label = format!("{underscore_target}");
 
     // alright lets do the rust stuff.

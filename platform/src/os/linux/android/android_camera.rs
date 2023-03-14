@@ -137,6 +137,9 @@ impl AndroidCaptureSession{
         let mut image_target = std::ptr::null_mut();
         ACameraOutputTarget_create(image_window, &mut image_target);
         ACaptureRequest_addTarget(capture_request, image_target);
+
+        let jpeg_quality = 60u8;
+        ACaptureRequest_setEntry_u8(capture_request, ACAMERA_JPEG_QUALITY, 1, &jpeg_quality);
         
         let mut image_output = std::ptr::null_mut();
         ACaptureSessionOutput_create(image_window, &mut image_output);
