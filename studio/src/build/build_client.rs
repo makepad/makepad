@@ -63,8 +63,7 @@ impl BuildClient {
     
     pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_msg: &mut dyn FnMut(&mut Cx, BuildMsgWrap)) {
         match event {
-            Event::Signal(event)
-            if event.signals.contains(&self.msg_signal) => {
+            Event::Signal=>{
                 loop {
                     match self.msg_receiver.try_recv() {
                         Ok(msg) => dispatch_msg(cx, msg),
@@ -92,7 +91,7 @@ impl BuildClient {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_with_local_server(subdir:&str) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
-        let msg_signal = LiveId::unique().into();
+        let msg_signal = Signal::new();
         let (msg_sender, msg_receiver) = mpsc::channel();
         
         let base_path = env::current_dir().unwrap();
@@ -103,9 +102,10 @@ impl BuildClient {
             cmd_receiver,
             server.connect(Box::new({
                 let msg_sender = msg_sender.clone();
+                let msg_signal = msg_signal.clone();
                 move | msg | {
                     msg_sender.send(msg).unwrap();
-                    Cx::post_signal(msg_signal);
+                    msg_signal.set()
                 }
             })),
         );
@@ -202,7 +202,7 @@ fn _spawn_msg_receiver(
         let msg = DeBin::deserialize_bin(msg_bytes.as_slice()).unwrap();
         
         msg_sender.send(msg).unwrap();
-        Cx::post_signal(msg_signal);
+        msg_signal.set()
     });
 }
 

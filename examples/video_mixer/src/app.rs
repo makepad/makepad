@@ -226,13 +226,13 @@ impl App {
                         //log!("DONE");
                         // decode jpeg
                         //log!(" DECODE JPEG");
-                        let _ = std::fs::File::create(&format!("dump.jpg")).unwrap().write(&buffer);
+                        //let _ = std::fs::File::create(&format!("dump.jpg")).unwrap().write(&buffer);
                         match makepad_image_formats::jpeg::decode(&buffer) {
                             Ok(data)=>{
                                 //let _ = std::fs::File::create(&format!("dump{frame_count}.jpg")).unwrap().write(&buffer);
                                 let _= sender.send(data);
                             } 
-                            Err(e)=>{  
+                            Err(e)=>{
                                 log!("JPEG DECODE ERROR {}", e);
                             }
                         }
@@ -240,6 +240,7 @@ impl App {
                     }
                     let _ = tcp_stream.shutdown(Shutdown::Both);
                 }
+                thread::sleep(Duration::from_millis(300));
             }
         });
     }  
@@ -382,7 +383,7 @@ impl App {
             }
             Event::VideoInputs(devices) => {
                 //println!("Got devices! {:?}", devices);
-                cx.use_video_input(&devices.find_highest_at_res(0, 1920, 1080));
+                cx.use_video_input(&devices.find_highest_at_res(devices.find_device("USB Capture HDMI 4k+"), 1920, 1080));
             }
             _ => ()
         }

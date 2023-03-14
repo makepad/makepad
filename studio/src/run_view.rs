@@ -144,7 +144,6 @@ impl RunView {
                         format: TextureFormat::SharedBGRA(0),
                         width: Some(new_size.0),
                         height: Some(new_size.1),
-                        multisample: None
                     });
                     
                     state.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
