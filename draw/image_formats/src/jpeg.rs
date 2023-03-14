@@ -1128,7 +1128,6 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
             },
             0xFFDD => { // restart interval
                 resint = from_be16(&src[sp + 4..sp + 6]) as usize;
-                println!("restart interval at {}",resint);
             },
             0xFFE1 => { // EXIF
                 let header = from_be32(&src[sp + 4..sp + 8]);

@@ -15,7 +15,7 @@ use {
     std::io::Write,
     std::sync::{Arc, Mutex},
     std::thread,
-    std::net::{UdpSocket,TcpListener, TcpStream},
+    std::net::{UdpSocket,TcpListener, TcpStream, Shutdown},
     std::time::{self, Duration},
 };
 
@@ -65,7 +65,7 @@ live_design!{
     App = {{App}} {
         window: {ui: {inner_view = {
             show_bg:true 
-            bg_draw:{color:#00f}
+            draw_bg:{color:#00f}
             video_input1 = <VideoFrame> {
             }
         }}}
@@ -128,8 +128,8 @@ impl App {
         
         std::thread::spawn(move || {
             let dummy = client_uid.to_be_bytes();
-            loop {
-                write_discovery.send_to(&dummy, "255.255.255.255:42531").unwrap();
+            loop {   
+                let _ = write_discovery.send_to(&dummy, "255.255.255.255:42531");
                 thread::sleep(time::Duration::from_secs(1));
             }
         });
@@ -168,8 +168,9 @@ impl App {
                         }
                         thread::sleep(time::Duration::from_millis(10));
                     }
+                    let _ = tcp_stream.shutdown(Shutdown::Both);
                 });
-            }
+            } 
         });
     }
     

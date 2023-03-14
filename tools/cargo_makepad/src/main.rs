@@ -1,5 +1,8 @@
 mod android;
+mod wasm;
+mod shell;
 use android::*;
+use wasm::*;
 
 fn show_help(err: &str){
     if err.len()!=0{
@@ -12,9 +15,13 @@ fn show_help(err: &str){
     println!("");
     println!("Wasm Commands:");
     println!("");
-    println!("    wasm install-toolchain                       Install the toolchain needed for wasm32 with rustup");
+    println!("    wasm toolchain-install                       Install the toolchain needed for wasm32 with rustup");
     println!("    wasm build <cargo args>                      Build a wasm project");
-    println!("    wasm run[:8080] <cargo args>                 Build and run a wasm project, starts a webserver at port 8080 by default");
+    println!("    wasm [options] run <cargo args>              Build and run a wasm project, starts a webserver at port 8080 by default");
+    println!("");
+    println!("    [options] with its default value:");
+    println!("");
+    println!("       --port=8080                               The port to run the wasm webserver");
     println!("");
     println!("Android commands:");
     println!("");
@@ -52,6 +59,9 @@ fn main() {
     }
     match args[0].as_ref(){
         "android" => if let Err(e) = handle_android(&args[1..]){
+            println!("Got error: {}", e);
+        }
+        "wasm" => if let Err(e) = handle_wasm(&args[1..]){
             println!("Got error: {}", e);
         }
         _=> show_help("not implemented yet")

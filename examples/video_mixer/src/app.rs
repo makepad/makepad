@@ -17,8 +17,8 @@ use {
         makepad_draw::*,
     },
     std::thread,
-    std::io::{Read},
-    std::net::{UdpSocket,TcpStream},
+    std::io::{Read, Write},
+    std::net::{UdpSocket,TcpStream, Shutdown},
     std::time::{Duration},
 };
 
@@ -65,6 +65,25 @@ live_design!{
         }
     }
     
+    VideoFrameRound = <VideoFrame> {
+        draw_bg: {
+            uniform alpha: 1.0
+            fn pixel(self) -> vec4 {
+                let color = self.get_video_pixel();
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.box(
+                    1,
+                    1,
+                    self.rect_size.x - 2,
+                    self.rect_size.y - 2,
+                    10
+                )
+                sdf.fill_keep(vec4(color.xyz, self.alpha))
+                return sdf.result
+            }
+        }
+    }
+    
     DisplayChannel = <Box> {
         draw_bg: {color: #3337, radius: 10.0}
         walk: {width: Fill, height: 300}
@@ -78,8 +97,8 @@ live_design!{
         }
         window: {ui: {inner_view = {
             video_input1 = <VideoFrame> {
-                network_video = <VideoFrame> {
-                    walk:{width:200,height:200}
+                network_video = <VideoFrameRound> {
+                    walk:{width:320,height:240}
                 }
                 layout: {align: {y: 1.0}, spacing: 5, padding: 10}
                 chan1 = <DisplayChannel> {}
@@ -92,6 +111,11 @@ live_design!{
             window: {inner_size: vec2(400, 300)},
             ui: {inner_view = {
                 video_input1 = <VideoFrame> {
+                    layout: {align: {x:1.0, y: 1.0}, padding: 50}
+                    network_video = <VideoFrameRound> {
+                        draw_bg:{alpha: 0.7},
+                        walk:{width:400,height:300}
+                    }
                 }
             }}
         }
@@ -99,6 +123,9 @@ live_design!{
             window: {inner_size: vec2(400, 300)},
             ui: {inner_view = {
                 video_input1 = <VideoFrame> {
+                    <SlidesView>{
+                        
+                    }
                 }
             }}
         }
@@ -108,7 +135,8 @@ app_main!(App);
 
 #[derive(Live, LiveAtomic, LiveHook)]
 pub struct AudioMixer {
-    channel: [f32a; 4]
+    channel: [f32a; 4],
+    gain: [f32a; 4]
 }
 
 #[derive(Live, LiveHook)]
@@ -119,6 +147,7 @@ pub struct App {
     video_input1: Texture,
     video_network: Texture,
     mixer: Arc<AudioMixer>,
+    #[rust] restart_network: Signal,
     #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust] network_recv: ToUIReceiver<makepad_image_formats::ImageBuffer>,
     #[rust] video_recv: ToUIReceiver<VideoBuffer>,
@@ -136,6 +165,9 @@ pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut 
             }
             bytes_left -= bytes_read;
         }
+        else{
+            return true;
+        }
     }
     false
 }
@@ -148,53 +180,69 @@ impl App {
     pub fn start_network_stack(&mut self, _cx: &mut Cx) {
         
         let read_discovery = UdpSocket::bind("0.0.0.0:42531").unwrap();
-        read_discovery.set_read_timeout(Some(Duration::new(0, 1))).unwrap();
+        read_discovery.set_read_timeout(Some(Duration::new(0, 10))).unwrap();
         read_discovery.set_broadcast(true).unwrap();
         let sender = self.network_recv.sender();
-        
+        let restart_network = self.restart_network.clone();
         std::thread::spawn(move || {
-            let peer_addr;
             loop{
+                let mut peer_addr = Some("192.168.1.152:42532".parse().unwrap());
                 let mut data  = [0u8;32];
-                if let Ok((_, mut addr)) = read_discovery.recv_from(&mut data) {
+                while let Ok((_, mut addr)) = read_discovery.recv_from(&mut data) {
                     addr.set_port(42532);
-                    peer_addr = Some(addr);
-                    break;
+                    peer_addr = Some(addr); 
+                }  
+                // alright if we have a peer addr lets connect to it
+                if peer_addr.is_none(){
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
                 } 
-                thread::sleep(Duration::from_millis(10));
-            }
-            // alright if we have a peer addr lets connect to it
-            loop{
-                if let Ok(mut tcp_stream) = TcpStream::connect(peer_addr.unwrap()){
+                log!("Connecting to phone {}", peer_addr.unwrap()); 
+                if let Ok(mut tcp_stream) = TcpStream::connect_timeout(&peer_addr.unwrap(),Duration::new(5,0)){
+                    tcp_stream.set_read_timeout(Some(Duration::new(2,0))).unwrap();
+                    log!("Connected to phone"); 
                     //let mut frame_count = 0;
-                    loop{
+                    loop{ 
+                        if restart_network.check_and_clear(){
+                            break;
+                        } 
                       //  frame_count += 1;
+                       // log!(" READ LEN");
                         let mut len = [0u8;4];
                         if read_exact_bytes_from_tcp_stream(&mut tcp_stream, &mut len){break;}
                         let len:u32 = u32::from_be_bytes(len);
                         if len == 0{
+                            log!("Read failed restarting connection");
+                            break;
+                        }
+                        if len < 5000 || len > 100000{
+                            log!("Length invalid {} restarting connection", len);
                             break;
                         }
                         let mut buffer = Vec::new();
                         buffer.resize(len as usize, 0);
+                        //log!(" READ DATA {}", len);
                         if read_exact_bytes_from_tcp_stream(&mut tcp_stream, &mut buffer){break;}
-                        
+                        //log!("DONE");
                         // decode jpeg
+                        //log!(" DECODE JPEG");
+                        let _ = std::fs::File::create(&format!("dump.jpg")).unwrap().write(&buffer);
                         match makepad_image_formats::jpeg::decode(&buffer) {
                             Ok(data)=>{
                                 //let _ = std::fs::File::create(&format!("dump{frame_count}.jpg")).unwrap().write(&buffer);
                                 let _= sender.send(data);
-                            }
-                            Err(e)=>{ 
+                            } 
+                            Err(e)=>{  
                                 log!("JPEG DECODE ERROR {}", e);
                             }
                         }
+                       // log!(" DONE");
                     }
+                    let _ = tcp_stream.shutdown(Shutdown::Both);
                 }
-                thread::sleep(Duration::from_millis(100));
             }
         });
-    }
+    }  
     
     pub fn start_inputs(&mut self, cx: &mut Cx) {
         let (send, mut recv) = AudioStreamSender::create_pair(1, 1);
@@ -221,10 +269,10 @@ impl App {
             // now lets mix our inputs we combine every input
             for j in 0..output.frame_count() {
                 let audio =
-                input1.channel(0)[j] * mixer.channel[0].get()
-                    + input1.channel(1)[j] * mixer.channel[1].get()
-                    + input2.channel(0)[j] * mixer.channel[2].get()
-                    + input2.channel(1)[j] * mixer.channel[3].get();
+                input1.channel(0)[j] * mixer.channel[0].get()* mixer.gain[0].get()
+                    + input1.channel(1)[j] * mixer.channel[1].get()* mixer.gain[1].get()
+                    + input2.channel(0)[j] * mixer.channel[2].get()* mixer.gain[2].get()
+                    + input2.channel(1)[j] * mixer.channel[3].get()* mixer.gain[3].get();
                 output.channel_mut(0)[j] = audio * 5.0;
                 output.channel_mut(1)[j] = audio * 5.0;
             }
@@ -249,6 +297,7 @@ impl App {
                     
                     for v in [
                         self.window.ui.get_frame(id!(network_video)),
+                        self.window1.ui.get_frame(id!(network_video)),
                     ] {
                         v.set_texture(0, &self.video_network);
                         v.set_uniform(cx, id!(image_size), &image_size);
@@ -259,14 +308,21 @@ impl App {
                 while let Some((_, data)) = self.midi_input.receive() {
                     match data.decode() {
                         MidiEvent::ControlChange(cc) => {
+                            log!("{} {}", cc.param, cc.value);
                             if cc.param == 2 {self.mixer.channel[0].set(cc.value as f32 / 63.0)};
                             if cc.param == 3 {self.mixer.channel[1].set(cc.value as f32 / 63.0)};
                             if cc.param == 4 {self.mixer.channel[2].set(cc.value as f32 / 63.0)};
                             if cc.param == 5 {self.mixer.channel[3].set(cc.value as f32 / 63.0)};
+                            if cc.param == 13 {self.mixer.gain[0].set(cc.value as f32 / 63.0)};
+                            if cc.param == 14 {self.mixer.gain[1].set(cc.value as f32 / 63.0)};
+                            if cc.param == 15 {self.mixer.gain[2].set(cc.value as f32 / 63.0)};
+                            if cc.param == 16 {self.mixer.gain[3].set(cc.value as f32 / 63.0)};
+                            if cc.param == 28 && cc.value == 127{
+                                self.restart_network.set();
+                            }
                         }
                         _ => ()
                     }
-                    println!("{:?}", data.decode());
                 }
                 // lets receive the audio buffers
                 while let Ok((input, audio)) = self.audio_recv.try_recv() {
@@ -317,17 +373,16 @@ impl App {
                 //println!("{}", devices);
                 let inputs = devices.match_inputs(&[
                     "Wireless GO II RX",
-                    "USB Capture HDMI 4K+ Mic"
                 ]);
                 cx.use_audio_inputs(&inputs);
                 let output = devices.match_outputs(&[
-                    "G432 Gaming Headset",
+                    "External Headphones",
                 ]);
                 cx.use_audio_outputs(&output);
             }
             Event::VideoInputs(devices) => {
                 //println!("Got devices! {:?}", devices);
-                cx.use_video_input(&devices.find_highest_at_res(0, 3840, 2160));
+                cx.use_video_input(&devices.find_highest_at_res(0, 1920, 1080));
             }
             _ => ()
         }
