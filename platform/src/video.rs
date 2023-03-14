@@ -138,6 +138,13 @@ pub struct VideoInputsEvent {
 }
 
 impl VideoInputsEvent {
+    pub fn find_device(&self, name:&str)->usize{
+        if let Some(position) = self.descs.iter().position(|v| v.name == name){
+            return position
+        }
+        return 0
+    }
+    
     pub fn find_highest(&self, device_index:usize) -> Vec<(VideoInputId,VideoFormatId)> {
         if let Some(device) = self.descs.get(device_index){
             let mut max_pixels = 0;

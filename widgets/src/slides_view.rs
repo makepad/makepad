@@ -19,8 +19,8 @@ live_design!{
         text: ""
     }
     
-    Slide = <Frame> {
-        draw_bg: {shape: Box, color: #2, radius: 10}
+    Slide = <Box> {
+        draw_bg: {shape: Box, color: #2, radius: 10.0}
         walk: {width: (SLIDE_WIDTH), height: Fill}
         layout: {align: {x: 0.5, y: 0.5}, flow: Down, spacing: 40}
         title = <Label> {
