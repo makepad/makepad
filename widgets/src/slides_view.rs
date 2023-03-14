@@ -94,7 +94,6 @@ pub struct SlidesView {
     #[rust] next_frame: NextFrame
 }
 
-
 impl SlidesView {
     
     fn next_frame(&mut self, cx: &mut Cx) {

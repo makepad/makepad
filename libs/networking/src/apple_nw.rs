@@ -39,7 +39,6 @@ impl HttpsConnection {
                     
                 }
             }
-            
         });
         nw_connection_set_queue(connection, queue);
         nw_connection_set_state_changed_handler(

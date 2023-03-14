@@ -106,7 +106,6 @@ impl AudioDevicesEvent{
                 for input in inputs{
                     if d.name.find(input).is_some(){
                         results.push(d.device_id);
-                        break;
                     }
                 }
             }

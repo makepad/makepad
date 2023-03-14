@@ -105,7 +105,7 @@ impl Dock {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        if self.overlay_view.begin(cx).is_redrawing() {
+        if self.overlay_view.begin(cx, Walk::default()).is_redrawing() {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
@@ -212,7 +212,7 @@ impl Dock {
     pub fn begin_contents(&mut self, cx: &mut Cx2d)->ViewRedrawing {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
-        panel.contents_view.begin(cx)
+        panel.contents_view.begin(cx, Walk::default())
     } 
     
     pub fn end_contents(&mut self, cx: &mut Cx2d){
