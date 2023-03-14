@@ -1,4 +1,3 @@
-use makepad_widgets::makepad_platform::*;
-use makepad_studio::app::*;
- 
-main_app!(App); 
+fn main(){
+    makepad_studio::app_main()
+}
