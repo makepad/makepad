@@ -166,7 +166,7 @@ live_design!{
             channel: [2.0, 2.0, 2.0, 2.0]
         }
         window1: {
-            window: {inner_size: vec2(1920, 1080), position: vec2(1500, 1000)},
+            window: {inner_size: vec2(960, 540), dpi_override: 1.0, position: vec2(0, 0)},
             ui: {
                 inner_view = {
                     <MainSlides> {
@@ -185,7 +185,7 @@ live_design!{
             }
         }
         window2: {
-            window: {inner_size: vec2(400, 300)},
+            window: {inner_size: vec2(960, 540), position: vec2(0, 540), dpi_override: 1.0},
             ui: {inner_view = {
                 <MainSlides> {
                     
@@ -489,12 +489,12 @@ impl AppMain for App {
                 ]);
                 cx.use_audio_inputs(&inputs);
                 let output = devices.match_outputs(&[
-                    "External Headphones",
+                    "Loopback Audio",
                 ]);
                 cx.use_audio_outputs(&output);
             }
             Event::VideoInputs(devices) => {
-                cx.use_video_input(&devices.find_highest_at_res(devices.find_device("USB Capture HDMI 4k+"), 1920, 1080));
+                cx.use_video_input(&devices.find_highest_at_res(devices.find_device("USB Capture HDMI 4K+"), 1920, 1080));
             }
             _ => ()
         }

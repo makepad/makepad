@@ -108,6 +108,10 @@ impl LiveApply for Window {
                     let v:Vec2 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
                     cx.windows[self.window_id()].create_position = Some(v.into());
                 }
+                live_id!(dpi_override) => {
+                    let v:f64 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
+                    cx.windows[self.window_id()].dpi_override = Some(v);
+                }
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
@@ -183,6 +187,7 @@ pub struct CxWindow {
     pub create_title: String,
     pub create_position: Option<DVec2>,
     pub create_inner_size: Option<DVec2>,
+    pub dpi_override: Option<f64>,
     pub is_created: bool,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<PassId>,
