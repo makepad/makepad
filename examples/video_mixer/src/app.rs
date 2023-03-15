@@ -5,6 +5,7 @@ use {
         makepad_audio_widgets::display_audio::*,
         makepad_draw::makepad_image_formats,
         makepad_widgets::*,
+        makepad_widgets::slides_view::*,
         makepad_platform::midi::*,
         makepad_platform::audio::*,
         makepad_platform::live_atomic::*,
@@ -91,60 +92,114 @@ live_design!{
     Slide = <Slide> {
         walk: {width: 1920.0, height: Fill}
     }
+    
+    MainSlides = <Frame> {
+        layout: {flow: Overlay, align: {x: 1.0, y: 1.0}, padding: 0}
+        slides_view = <SlidesView> {
+            slide_width: 1920.0
+            goal_pos: 15.0
+            frame: {
+                video_input1 = <VideoFrame> {
+                    walk: {width: 1920, height: Fill}
+                }
+                <Image> {
+                    image: d"crate://self/rust_meetup_slide.png",
+                    walk: {width: 1920, height: 1080}
+                }
+                <Slide> {title = {text: "Intro"}, <SlideBody> {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
+                <Slide> {title = {text: "Recording Talks"}, <SlideBody> {text: "Not as easy as you think"}}
+                <Slide> {title = {text: "What do you need"}, <SlideBody> {text: "- Multiple microphones\n- Audio Mixing ability\n- Video mixing\n- Speaker camera\n- Event slide"}}
+                <Image> {
+                    image: d"crate://self/camera_gear.png",
+                    walk: {width: 1920, height: 1080}
+                }
+                <Slide> {title = {text: "So much gear"}, <SlideBody> {text: "- What if we use software instead"}}
+                <Slide> {title = {text: "We can replace"}, <SlideBody> {text: "- Expensive camera: cheap android\n- Audio mixer: laptop\n- Video mixer: laptop\n- Audio Mixer: Midi BLE controller"}}
+                <Slide> {title = {text: "The software"}, <SlideBody> {text: "- Android app video send\n- Macos Audio+Video+Midi+Rendering"}}
+                <Slide> {title = {text: "Remote Camera:"}, <SlideBody> {text: "- Android: Endless buildsystem wrangling\n- Gradle, Java, Android Studio, NDK, Linker, APK"}}
+                <Slide> {title = {text: "Simple Rust on Android"}, <SlideBody> {text: "- Strip out Gradle/Android Studio\n- Repackage all buildtooling\n#cargo makepad android toolchain-install\n#cargo makepad android run makepad-example-video-sender"}}
+                <Slide> {title = {text: "Remote camera: Solved"}, <SlideBody> {text: ""}network_video2 = <VideoFrameRound> {
+                    walk: {width: 640, height: 480}
+                }}
+                
+                <Slide> {title = {text: "Video mixer"}, <SlideBody> {text: "- Mixing inputs\n- Connect to network camera\n- Audio mixing"}}
+                <Slide> {title = {text: "Makepad APIs"}, <SlideBody> {text: "- Windowing\n- Graphics\n- UI Components\n- Audio in/out\n- Midi in/out\n- Video In"}}
+                <Slide> {title = {text: "Nice deadline"}, <SlideBody> {text: "- 22 platform apis in 10 weeks"}}
+                <Slide> {title = {text: "Audio Inputs"}, <SlideBody> {}
+                    <Box> {
+                        walk:{height:Fit}
+                        draw_bg:{color:#5}
+                        chan5 = <DisplayChannel> {}
+                        chan6 = <DisplayChannel> {}
+                        chan7 = <DisplayChannel> {}
+                        chan8 = <DisplayChannel> {}
+                    }
+                }
+                <Slide> {title = {text: "DSL for styling"}, <SlideBody> {text: "- Almost not crap to do"}}
+                <Image> {
+                    image: d"crate://self/dsl_view.png",
+                    walk: {width: 1920, height: 1080}
+                }
+                warp_image = <Image> {
+                    draw_bg: {
+                        uniform warp: 0.0
+                        fn get_color(self) -> vec4 {
+                            let wp = mix(
+                                self.pos,
+                                abs(sin(self.pos * 8.0)),
+                                self.warp
+                            );
+                            return sample2d(self.image, wp).xyzw;
+                        }
+                    }
+                    image: d"crate://self/rust_meetup_slide.png",
+                    walk: {width: 1920, height: 1080}
+                    layout: {align: {y: 0.0}, spacing: 5, padding: 10}
+                    
+                }
+                <Slide> {title = {text: "Thank you"}, <SlideBody> {text: "- github.com/makepad/makepad\n- twitter: @rikarends"}}
+            }
+        }
+    }
     App = {{App}} {
         mixer: {
             channel: [2.0, 2.0, 2.0, 2.0]
         }
-        window: {
-            window: {position: vec2(1500, 1000)},
+        window1: {
+            window: {inner_size: vec2(1920, 1080), position: vec2(1500, 1000)},
             ui: {
                 inner_view = {
-                    
-                    <SlidesView> {
-                        slide_width: 1920.0
-                        frame: {
-                            video_input1 = <VideoFrame> {
-                                walk: {width: 1920, height: Fill}
+                    <MainSlides> {
+                        <Frame> {
+                            network_video = <VideoFrameRound> {
+                                walk: {width: 320, height: 240}
                             }
-                            <Image> {
-                                image: d"crate://self/rust_meetup_slide.png",
-                                walk: {width: 1920, height: 1080}
-                            }
-                            <Slide> {title = {text: "Portable SIMD"}, <SlideBody> {text: "For Native and Wasm"}}
-                            <Slide> {title = {text: "Intro"}, <SlideBody> {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
+                            layout: {align: {y: 1.0}, spacing: 5, padding: 10}
+                            chan1 = <DisplayChannel> {}
+                            chan2 = <DisplayChannel> {}
+                            chan3 = <DisplayChannel> {}
+                            chan4 = <DisplayChannel> {}
                         }
                     }
-                    /*
-                network_video = <VideoFrameRound> {
-                    walk:{width:320,height:240}
-                }
-                layout: {align: {y: 1.0}, spacing: 5, padding: 10}
-                chan1 = <DisplayChannel> {}
-                chan2 = <DisplayChannel> {}
-                chan3 = <DisplayChannel> {}
-                chan4 = <DisplayChannel> {}
-                */
                 }
             }
-        }
-        window1: {
-            window: {inner_size: vec2(400, 300)},
-            ui: {inner_view = {
-                video_input1 = <VideoFrame> {
-                    layout: {align: {x: 1.0, y: 1.0}, padding: 50}
-                    network_video = <VideoFrameRound> {
-                        draw_bg: {alpha: 0.7},
-                        walk: {width: 400, height: 300}
-                    }
-                }
-            }}
         }
         window2: {
             window: {inner_size: vec2(400, 300)},
             ui: {inner_view = {
-                video_input1 = <VideoFrame> {
+                <MainSlides> {
                     
+                    network_video = <VideoFrameRound> {
+                        draw_bg: {alpha: 0.9},
+                        walk: {width: 320, height: 240, margin: {bottom: 50, right: 50}}
+                    }
                 }
+            }}
+        }
+        window3: {
+            window: {inner_size: vec2(400, 300)},
+            ui: {inner_view = {
+                <MainSlides> {}
             }}
         }
     }
@@ -158,14 +213,14 @@ pub struct AudioMixer {
 }
 
 #[derive(Live, LiveHook)]
-#[live_design_with{
+#[live_design_with {
     crate::makepad_audio_widgets::live_design(cx);
 }]
 
 pub struct App {
-    window: DesktopWindow,
     window1: DesktopWindow,
     window2: DesktopWindow,
+    window3: DesktopWindow,
     video_input1: Texture,
     video_network: Texture,
     mixer: Arc<AudioMixer>,
@@ -214,17 +269,14 @@ impl App {
                     thread::sleep(Duration::from_millis(100));
                     continue;
                 }
-                //log!("Connecting to phone {}", peer_addr.unwrap());
+                
                 if let Ok(mut tcp_stream) = TcpStream::connect_timeout(&peer_addr.unwrap(), Duration::new(5, 0)) {
                     tcp_stream.set_read_timeout(Some(Duration::new(2, 0))).unwrap();
                     log!("Connected to phone {}", peer_addr.unwrap());
-                    //let mut frame_count = 0;
                     loop {
                         if restart_network.check_and_clear() {
                             break;
                         }
-                        //  frame_count += 1;
-                        // log!(" READ LEN");
                         let mut len = [0u8; 4];
                         if read_exact_bytes_from_tcp_stream(&mut tcp_stream, &mut len) {break;}
                         let len: u32 = u32::from_be_bytes(len);
@@ -238,22 +290,16 @@ impl App {
                         }
                         let mut buffer = Vec::new();
                         buffer.resize(len as usize, 0);
-                        //log!(" READ DATA {}", len);
                         if read_exact_bytes_from_tcp_stream(&mut tcp_stream, &mut buffer) {break;}
-                        //log!("DONE");
-                        // decode jpeg
-                        //log!(" DECODE JPEG");
-                        //let _ = std::fs::File::create(&format!("dump.jpg")).unwrap().write(&buffer);
+                        
                         match makepad_image_formats::jpeg::decode(&buffer) {
                             Ok(data) => {
-                                //let _ = std::fs::File::create(&format!("dump{frame_count}.jpg")).unwrap().write(&buffer);
                                 let _ = sender.send(data);
                             }
                             Err(e) => {
                                 log!("JPEG DECODE ERROR {}", e);
                             }
                         }
-                        // log!(" DONE");
                     }
                     let _ = tcp_stream.shutdown(Shutdown::Both);
                 }
@@ -302,19 +348,19 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx).is_redrawing() {
-            self.window.end(cx);
-        }
         if self.window1.begin(cx).is_redrawing() {
             self.window1.end(cx);
         }
         if self.window2.begin(cx).is_redrawing() {
             self.window2.end(cx);
         }
+        if self.window3.begin(cx).is_redrawing() {
+            self.window3.end(cx);
+        }
     }
 }
 
-impl AppMain for App{
+impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::Signal => {
@@ -328,8 +374,12 @@ impl AppMain for App{
                     let image_size = [nw_image.width as f32, nw_image.height as f32];
                     
                     for v in [
-                        self.window.ui.get_frame(id!(network_video)),
                         self.window1.ui.get_frame(id!(network_video)),
+                        self.window2.ui.get_frame(id!(network_video)),
+                        self.window3.ui.get_frame(id!(network_video)),
+                        self.window1.ui.get_frame(id!(network_video2)),
+                        self.window2.ui.get_frame(id!(network_video2)),
+                        self.window3.ui.get_frame(id!(network_video2)),
                     ] {
                         v.set_texture(0, &self.video_network);
                         v.set_uniform(cx, id!(image_size), &image_size);
@@ -349,8 +399,37 @@ impl AppMain for App{
                             if cc.param == 14 {self.mixer.gain[1].set(cc.value as f32 / 63.0)};
                             if cc.param == 15 {self.mixer.gain[2].set(cc.value as f32 / 63.0)};
                             if cc.param == 16 {self.mixer.gain[3].set(cc.value as f32 / 63.0)};
+                            if cc.param == 20 {
+                                let val = cc.value as f32 / 127.0;
+                                log!("{}", val);
+                                for v in [
+                                    self.window1.ui.get_frame(id!(warp_image)),
+                                    self.window2.ui.get_frame(id!(warp_image)),
+                                    self.window3.ui.get_frame(id!(warp_image)),
+                                ] {
+                                    v.set_uniform(cx, id!(warp), &[val]);
+                                }
+                            };
                             if cc.param == 28 && cc.value == 127 {
                                 self.restart_network.set();
+                            }
+                            if cc.param == 62 && cc.value == 127 {
+                                for v in [
+                                    self.window1.ui.get_slides_view(id!(slides_view)),
+                                    self.window2.ui.get_slides_view(id!(slides_view)),
+                                    self.window3.ui.get_slides_view(id!(slides_view)),
+                                ] {
+                                    v.prev_slide(cx);
+                                }
+                            }
+                            if cc.param == 81 && cc.value == 127 {
+                                for v in [
+                                    self.window1.ui.get_slides_view(id!(slides_view)),
+                                    self.window2.ui.get_slides_view(id!(slides_view)),
+                                    self.window3.ui.get_slides_view(id!(slides_view)),
+                                ] {
+                                    v.next_slide(cx);
+                                }
                             }
                         }
                         _ => ()
@@ -359,12 +438,16 @@ impl AppMain for App{
                 // lets receive the audio buffers
                 while let Ok((input, audio)) = self.audio_recv.try_recv() {
                     if input == 0 {
-                        self.window.ui.get_display_audio(id!(chan1.disp)).process_buffer(cx, Some(0), 0, &audio);
-                        self.window.ui.get_display_audio(id!(chan2.disp)).process_buffer(cx, Some(1), 0, &audio);
+                        self.window1.ui.get_display_audio(id!(chan1.disp)).process_buffer(cx, Some(0), 0, &audio);
+                        self.window1.ui.get_display_audio(id!(chan2.disp)).process_buffer(cx, Some(1), 0, &audio);
+                        self.window1.ui.get_display_audio(id!(chan5.disp)).process_buffer(cx, Some(0), 0, &audio);
+                        self.window1.ui.get_display_audio(id!(chan6.disp)).process_buffer(cx, Some(1), 0, &audio);
                     }
                     if input == 1 {
-                        self.window.ui.get_display_audio(id!(chan3.disp)).process_buffer(cx, Some(0), 0, &audio);
-                        self.window.ui.get_display_audio(id!(chan4.disp)).process_buffer(cx, Some(1), 0, &audio);
+                        self.window1.ui.get_display_audio(id!(chan3.disp)).process_buffer(cx, Some(0), 0, &audio);
+                        self.window1.ui.get_display_audio(id!(chan4.disp)).process_buffer(cx, Some(1), 0, &audio);
+                        self.window1.ui.get_display_audio(id!(chan7.disp)).process_buffer(cx, Some(0), 0, &audio);
+                        self.window1.ui.get_display_audio(id!(chan8.disp)).process_buffer(cx, Some(1), 0, &audio);
                     }
                 }
                 if let Ok(mut vfb) = self.video_recv.try_recv_flush() {
@@ -379,9 +462,9 @@ impl AppMain for App{
                     let image_size = [vfb.format.width as f32, vfb.format.height as f32];
                     
                     for v in [
-                        self.window.ui.get_frame(id!(video_input1)),
                         self.window1.ui.get_frame(id!(video_input1)),
-                        self.window2.ui.get_frame(id!(video_input1))
+                        self.window2.ui.get_frame(id!(video_input1)),
+                        self.window3.ui.get_frame(id!(video_input1))
                     ] {
                         v.set_texture(0, &self.video_input1);
                         v.set_uniform(cx, id!(image_size), &image_size);
@@ -401,8 +484,6 @@ impl AppMain for App{
                 cx.use_midi_inputs(&ports.all_inputs());
             }
             Event::AudioDevices(devices) => {
-                // ok which audio devices
-                //println!("{}", devices);
                 let inputs = devices.match_inputs(&[
                     "Wireless GO II RX",
                 ]);
@@ -413,15 +494,14 @@ impl AppMain for App{
                 cx.use_audio_outputs(&output);
             }
             Event::VideoInputs(devices) => {
-                //println!("Got devices! {:?}", devices);
                 cx.use_video_input(&devices.find_highest_at_res(devices.find_device("USB Capture HDMI 4k+"), 1920, 1080));
             }
             _ => ()
         }
         
-        self.window.handle_event(cx, event);
         self.window1.handle_event(cx, event);
         self.window2.handle_event(cx, event);
+        self.window3.handle_event(cx, event);
     }
     
 }
