@@ -97,7 +97,7 @@ live_design!{
         layout: {flow: Overlay, align: {x: 1.0, y: 1.0}, padding: 0}
         slides_view = <SlidesView> {
             slide_width: 1920.0
-            goal_pos: 15.0
+            goal_pos: 0.0
             frame: {
                 video_input1 = <VideoFrame> {
                     walk: {width: 1920, height: Fill}
