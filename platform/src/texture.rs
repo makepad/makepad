@@ -102,6 +102,7 @@ impl Default for TextureDesc {
 
 impl LiveHook for Texture {}
 impl LiveNew for Texture {
+    fn live_design_with(_cx:&mut Cx){}
     fn new(cx: &mut Cx) -> Self {
         let texture = cx.textures.alloc();
         texture

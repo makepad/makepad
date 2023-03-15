@@ -243,7 +243,7 @@ impl LogListNode {
         self.fold_button.set_is_open(cx, is_open, animate);
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -253,9 +253,9 @@ impl LogListNode {
             self.draw_bg.area().redraw(cx);
         }
         
-        self.fold_button.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.fold_button.handle_event_with(cx, event, &mut | _, _ | {});
         
-        self.link_label.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.link_label.handle_event_with(cx, event, &mut | _, _ | {});
         
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
@@ -370,18 +370,18 @@ impl LogList {
         self.stack.pop();
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
         //let view_area = self.view_area;
-        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
         
         let mut actions = Vec::new();
         for (node_id, node) in self.fold_nodes.iter_mut() {
-            node.handle_event_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event_with(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {

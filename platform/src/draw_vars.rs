@@ -156,8 +156,6 @@ impl DrawVars {
         self.draw_shader.is_some()
     }
     
-    pub fn live_design(_cx: &mut Cx) {}
-    
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
             std::slice::from_raw_parts((&self.var_instances[self.var_instance_start - 1] as *const _ as *const f32).offset(1), self.var_instance_slots)

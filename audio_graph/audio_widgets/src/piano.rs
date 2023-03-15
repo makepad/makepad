@@ -134,7 +134,7 @@ pub struct PianoKey {
 }
 
 #[derive(Live)]
-#[live_design_fn(widget_factory!(Piano))]
+#[live_design_with{widget_factory!(cx, Piano)}]
 pub struct Piano {
     #[rust] area: Area,
     walk: Walk,
@@ -200,7 +200,7 @@ impl PianoKey {
         self.toggle_state(cx, is, animate, id!(focus.on), id!(focus.off))
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -318,7 +318,7 @@ impl Piano {
         }
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -326,7 +326,7 @@ impl Piano {
     ) {
         let mut actions = Vec::new();
         for (key_id, piano_key) in self.black_keys.iter_mut().chain(self.white_keys.iter_mut()) {
-            piano_key.handle_event_fn(cx, event, self.area,  &mut | _, action | {
+            piano_key.handle_event_with(cx, event, self.area,  &mut | _, action | {
                 actions.push((*key_id, action))
             });
         }
@@ -439,14 +439,14 @@ impl Piano {
 }
 
 impl Widget for Piano{
-   fn handle_widget_event_fn(
+   fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
         });
     }

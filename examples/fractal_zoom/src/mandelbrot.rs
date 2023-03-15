@@ -1,13 +1,10 @@
 use {
     crate::{
-        makepad_draw::*,
         makepad_widgets::*,
-        makepad_platform::thread::*
+        makepad_platform::thread::*,
+        mandelbrot_simd::*
     }
 };
-// include the SIMD path if we support it
-//#[cfg(feature = "nightly")]
-use crate::mandelbrot_simd::*;
 
 // Our live DSL to define the shader and UI def
 live_design!{
@@ -160,7 +157,7 @@ impl TileCache {
             textures.push(texture);
         }
         // preallocate buffers otherwise safari barfs in the worker
-        let use_cores = cx.cpu_cores().min(3)-2;
+        let use_cores = cx.cpu_cores().min(3) - 2;
         Self {
             textures,
             current: Vec::new(),
@@ -397,8 +394,8 @@ impl FractalSpace {
 }
 
 
-#[derive(Live, Widget)]
-#[live_design_fn(widget_factory!(Mandelbrot))]
+#[derive(Live)]
+#[live_design_with{widget_factory!(cx, Mandelbrot)}]
 pub struct Mandelbrot {
     // DSL accessible
     draw_tile: DrawTile,
@@ -446,6 +443,26 @@ impl LiveHook for Mandelbrot {
 #[derive(Clone, WidgetAction)]
 pub enum MandelbrotAction {
     None
+}
+
+impl Widget for Mandelbrot {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let uid = self.widget_uid();
+        self.handle_event_with(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.view_area.redraw(cx)
+    }
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
 }
 
 impl Mandelbrot {
@@ -523,11 +540,7 @@ impl Mandelbrot {
         }
     }
     
-    pub fn area(&self) -> Area {
-        self.view_area
-    }
-    
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
         //self.state_handle_event(cx, event);
         //if let Event::Signal(_) = event {
         // this batches up all the input signals into a single animation frame

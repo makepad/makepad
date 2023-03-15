@@ -1,3 +1,3 @@
 fn main(){
-    makepad_studio::app_main()
+    makepad_studio::app::app_main()
 }

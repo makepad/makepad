@@ -854,7 +854,7 @@ impl CodeEditorImpl {
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
         
         if self.state_handle_event(cx, event).must_redraw() {
             self.scroll_bars.redraw(cx);

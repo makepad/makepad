@@ -1129,7 +1129,7 @@ impl App {
         let display_audio = ui.get_display_audio(id!(display_audio));
         
         let mut buffers = 0;
-        self.audio_graph.handle_event_fn(cx, event, &mut | cx, action | {
+        self.audio_graph.handle_event_with(cx, event, &mut | cx, action | {
             match action {
                 AudioGraphAction::DisplayAudio {buffer, voice, active} => {
                     display_audio.process_buffer(cx, active, voice, buffer);

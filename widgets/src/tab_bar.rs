@@ -172,14 +172,14 @@ impl TabBar {
         self.view_area.redraw(cx)
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabBarAction),
     ) {
         let view_area = self.view_area;
-        self.scroll_bars.handle_event_fn(cx, event, &mut |cx,_|{
+        self.scroll_bars.handle_event_with(cx, event, &mut |cx,_|{
             view_area.redraw(cx);
         });
         
@@ -187,7 +187,7 @@ impl TabBar {
             dispatch_action(cx, TabBarAction::TabWasPressed(tab_id));
         }
         for (tab_id, tab) in self.tabs.iter_mut() {
-            tab.handle_event_fn(cx, event, &mut | cx, action | match action {
+            tab.handle_event_with(cx, event, &mut | cx, action | match action {
                 TabAction::WasPressed => {
                     dispatch_action(cx, TabBarAction::TabWasPressed(*tab_id));
                 }

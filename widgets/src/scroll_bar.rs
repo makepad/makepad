@@ -333,7 +333,7 @@ impl ScrollBar {
         }
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         if self.visible {
             self.state_handle_event(cx, event);
             if self.next_frame.is_event(event).is_some() {

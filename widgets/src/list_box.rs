@@ -132,7 +132,7 @@ pub struct ListBoxItem {
 }
 
 #[derive(Live)]
-#[live_design_fn(widget_factory!(ListBox))]
+#[live_design_with{widget_factory!(cx, ListBox)}]
 pub struct ListBox {
     scroll_bars: ScrollBars,
     list_item: Option<LivePtr>,
@@ -202,7 +202,7 @@ impl ListBoxItem {
         self.toggle_state(cx, is_selected, animate, id!(select.on), id!(select.off))
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -293,17 +293,17 @@ impl ListBox {
         }
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxAction),
     ) {
-        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
         
         let mut actions = Vec::new();
         for (node_id, node) in self.list_items.iter_mut() {
-            node.handle_event_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event_with(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {
@@ -344,9 +344,9 @@ impl Widget for ListBox {
         self.scroll_bars.redraw(cx);
     }
     
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }

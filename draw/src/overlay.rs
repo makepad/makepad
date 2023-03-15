@@ -17,6 +17,7 @@ pub struct Overlay { // draw info per UI element
 
 impl LiveHook for Overlay {}
 impl LiveNew for Overlay {
+    fn live_design_with(_cx:&mut Cx){}
     fn new(cx: &mut Cx) -> Self {
         let draw_list = cx.draw_lists.alloc();
         //cx.draw_lists[draw_list.id()].unclipped = true;

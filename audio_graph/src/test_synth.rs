@@ -18,7 +18,7 @@ live_design!{
 enum FromUI {}
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(audio_component!(BasicSynth))]
+#[live_design_with(audio_component!(BasicSynth))]
 struct BasicSynth {
     prop:f64,
     #[rust] from_ui: FromUISender<FromUI>,
@@ -78,7 +78,7 @@ impl AudioComponent for BasicSynth {
         Box::new(Node::default())
     }
     
-    fn handle_event_fn(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+    fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
     }
     // we dont have inputs
     fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult{

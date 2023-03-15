@@ -147,7 +147,7 @@ pub struct DrawSlider {
 }
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(Slider))]
+#[live_design_with{widget_factory!(cx, Slider)}]
 pub struct Slider {
     draw_slider: DrawSlider,
     
@@ -203,7 +203,7 @@ impl Slider {
         old != self.value
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
         self.state_handle_event(cx, event);
         for action in self.text_input.handle_event(cx, event) {
             match action {
@@ -310,9 +310,9 @@ impl Widget for Slider {
         self.draw_slider.redraw(cx);
     }
     
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }

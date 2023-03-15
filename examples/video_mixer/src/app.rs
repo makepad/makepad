@@ -1,6 +1,3 @@
-pub use makepad_audio_widgets;
-pub use makepad_audio_widgets::makepad_widgets;
-pub use makepad_widgets::makepad_platform;
 use std::sync::{Arc};
 
 use {
@@ -27,7 +24,6 @@ live_design!{
     import makepad_widgets::slides_view::*;
     import makepad_draw::shader::std::*;
     
-    //import crate::video_view::VideoView;
     registry Widget::*;
     
     VideoFrame = <Frame> {
@@ -92,7 +88,7 @@ live_design!{
         }
     }
     AudioMixer = {{AudioMixer}} {}
-    Slide = <Slide>{
+    Slide = <Slide> {
         walk: {width: 1920.0, height: Fill}
     }
     App = {{App}} {
@@ -103,12 +99,16 @@ live_design!{
             window: {position: vec2(1500, 1000)},
             ui: {
                 inner_view = {
-                
+                    
                     <SlidesView> {
                         slide_width: 1920.0
                         frame: {
                             video_input1 = <VideoFrame> {
                                 walk: {width: 1920, height: Fill}
+                            }
+                            <Image> {
+                                image: d"crate://self/rust_meetup_slide.png",
+                                walk: {width: 1920, height: 1080}
                             }
                             <Slide> {title = {text: "Portable SIMD"}, <SlideBody> {text: "For Native and Wasm"}}
                             <Slide> {title = {text: "Intro"}, <SlideBody> {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
@@ -158,6 +158,10 @@ pub struct AudioMixer {
 }
 
 #[derive(Live, LiveHook)]
+#[live_design_with{
+    crate::makepad_audio_widgets::live_design(cx);
+}]
+
 pub struct App {
     window: DesktopWindow,
     window1: DesktopWindow,
@@ -191,12 +195,7 @@ pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut 
 }
 
 impl App {
-    pub fn live_design(cx: &mut Cx) {
-        makepad_audio_widgets::live_design(cx);
-    }
-    
     pub fn start_network_stack(&mut self, _cx: &mut Cx) {
-        
         let read_discovery = UdpSocket::bind("0.0.0.0:42531").unwrap();
         read_discovery.set_read_timeout(Some(Duration::new(0, 10))).unwrap();
         read_discovery.set_broadcast(true).unwrap();
@@ -302,7 +301,21 @@ impl App {
         })
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+    pub fn draw(&mut self, cx: &mut Cx2d) {
+        if self.window.begin(cx).is_redrawing() {
+            self.window.end(cx);
+        }
+        if self.window1.begin(cx).is_redrawing() {
+            self.window1.end(cx);
+        }
+        if self.window2.begin(cx).is_redrawing() {
+            self.window2.end(cx);
+        }
+    }
+}
+
+impl AppMain for App{
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::Signal => {
                 while let Ok(mut nw_image) = self.network_recv.try_recv() {
@@ -411,15 +424,4 @@ impl App {
         self.window2.handle_event(cx, event);
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx).is_redrawing() {
-            self.window.end(cx);
-        }
-        if self.window1.begin(cx).is_redrawing() {
-            self.window1.end(cx);
-        }
-        if self.window2.begin(cx).is_redrawing() {
-            self.window2.end(cx);
-        }
-    }
 }

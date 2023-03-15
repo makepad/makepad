@@ -138,7 +138,7 @@ live_design!{
 }
 
 #[derive(Live)]
-#[live_design_fn(widget_factory!(DropDown))]
+#[live_design_with(widget_factory!(cx,DropDown))]
 pub struct DropDown {
     state: State,
     
@@ -221,7 +221,7 @@ impl DropDown {
         cx.sweep_unlock(self.draw_bg.area());
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DropDownAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DropDownAction)) {
         self.state_handle_event(cx, event);
         
         if self.is_open && self.popup_menu.is_some() {
@@ -230,7 +230,7 @@ impl DropDown {
             let mut map = global.map.borrow_mut();
             let menu = map.get_mut(&self.popup_menu.unwrap()).unwrap();
             let mut close = false;
-            menu.handle_event_fn(cx, event, self.draw_bg.area(), &mut | cx, action | {
+            menu.handle_event_with(cx, event, self.draw_bg.area(), &mut | cx, action | {
                 match action {
                     PopupMenuAction::WasSweeped(_node_id) => {
                         //dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
@@ -393,9 +393,9 @@ impl Widget for DropDown {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }

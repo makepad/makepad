@@ -18,7 +18,7 @@ pub enum AudioComponentAction{
 
 pub trait AudioComponent: LiveApply {
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
-    fn handle_event_fn(&mut self, _cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
+    fn handle_event_with(&mut self, _cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
     fn get_graph_node(&mut self, cx: &mut Cx) -> Box<dyn AudioGraphNode + Send>;
     fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult;
 }
@@ -236,15 +236,15 @@ impl<'a> Try for AudioResult<'a> {
 
 #[macro_export]
 macro_rules!audio_component {
-    ( $ ty: ident) => {
-        | cx: &mut Cx | {
+    ($cx:ident, $ ty: ident) => {
+        {
             struct Factory();
             impl AudioComponentFactory for Factory {
                 fn new(&self, cx: &mut Cx) -> Box<dyn AudioComponent> {
                     Box::new( $ ty::new(cx))
                 }
             }
-            register_component_factory!(cx, AudioComponentRegistry, $ ty, Factory);
+            register_component_factory!($cx, AudioComponentRegistry, $ ty, Factory);
         }
     }
 }
