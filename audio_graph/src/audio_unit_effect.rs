@@ -25,7 +25,9 @@ enum FromUI {
 }
 
 #[derive(Live)]
-#[live_design_fn(audio_component!(AudioUnitEffect))]
+#[live_design_with{
+    audio_component!(cx, AudioUnitEffect)
+}]
 struct AudioUnitEffect {
     plugin: String,
     preset_data: String,
@@ -107,7 +109,7 @@ impl AudioComponent for AudioUnitEffect {
         })
     }
     
-    fn handle_event_fn(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         while let Ok(to_ui) = self.to_ui.try_recv() {
             match to_ui {
                 ToUI::NewAudioUnit(audio_unit) => {

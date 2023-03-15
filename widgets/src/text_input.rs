@@ -196,7 +196,7 @@ pub struct DrawLabel {
 
 
 #[derive(Live)]
-#[live_design_fn(widget_factory!(TextInput))]
+#[live_design_with{widget_factory!(cx, TextInput)}]
 pub struct TextInput {
     state: State,
     
@@ -250,9 +250,9 @@ impl Widget for TextInput {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
@@ -451,11 +451,11 @@ impl TextInput {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<TextInputAction> {
         let mut actions = Vec::new();
-        self.handle_event_fn(cx, event, &mut | _, a | actions.push(a));
+        self.handle_event_with(cx, event, &mut | _, a | actions.push(a));
         actions
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocusLost(_) => {

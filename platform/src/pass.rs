@@ -90,6 +90,7 @@ impl std::ops::IndexMut<PassId> for CxPassPool {
 
 impl LiveHook for Pass {}
 impl LiveNew for Pass {
+    fn live_design_with(_cx:&mut Cx){}
     fn new(cx: &mut Cx) -> Self {
         let pass = cx.passes.alloc();
         pass

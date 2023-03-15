@@ -340,7 +340,7 @@ live_design!{
 }
 
 #[derive(Live)]
-#[live_design_fn(widget_factory!(Frame))]
+#[live_design_with{widget_factory!(cx,Frame)}]
 pub struct Frame { // draw info per UI element
     draw_bg: DrawColor,
     
@@ -525,10 +525,19 @@ impl FrameRef {
             Area::Empty
         }
     }
+    
+    pub fn child_count(&self)->usize{
+        if let Some(inner) = self.inner() {
+            inner.draw_order.len()
+        }
+        else {
+            0
+        }
+    }
 }
 
 impl Widget for Frame {
-    fn handle_widget_event_fn(
+    fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -550,7 +559,7 @@ impl Widget for Frame {
             if let Some(child) = self.children.get_mut(id) {
                 // if a child is not visible, we should
                 if child.is_visible() || !event.requires_visibility() {
-                    child.handle_widget_event_fn(cx, event, dispatch_action);
+                    child.handle_widget_event_with(cx, event, dispatch_action);
                 }
             }
         }

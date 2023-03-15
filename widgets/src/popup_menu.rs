@@ -233,7 +233,7 @@ impl PopupMenuItem {
         self.draw_bg.end(cx);
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -351,7 +351,7 @@ impl PopupMenu {
         }
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -360,7 +360,7 @@ impl PopupMenu {
     ) {
         let mut actions = Vec::new();
         for (item_id, node) in self.menu_items.iter_mut() {
-            node.handle_event_fn(cx, event, sweep_area, &mut | _, e | actions.push((*item_id, e)));
+            node.handle_event_with(cx, event, sweep_area, &mut | _, e | actions.push((*item_id, e)));
         }
         
         for (node_id, action) in actions {

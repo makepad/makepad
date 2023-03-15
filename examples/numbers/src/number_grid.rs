@@ -1,6 +1,5 @@
 use {
     crate::{
-        makepad_draw::*,
         makepad_widgets::*,
     },
     std::fmt::Write,
@@ -140,8 +139,30 @@ pub struct NumberBox {
     label_align: Align,
 }
 
-#[derive(Live, Widget)]
-#[live_design_fn(widget_factory!(NumberGrid))]
+impl Widget for NumberGrid {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let uid = self.widget_uid();
+        self.handle_event_with(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.scroll_bars.redraw(cx)
+    }
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
+}
+
+#[derive(Live)]
+#[live_design_with{
+    widget_factory!(cx, NumberGrid)
+}]
 pub struct NumberGrid {
     scroll_bars: ScrollBars,
     walk: Walk,
@@ -154,7 +175,7 @@ pub struct NumberGrid {
 }
 
 impl NumberBox {
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.draw_bg.area()) {
@@ -255,17 +276,13 @@ impl NumberGrid{
         }
     }
     
-    pub fn area(&self)->Area{
-        self.scroll_bars.area()
-    }
-    
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, NumberGridAction),
     ) {
-        self.scroll_bars.handle_event_fn(cx, event, &mut |_,_|{});
+        self.scroll_bars.handle_event_with(cx, event, &mut |_,_|{});
         
         match event{
             Event::KeyDown(fe) if fe.key_code == KeyCode::Space=>{
@@ -284,7 +301,7 @@ impl NumberGrid{
         
         let mut actions = Vec::new();
         for (box_id, number_box) in self.number_boxes.iter_mut() {
-            number_box.handle_event_fn(cx, event, &mut | _, action | {
+            number_box.handle_event_with(cx, event, &mut | _, action | {
                 actions.push((*box_id, action))
             });
         }

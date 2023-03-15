@@ -130,7 +130,9 @@ pub enum ButtonAction {
 }
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(Button))]
+#[live_design_with{
+    widget_factory!(cx, Button)
+}]
 pub struct Button {
     state: State,
     
@@ -144,14 +146,14 @@ pub struct Button {
 }
 
 impl Widget for Button{
-   fn handle_widget_event_fn(
+   fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
         });
     }
@@ -177,7 +179,7 @@ struct DrawLabelText {
 
 impl Button {
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {

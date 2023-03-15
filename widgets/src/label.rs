@@ -22,7 +22,7 @@ live_design!{
 }
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(Label))]
+#[live_design_with(widget_factory!(cx,Label))]
 pub struct Label {
     draw_label: DrawText,
     walk: Walk,

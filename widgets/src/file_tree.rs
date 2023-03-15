@@ -359,7 +359,7 @@ impl FileTreeNode {
         self.toggle_state(cx, is, animate, id!(open.on), id!(open.off));
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -546,17 +546,17 @@ impl FileTree {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {
         let mut a = Vec::new();
-        self.handle_event_fn(cx, event, &mut | _, v | a.push(v));
+        self.handle_event_with(cx, event, &mut | _, v | a.push(v));
         a
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeAction),
     ) {
-        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
         
         match event {
             Event::DragEnd => self.dragging_node_id = None,
@@ -565,7 +565,7 @@ impl FileTree {
         
         let mut actions = Vec::new();
         for (node_id, (node, _)) in self.tree_nodes.iter_mut() {
-            node.handle_event_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event_with(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {

@@ -80,7 +80,7 @@ live_design!{
 }
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(FoldButton))]
+#[live_design_with{widget_factory!(cx, FoldButton)}]
 pub struct FoldButton {
     state: State,
     
@@ -102,7 +102,7 @@ pub enum FoldButtonAction {
 
 impl FoldButton {
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -174,9 +174,9 @@ impl Widget for FoldButton {
         self.draw_bg.redraw(cx);
     }
     
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }

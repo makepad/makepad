@@ -44,54 +44,13 @@ live_design!{
         anim_speed: 0.9
         frame: <ScrollX> {
             walk: {width: Fill, height: Fill}
-            /*
-            <Slide> {title = {text: "Portable SIMD"}, <Body> {text: "For Native and Wasm"}}
-            <Slide> {title = {text: "Intro"}, <Body> {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
-            
-            <Slide> {title = {text: "Fractals Native"}, <Body> {text: "Native: All cores and SIMD"}}
-            <Slide> {title = {text: "Fractals web"}, <Body> {text: "No SIMD on safari"}}
-            <Slide> {title = {text: "Mandelbrot"}, <Body> {text: "Trivially parallel"}}
-            <Slide> {title = {text: "Tile engine"}, <Body> {text: "Threads and queues\nchange core counter"}}
-            <Slide> {title = {text: "Live updating"}, <Body> {text: "Core feature of makepad\nLive shaders+DSL"}}
-            
-            <Slide> {title = {text: "SIMD"}, <Body> {text: "Single instruction\nMultiple data\nLane bitsize"}}
-            <Slide> {title = {text: "Lanes"}, <Body> {text: "128 bit (ARM/Wasm)\n256 bit: AMD/Intel\n512 bit intel"}}
-            <Slide> {title = {text: "CPU Instructions"}, <Body> {text: "intel: MMX\nintel: SSE2\nintel: AVX\nARM: Neon"}}
-            <Slide> {title = {text: "Intrinsics"}, <Body> {text: "CPU specific\nMany codepaths"}}
-            <Slide> {title = {text: "Portable SIMD"}, <Body> {text: "Write once run everywhere"}}
-            <Slide> {title = {text: "Mandelbrot"}, <Body> {text: "Show code"}}
-            
-            <Slide> {title = {text: "Web issues"}, <Body> {text: "Bindgen huge\nRust primitives\nStack frame\nSafari"}}
-            <Slide> {title = {text: "Audio threads"}, <Body> {text: "Fun audio"}}
-            
-            <Slide> {title = {text: "Future for Makepad"}, <Body> {text: "Rust IDE\nLive coding\nDesigntool"}}
-            <Slide> {title = {text: "Links"}, <Body> {text: "twitter: @makepad @rikarends\ngithub.com/makepad/makepad"}}
-            */
-            /*
-            Slide {title = {text: "Makepad JS"}}
-            Slide {title = {text: "What was wrong"}, Body {text: "Not stable after 30+ mins"}}
-            Slide {title = {text: "The real problem"}, Body {text: "No CPU perf left over\nNo VR + HiFPS"}}
-            Slide {title = {text: "JS was wrong"}, Body {text: "GC limits complex use\nNot enough perf\nDynamic typing doesnt scale"}}
-            Slide {title = {text: "The end?"}, Body {text: "Your life has no purpose"}}
-            Slide {title = {text: "Hi Rust"}, Body {text: "Static typed\nCompiled native +wasm\nHigh and low level"}}
-            Slide {title = {text: "A new chance"}, Body {text: "Eddy Bruël - code\nSebastian Michaelidis - design"}}
-            Slide {title = {text: "Could this be it?"}, Body {text: "Run code native and on web"}}
-            Slide {title = {text: "Makepad Rust"}, Body {text: "6 months first iteration"}}
-            Slide {title = {text: "Chrome profile"}, Body {text: "Time left to be useful"}}
-            Slide {title = {text: "What is it"}, Body {text: "UI Stack\nCode editor and IDE\nDesigntool"}}
-            Slide {title = {text: "The idea"}, Body {text: "a UI DSL with live hybrid editing"}}
-            Slide {title = {text: "Why"}, Body {text: "Having fun again as a programmer"}}
-            Slide {title = {text: "Fun Audio"}}
-            Slide {title = {text: "Future"}, Body {text: "OSS release in 3 months\nDesigntool will be commercial"}}
-            Slide {title = {text: "Links"}, Body {text: "makepad.dev\ngithub.com/makepad/makepad\ntwitter: @rikarends @makepad"}}
-            */
         }
     }
 }
 
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(SlidesView))]
+#[live_design_with{widget_factory!(cx, SlidesView)}]
 pub struct SlidesView {
     slide_width: f64,
     goal_pos: f64,
@@ -108,17 +67,17 @@ pub enum SlidesViewAction {
 
 
 impl Widget for SlidesView {
-   fn handle_widget_event_fn(
+   fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
         });
-        self.frame.handle_widget_event_fn(cx, event, dispatch_action);
+        self.frame.handle_widget_event_with(cx, event, dispatch_action);
     }
     
     fn get_walk(&self) -> Walk {
@@ -143,7 +102,7 @@ impl SlidesView {
         self.next_frame = cx.new_next_frame();
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidesViewAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidesViewAction)) {
         // lets handle mousedown, setfocus
         match event {
             Event::Construct => {
@@ -163,7 +122,10 @@ impl SlidesView {
             Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, ..}) => {
                 self.goal_pos += 1.0;
                 // lets cap goal pos on the # of slides
-                
+                let max_goal_pos = (self.frame.child_count().max(1) - 1) as f64;
+                if self.goal_pos > max_goal_pos{
+                    self.goal_pos = max_goal_pos
+                }
                 self.next_frame(cx);
             }
             Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, ..}) => {
@@ -194,5 +156,4 @@ impl SlidesView {
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct SlidesViewRef(WidgetRef);
 
-impl SlidesViewRef {
-}
+impl SlidesViewRef {}

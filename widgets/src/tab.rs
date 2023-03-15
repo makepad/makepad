@@ -164,7 +164,7 @@ impl Tab {
     }
     
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,

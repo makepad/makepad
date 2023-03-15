@@ -41,9 +41,9 @@ pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("Widget for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             //tb.add("    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}");
-            tb.add("    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {");
+            tb.add("    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {");
             tb.add("        let uid = self.widget_uid();");
-            tb.add("        self.handle_event_fn(cx, event, &mut |cx, action|{");
+            tb.add("        self.handle_event_with(cx, event, &mut |cx, action|{");
             tb.add("            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))");
             tb.add("        });");
             tb.add("    }");
