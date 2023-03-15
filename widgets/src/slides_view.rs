@@ -50,7 +50,7 @@ live_design!{
 
 
 #[derive(Live, LiveHook)]
-#[live_design_with{widget_factory!(cx, SlidesView)}]
+#[live_design_with {widget_factory!(cx, SlidesView)}]
 pub struct SlidesView {
     slide_width: f64,
     goal_pos: f64,
@@ -67,7 +67,7 @@ pub enum SlidesViewAction {
 
 
 impl Widget for SlidesView {
-   fn handle_widget_event_with(
+    fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -84,7 +84,7 @@ impl Widget for SlidesView {
         self.frame.get_walk()
     }
     
-    fn redraw(&mut self, cx:&mut Cx){
+    fn redraw(&mut self, cx: &mut Cx) {
         self.frame.redraw(cx)
     }
     
@@ -100,6 +100,24 @@ impl Widget for SlidesView {
 impl SlidesView {
     fn next_frame(&mut self, cx: &mut Cx) {
         self.next_frame = cx.new_next_frame();
+    }
+    
+    pub fn next_slide(&mut self, cx: &mut Cx) {
+        self.goal_pos += 1.0;
+        // lets cap goal pos on the # of slides
+        let max_goal_pos = (self.frame.child_count().max(1) - 1) as f64;
+        if self.goal_pos > max_goal_pos {
+            self.goal_pos = max_goal_pos
+        }
+        self.next_frame(cx);
+    }
+    
+    pub fn prev_slide(&mut self, cx: &mut Cx) {
+        self.goal_pos -= 1.0;
+        if self.goal_pos < 0.0 {
+            self.goal_pos = 0.0;
+        }
+        self.next_frame(cx);
     }
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidesViewAction)) {
@@ -120,20 +138,10 @@ impl SlidesView {
         }
         match event.hits(cx, self.frame.area()) {
             Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, ..}) => {
-                self.goal_pos += 1.0;
-                // lets cap goal pos on the # of slides
-                let max_goal_pos = (self.frame.child_count().max(1) - 1) as f64;
-                if self.goal_pos > max_goal_pos{
-                    self.goal_pos = max_goal_pos
-                }
-                self.next_frame(cx);
+                self.next_slide(cx);
             }
             Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, ..}) => {
-                self.goal_pos -= 1.0;
-                if self.goal_pos < 0.0 {
-                    self.goal_pos = 0.0;
-                }
-                self.next_frame(cx);
+                self.prev_slide(cx);
             }
             Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.frame.area());
@@ -146,7 +154,7 @@ impl SlidesView {
         self.frame.redraw(cx);
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         while self.frame.draw_widget(cx, walk).is_not_done() {
         }
     }
@@ -156,4 +164,16 @@ impl SlidesView {
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct SlidesViewRef(WidgetRef);
 
-impl SlidesViewRef {}
+impl SlidesViewRef {
+    pub fn next_slide(&self, cx:&mut Cx){
+        if let Some(mut inner) = self.inner_mut(){
+            inner.next_slide(cx);
+        }
+    }
+    pub fn prev_slide(&self, cx:&mut Cx){
+        if let Some(mut inner) = self.inner_mut(){
+            inner.prev_slide(cx);
+        }
+    }
+    
+}
