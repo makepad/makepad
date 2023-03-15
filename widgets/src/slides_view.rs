@@ -131,7 +131,7 @@ impl SlidesView {
                 if (self.current_pos - self.goal_pos).abs()>0.00001 {
                     self.next_frame(cx);
                 }
-                self.frame.set_scroll_pos(cx, dvec2(self.current_pos * self.slide_width, 0.0));
+                self.frame.set_scroll_pos(cx, dvec2((self.current_pos * self.slide_width).floor(), 0.0));
                 self.frame.redraw(cx);
             }
             _ => ()
