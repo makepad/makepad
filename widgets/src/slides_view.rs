@@ -1,15 +1,19 @@
-use crate::makepad_draw::*;
-use crate::frame::*;
-use crate::widget::*;
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    frame::*,
+    widget::*,
+};
 
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::frame::*;
-    registry Widget::*;
+    import makepad_widgets::label::Label;
+    //registry Widget::*;
     
     const SLIDE_WIDTH = 800
     
-    Body = <Label> {
+    SlideBody = <Label> {
         draw_label: {
             color: #f
             text_style: {
@@ -40,6 +44,7 @@ live_design!{
         anim_speed: 0.9
         frame: <ScrollX> {
             walk: {width: Fill, height: Fill}
+            /*
             <Slide> {title = {text: "Portable SIMD"}, <Body> {text: "For Native and Wasm"}}
             <Slide> {title = {text: "Intro"}, <Body> {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
             
@@ -61,6 +66,7 @@ live_design!{
             
             <Slide> {title = {text: "Future for Makepad"}, <Body> {text: "Rust IDE\nLive coding\nDesigntool"}}
             <Slide> {title = {text: "Links"}, <Body> {text: "twitter: @makepad @rikarends\ngithub.com/makepad/makepad"}}
+            */
             /*
             Slide {title = {text: "Makepad JS"}}
             Slide {title = {text: "What was wrong"}, Body {text: "Not stable after 30+ mins"}}
@@ -85,6 +91,7 @@ live_design!{
 
 
 #[derive(Live, LiveHook)]
+#[live_design_fn(widget_factory!(SlidesView))]
 pub struct SlidesView {
     slide_width: f64,
     goal_pos: f64,
@@ -94,15 +101,50 @@ pub struct SlidesView {
     #[rust] next_frame: NextFrame
 }
 
-impl SlidesView {
+#[derive(Clone, WidgetAction)]
+pub enum SlidesViewAction {
+    None,
+}
+
+
+impl Widget for SlidesView {
+   fn handle_widget_event_fn(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
+    ) {
+        let uid = self.widget_uid();
+        self.handle_event_fn(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
+        });
+        self.frame.handle_widget_event_fn(cx, event, dispatch_action);
+    }
     
+    fn get_walk(&self) -> Walk {
+        self.frame.get_walk()
+    }
+    
+    fn redraw(&mut self, cx:&mut Cx){
+        self.frame.redraw(cx)
+    }
+    
+    fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache) -> WidgetResult {
+        self.frame.find_widget(path, cached)
+    }
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        self.frame.draw_widget(cx, walk)
+    }
+}
+
+impl SlidesView {
     fn next_frame(&mut self, cx: &mut Cx) {
         self.next_frame = cx.new_next_frame();
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidesViewAction)) {
         // lets handle mousedown, setfocus
-        self.frame.handle_event(cx, event);
         match event {
             Event::Construct => {
                 self.next_frame(cx);
@@ -120,6 +162,8 @@ impl SlidesView {
         match event.hits(cx, self.frame.area()) {
             Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, ..}) => {
                 self.goal_pos += 1.0;
+                // lets cap goal pos on the # of slides
+                
                 self.next_frame(cx);
             }
             Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, ..}) => {
@@ -140,8 +184,15 @@ impl SlidesView {
         self.frame.redraw(cx);
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw(cx).is_not_done() {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
+        while self.frame.draw_widget(cx, walk).is_not_done() {
         }
     }
+}
+
+// ImGUI convenience API for Piano
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct SlidesViewRef(WidgetRef);
+
+impl SlidesViewRef {
 }

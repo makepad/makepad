@@ -1,6 +1,5 @@
 use {
     crate::{
-        makepad_derive_widget::*,
         button::ButtonAction,
         makepad_draw::*,
         widget::*
@@ -126,13 +125,38 @@ live_design!{
     }
 }
 
-#[derive(Live, Widget)]
+#[derive(Live)]
 #[live_design_fn(widget_factory!(DesktopButton))]
 pub struct DesktopButton {
     state: State,
     walk: Walk,
     #[alias(button_type, draw_bg.button_type)]
     pub draw_bg: DrawDesktopButton,
+}
+
+impl Widget for DesktopButton{
+   fn handle_widget_event_fn(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
+    ) {
+        let uid = self.widget_uid();
+        self.handle_event_fn(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
+        });
+    }
+
+    fn get_walk(&self)->Walk{self.walk}
+    
+    fn redraw(&mut self, cx:&mut Cx){
+        self.draw_bg.redraw(cx)
+    }
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
 }
 
 #[derive(Live, LiveHook)]
@@ -205,6 +229,7 @@ impl DesktopButton {
     pub fn area(&mut self)->Area{
         self.draw_bg.area()
     }
+    pub fn get_widget_walk(&self)->Walk{self.walk}
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
         self.draw_bg.draw_walk(cx, walk);

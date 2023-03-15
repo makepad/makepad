@@ -3,7 +3,7 @@ pub use makepad_draw::makepad_image_formats;
 pub use makepad_draw;
 
 pub use makepad_derive_widget;
-pub use makepad_platform::*;
+pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
 
 pub mod button;

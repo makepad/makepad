@@ -50,7 +50,7 @@ struct DrawWave {
     draw_super: DrawQuad,
 }
 
-#[derive(Live, Widget)]
+#[derive(Live)]
 #[live_design_fn(widget_factory!(DisplayAudio))]
 pub struct DisplayAudio {
     walk: Walk,
@@ -58,6 +58,32 @@ pub struct DisplayAudio {
     wave_texture: Texture,
     #[rust] data_offset: [usize; 32],
     #[rust([0; 32])] active: [usize; 32],
+}
+
+
+impl Widget for DisplayAudio {
+    fn handle_widget_event_fn(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
+    ) {
+        let uid = self.widget_uid();
+        self.handle_event_fn(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.draw_wave.redraw(cx)
+    }
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
 }
 
 #[derive(Clone, WidgetAction)]
@@ -107,13 +133,13 @@ impl DisplayAudio {
             let off = voice_offset + ((wave_off + i) % (WAVE_SIZE_X));
             wave_buf[off] = left_u16 << 16 | right_u16;
         }
-
+        
         self.wave_texture.swap_image_u32(cx, &mut wave_buf);
         self.data_offset[voice] = (self.data_offset[voice] + frames) % (WAVE_SIZE_X);
-        if is_active{
+        if is_active {
             self.active[voice] = 6
         }
-        if self.active[voice]>0 { 
+        if self.active[voice]>0 {
             self.draw_wave.redraw(cx);
             self.active[voice] -= 1;
         }
@@ -126,17 +152,7 @@ impl DisplayAudio {
         self.draw_wave.draw_walk(cx, walk);
     }
     
-    pub fn area(&self) -> Area {
-        self.draw_wave.area()
-    }
-    
-    
-    pub fn handle_event_fn(
-        &mut self,
-        _cx: &mut Cx,
-        _event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, DisplayAudioAction),
-    ) {
+    pub fn handle_event_fn(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, DisplayAudioAction),) {
     }
 }
 

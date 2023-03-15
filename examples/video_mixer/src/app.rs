@@ -14,18 +14,19 @@ use {
         makepad_platform::audio_stream::*,
         makepad_platform::thread::*,
         makepad_platform::video::*,
-        makepad_draw::*,
     },
     std::thread,
-    std::io::{Read, Write},
-    std::net::{UdpSocket,TcpStream, Shutdown},
+    std::io::{Read},
+    std::net::{UdpSocket, TcpStream, Shutdown},
     std::time::{Duration},
 };
 
 
 live_design!{
     import makepad_widgets::frame::*;
+    import makepad_widgets::slides_view::*;
     import makepad_draw::shader::std::*;
+    
     //import crate::video_view::VideoView;
     registry Widget::*;
     
@@ -50,7 +51,7 @@ live_design!{
                 
                 // fetch pixel
                 let data = sample2d(self.image, self.pos).xyzw;
-                if self.is_rgb > 0.5{
+                if self.is_rgb > 0.5 {
                     return vec4(data.xyz, 1.0);
                 }
                 if mod (pix.x, 2.0)>1.0 {
@@ -91,12 +92,29 @@ live_design!{
         }
     }
     AudioMixer = {{AudioMixer}} {}
+    Slide = <Slide>{
+        walk: {width: 1920.0, height: Fill}
+    }
     App = {{App}} {
         mixer: {
             channel: [2.0, 2.0, 2.0, 2.0]
         }
-        window: {ui: {inner_view = {
-            video_input1 = <VideoFrame> {
+        window: {
+            window: {position: vec2(1500, 1000)},
+            ui: {
+                inner_view = {
+                
+                    <SlidesView> {
+                        slide_width: 1920.0
+                        frame: {
+                            video_input1 = <VideoFrame> {
+                                walk: {width: 1920, height: Fill}
+                            }
+                            <Slide> {title = {text: "Portable SIMD"}, <SlideBody> {text: "For Native and Wasm"}}
+                            <Slide> {title = {text: "Intro"}, <SlideBody> {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
+                        }
+                    }
+                    /*
                 network_video = <VideoFrameRound> {
                     walk:{width:320,height:240}
                 }
@@ -105,16 +123,18 @@ live_design!{
                 chan2 = <DisplayChannel> {}
                 chan3 = <DisplayChannel> {}
                 chan4 = <DisplayChannel> {}
+                */
+                }
             }
-        }}}
+        }
         window1: {
             window: {inner_size: vec2(400, 300)},
             ui: {inner_view = {
                 video_input1 = <VideoFrame> {
-                    layout: {align: {x:1.0, y: 1.0}, padding: 50}
+                    layout: {align: {x: 1.0, y: 1.0}, padding: 50}
                     network_video = <VideoFrameRound> {
-                        draw_bg:{alpha: 0.7},
-                        walk:{width:400,height:300}
+                        draw_bg: {alpha: 0.7},
+                        walk: {width: 400, height: 300}
                     }
                 }
             }}
@@ -123,9 +143,7 @@ live_design!{
             window: {inner_size: vec2(400, 300)},
             ui: {inner_view = {
                 video_input1 = <VideoFrame> {
-                    <SlidesView>{
-                        
-                    }
+                    
                 }
             }}
         }
@@ -154,18 +172,18 @@ pub struct App {
     #[rust] audio_recv: ToUIReceiver<(usize, AudioBuffer)>,
 }
 
-pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut [u8]) -> bool{
+pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut [u8]) -> bool {
     let bytes_total = bytes.len();
     let mut bytes_left = bytes_total;
     while bytes_left > 0 {
         let buf = &mut bytes[(bytes_total - bytes_left)..bytes_total];
-        if let Ok(bytes_read) = tcp_stream.read(buf){
+        if let Ok(bytes_read) = tcp_stream.read(buf) {
             if bytes_read == 0 {
                 return true;
             }
             bytes_left -= bytes_read;
         }
-        else{
+        else {
             return true;
         }
     }
@@ -185,65 +203,65 @@ impl App {
         let sender = self.network_recv.sender();
         let restart_network = self.restart_network.clone();
         std::thread::spawn(move || {
-            loop{
+            loop {
                 let mut peer_addr = Some("192.168.1.152:42532".parse().unwrap());
-                let mut data  = [0u8;32];
+                let mut data = [0u8; 32];
                 while let Ok((_, mut addr)) = read_discovery.recv_from(&mut data) {
                     addr.set_port(42532);
-                    peer_addr = Some(addr); 
-                }  
+                    peer_addr = Some(addr);
+                }
                 // alright if we have a peer addr lets connect to it
-                if peer_addr.is_none(){
+                if peer_addr.is_none() {
                     thread::sleep(Duration::from_millis(100));
                     continue;
-                } 
-                log!("Connecting to phone {}", peer_addr.unwrap()); 
-                if let Ok(mut tcp_stream) = TcpStream::connect_timeout(&peer_addr.unwrap(),Duration::new(5,0)){
-                    tcp_stream.set_read_timeout(Some(Duration::new(2,0))).unwrap();
-                    log!("Connected to phone"); 
+                }
+                //log!("Connecting to phone {}", peer_addr.unwrap());
+                if let Ok(mut tcp_stream) = TcpStream::connect_timeout(&peer_addr.unwrap(), Duration::new(5, 0)) {
+                    tcp_stream.set_read_timeout(Some(Duration::new(2, 0))).unwrap();
+                    log!("Connected to phone {}", peer_addr.unwrap());
                     //let mut frame_count = 0;
-                    loop{ 
-                        if restart_network.check_and_clear(){
+                    loop {
+                        if restart_network.check_and_clear() {
                             break;
-                        } 
-                      //  frame_count += 1;
-                       // log!(" READ LEN");
-                        let mut len = [0u8;4];
-                        if read_exact_bytes_from_tcp_stream(&mut tcp_stream, &mut len){break;}
-                        let len:u32 = u32::from_be_bytes(len);
-                        if len == 0{
+                        }
+                        //  frame_count += 1;
+                        // log!(" READ LEN");
+                        let mut len = [0u8; 4];
+                        if read_exact_bytes_from_tcp_stream(&mut tcp_stream, &mut len) {break;}
+                        let len: u32 = u32::from_be_bytes(len);
+                        if len == 0 {
                             log!("Read failed restarting connection");
                             break;
                         }
-                        if len < 5000 || len > 100000{
+                        if len < 5000 || len > 100000 {
                             log!("Length invalid {} restarting connection", len);
                             break;
                         }
                         let mut buffer = Vec::new();
                         buffer.resize(len as usize, 0);
                         //log!(" READ DATA {}", len);
-                        if read_exact_bytes_from_tcp_stream(&mut tcp_stream, &mut buffer){break;}
+                        if read_exact_bytes_from_tcp_stream(&mut tcp_stream, &mut buffer) {break;}
                         //log!("DONE");
                         // decode jpeg
                         //log!(" DECODE JPEG");
                         //let _ = std::fs::File::create(&format!("dump.jpg")).unwrap().write(&buffer);
                         match makepad_image_formats::jpeg::decode(&buffer) {
-                            Ok(data)=>{
+                            Ok(data) => {
                                 //let _ = std::fs::File::create(&format!("dump{frame_count}.jpg")).unwrap().write(&buffer);
-                                let _= sender.send(data);
-                            } 
-                            Err(e)=>{
+                                let _ = sender.send(data);
+                            }
+                            Err(e) => {
                                 log!("JPEG DECODE ERROR {}", e);
                             }
                         }
-                       // log!(" DONE");
+                        // log!(" DONE");
                     }
                     let _ = tcp_stream.shutdown(Shutdown::Both);
                 }
                 thread::sleep(Duration::from_millis(300));
             }
         });
-    }  
+    }
     
     pub fn start_inputs(&mut self, cx: &mut Cx) {
         let (send, mut recv) = AudioStreamSender::create_pair(1, 1);
@@ -270,10 +288,10 @@ impl App {
             // now lets mix our inputs we combine every input
             for j in 0..output.frame_count() {
                 let audio =
-                input1.channel(0)[j] * mixer.channel[0].get()* mixer.gain[0].get()
-                    + input1.channel(1)[j] * mixer.channel[1].get()* mixer.gain[1].get()
-                    + input2.channel(0)[j] * mixer.channel[2].get()* mixer.gain[2].get()
-                    + input2.channel(1)[j] * mixer.channel[3].get()* mixer.gain[3].get();
+                input1.channel(0)[j] * mixer.channel[0].get() * mixer.gain[0].get()
+                    + input1.channel(1)[j] * mixer.channel[1].get() * mixer.gain[1].get()
+                    + input2.channel(0)[j] * mixer.channel[2].get() * mixer.gain[2].get()
+                    + input2.channel(1)[j] * mixer.channel[3].get() * mixer.gain[3].get();
                 output.channel_mut(0)[j] = audio * 5.0;
                 output.channel_mut(1)[j] = audio * 5.0;
             }
@@ -287,7 +305,7 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::Signal => {
-                while let Ok(mut nw_image) = self.network_recv.try_recv(){
+                while let Ok(mut nw_image) = self.network_recv.try_recv() {
                     self.video_network.set_desc(cx, TextureDesc {
                         format: TextureFormat::ImageBGRA,
                         width: Some(nw_image.width),
@@ -318,7 +336,7 @@ impl App {
                             if cc.param == 14 {self.mixer.gain[1].set(cc.value as f32 / 63.0)};
                             if cc.param == 15 {self.mixer.gain[2].set(cc.value as f32 / 63.0)};
                             if cc.param == 16 {self.mixer.gain[3].set(cc.value as f32 / 63.0)};
-                            if cc.param == 28 && cc.value == 127{
+                            if cc.param == 28 && cc.value == 127 {
                                 self.restart_network.set();
                             }
                         }
