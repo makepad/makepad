@@ -126,7 +126,7 @@ live_design!{
 }
 
 #[derive(Live)]
-#[live_design_fn(widget_factory!(DesktopButton))]
+#[live_design_with{widget_factory!(cx, DesktopButton)}]
 pub struct DesktopButton {
     state: State,
     walk: Walk,
@@ -135,14 +135,14 @@ pub struct DesktopButton {
 }
 
 impl Widget for DesktopButton{
-   fn handle_widget_event_fn(
+   fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
         });
     }
@@ -194,7 +194,7 @@ impl LiveHook for DesktopButton {
 }
 
 impl DesktopButton {
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.state_handle_event(cx, event);
 
         match event.hits(cx, self.draw_bg.area()) {

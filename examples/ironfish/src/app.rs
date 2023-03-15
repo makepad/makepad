@@ -1,25 +1,15 @@
+use crate::{
+    makepad_widgets::*,
+    makepad_audio_graph::*,
+    makepad_platform::midi::*,
+    
+    makepad_synth_ironfish::ironfish::*,
+    makepad_audio_widgets::piano::*,
+    sequencer::*,
+    makepad_audio_widgets::display_audio::*
+};
 
-pub use makepad_audio_widgets::makepad_widgets;
-pub use makepad_widgets::makepad_platform;
-pub use makepad_platform::makepad_math;
-pub use makepad_synth_ironfish;
-pub use makepad_synth_ironfish::makepad_audio_graph;
-
-use makepad_widgets::*;
-use makepad_draw::*;
-use makepad_audio_graph::*;
-use makepad_platform::midi::*;
-
-mod sequencer;
-mod app_desktop;
-mod app_mobile;
-
-use makepad_synth_ironfish::ironfish::*;
-use makepad_audio_widgets::piano::*;
-use crate::sequencer::*;
-use makepad_audio_widgets::display_audio::*;
-
-//use std::fs::File;  
+//use std::fs::File;
 //use std::io::prelude::*;
 live_design!{
     import makepad_example_ironfish::app_desktop::AppDesktop
@@ -38,12 +28,20 @@ live_design!{
             }
         }
         
-        ui: <AppDesktop>{}
+        ui: <AppDesktop> {}
     }
 }
 app_main!(App);
 
 #[derive(Live)]
+#[live_design_with {
+    crate::makepad_audio_widgets::live_design(cx);
+    crate::makepad_audio_graph::live_design(cx);
+    crate::makepad_synth_ironfish::live_design(cx);
+    crate::sequencer::live_design(cx);
+    crate::app_desktop::live_design(cx);
+    crate::app_mobile::live_design(cx);
+}]
 pub struct App {
     ui: FrameRef,
     audio_graph: AudioGraph,
@@ -59,14 +57,6 @@ impl LiveHook for App {
 }
 
 impl App {
-    pub fn live_design(cx: &mut Cx) {
-        makepad_audio_widgets::live_design(cx);
-        makepad_audio_graph::live_design(cx);
-        makepad_synth_ironfish::live_design(cx);
-        crate::sequencer::live_design(cx);
-        crate::app_desktop::live_design(cx);
-        crate::app_mobile::live_design(cx);
-    }
     
     pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, actions: &WidgetActions) {
         let mut db = db.borrow_cx(cx, &self.ui, actions);
@@ -190,7 +180,19 @@ impl App {
         data_to_apply!(db, volume_envelope.r => vol_env.display, draw_bg.release => | v | v);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+    pub fn draw(&mut self, cx: &mut Cx2d) {
+        if self.window.begin(cx).is_not_redrawing() {
+            return;
+        }
+        
+        while self.ui.draw(cx).is_not_done() {};
+        
+        self.window.end(cx);
+    }
+}
+
+impl AppMain for App {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
         if let Event::Draw(event) = event {
             return self.draw(&mut Cx2d::new(cx, event));
@@ -217,7 +219,7 @@ impl App {
         }
         
         if let Event::AudioDevices(devices) = event {
-            //log!("{}", devices); 
+            //log!("{}", devices);
             cx.use_audio_outputs(&devices.default_output());
         }
         
@@ -250,7 +252,7 @@ impl App {
         let display_audio = ui.get_display_audio(id!(display_audio));
         
         let mut buffers = 0;
-        self.audio_graph.handle_event_fn(cx, event, &mut | cx, action | {
+        self.audio_graph.handle_event_with(cx, event, &mut | cx, action | {
             match action {
                 AudioGraphAction::DisplayAudio {buffer, voice, ..} => {
                     display_audio.process_buffer(cx, None, voice, buffer);
@@ -340,14 +342,4 @@ impl App {
         }
     }*/
     
-    
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx).is_not_redrawing() {
-            return;
-        }
-        
-        while self.ui.draw(cx).is_not_done() {};
-        
-        self.window.end(cx);
-    }
 }

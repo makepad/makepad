@@ -1897,7 +1897,9 @@ live_design!{
 
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(audio_component!(IronFish))]
+#[live_design_with{
+    audio_component!(cx, IronFish)
+}]
 pub struct IronFish {
     pub settings: Arc<IronFishSettings>,
     //#[rust] to_ui: ToUIReceiver<ToUI>,
@@ -1993,7 +1995,7 @@ impl AudioComponent for IronFish {
         })
     }
     
-    fn handle_event_fn(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
     }
     // we dont have inputs
     fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult {

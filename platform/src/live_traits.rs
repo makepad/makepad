@@ -37,7 +37,7 @@ pub trait LiveHook {
 pub trait LiveNew: LiveApply {
     fn new(cx: &mut Cx) -> Self;
     
-    fn live_design(_cx: &mut Cx) {}
+    fn live_design_with(_cx: &mut Cx) {}
     
     fn live_type_info(cx: &mut Cx) -> LiveTypeInfo;
     

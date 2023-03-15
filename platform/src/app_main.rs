@@ -1,4 +1,11 @@
 
+use crate::event::Event;
+use crate::cx::Cx;
+
+pub trait AppMain{
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event);
+}
+
 #[macro_export]
 macro_rules!app_main {
     ( $ app: ident) => {
@@ -10,8 +17,7 @@ macro_rules!app_main {
                 if let Event::Construct = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
                 }
-                
-                app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
+                <AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }));
             live_design(&mut cx);
             cx.init();

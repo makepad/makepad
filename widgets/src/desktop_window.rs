@@ -162,11 +162,11 @@ impl DesktopWindow {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<DesktopWindowEvent> {
         let mut a = Vec::new();
-        self.handle_event_fn(cx, event, &mut | _, v | a.push(v));
+        self.handle_event_with(cx, event, &mut | _, v | a.push(v));
         a
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowEvent)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowEvent)) {
         
         self.debug_view.handle_event(cx, event);
         self.nav_control.handle_event(cx, event, self.main_view.draw_list_id());

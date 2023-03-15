@@ -1,8 +1,3 @@
-pub use makepad_audio_widgets;
-pub use makepad_audio_widgets::makepad_widgets;
-pub use makepad_widgets::makepad_platform;
-pub use makepad_micro_serde;
-
 use {
     crate::{
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
@@ -10,7 +5,6 @@ use {
         makepad_widgets::*,
         makepad_platform::thread::*,
         makepad_platform::video::*,
-        makepad_draw::*,
     },
     std::io::Write,
     std::sync::{Arc, Mutex},
@@ -76,6 +70,9 @@ app_main!(App);
 
 
 #[derive(Live, LiveHook)]
+#[live_design_with{
+    crate::makepad_audio_widgets::live_design(cx);
+}]      
 pub struct App {
     window: DesktopWindow,
     video_input1: Texture,
@@ -106,11 +103,66 @@ pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u
     false
 }
 
+impl AppMain for App{
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::Signal => {
+                if let Ok(mut vfb) = self.video_recv.try_recv_flush() {
+                    self.video_input1.set_desc(cx, TextureDesc {
+                        format: TextureFormat::ImageBGRA,
+                        width: Some(vfb.format.width),
+                        height: Some(vfb.format.height)
+                    });
+                    let image_size = [vfb.format.width as f32, vfb.format.height as f32];
+                    let mut is_rgb = [0.0];
+                    if let Some(buf) = vfb.as_vec_u32() {
+                        self.video_input1.swap_image_u32(cx, buf);
+                    }
+                    else if let Some(buf) = vfb.as_vec_u8() { // lets decode a jpeg for the fun of it
+                        
+                        match makepad_image_formats::jpeg::decode(buf) {
+                            Ok(mut data)=>{
+                                is_rgb = [1.0];
+                                self.video_input1.swap_image_u32(cx,&mut data.data);
+                            }
+                            Err(e)=>{ 
+                                log!("JPEG DECODE ERROR {}", e);
+                            }
+                        }
+                        *self.send_video_buffer.lock().unwrap() = Some(vfb);
+                    }
+                    
+                    for v in [
+                        self.window.ui.get_frame(id!(video_input1)),
+                    ] {
+                        v.set_texture(0, &self.video_input1);
+                        v.set_uniform(cx, id!(image_size), &image_size);
+                        v.set_uniform(cx, id!(is_rgb), &is_rgb);
+                        v.redraw(cx);
+                    }
+                }
+            }
+            Event::Draw(event) => {
+                return self.draw(&mut Cx2d::new(cx, event));
+            }
+            Event::Construct => {
+                self.start_inputs(cx);
+                self.start_network_stack(cx);
+            }
+            Event::VideoInputs(devices) => {
+                //log!("Got devices! {:?}", devices);
+                cx.use_video_input(&devices.find_format(0, 640, 480, VideoPixelFormat::MJPEG));
+            }
+            _ => ()
+        }
+        
+        self.window.handle_event(cx, event);
+    }    
+}
+
 impl App {
-    pub fn live_design(cx: &mut Cx) {
-        makepad_audio_widgets::live_design(cx);
-    }
-    
+  
     pub fn start_inputs(&mut self, cx: &mut Cx) {
         let video_sender = self.video_recv.sender();
         cx.video_input(0, move | img | {
@@ -174,60 +226,6 @@ impl App {
         });
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        match event {
-            Event::Signal => {
-                if let Ok(mut vfb) = self.video_recv.try_recv_flush() {
-                    self.video_input1.set_desc(cx, TextureDesc {
-                        format: TextureFormat::ImageBGRA,
-                        width: Some(vfb.format.width),
-                        height: Some(vfb.format.height)
-                    });
-                    let image_size = [vfb.format.width as f32, vfb.format.height as f32];
-                    let mut is_rgb = [0.0];
-                    if let Some(buf) = vfb.as_vec_u32() {
-                        self.video_input1.swap_image_u32(cx, buf);
-                    }
-                    else if let Some(buf) = vfb.as_vec_u8() { // lets decode a jpeg for the fun of it
-                        
-                        match makepad_image_formats::jpeg::decode(buf) {
-                            Ok(mut data)=>{
-                                is_rgb = [1.0];
-                                self.video_input1.swap_image_u32(cx,&mut data.data);
-                            }
-                            Err(e)=>{ 
-                                log!("JPEG DECODE ERROR {}", e);
-                            }
-                        }
-                        *self.send_video_buffer.lock().unwrap() = Some(vfb);
-                    }
-                    
-                    for v in [
-                        self.window.ui.get_frame(id!(video_input1)),
-                    ] {
-                        v.set_texture(0, &self.video_input1);
-                        v.set_uniform(cx, id!(image_size), &image_size);
-                        v.set_uniform(cx, id!(is_rgb), &is_rgb);
-                        v.redraw(cx);
-                    }
-                }
-            }
-            Event::Draw(event) => {
-                return self.draw(&mut Cx2d::new(cx, event));
-            }
-            Event::Construct => {
-                self.start_inputs(cx);
-                self.start_network_stack(cx);
-            }
-            Event::VideoInputs(devices) => {
-                //log!("Got devices! {:?}", devices);
-                cx.use_video_input(&devices.find_format(0, 640, 480, VideoPixelFormat::MJPEG));
-            }
-            _ => ()
-        }
-        
-        self.window.handle_event(cx, event);
-    }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
         if self.window.begin(cx).is_redrawing() {

@@ -51,7 +51,7 @@ struct DrawWave {
 }
 
 #[derive(Live)]
-#[live_design_fn(widget_factory!(DisplayAudio))]
+#[live_design_with{widget_factory!(cx, DisplayAudio)}]
 pub struct DisplayAudio {
     walk: Walk,
     draw_wave: DrawWave,
@@ -62,14 +62,14 @@ pub struct DisplayAudio {
 
 
 impl Widget for DisplayAudio {
-    fn handle_widget_event_fn(
+    fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
         });
     }
@@ -152,7 +152,7 @@ impl DisplayAudio {
         self.draw_wave.draw_walk(cx, walk);
     }
     
-    pub fn handle_event_fn(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, DisplayAudioAction),) {
+    pub fn handle_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, DisplayAudioAction),) {
     }
 }
 

@@ -60,8 +60,8 @@ pub struct LinkLabel {
 
 impl LinkLabel {
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
-        self.button.handle_event_fn(cx, event, dispatch_action)
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
+        self.button.handle_event_with(cx, event, dispatch_action)
     }
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {

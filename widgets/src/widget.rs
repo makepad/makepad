@@ -23,7 +23,7 @@ pub trait WidgetDesign{
 }
 
 pub trait Widget: LiveApply {
-    fn handle_widget_event_fn(
+    fn handle_widget_event_with(
         &mut self,
         _cx: &mut Cx,
         _event: &Event,
@@ -32,7 +32,7 @@ pub trait Widget: LiveApply {
     
     fn handle_widget_event(&mut self, cx: &mut Cx, event: &Event) -> WidgetActions {
         let mut actions = Vec::new();
-        self.handle_widget_event_fn(cx, event, &mut | _, action | {
+        self.handle_widget_event_with(cx, event, &mut | _, action | {
             actions.push(action);
         });
         actions
@@ -215,9 +215,9 @@ impl WidgetRef {
         }
     }
     
-    pub fn handle_widget_event_fn(&self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    pub fn handle_widget_event_with(&self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.handle_widget_event_fn(cx, event, dispatch_action)
+            return inner.handle_widget_event_with(cx, event, dispatch_action)
         }
     }
     
@@ -480,15 +480,15 @@ impl<T: Clone> DrawStateWrap<T> {
 
 #[macro_export]
 macro_rules!widget_factory {
-    ( $ ty: ty) => {
-        | cx: &mut Cx | {
+    ( $cx:ident, $ ty: ty) => {
+        {
             struct Factory();
             impl WidgetFactory for Factory {
                 fn new(&self, cx: &mut Cx) -> Box<dyn Widget> {
                     Box::new(< $ ty>::new(cx))
                 }
             }
-            register_component_factory!(cx, WidgetRegistry, $ ty, Factory);
+            register_component_factory!($cx, WidgetRegistry, $ ty, Factory);
         }
     }
 }

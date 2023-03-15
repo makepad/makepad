@@ -18,7 +18,9 @@ live_design!{
 enum FromUI {}
 
 #[derive(Live)]
-#[live_design_fn(audio_component!(Instrument))]
+#[live_design_with{
+    audio_component!(cx, Instrument)
+}]
 struct Instrument {
     #[rust] step_order: Vec<LiveId>,
     #[rust] steps: ComponentMap<LiveId, AudioComponentRef>,
@@ -113,10 +115,10 @@ impl AudioComponent for Instrument {
         })
     }
     
-    fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         for step in self.steps.values_mut(){
             if let Some(step) = step.as_mut(){
-                step.handle_event_fn(cx, event, dispatch_action)
+                step.handle_event_with(cx, event, dispatch_action)
             }
         }
     }

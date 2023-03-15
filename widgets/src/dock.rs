@@ -284,7 +284,7 @@ impl Dock {
                 Panel::Split(panel) => {
                     panel
                         .splitter
-                        .handle_event_fn(cx, event, &mut | cx, action | match action {
+                        .handle_event_with(cx, event, &mut | cx, action | match action {
                         SplitterAction::Changed {axis, align} => {
                             dispatch_action(cx, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align});
                         },
@@ -295,7 +295,7 @@ impl Dock {
                     let mut redraw = false;
                     panel
                         .tab_bar
-                        .handle_event_fn(cx, event, &mut | cx, action | match action {
+                        .handle_event_with(cx, event, &mut | cx, action | match action {
                         TabBarAction::ReceivedDraggedItem(item) => dispatch_action(
                             cx,
                             DockAction::TabBarReceivedDraggedItem(*panel_id, item),

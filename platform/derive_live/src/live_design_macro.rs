@@ -26,7 +26,7 @@ pub fn live_design_impl(input: TokenStream) -> TokenStream {
         tb.add("        live_type_infos:{");
         tb.add("            let mut v = Vec::new();");
         for live_type in &live_types {
-            tb.stream(Some(live_type.clone())).add("::live_design(cx);");
+            tb.stream(Some(live_type.clone())).add("::live_design_with(cx);");
             tb.add("        v.push(").stream(Some(live_type.clone())).add("::live_type_info(cx));");
         }
         tb.add("            v");
