@@ -102,7 +102,7 @@ pub struct DrawSplitter {
 }
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(Splitter))]
+#[live_design_with{widget_factory!(cx, Splitter)}]
 pub struct Splitter {
     #[live(Axis::Horizontal)] pub axis: Axis,
     #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
@@ -135,7 +135,7 @@ enum DrawState {
 }
 
 impl Widget for Splitter {
-   fn handle_widget_event_fn(
+   fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -143,12 +143,12 @@ impl Widget for Splitter {
     ) {
         let mut redraw = false;
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
             redraw = true;
         });
-        self.a.handle_widget_event_fn(cx, event, dispatch_action);
-        self.b.handle_widget_event_fn(cx, event, dispatch_action);
+        self.a.handle_widget_event_with(cx, event, dispatch_action);
+        self.b.handle_widget_event_with(cx, event, dispatch_action);
         if redraw {
             self.a.redraw(cx);
             self.b.redraw(cx);
@@ -247,7 +247,7 @@ impl Splitter {
         self.align = align;
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,

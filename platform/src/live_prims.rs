@@ -35,6 +35,7 @@ macro_rules!live_primitive {
             $ apply
         }
         impl LiveNew for $ ty {
+            fn live_design_with(_cx:&mut Cx){}
             fn new(_cx: &mut Cx) -> Self {
                 $ default
             }

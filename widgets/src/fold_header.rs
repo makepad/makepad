@@ -43,7 +43,7 @@ live_design!{
 }
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(FoldHeader))]
+#[live_design_with{widget_factory!(cx, FoldHeader)}]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] rect_size: f64,
@@ -64,7 +64,7 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
-    fn handle_widget_event_fn(
+    fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -91,7 +91,7 @@ impl Widget for FoldHeader {
             dispatch_action(cx, item)
         }
         
-        self.body.handle_widget_event_fn(cx, event, dispatch_action);
+        self.body.handle_widget_event_with(cx, event, dispatch_action);
     }
     
     fn redraw(&mut self, cx: &mut Cx) {

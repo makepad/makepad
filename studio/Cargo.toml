@@ -15,5 +15,3 @@ makepad-editor-core = {path="./editor_core", version="0.3.0"}
 makepad-collab-protocol = {path="./collab_protocol", version="0.3.0"}
 makepad-collab-server = {path="./collab_server", version="0.3.0"}
 
-[lib]
-path = "src/app.rs"

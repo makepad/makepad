@@ -145,7 +145,7 @@ pub enum CheckType {
 }
 
 #[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(CheckBox))]
+#[live_design_with{widget_factory!(cx, CheckBox)}]
 pub struct CheckBox {
     draw_check: DrawCheckBox,
     
@@ -171,7 +171,7 @@ pub enum CheckBoxAction {
 
 impl CheckBox {
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CheckBoxAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CheckBoxAction)) {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.draw_check.area()) {
@@ -234,9 +234,9 @@ impl Widget for CheckBox {
         self.draw_check.redraw(cx);
     }
     
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }

@@ -347,13 +347,17 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        }");
         tb.add("    }");
         
-        tb.add("    fn live_design(cx: &mut Cx) {");
+        tb.add("    fn live_design_with(cx: &mut Cx) {");
         
-        for attr in main_attribs.iter().filter( | attr | attr.name == "live_design_fn") {
+        for attr in main_attribs.iter().filter( | attr | attr.name == "live_design_with") {
             if attr.args.is_none() {
-                return error_result("live_design needs an argument")
+                return error_result("live_design_with needs an argument")
             }
-            tb.add("(").stream(attr.args.clone()).add(")(cx);");
+            tb.stream(attr.args.clone()).add(";");
+            /*
+            tb.add("let cb:Fn(&mut Cx) = (").stream(attr.args.clone()).add(");");
+            tb.add("cb(").stream(attr.args.clone()).add(")(cx);");
+            */
         }
         
         // we need this here for shader enums to register without hassle
@@ -362,10 +366,10 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             if attr.name == "live" || attr.name == "calc" {
                 match unwrap_option(field.ty.clone()) {
                     Ok(inside) => {
-                        tb.add("<").stream(Some(inside)).add("as LiveNew>::live_design(cx);");
+                        tb.add("<").stream(Some(inside)).add("as LiveNew>::live_design_with(cx);");
                     }
                     Err(not_option) => {
-                        tb.add("<").stream(Some(not_option)).add("as LiveNew>::live_design(cx);");
+                        tb.add("<").stream(Some(not_option)).add("as LiveNew>::live_design_with(cx);");
                     }
                 }
             }
@@ -491,7 +495,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        }");
         tb.add("    }");
         
-        tb.add("    fn live_design(cx: &mut Cx) {");
+        tb.add("    fn live_design_with(cx: &mut Cx) {");
         
         
         let is_u32_enum = main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();

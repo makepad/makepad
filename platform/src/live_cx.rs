@@ -167,22 +167,21 @@ impl Cx {
     
     // ok so now what. now we should run the expansion
     pub fn live_expand(&mut self) {
-        // lets expand the f'er
         let mut errs = Vec::new();
         let mut live_registry = self.live_registry.borrow_mut();
+        /*
+        for file in &live_registry.live_files {
+            log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
+        }*/
         live_registry.expand_all_documents(&mut errs);
         for err in errs {
             error!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }
-        // lets dump our main doc
-        // ok now we scan for all dependencies and store them on Cx.
     }
     
     pub fn live_scan_dependencies(&mut self) {
         let live_registry = self.live_registry.borrow();
-        
         for file in &live_registry.live_files {
-           //log!("{}. {}", file.module_id.0, file.module_id.1);
             for node in &file.original.nodes {
                 match &node.value {
                     LiveValue::Dependency {..} => {

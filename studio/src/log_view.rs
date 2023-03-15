@@ -76,12 +76,12 @@ impl LogView {
         self.log_list.end(cx);
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
-        self.log_list.handle_event_fn(cx, event, &mut |_,_|{})
+        self.log_list.handle_event_with(cx, event, &mut |_,_|{})
     }
 }

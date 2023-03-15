@@ -95,7 +95,7 @@ pub struct SeqButton {
 pub struct SeqButtonId(pub LiveId);
 
 #[derive(Live)]
-#[live_design_fn(widget_factory!(Sequencer))]
+#[live_design_with{widget_factory!(cx, Sequencer)}]
 pub struct Sequencer {
     #[rust] area: Area,
     walk: Walk,
@@ -140,7 +140,7 @@ impl SeqButton {
         self.state.is_in_state(cx, id!(active.on))
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -222,14 +222,14 @@ impl Sequencer {
         cx.set_key_focus(self.area);
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, SequencerAction),
     ) {
         for button in self.buttons.values_mut() {
-            button.handle_event_fn(cx, event, self.area, dispatch_action);
+            button.handle_event_with(cx, event, self.area, dispatch_action);
         }
         
         match event.hits(cx, self.area) {
@@ -277,9 +277,9 @@ impl Widget for Sequencer {
     
     fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
     
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
