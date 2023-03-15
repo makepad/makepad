@@ -133,7 +133,7 @@ pub struct PianoKey {
     state: State,
 }
 
-#[derive(Live, Widget)]
+#[derive(Live)]
 #[live_design_fn(widget_factory!(Piano))]
 pub struct Piano {
     #[rust] area: Area,
@@ -303,11 +303,7 @@ impl Piano {
         self.white_keys.retain_visible();
         self.black_keys.retain_visible();
     }
-    
-    pub fn area(&mut self)->Area{
-        self.area
-    }
-    
+       
     pub fn set_key_focus(&self, cx: &mut Cx) {
         cx.set_key_focus(self.area);
     }
@@ -439,6 +435,31 @@ impl Piano {
             }
             _ => ()
         }
+    }
+}
+
+impl Widget for Piano{
+   fn handle_widget_event_fn(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
+    ) {
+        let uid = self.widget_uid();
+        self.handle_event_fn(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
+        });
+    }
+
+    fn get_walk(&self)->Walk{self.walk}
+    
+    fn redraw(&mut self, cx:&mut Cx){
+        self.area.redraw(cx)
+    }
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk(cx, walk);
+        WidgetDraw::done()
     }
 }
 

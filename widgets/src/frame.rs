@@ -485,10 +485,6 @@ impl FrameRef {
         self.0.handle_widget_event(cx, event)
     }
     
-    /*pub fn template(&self, cx: &mut Cx, path: &[LiveId], new_id: &[LiveId; 1], nodes: &[LiveNode]) -> WidgetRef {
-        self.0.template(cx, path, new_id, nodes)
-    }*/
-    
     pub fn draw(&self, cx: &mut Cx2d,) -> WidgetDraw {
         if let Some(mut inner) = self.inner_mut() {
             return inner.draw(cx)
