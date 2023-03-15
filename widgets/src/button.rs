@@ -129,7 +129,7 @@ pub enum ButtonAction {
     Release
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Live, LiveHook)]
 #[live_design_fn(widget_factory!(Button))]
 pub struct Button {
     state: State,
@@ -141,6 +141,31 @@ pub struct Button {
     
     layout: Layout,
     text: String
+}
+
+impl Widget for Button{
+   fn handle_widget_event_fn(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
+    ) {
+        let uid = self.widget_uid();
+        self.handle_event_fn(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
+        });
+    }
+
+    fn get_walk(&self)->Walk{self.walk}
+    
+    fn redraw(&mut self, cx:&mut Cx){
+        self.draw_bg.redraw(cx)
+    }
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
@@ -182,8 +207,6 @@ impl Button {
             _ => ()
         };
     }
-    
-    pub fn area(&self)->Area{self.draw_bg.area()}
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);

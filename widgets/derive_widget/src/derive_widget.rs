@@ -27,7 +27,7 @@ pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
     }
     return parser.unexpected()
 }
-
+/*
 pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
@@ -51,7 +51,7 @@ pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
             tb.add("        self.area().redraw(cx)");
             tb.add("    }");
             tb.add("    fn get_walk(&self) -> Walk {");
-            tb.add("        self.walk");
+            tb.add("        self.get_widget_walk()");
             tb.add("    }");
             tb.add("    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {");
             tb.add("        let _= self.draw_walk(cx, walk);");
@@ -62,7 +62,7 @@ pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
         }
     }
     return parser.unexpected()
-}
+}*/
 
 pub fn camel_case_to_snake_case(inp: &str) -> String {
     let mut out = String::new();
@@ -104,7 +104,11 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("        &self.0");
             tb.add("    }");
             tb.add("}");
-            
+            tb.add("impl std::ops::DerefMut for ").ident(&struct_name).add("{");
+            tb.add("    fn deref_mut(&mut self)->&mut Self::Target{");
+            tb.add("        &mut self.0");
+            tb.add("    }");
+            tb.add("}");
             tb.add("impl").ident(&struct_name).add("{");
             
             tb.add("   pub fn inner(&self) -> Option<std::cell::Ref<'_, ").ident(clean_name).add(" >> {");
