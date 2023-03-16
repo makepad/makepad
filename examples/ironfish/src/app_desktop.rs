@@ -1813,6 +1813,7 @@ live_design!{
                 layout: { spacing: (SSPACING_1) }
 
                 panic = <FishButton> { text: "Panic" }
+                platformtoggle = <FishButton> { text: "Mobile" }
                 presets = <FishButton> { text: "Browse", walk: {width: Fit } }
                 <FishButton> { text: "←" }
                 <FishButton> { text: "→" }
