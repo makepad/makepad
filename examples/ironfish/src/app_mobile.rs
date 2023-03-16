@@ -400,6 +400,13 @@ live_design!{
                 text: "Share"
                 walk: {width: Fit, height: Fit, margin: {top: 2}}
             }
+
+            platformtoggle = <FishButton> { text: "Desktop" }
+
+            share = <FishButton> {
+                text: "Share"
+                walk: {width: Fit, height: Fit, margin: {top: 2}}
+            }
             // grid_up = <FishButton> {
             //     text: "↑"
             //     walk: {width: Fit, height: Fit}
