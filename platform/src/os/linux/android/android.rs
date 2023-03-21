@@ -325,6 +325,9 @@ impl Cx {
                 CxOsOp::ShowTextIME(area, pos) => {
                     to_java.show_text_ime();
                 },
+                CxOsOp::HideTextIME => {
+                    to_java.hide_text_ime();
+                },
                 _ => ()
             }
         }  
