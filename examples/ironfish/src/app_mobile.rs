@@ -11,6 +11,18 @@ live_design!{
     const SPACING_CONTROLS = 7.5;
     const SPACING_BASE_PADDING = 6.0;
     
+    const SSPACING_0 = 0.0
+    const SSPACING_1 = 4.0
+    const SSPACING_2 = (SSPACING_1 * 2)
+    const SSPACING_3 = (SSPACING_1 * 3)
+    const SSPACING_4 = (SSPACING_1 * 4)
+
+    SPACING_0 = {top: (SSPACING_0), right: (SSPACING_0), bottom: (SSPACING_0), left: (SSPACING_0)}
+    SPACING_1 = {top: (SSPACING_1), right: (SSPACING_1), bottom: (SSPACING_1), left: (SSPACING_1)}
+    SPACING_2 = {top: (SSPACING_2), right: (SSPACING_2), bottom: (SSPACING_2), left: (SSPACING_2)}
+    SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
+    SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
+
     const COLOR_CLEAR = #x3;
     
     const COLOR_PLAYARROW_INNER = #xFFFDDDFF;
@@ -83,7 +95,7 @@ live_design!{
         draw_label: {
             color_selected: (COLOR_UP_8),
             color_unselected: (COLOR_UP_6),
-            color_unselected_hover: (COLOR_UP_8),
+            color_unselected_hover: (COLOR_UP_6),
             text_style:
             {
                 font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"},
@@ -147,15 +159,7 @@ live_design!{
         draw_label: {
             text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}
             fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        (COLOR_UP_6),
-                        (COLOR_UP_6),
-                        self.hover
-                    ),
-                    (COLOR_UP_6),
-                    self.pressed
-                )
+                return mix( (COLOR_UP_6), (COLOR_UP_6), self.pressed )
             }
         }
         
@@ -276,7 +280,7 @@ live_design!{
                     let sz = 7.0;
                     let c = vec2(left + sz, self.rect_size.y * 0.5);
                     sdf.box(left, c.y - sz, sz * 2.0, sz * 2.2, 1.5); // rounding = 3rd value
-                    sdf.fill_keep(mix((COLOR_CONTROL_INSET), (COLOR_CONTROL_INSET) * 0.1, pow(self.pos.y, 1.)))
+                    sdf.fill_keep(#f00)
                     sdf.stroke(mix((COLOR_DOWN_3), (COLOR_UP_FULL), pow(self.pos.y, 3.0)), 1.0) // outline
                     
                     let szs = sz * 0.5;
@@ -343,6 +347,93 @@ live_design!{
         }
     }
     
+    FishToggle = <ElementBox> {
+        layout: { padding: <SPACING_0> {} }
+        checkbox = <CheckBox> {
+            layout: { padding: { top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23 } }
+            label: "CutOff1"
+            label_walk: { margin: {left: 45.0, top: 8, bottom: 8, right: 10} }
+            state: {
+                selected = {
+                    default: off
+                    off = {
+                        from: {all: Forward {duration: 0.1}}
+                        apply: {draw_check: {selected: 0.0}}
+                    }
+                    on = {
+                        cursor: Arrow,
+                        from: {all: Forward {duration: 0.1}}
+                        apply: {draw_check: {selected: 1.0}}
+                    }
+                }
+            }
+            draw_check: {
+                instance border_width: 1.0
+                instance border_color: #x06
+                instance border_color2: #xFFFFFF0A
+                size: 8.5;
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    let sz = self.size;
+                    let left = sz + 1.;
+                    let c = vec2(left + sz, self.rect_size.y * 0.5);
+                    sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
+
+                    sdf.stroke_keep( (COLOR_UP_3), 1.25 )
+
+                    sdf.fill( (COLOR_UP_OFF))
+                    let isz = sz * 0.65;
+                    sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
+                    sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
+                    sdf.subtract();
+                    sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
+                    sdf.blend(self.selected)
+                    sdf.fill(#xFFF8);
+                    return sdf.result
+                }
+            }
+            draw_label: {
+                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                color: (COLOR_UP_5)
+            }
+        }
+    }
+    
+    PresetFavorite = <CheckBox> {
+        draw_check: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+
+                let left = 1;
+                let sz = self.rect_size.x / 2;
+                let c = vec2(sz, sz);
+
+                let csz = 4.0;
+                sdf.circle(csz, csz, csz);
+                sdf.circle(csz * 3, csz, csz);
+                sdf.union();
+
+                let squeeze = sz * 0.025;
+                let top_offset = 0.6;
+                // let top_offset = 0.6;
+                sdf.move_to(c.x - sz + squeeze + 1.0, c.y - (sz * top_offset));
+                sdf.line_to(c.x - sz * 0.5, c.y - (sz * 0.8));
+                sdf.line_to(c.x - squeeze, c.y - (sz * top_offset));
+                sdf.line_to(c.x * 0.5, c.y);
+                sdf.close_path();
+                
+                sdf.fill_keep(mix(#141414, #888, self.selected))
+
+                return sdf.result
+            }
+        }
+        draw_label: {
+            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+            color: (COLOR_UP_6)
+        }
+    }
+
+
     SequencerControls = <Box> {
         layout: {flow: Right, padding: 0, spacing: (SPACING_CONTROLS), align: {x: 0.0, y: 0.5}}
         walk: {width: Fill, height: Fit, margin: {top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS)}}
@@ -392,6 +483,17 @@ live_design!{
             walk: {width: Fit, height: Fill}
             layout: {align: {x: 0.0, y: 0.5}, spacing: (SPACING_CONTROLS)}
             
+            arp = <FishToggle> {
+                walk: { margin: <SPACING_0> {} }
+                layout: { padding: <SPACING_0> {} }
+                checkbox = {
+                    label: "Arp"
+                    layout: { padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_0)}}
+                    walk: { margin: <SPACING_0> {} }
+                }
+                walk: {width: Fit, height: Fit, margin: <SPACING_0> {}}
+            }
+
             clear_grid = <FishButton> {
                 text: "Clear"
                 walk: {width: Fit, height: Fit, margin: {top: 2}}
@@ -522,15 +624,7 @@ live_design!{
         draw_label: {
             text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}
             fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        (COLOR_UP_6),
-                        (COLOR_UP_6),
-                        self.hover
-                    ),
-                    (COLOR_UP_6),
-                    self.pressed
-                )
+                return mix( (COLOR_UP_6), (COLOR_UP_6), self.pressed )
             }
         }
         
@@ -642,7 +736,7 @@ live_design!{
                 layout: {flow: Down}
                 walk: {width: Fill, height: 200}
                 draw_bg: {
-                    color: COLOR_UP_2,
+                    color: (COLOR_UP_2),
                     radius: 5.0
                 }
                 
@@ -729,27 +823,19 @@ live_design!{
     }
     
     PresetListEntry = <Frame> {
-        layout: {flow: Down, padding: {top: 5, right: 20, bottom: 5, left: 20}}
-        walk: {width: Fill, height: Fit}
-        
+        layout: {flow: Down, padding: {top: 0, right: 5, bottom: 5, left: 5}, align: {x: 0.5, y: 0.5}}
+        walk: { width: Fill, height: Fit}
+
         <Frame> {
-            layout: {flow: Right, align: {x: 0.0, y: 0.5}}
-            walk: {width: Fill, height: Fit}
-            
-            presetselector = <FishCheckbox> {
-                label: " "
-            }
-            
+            layout: {flow: Right, align: {x: 0.5, y: 0.5}}
+            walk: { width: Fill, height: Fit}
+
             label = <Button> {
-                walk: {width: Fill}
-                layout: {align: {x: 0.0, y: 0.5}}
+                walk: { width: Fill, height: Fill, margin: {top: 5} }
+                layout: {align: {x: 0.0, y: 0.5}, padding: { left: 5 }}
                 draw_label: {
                     fn get_color(self) -> vec4 {
-                        return mix(
-                            (COLOR_UP_6),
-                            (COLOR_UP_8),
-                            self.pressed
-                        )
+                        return mix( (COLOR_UP_5), (COLOR_UP_4), self.pressed )
                     }
                     text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
                     color: (COLOR_UP_6)
@@ -762,19 +848,70 @@ live_design!{
                 }
                 text: "Preset Name"
             }
-            
-            presetfavorite = <CheckBox> {
-                label: "Favorite"
-            }
-            
-            share = <FishButton> {
-                text: "Share"
+
+            <Box> {
                 walk: {width: Fit, height: Fit}
-                // color: (COLOR_UP_6)
-                draw_label: {text_style: {font_size: (FONT_SIZE_H2)}}
+
+                presetfavorite = <PresetFavorite> {
+                    walk: {width: 30, height: 30, margin: {top: 15} }
+                    label: " "
+                }
+
+                share = <FishButton> {
+                    walk: { margin: {top: 5} }
+                    draw_label: {
+                        text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                        fn get_color(self) -> vec4 {
+                            return mix(
+                                (COLOR_UP_4),
+                                (COLOR_UP_5),
+                                self.pressed
+                            )
+                        }
+                    }
+
+                    // draw_bg: {
+                    //     instance hover: 0.0
+                    //     instance pressed: 0.0
+                        
+                    //     fn pixel(self) -> vec4 {
+                    //         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    //         sdf.box(
+                    //             1.,
+                    //             1.,
+                    //             self.rect_size.x - 2.0,
+                    //             self.rect_size.y - 2.0,
+                    //             2.0
+                    //         )
+                            
+                    //         sdf.stroke_keep(
+                    //             mix(
+                    //                 #0000,
+                    //                 mix((COLOR_DOWN_5), (COLOR_UP_3), pow(self.pos.y, 3)),
+                    //                 self.pressed
+                    //             ),
+                    //             1.
+                    //         );
+
+                    //         sdf.fill(
+                    //             mix(
+                    //                 #FFFFFF00,
+                    //                 mix((COLOR_DOWN_4), (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 0.3)),
+                    //                 self.pressed
+                    //             )
+                    //         );
+                            
+                    //         return sdf.result
+                    //     }
+                    // }
+                    text: "→"
+                    walk: {width: Fit, height: Fit}
+                    draw_label: { text_style: {font_size: (FONT_SIZE_H2)} }
+                }
+
             }
         }
-        
+
     }
     
     PaginationButton = <FishButton> {
@@ -815,7 +952,7 @@ live_design!{
         <PaginationButton> {text: "…"}
     }
     
-    PresetList = <Box> {
+    PresetList = <ScrollY> {
         
         walk: {width: Fill, height: Fill, margin: {top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS)}}
         layout: {flow: Down, align: {x: 0.5, y: 0.5},}
@@ -915,17 +1052,17 @@ live_design!{
             <SequencerControls> {}
             
             application_pages = <Box> {
-                // tab1_frame = <ModeSequencer> {}
-                // tab2_frame = <ModePlay> {} // TODO: enable again
+                tab1_frame = <ModeSequencer> {}
+                tab2_frame = <ModePlay> { } // TODO: enable again
                 tab3_frame = <ModePresetmanager> {} // TODO: enable again
             }
             
-            menu = <Box> {
+            mobile_menu = <Box> {
                 walk: {width: Fill, height: 150}
                 layout: {flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20}
                 draw_bg: {color: (COLOR_DOWN_2)}
                 
-                modes = <Frame> {
+                mobile_modes = <Frame> {
                     tab1 = <FishTab> {
                         walk: {width: Fill}
                         layout: {align: {x: 0.5, y: 0.5}}
@@ -950,6 +1087,9 @@ live_design!{
         }
     }
 }
+
+
+
 /*
 main_app!(App);
 
