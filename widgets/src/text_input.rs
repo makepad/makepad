@@ -460,6 +460,7 @@ impl TextInput {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocusLost(_) => {
                 self.animate_state(cx, id!(focus.off));
+                cx.hide_text_ime();
                 dispatch_action(cx, TextInputAction::Return(self.text.clone()));
                 dispatch_action(cx, TextInputAction::KeyFocusLost);
             }

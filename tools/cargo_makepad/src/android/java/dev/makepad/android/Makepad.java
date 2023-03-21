@@ -12,6 +12,7 @@ public class Makepad {
         String[] getAudioDevices(long flag);
         void openAllMidiDevices(long delay);
         void showTextIME();
+        void hideTextIME();
     }
 
     static {
