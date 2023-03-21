@@ -11,6 +11,7 @@ public class Makepad {
         byte[] readAsset(String path);
         String[] getAudioDevices(long flag);
         void openAllMidiDevices(long delay);
+        void showTextIME();
     }
 
     static {

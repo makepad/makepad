@@ -322,6 +322,9 @@ impl Cx {
                     to_java.cancel_timeout(timer_id as i64);
                     //android_app.stop_timer(timer_id);
                 },
+                CxOsOp::ShowTextIME(area, pos) => {
+                    to_java.show_text_ime();
+                },
                 _ => ()
             }
         }  
