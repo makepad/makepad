@@ -28,7 +28,8 @@ live_design!{
             }
         }
         
-        ui: <AppDesktop> {}
+        ui: <AppMobile> {}
+        // ui: <AppDesktop> {}
     }
 }
 app_main!(App);
@@ -239,15 +240,15 @@ impl AppMain for App {
             id!(oscillators.osc2),
         ]);
         
-        // ui.get_radio_group(&[
-        //     id!(effects.tab1),
-        //     id!(effects.tab2),
-        //     id!(effects.tab3),
-        // ]).selected_to_visible(cx, &ui, &actions, &[
-        //     id!(effects.tab1_frame),
-        //     id!(effects.tab2_frame),
-        //     id!(effects.tab3_frame),
-        // ]);
+        ui.get_radio_group(&[
+            id!(mobile_modes.tab1),
+            id!(mobile_modes.tab2),
+            id!(mobile_modes.tab3),
+        ]).selected_to_visible(cx, &ui, &actions, &[
+            id!(application_pages.tab1_frame),
+            id!(application_pages.tab2_frame),
+            id!(application_pages.tab3_frame),
+        ]);
         
         let display_audio = ui.get_display_audio(id!(display_audio));
         
