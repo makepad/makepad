@@ -241,6 +241,11 @@ Makepad.Callback{
         }
     }
 
+    public void hideTextIME() {
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        imm.hideSoftInputFromWindow(mView.getWindowToken(), 0);
+    }
+
     Handler mHandler;
     HashMap<Long, Runnable> mRunnables;
     MakepadSurfaceView mView;

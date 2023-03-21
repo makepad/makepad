@@ -121,6 +121,22 @@ impl<'a> AndroidToJava<'a> {
             ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
         }
     }
+
+    /// Hide software keyboard
+    pub fn hide_text_ime(&self) {
+        unsafe {
+            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
+            let name = CString::new("hideTextIME").unwrap();
+            let signature = CString::new("()V").unwrap();
+            let method_id = ((**self.env).GetMethodID.unwrap())(
+                self.env,
+                class,
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
+            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
+        }
+    }
     
     
     /// reads an asset
