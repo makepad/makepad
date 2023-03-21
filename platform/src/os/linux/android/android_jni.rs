@@ -337,6 +337,24 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onDraw(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onKeyDown(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    key_code: jint,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_key_down(
+        key_code,
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onTouch(
     env: *mut JNIEnv,
     _: jclass,

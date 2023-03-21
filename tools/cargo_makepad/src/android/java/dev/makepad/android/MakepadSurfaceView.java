@@ -17,9 +17,12 @@ import javax.microedition.khronos.egl.EGLDisplay;
 import javax.microedition.khronos.egl.EGLSurface;
 import javax.microedition.khronos.opengles.GL10;
 
+import android.view.KeyEvent;
+
 public class MakepadSurfaceView extends SurfaceView implements 
 SurfaceHolder.Callback, 
-View.OnTouchListener
+View.OnTouchListener,
+KeyEvent.Callback
 {
     public MakepadSurfaceView(Context context, long cx) {
         super(context);
@@ -116,6 +119,12 @@ View.OnTouchListener
         if (!mEgl.eglSwapBuffers(mEglDisplay, mEglSurface)) {
             throw new RuntimeException("eglSwapBuffers failed");
         }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        Makepad.onKeyDown(mCx, keyCode, (Makepad.Callback)this.getContext());
+        return true;
     }
 
     private static final int EGL_CONTEXT_CLIENT_VERSION = 0x3098;

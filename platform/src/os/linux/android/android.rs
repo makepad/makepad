@@ -6,6 +6,7 @@ use {
         android_media::CxAndroidMedia,
         jni_sys::jobject,
         android_jni::{AndroidToJava},
+        android_util::*,
     },
     self::super::super::{
         gl_sys,
@@ -20,6 +21,7 @@ use {
             TouchUpdateEvent,
             WindowGeomChangeEvent,
             TimerEvent,
+            TextInputEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Event,
@@ -187,6 +189,22 @@ impl Cx {
         self.call_event_handler(&e);
         let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
         self.fingers.process_touch_update_end(&e.touches);
+        self.after_every_event(&to_java);
+    }
+
+    /// Called when a touch event happened on the software keyword
+    pub fn from_java_on_key_down(&mut self, native_key_code: i32, to_java: AndroidToJava) {
+        crate::log!("{}", native_key_code);
+        let key_code = to_key_code(native_key_code);
+        let input = keycode_to_string(key_code, false).to_string();
+        let e = Event::TextInput(
+            TextInputEvent {
+                input: input,
+                replace_last: false,
+                was_paste: false,
+            }
+        );
+        self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
     
