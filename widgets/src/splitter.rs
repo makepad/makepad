@@ -163,17 +163,17 @@ impl Widget for Splitter {
         self.draw_splitter.redraw(cx)
     }
     
-    fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache) -> WidgetResult {
-        self.a.find_widget(path, cached) ?;
-        self.b.find_widget(path, cached)
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet) {
+        self.a.find_widgets(path, cached, results);
+        self.b.find_widgets(path, cached, results);
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }
         if let Some(DrawState::DrawA) = self.draw_state.get() {
-            self.a.draw_walk_widget(cx) ?;
+            self.a.draw_widget(cx) ?;
             self.draw_state.set(DrawState::DrawSplit);
         }
         if let Some(DrawState::DrawSplit) = self.draw_state.get() {
@@ -181,7 +181,7 @@ impl Widget for Splitter {
             self.draw_state.set(DrawState::DrawB)
         }
         if let Some(DrawState::DrawB) = self.draw_state.get() {
-            self.b.draw_walk_widget(cx) ?;
+            self.b.draw_widget(cx) ?;
             self.end(cx);
             self.draw_state.end();
         }

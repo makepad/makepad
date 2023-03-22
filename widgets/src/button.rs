@@ -2,7 +2,6 @@ use {
     crate::{
         makepad_derive_widget::*,
         makepad_draw::*,
-        frame::*,
         widget::*
     }
 };
@@ -164,7 +163,7 @@ impl Widget for Button{
         self.draw_bg.redraw(cx)
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         let _ = self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
@@ -236,3 +235,17 @@ impl ButtonRef {
         false
     }
 }
+
+#[derive(Clone, WidgetSet)]
+pub struct ButtonSet(WidgetSet);
+impl ButtonSet{
+    pub fn clicked(&self, actions: &WidgetActions)->bool{
+        for button in self.iter(){
+            if ButtonRef(button).clicked(actions){
+                return true
+            }
+        }
+        false
+    }
+}
+

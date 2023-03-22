@@ -4,7 +4,6 @@ use {
         makepad_draw::*,
         widget::*,
         data_binding::DataBinding,
-        frame::*,
     }
 };
 
@@ -243,7 +242,7 @@ impl Widget for CheckBox {
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }

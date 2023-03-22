@@ -1,6 +1,5 @@
 use crate::{
     makepad_platform::*,
-    frame::*,
     widget::*,
 };
 
@@ -64,7 +63,7 @@ impl DataBinding {
         }
     }
     
-    pub fn borrow_cx<'a>(&'a mut self, cx: &'a mut Cx, ui: &'a FrameRef, act: &'a WidgetActions) -> DataBindingCxBorrow<'a> {
+    pub fn borrow_cx<'a>(&'a mut self, cx: &'a mut Cx, ui: &'a WidgetRef, act: &'a WidgetActions) -> DataBindingCxBorrow<'a> {
         DataBindingCxBorrow {
             db: self,
             cx,
