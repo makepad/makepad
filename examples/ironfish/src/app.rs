@@ -15,11 +15,9 @@ live_design!{
     import makepad_example_ironfish::app_desktop::AppDesktop
     import makepad_example_ironfish::app_mobile::AppMobile
     registry AudioComponent::*;
-    
+    registry Widget::*;
     // APP
     App = {{App}} {
-        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: #2A}}
-        
         audio_graph: {
             root: <Mixer> {
                 c1 = <Instrument> {
@@ -28,7 +26,23 @@ live_design!{
             }
         }
         
-        ui: <AppDesktop> {}
+        ui: <Frame> {
+            <DesktopWindow> {
+                window: {inner_size: vec2(1280, 1000)},
+                pass: {clear_color: #2A}
+                frame: {body = {
+                    <AppDesktop> {}
+                }}
+            }
+            /*<DesktopWindow> {
+                window: {inner_size: vec2(400, 800), position:vec2(0,0)},
+                pass: {clear_color: #2A}
+                frame: {body = {
+                    <AppMobile> {}
+                }}
+            }*/
+        }
+        
     }
 }
 app_main!(App);
@@ -43,9 +57,8 @@ app_main!(App);
     crate::app_mobile::live_design(cx);
 }]
 pub struct App {
-    ui: FrameRef,
+    ui: WidgetRef,
     audio_graph: AudioGraph,
-    window: DesktopWindow,
     #[rust] midi_input: MidiInput,
 }
 
@@ -181,13 +194,7 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx).is_not_redrawing() {
-            return;
-        }
-        
-        while self.ui.draw(cx).is_not_done() {};
-        
-        self.window.end(cx);
+        while self.ui.draw_widget(cx).is_not_done() {};
     }
 }
 
@@ -198,12 +205,10 @@ impl AppMain for App {
             return self.draw(&mut Cx2d::new(cx, event));
         }
         
-        self.window.handle_event(cx, event);
-        
         let ui = self.ui.clone();
         let mut db = DataBinding::new();
         
-        let actions = ui.handle_event(cx, event);
+        let actions = ui.handle_widget_event(cx, event);
         
         if let Event::Construct = event {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
@@ -230,14 +235,14 @@ impl AppMain for App {
         //     id!(envelopes.tab1_frame),
         //     id!(envelopes.tab2_frame),
         // ]);
-        
+        /*
         ui.get_radio_group(&[
             id!(oscillators.tab1),
             id!(oscillators.tab2),
         ]).selected_to_visible(cx, &ui, &actions, &[
             id!(oscillators.osc1),
             id!(oscillators.osc2),
-        ]);
+        ]);*/
         
         // ui.get_radio_group(&[
         //     id!(effects.tab1),
@@ -265,7 +270,6 @@ impl AppMain for App {
         });
         
         let piano = ui.get_piano(id!(piano));
-        
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);
             if let Some(note) = data.decode().on_note() {
@@ -291,6 +295,7 @@ impl AppMain for App {
         // lets fetch and update the tick.
         
         if ui.get_button(id!(clear_grid)).clicked(&actions) {
+            sequencer.clear_grid(cx, &mut db);
             sequencer.clear_grid(cx, &mut db);
         }
         
