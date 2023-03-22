@@ -1,4 +1,5 @@
 use crate::{
+    makepad_derive_widget::*,
     debug_view::DebugView,
     makepad_draw::*,
     nav_control::NavControl,
@@ -10,14 +11,15 @@ use crate::{
 
 live_design!{
     import crate::theme::*;
-    registry Widget::*;
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
+    import makepad_widgets::label::Label;
+    import makepad_widgets::desktop_button::DesktopButton;
     
     DesktopWindow = {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
         var caption = "Makepad"
-        ui: {
+        frame: <Frame>{
             layout: {
                 flow: Down
             },
@@ -50,7 +52,7 @@ live_design!{
                     xr_on = <DesktopButton> {button_type: XRMode}
                 }
             }
-            inner_view = <Frame> {user_draw: true}
+            body = <Frame> {}
         }
         mouse_cursor_size: vec2(20, 20),
         draw_cursor: {
@@ -86,6 +88,9 @@ live_design!{
 }
 
 #[derive(Live)]
+#[live_design_with{
+    widget_factory!(cx, DesktopWindow)
+}]
 pub struct DesktopWindow {
     #[rust] pub caption_size: DVec2,
     last_mouse_pos: DVec2,
@@ -102,7 +107,8 @@ pub struct DesktopWindow {
     pass: Pass,
     depth_texture: Texture,
     
-    pub ui: FrameRef,
+    
+    pub frame: WidgetRef,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![
@@ -116,7 +122,13 @@ pub struct DesktopWindow {
     #[rust] pub last_menu: Option<Menu>,
     
     // testing
-    #[rust] pub inner_over_chrome: bool,
+    #[rust] draw_state: DrawStateWrap<DrawState>,
+    
+}
+
+#[derive(Clone)]
+enum DrawState {
+    Drawing,
 }
 
 impl LiveHook for DesktopWindow {
@@ -126,32 +138,32 @@ impl LiveHook for DesktopWindow {
         // check if we are ar/vr capable
         if cx.xr_capabilities().vr_supported {
             // lets show a VR button
-            self.ui.get_frame(id!(web_xr)).set_visible(true);
+            self.frame.get_frame(id!(web_xr)).set_visible(true);
             log!("VR IS SUPPORTED");
         }
         match cx.os_type() {
             OsType::Windows => {
-                self.ui.get_frame(id!(caption_bar)).set_visible(true);
-                self.ui.get_frame(id!(windows_buttons)).set_visible(true);
+                self.frame.get_frame(id!(caption_bar)).set_visible(true);
+                self.frame.get_frame(id!(windows_buttons)).set_visible(true);
             }
             OsType::Macos => {
-                self.ui.get_frame(id!(caption_bar)).set_visible(false);
+                self.frame.get_frame(id!(caption_bar)).set_visible(false);
             }
             OsType::LinuxWindow(_) |
             OsType::LinuxDirect |
             OsType::Android(_) => {
-                self.ui.get_frame(id!(caption_bar)).set_visible(false);
+                self.frame.get_frame(id!(caption_bar)).set_visible(false);
             }
             OsType::Web(_) => {
-                self.ui.get_frame(id!(caption_bar)).set_visible(false);
+                self.frame.get_frame(id!(caption_bar)).set_visible(false);
             }
             _ => ()
         }
     }
 }
 
-#[derive(Clone)]
-pub enum DesktopWindowEvent {
+#[derive(Clone, WidgetAction)]
+pub enum DesktopWindowAction {
     EventForOtherWindow,
     WindowClosed,
     WindowGeomChange(WindowGeomChangeEvent),
@@ -159,74 +171,23 @@ pub enum DesktopWindowEvent {
 }
 
 impl DesktopWindow {
-    
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<DesktopWindowEvent> {
-        let mut a = Vec::new();
-        self.handle_event_with(cx, event, &mut | _, v | a.push(v));
-        a
-    }
-    
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowEvent)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowAction)) {
         
         self.debug_view.handle_event(cx, event);
         self.nav_control.handle_event(cx, event, self.main_view.draw_list_id());
         self.overlay.handle_event(cx, event);
-        let actions = self.ui.handle_event(cx, event);
-        if actions.not_empty() {
-            if self.ui.get_button(id!(min)).clicked(&actions) {
-                self.window.minimize(cx);
-            }
-            if self.ui.get_button(id!(max)).clicked(&actions) {
-                if self.window.is_fullscreen(cx) {
-                    self.window.restore(cx);
-                }
-                else {
-                    self.window.maximize(cx);
-                }
-            }
-            if self.ui.get_button(id!(close)).clicked(&actions) {
-                self.window.close(cx);
-            }
-            if self.ui.get_button(id!(xr_on)).clicked(&actions) {
-                cx.xr_start_presenting();
-            }
-        }
-        /*
-        if self.frame.get_button(ids!(min_btn)).clicked(&actions){
-            
-        }
-        
-        for item in self.frame.handle_event(cx, event) {
-            if let ButtonAction::Click = item.action.cast() {match item.id() {
-                live_id!(min_btn) => {
-                    self.window.minimize(cx);
-                }
-                live_id!(max_btn) => {
-                    if self.window.is_fullscreen(cx) {
-                        self.window.restore(cx);
-                    }
-                    else {
-                        self.window.maximize(cx);
-                    }
-                }
-                live_id!(close_btn) => {
-                    self.window.close(cx);
-                }
-                _ => ()
-            }}
-        }*/
         
         let is_for_other_window = match event {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
             Event::WindowClosed(ev) => {
                 if ev.window_id == self.window.window_id() {
-                    return dispatch_action(cx, DesktopWindowEvent::WindowClosed)
+                    return dispatch_action(cx, DesktopWindowAction::WindowClosed)
                 }
                 true
             }
             Event::WindowGeomChange(ev) => {
                 if ev.window_id == self.window.window_id() {
-                    return dispatch_action(cx, DesktopWindowEvent::WindowGeomChange(ev.clone()))
+                    return dispatch_action(cx, DesktopWindowAction::WindowGeomChange(ev.clone()))
                 }
                 true
             },
@@ -245,15 +206,41 @@ impl DesktopWindow {
                 }
                 true
             }
+            Event::TouchUpdate(ev) => ev.window_id != self.window.window_id(),
             Event::MouseDown(ev) => ev.window_id != self.window.window_id(),
             Event::MouseMove(ev) => ev.window_id != self.window.window_id(),
             Event::MouseUp(ev) => ev.window_id != self.window.window_id(),
             Event::Scroll(ev) => ev.window_id != self.window.window_id(),
             _ => false
         };
+        
         if is_for_other_window {
-            return dispatch_action(cx, DesktopWindowEvent::EventForOtherWindow)
+            return dispatch_action(cx, DesktopWindowAction::EventForOtherWindow)
         }
+        else {
+            
+            let actions = self.frame.handle_widget_event(cx, event);
+            if actions.not_empty() {
+                if self.frame.get_button(id!(min)).clicked(&actions) {
+                    self.window.minimize(cx);
+                }
+                if self.frame.get_button(id!(max)).clicked(&actions) {
+                    if self.window.is_fullscreen(cx) {
+                        self.window.restore(cx);
+                    }
+                    else {
+                        self.window.maximize(cx);
+                    }
+                }
+                if self.frame.get_button(id!(close)).clicked(&actions) {
+                    self.window.close(cx);
+                }
+                if self.frame.get_button(id!(xr_on)).clicked(&actions) {
+                    cx.xr_start_presenting();
+                }
+            }
+        }
+        
         if let Event::Resume = event {
             Cx2d::reset_fonts_atlas(cx);
         }
@@ -285,7 +272,7 @@ impl DesktopWindow {
         self.overlay.begin(cx);
         
         //while self.frame.draw(cx).is_ok(){}
-        if self.ui.draw(cx).is_done() {
+        if self.frame.draw_widget(cx).is_done() {
             self.end(cx);
             return ViewRedrawing::no()
         }
@@ -293,7 +280,7 @@ impl DesktopWindow {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        while self.ui.draw(cx).is_not_done() {}
+        while self.frame.draw_widget(cx).is_not_done() {}
         self.debug_view.draw(cx);
         
         // lets draw our cursor
@@ -311,6 +298,48 @@ impl DesktopWindow {
         
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
+    }
+}
+
+impl Widget for DesktopWindow{
+   fn handle_widget_event_with(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
+    ) {
+        let uid = self.widget_uid();
+        self.handle_event_with(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
+        });
+    }
+
+    fn get_walk(&self)->Walk{Walk::default()}
+    
+    fn redraw(&mut self, cx:&mut Cx){
+        self.frame.redraw(cx)
+    }
+        
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        self.frame.find_widgets(path, cached, results);
+    }
+    
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
+        if self.draw_state.begin(cx, DrawState::Drawing) {
+            if self.begin(cx).is_not_redrawing() {
+                self.draw_state.end();
+                return WidgetDraw::done();
+            }
+        }
+        
+        if let Some(DrawState::Drawing) = self.draw_state.get(){
+            self.frame.draw_widget(cx)?;
+            self.draw_state.end();
+        }        
+
+        self.end(cx);
+        
+        WidgetDraw::done()
     }
 }
 
