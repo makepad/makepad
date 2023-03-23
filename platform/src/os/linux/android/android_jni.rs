@@ -341,11 +341,31 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onKeyDown(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
-    key_code: jint,
+    event: jobject,
     callback: jobject,
 ) {
+    let key_code = unsafe {
+        let class = ((**env).GetObjectClass.unwrap())(env, event);
+        let name = CString::new("getKeyCode").unwrap();
+        let signature = CString::new("()I").unwrap();
+        let method_id =
+        ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
+        ((**env).CallIntMethod.unwrap())(env, event, method_id)
+    };
+
+    let shift = unsafe {
+        let class = ((**env).GetObjectClass.unwrap())(env, event);
+        let name = CString::new("isShiftPressed").unwrap();
+        let signature = CString::new("()Z").unwrap();
+        let method_id =
+        ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
+        ((**env).CallBooleanMethod.unwrap())(env, event, method_id)
+    };
+    let shift_bool:bool = shift != 0;
+
     (*(cx as *mut Cx)).from_java_on_key_down(
         key_code,
+        shift_bool,
         AndroidToJava {
             env,
             callback,
