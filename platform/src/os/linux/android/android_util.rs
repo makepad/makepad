@@ -4,7 +4,18 @@ use {
 
 
 pub fn to_key_code(key_code: i32) -> KeyCode {
-  match key_code {      
+  match key_code {
+      7 => KeyCode::Key0,
+      8 => KeyCode::Key1,
+      9 => KeyCode::Key2,
+      10 => KeyCode::Key3,
+      11 => KeyCode::Key4,
+      12 => KeyCode::Key5,
+      13 => KeyCode::Key6,
+      14 => KeyCode::Key7,
+      15 => KeyCode::Key8,
+      16 => KeyCode::Key9,
+
       29 => KeyCode::KeyA,
       30 => KeyCode::KeyB,
       31 => KeyCode::KeyC,
@@ -31,6 +42,13 @@ pub fn to_key_code(key_code: i32) -> KeyCode {
       52 => KeyCode::KeyX,
       53 => KeyCode::KeyY,
       54 => KeyCode::KeyZ,
+
+      55 => KeyCode::Comma,
+      56 => KeyCode::Period,
+      62 => KeyCode::Space,
+      69 => KeyCode::Minus,
+      70 => KeyCode::Equals,
+
       _ => KeyCode::Unknown
   }
 }
@@ -88,6 +106,7 @@ pub fn keycode_to_string(keycode: KeyCode, shift: bool) -> &'static str {
           KeyCode::Comma => ",",
           KeyCode::Period => ".",
           KeyCode::Slash => "/",
+          KeyCode::Space => " ",
           _ => ""
       }
   }
@@ -105,7 +124,6 @@ pub fn keycode_to_string(keycode: KeyCode, shift: bool) -> &'static str {
           KeyCode::Key8 => "(",
           KeyCode::Key9 => ")",
           KeyCode::Minus => "_",
-          KeyCode::Equals => "+",
           
           KeyCode::KeyQ => "Q",
           KeyCode::KeyW => "W",
@@ -143,6 +161,7 @@ pub fn keycode_to_string(keycode: KeyCode, shift: bool) -> &'static str {
           KeyCode::Comma => "<",
           KeyCode::Period => ">",
           KeyCode::Slash => "?",
+          KeyCode::Space => " ",
           _ => ""
       }
   }
