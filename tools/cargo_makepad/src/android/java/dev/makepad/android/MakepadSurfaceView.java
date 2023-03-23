@@ -123,7 +123,7 @@ KeyEvent.Callback
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        Makepad.onKeyDown(mCx, keyCode, (Makepad.Callback)this.getContext());
+        Makepad.onKeyDown(mCx, event, (Makepad.Callback)this.getContext());
         return true;
     }
 
