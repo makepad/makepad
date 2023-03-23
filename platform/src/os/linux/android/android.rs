@@ -193,10 +193,9 @@ impl Cx {
     }
 
     /// Called when a touch event happened on the software keyword
-    pub fn from_java_on_key_down(&mut self, native_key_code: i32, to_java: AndroidToJava) {
-        crate::log!("{}", native_key_code);
+    pub fn from_java_on_key_down(&mut self, native_key_code: i32, shift: bool, to_java: AndroidToJava) {
         let key_code = to_key_code(native_key_code);
-        let input = keycode_to_string(key_code, false).to_string();
+        let input = keycode_to_string(key_code, shift).to_string();
         let e = Event::TextInput(
             TextInputEvent {
                 input: input,
@@ -340,7 +339,7 @@ impl Cx {
                     to_java.cancel_timeout(timer_id as i64);
                     //android_app.stop_timer(timer_id);
                 },
-                CxOsOp::ShowTextIME(area, pos) => {
+                CxOsOp::ShowTextIME(_area, _pos) => {
                     to_java.show_text_ime();
                 },
                 CxOsOp::HideTextIME => {
