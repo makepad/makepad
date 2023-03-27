@@ -56,6 +56,28 @@ live_design!{
             return sdf.result
         }
     }
+
+    DrawLabelText= {{DrawLabelText}} {
+        instance selected: 0.0
+        text_style: {
+            font: {
+                //path: d"resources/IBMPlexSans-SemiBold.ttf"
+            }
+            font_size: 11.0
+        }
+        fn get_color(self) -> vec4 {
+            return mix(
+                mix(
+                    #fff6,
+                    #fff6,
+                    self.hover
+                ),
+                #fff6,
+                self.selected
+            )
+        }
+    }
+    
     
     CheckBox = {{CheckBox}} {
         draw_label: {
@@ -85,12 +107,14 @@ live_design!{
                     from: {all: Forward {duration: 0.15}}
                     apply: {
                         draw_check: {hover: 0.0}
+                        draw_label: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         draw_check: {hover: 1.0}
+                        draw_label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
             }
@@ -112,13 +136,19 @@ live_design!{
             selected = {
                 default: off
                 off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {draw_check: {selected: 0.0}}
-                }
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_check: {selected: 0.0},
+                        draw_label: {selected: 0.0},
+                    }
+                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
-                    apply: {draw_check: {selected: 1.0}}
+                    apply: {
+                        draw_check: {selected: 1.0}
+                        draw_label: {selected: 1.0}
+                    }
                 }
             }
         }
@@ -155,7 +185,7 @@ pub struct CheckBox {
     
     label_walk: Walk,
     label_align: Align,
-    draw_label: DrawText,
+    draw_label: DrawLabelText,
     label: String,
     
     bind: String,
@@ -167,6 +197,12 @@ pub enum CheckBoxAction {
     None
 }
 
+#[derive(Live, LiveHook)]#[repr(C)]
+struct DrawLabelText {
+    draw_super: DrawText,
+    hover: f32,
+    pressed: f32,
+}
 
 impl CheckBox {
     
