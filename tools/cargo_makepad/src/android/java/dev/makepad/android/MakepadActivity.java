@@ -1,12 +1,15 @@
 package dev.makepad.android;
 import android.Manifest;
 
+import android.view.ContextMenu;
+import android.view.ContextMenu.ContextMenuInfo;
+import android.view.MenuInflater;
+import android.view.View.OnCreateContextMenuListener;
+
 import android.os.Bundle;
 import android.app.Activity;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
-import android.widget.LinearLayout;
-import android.widget.RelativeLayout;
 import android.content.Context;
 import android.util.Log;
 import android.content.pm.PackageManager;
@@ -40,6 +43,7 @@ import android.bluetooth.BluetoothDevice;
 
 public class MakepadActivity extends Activity implements 
 MidiManager.OnDeviceOpenedListener,
+OnCreateContextMenuListener,
 Makepad.Callback{
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -72,6 +76,8 @@ Makepad.Callback{
 
         setContentView(mView);
         Makepad.onNewGL(mCx, this);
+
+        registerForContextMenu(mView);
     }
 
     @Override
@@ -244,6 +250,16 @@ Makepad.Callback{
     public void hideTextIME() {
         InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         imm.hideSoftInputFromWindow(mView.getWindowToken(), 0);
+    }
+
+    @Override
+    public void onCreateContextMenu(ContextMenu menu, View v,
+                                    ContextMenuInfo menuInfo) {
+        Log.d("Makepad", "pos: " + mView.lastTouchX + " " + mView.lastTouchY);
+
+        super.onCreateContextMenu(menu, v, menuInfo);
+        // MenuInflater inflater = getMenuInflater();
+        // inflater.inflate(R.menu.context_menu, menu);
     }
 
     Handler mHandler;
