@@ -153,7 +153,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             "-I",
             &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
             "-S",
-            "/Users/jorgebejar/Projects/makepad/res",
+            &cargo_manifest_dir.join("src/android/res").to_str().unwrap(),
             "-M",
             &manifest_file.to_str().unwrap(),
             "-J",
@@ -222,8 +222,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             "-M",
             &manifest_file.to_str().unwrap(),
             "-S",
-            // TODO remove local path!!!
-            "/Users/jorgebejar/Projects/makepad/res",
+            &cargo_manifest_dir.join("src/android/res").to_str().unwrap(),
             &out_dir.to_str().unwrap(),
         ]
     ) ?;
