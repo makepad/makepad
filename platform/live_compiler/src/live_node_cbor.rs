@@ -1,4 +1,5 @@
 use {
+    std::rc::Rc,
     std::convert::TryInto,
     crate::{
         makepad_live_tokenizer::LiveId,
@@ -270,7 +271,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 LiveValue::InlineString(s) => {
                     encode_str(s.as_str(), &mut out);
                 },
-                LiveValue::FittedString(s) => {
+                LiveValue::String(s) => {
                     encode_str(s.as_str(), &mut out);
                 },
                 LiveValue::Bool(v) => {
@@ -360,14 +361,14 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 LiveValue::ExprMember(_) => {
                     return Err("Cannot serialise LiveValue::ExprMember".into())
                 },
+                LiveValue::Binding(_) => {
+                    return Err("Cannot serialise LiveValue::Expr".into())
+                },
                 LiveValue::Expr {..} => {
                     return Err("Cannot serialise LiveValue::Expr".into())
                 },
                 LiveValue::ExprCall {..} => {
                     return Err("Cannot serialise LiveValue::ExprCall".into())
-                },
-                LiveValue::DocumentString {..} => {
-                    return Err("Cannot serialise LiveValue::DocumentString".into())
                 },
                 LiveValue::Dependency {..} => {
                     return Err("Cannot serialise LiveValue::Dependency".into())
@@ -384,6 +385,9 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 LiveValue::Registry(..) => {
                     return Err("Cannot serialise LiveValue::Registry".into())
                 }
+                LiveValue::IdPath(..) => {
+                    return Err("Cannot serialise LiveValue::IdPath".into())
+                }                
             }
             index += 1;
         }
@@ -715,7 +719,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                     LiveValue::InlineString(inline_str)
                 }
                 else {
-                    LiveValue::FittedString(FittedString::from_string(v.to_string()))
+                    LiveValue::String(Rc::new(v.to_string()))
                 };
                 self.push(LiveNode {id, origin, value});
             }

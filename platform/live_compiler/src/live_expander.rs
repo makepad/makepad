@@ -125,7 +125,8 @@ impl<'a> LiveExpander<'a> {
                         // do nothing
                     }
                     // replacing object types
-                    else if out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
+                    else if out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() ||
+                            out_value.is_binding() || in_value.is_binding() && out_value.is_value_type() {
                         // replace range
                         let next_index = out_doc.nodes.skip_node(overwrite);
                         
@@ -169,7 +170,7 @@ impl<'a> LiveExpander<'a> {
                 }
                 Err(insert_point) => {
                     // ok so. if we are inserting an expression, just do the whole thing in one go.
-                    if in_node.is_expr() {
+                    if in_node.is_expr() || in_node.is_binding() {
                         // splice it in
                         let old_len = out_doc.nodes.len();
                         out_doc.nodes.splice(insert_point..insert_point, in_doc.nodes.node_slice(in_index).iter().cloned());
