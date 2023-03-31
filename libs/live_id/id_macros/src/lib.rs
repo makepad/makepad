@@ -80,6 +80,43 @@ pub fn id(item: TokenStream) -> TokenStream {
     tb.end()
 }
 
+#[proc_macro] 
+pub fn ids(item: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new(); 
+    let mut parser = TokenParser::new(item);
+    fn parse(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{
+        tb.add("&[");
+        'outer: loop{
+            tb.add("&[");
+            loop{
+                let ident = parser.expect_any_ident()?;
+                let id = from_str_unchecked(&ident);
+                tb.add("LiveId (").suf_u64(id).add("),");
+                if parser.eat_eot(){
+                    tb.add("]");
+                    break 'outer
+                }
+                if parser.eat_punct_alone(','){
+                    tb.add("]");
+                    break
+                }
+                parser.expect_punct_alone('.')?
+            }
+            tb.add(",");
+            if parser.eat_eot(){
+                break;
+            }
+        }
+        tb.add("]");
+        return Ok(())
+    }
+    if let Err(e) = parse(&mut parser, &mut tb){
+        return e
+    };
+    tb.end()
+}
+
+
 // absolutely a very bad idea but lets see if we can do this.
 #[proc_macro]
 pub fn live_id_num(item: TokenStream) -> TokenStream {

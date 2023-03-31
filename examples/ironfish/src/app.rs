@@ -14,8 +14,10 @@ use crate::{
 live_design!{
     import makepad_example_ironfish::app_desktop::AppDesktop
     import makepad_example_ironfish::app_mobile::AppMobile
+    import makepad_widgets::desktop_window::DesktopWindow
+    import makepad_widgets::frame::*
     registry AudioComponent::*;
-    registry Widget::*;
+    
     // APP
     App = {{App}} {
         audio_graph: {
@@ -26,6 +28,7 @@ live_design!{
             }
         }
         
+        //ui: <AppMobile> {}
         ui: <Frame> {
             <DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000)},
@@ -35,116 +38,11 @@ live_design!{
                 }}
             }
             <DesktopWindow> {
-                window: {inner_size: vec2(400, 800), position:vec2(0,0)},
+                window: {inner_size: vec2(400, 600)},
                 pass: {clear_color: #2A}
                 frame: {body = {
                     <AppMobile> {}
                 }}
-            }
-        }
-        
-        binding:{
-            fn map(){
-                // touch
-                touch.scale => touch.scale.slider
-                touch.scale => touch.scale.slider
-                touch.curve => touch.curve.slider
-                touch.offset => touch.offset.slider
-                filter1.touch_amount => touch.touchamount.slider
-                
-                // sequencer
-                sequencer.playing => playpause.checkbox
-                sequencer.bpm => speed.slider
-                sequencer.rootnote => rootnote.dropdown
-                sequencer.scale => scaletype.dropdown
-                arp.enabled => arp.checkbox
-                arp.octaves => arpoctaves.slider
-                
-                // Mixer panel
-                osc_balance => balance.slider
-                noise => noise.slider
-                sub_osc => sub.slider
-                portamento => porta.slider
-                
-                // DelayFX Panel
-                delay.delaysend => delaysend.slider
-                delay.delayfeedback => delayfeedback.slider
-                
-                bitcrush.enable => crushenable.checkbox
-                bitcrush.amount => crushamount.slider
-                
-                delay.difference => delaydifference.slider
-                delay.cross => delaycross.slider
-                
-                // Chorus panel
-                chorus.mix => chorusmix.slider
-                chorus.mindelay => chorusdelay.slider
-                chorus.moddepth => chorusmod.slider
-                chorus.rate => chorusrate.slider
-                chorus.phasediff => chorusphase.slider
-                chorus.feedback => chorusfeedback.slider
-                
-                // Reverb panel
-                reverb.mix => reverbmix.slider
-                reverb.feedback => reverbfeedback.slider
-                
-                //LFO Panel
-                lfo.rate => rate.slider
-                filter1.lfo_amount => lfoamount.slider
-                lfo.synconkey => sync.checkbox
-                
-                //Volume Envelope
-                volume_envelope.a => vol_env.attack.slider
-                volume_envelope.h => vol_env.hold.slider
-                volume_envelope.d => vol_env.decay.slider
-                volume_envelope.s => vol_env.sustain.slider
-                volume_envelope.r => vol_env.release.slider
-                
-                //Mod Envelope
-                mod_envelope.a => mod_env.attack.slider
-                mod_envelope.h => mod_env.hold.slider
-                mod_envelope.d => mod_env.decay.slider
-                mod_envelope.s => mod_env.sustain.slider
-                mod_envelope.r => mod_env.release.slider
-                filter1.envelope_amount => modamount.slider
-                
-                // Filter panel
-                filter1.filter_type => filter_type.dropdown
-                filter1.cutoff => cutoff.slider
-                filter1.resonance => resonance.slider
-                
-                // Osc1 panel
-                supersaw1.spread => osc1.supersaw.spread.slider
-                supersaw1.diffuse => osc1.supersaw.diffuse.slider
-                supersaw1.spread => osc1.supersaw.spread.slider
-                supersaw1.diffuse => osc1.supersaw.diffuse.slider
-                supersaw1.spread => osc1.hypersaw.spread.slider
-                supersaw1.diffuse => osc1.hypersaw.diffuse.slider
-                
-                osc1.osc_type => osc1.type.dropdown
-                osc1.transpose => osc1.transpose.slider
-                osc1.detune => osc1.detune.slider
-                osc1.harmonic => osc1.harmonicshift.slider
-                osc1.harmonicenv => osc1.harmonicenv.slider
-                osc1.harmoniclfo => osc1.harmoniclfo.slider
-                
-                // Osc2 panel
-                supersaw1.spread => osc2.supersaw.spread.slider
-                supersaw1.diffuse => osc2.supersaw.diffuse.slider
-                supersaw2.spread => osc2.supersaw.spread.slider
-                supersaw2.diffuse => osc2.supersaw.diffuse.slider
-                supersaw2.spread => osc2.hypersaw.spread.slider
-                supersaw2.diffuse => osc2.hypersaw.diffuse.slider
-                
-                osc2.osc_type => osc2.type.dropdown
-                osc2.transpose => osc2.transpose.slider
-                osc2.detune => osc2.detune.slider
-                osc2.harmonic => osc2.harmonicshift.slider
-                osc2.harmonicenv => osc2.harmonicenv.slider
-                osc2.harmoniclfo => osc2.harmoniclfo.slider
-                
-                // sequencer
-                sequencer.steps => sequencer
             }
         }
     }
@@ -162,7 +60,6 @@ app_main!(App);
 }]
 pub struct App {
     ui: WidgetRef,
-    binding: DataBinding,
     audio_graph: AudioGraph,
     #[rust] midi_input: MidiInput,
 }
@@ -178,8 +75,107 @@ impl App {
     
     pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, actions: &WidgetActions) {
         let mut db = db.borrow_cx(cx, &self.ui, actions);
+        // touch
+        data_to_widget!(db, touch.scale => touch.scale.slider);
+        data_to_widget!(db, touch.scale => touch.scale.slider);
+        data_to_widget!(db, touch.curve => touch.curve.slider);
+        data_to_widget!(db, touch.offset => touch.offset.slider);
+        data_to_widget!(db, filter1.touch_amount => touch.touchamount.slider);
         
-        /*
+        // sequencer
+        data_to_widget!(db, sequencer.playing => playpause.checkbox);
+        data_to_widget!(db, sequencer.bpm => speed.slider);
+        data_to_widget!(db, sequencer.rootnote => rootnote.dropdown);
+        data_to_widget!(db, sequencer.scale => scaletype.dropdown);
+        data_to_widget!(db, arp.enabled => arp.checkbox);
+        data_to_widget!(db, arp.octaves => arpoctaves.slider);
+        
+        // Mixer panel
+        data_to_widget!(db, osc_balance => balance.slider);
+        data_to_widget!(db, noise => noise.slider);
+        data_to_widget!(db, sub_osc => sub.slider);
+        data_to_widget!(db, portamento => porta.slider);
+        
+        // DelayFX Panel
+        data_to_widget!(db, delay.delaysend => delaysend.slider);
+        data_to_widget!(db, delay.delayfeedback => delayfeedback.slider);
+        
+        data_to_widget!(db, bitcrush.enable => crushenable.checkbox);
+        data_to_widget!(db, bitcrush.amount => crushamount.slider);
+        
+        data_to_widget!(db, delay.difference => delaydifference.slider);
+        data_to_widget!(db, delay.cross => delaycross.slider);
+        
+        // Chorus panel
+        data_to_widget!(db, chorus.mix => chorusmix.slider);
+        data_to_widget!(db, chorus.mindelay => chorusdelay.slider);
+        data_to_widget!(db, chorus.moddepth => chorusmod.slider);
+        data_to_widget!(db, chorus.rate => chorusrate.slider);
+        data_to_widget!(db, chorus.phasediff => chorusphase.slider);
+        data_to_widget!(db, chorus.feedback => chorusfeedback.slider);
+        
+        // Reverb panel
+        data_to_widget!(db, reverb.mix => reverbmix.slider);
+        data_to_widget!(db, reverb.feedback => reverbfeedback.slider);
+        
+        //LFO Panel
+        data_to_widget!(db, lfo.rate => rate.slider);
+        data_to_widget!(db, filter1.lfo_amount => lfoamount.slider);
+        data_to_widget!(db, lfo.synconkey => sync.checkbox);
+        
+        //Volume Envelope
+        data_to_widget!(db, volume_envelope.a => vol_env.attack.slider);
+        data_to_widget!(db, volume_envelope.h => vol_env.hold.slider);
+        data_to_widget!(db, volume_envelope.d => vol_env.decay.slider);
+        data_to_widget!(db, volume_envelope.s => vol_env.sustain.slider);
+        data_to_widget!(db, volume_envelope.r => vol_env.release.slider);
+        
+        //Mod Envelope
+        data_to_widget!(db, mod_envelope.a => mod_env.attack.slider);
+        data_to_widget!(db, mod_envelope.h => mod_env.hold.slider);
+        data_to_widget!(db, mod_envelope.d => mod_env.decay.slider);
+        data_to_widget!(db, mod_envelope.s => mod_env.sustain.slider);
+        data_to_widget!(db, mod_envelope.r => mod_env.release.slider);
+        data_to_widget!(db, filter1.envelope_amount => modamount.slider);
+        
+        // Filter panel
+        data_to_widget!(db, filter1.filter_type => filter_type.dropdown);
+        data_to_widget!(db, filter1.cutoff => cutoff.slider);
+        data_to_widget!(db, filter1.resonance => resonance.slider);
+        
+        // Osc1 panel
+        data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw1.spread => osc1.hypersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc1.hypersaw.diffuse.slider);
+        
+        data_to_widget!(db, osc1.osc_type => osc1.type.dropdown);
+        data_to_widget!(db, osc1.transpose => osc1.transpose.slider);
+        data_to_widget!(db, osc1.detune => osc1.detune.slider);
+        data_to_widget!(db, osc1.harmonic => osc1.harmonicshift.slider);
+        data_to_widget!(db, osc1.harmonicenv => osc1.harmonicenv.slider);
+        data_to_widget!(db, osc1.harmoniclfo => osc1.harmoniclfo.slider);
+        
+        // Osc2 panel
+        data_to_widget!(db, supersaw1.spread => osc2.supersaw.spread.slider);
+        data_to_widget!(db, supersaw1.diffuse => osc2.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw2.spread => osc2.supersaw.spread.slider);
+        data_to_widget!(db, supersaw2.diffuse => osc2.supersaw.diffuse.slider);
+        data_to_widget!(db, supersaw2.spread => osc2.hypersaw.spread.slider);
+        data_to_widget!(db, supersaw2.diffuse => osc2.hypersaw.diffuse.slider);
+        
+        data_to_widget!(db, osc2.osc_type => osc2.type.dropdown);
+        data_to_widget!(db, osc2.transpose => osc2.transpose.slider);
+        data_to_widget!(db, osc2.detune => osc2.detune.slider);
+        data_to_widget!(db, osc2.harmonic => osc2.harmonicshift.slider);
+        data_to_widget!(db, osc2.harmonicenv => osc2.harmonicenv.slider);
+        data_to_widget!(db, osc2.harmoniclfo => osc2.harmoniclfo.slider);
+        
+        // sequencer
+        data_to_widget!(db, sequencer.steps => sequencer);
+        
         data_to_apply!(db, osc1.osc_type => osc1.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
         data_to_apply!(db, osc2.osc_type => osc2.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
         data_to_apply!(db, osc1.osc_type => osc1.hypersaw, visible => | v | v == id!(HyperSaw).to_enum());
@@ -196,7 +192,7 @@ impl App {
         data_to_apply!(db, volume_envelope.h => vol_env.display, draw_bg.hold => | v | v);
         data_to_apply!(db, volume_envelope.d => vol_env.display, draw_bg.decay => | v | v);
         data_to_apply!(db, volume_envelope.s => vol_env.display, draw_bg.sustain => | v | v);
-        data_to_apply!(db, volume_envelope.r => vol_env.display, draw_bg.release => | v | v);*/
+        data_to_apply!(db, volume_envelope.r => vol_env.display, draw_bg.release => | v | v);
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
@@ -206,6 +202,7 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        
         if let Event::Draw(event) = event {
             return self.draw(&mut Cx2d::new(cx, event));
         }
@@ -217,9 +214,6 @@ impl AppMain for App {
         
         if let Event::Construct = event {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            self.binding.bind_map(&self.ui);
-            
-            self.binding.load_data(ironfish.settings.live_read())
             db.to_widgets(ironfish.settings.live_read());
             ui.get_piano(id!(piano)).set_key_focus(cx);
             self.midi_input = cx.midi_input();
@@ -243,24 +237,24 @@ impl AppMain for App {
         //     id!(envelopes.tab1_frame),
         //     id!(envelopes.tab2_frame),
         // ]);
-        /*
-        ui.get_radio_group(&[
+        
+        ui.get_radio_buttons(&[
             id!(oscillators.tab1),
             id!(oscillators.tab2),
         ]).selected_to_visible(cx, &ui, &actions, &[
             id!(oscillators.osc1),
             id!(oscillators.osc2),
-        ]);*/
+        ]);
         
-        ui.get_radio_buttons(ids!(
-            mobile_modes.tab1,
-            mobile_modes.tab2,
-            mobile_modes.tab3
-        )).selected_to_visible(cx, &ui, &actions, ids!(
-            application_pages.tab1_frame,
-            application_pages.tab2_frame,
-            application_pages.tab3_frame
-        ));
+        ui.get_radio_buttons(&[
+            id!(mobile_modes.tab1),
+            id!(mobile_modes.tab2),
+            id!(mobile_modes.tab3),
+        ]).selected_to_visible(cx, &ui, &actions, &[
+            id!(application_pages.tab1_frame),
+            id!(application_pages.tab2_frame),
+            id!(application_pages.tab3_frame),
+        ]);
         
         let display_audio = ui.get_display_audio(id!(display_audio));
         
@@ -278,6 +272,7 @@ impl AppMain for App {
         });
         
         let piano = ui.get_piano(id!(piano));
+        
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);
             if let Some(note) = data.decode().on_note() {
@@ -304,7 +299,6 @@ impl AppMain for App {
         
         if ui.get_button(id!(clear_grid)).clicked(&actions) {
             sequencer.clear_grid(cx, &mut db);
-            sequencer.clear_grid(cx, &mut db);
         }
         
         if ui.get_button(id!(grid_down)).clicked(&actions) {
@@ -314,7 +308,7 @@ impl AppMain for App {
         if ui.get_button(id!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx, &mut db);
         }
-
+        
         self.data_bind(cx, &mut db, &actions);
         if let Some(nodes) = db.from_widgets() {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();

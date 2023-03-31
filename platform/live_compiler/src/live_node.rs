@@ -1,5 +1,6 @@
 use {
     std::{
+        rc::Rc,
         fmt,
         ops::{Deref, DerefMut},
     },
@@ -27,16 +28,9 @@ pub enum LiveValue {
     None,
     // string types
     Str(&'static str),
-    DocumentString {
-        string_start: usize,
-        string_count: usize
-    },
-    FittedString(FittedString),
+    String(Rc<String>),
     InlineString(InlineString),
-    Dependency {
-        string_start: usize,
-        string_count: usize
-    }, // bare values
+    Dependency(Rc<String>),
     Bool(bool),
     Int64(i64),
     Float32(f32),
@@ -45,8 +39,12 @@ pub enum LiveValue {
     Vec2(Vec2),
     Vec3(Vec3),
     Vec4(Vec4),
+
     Id(LiveId),
-    
+    IdPath(Rc<Vec<LiveId>>),
+
+    Binding(Rc<LiveBinding>),
+
     ExprBinOp(LiveBinOp),
     ExprUnOp(LiveUnOp),
     ExprMember(LiveId),
@@ -73,20 +71,21 @@ pub enum LiveValue {
     Registry(LiveId)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveBinding{
+    pub from: LiveIdPath,
+    pub to: LiveIdPath
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveIdPath(pub Vec<LiveId>);
+
 impl LiveValue {
     pub fn update_from_live_token(&mut self, token: &LiveToken) -> bool {
         match self {
-            Self::DocumentString {string_start, string_count} => {
-                if let LiveToken::String {index, len} = token {
-                    *string_start = *index as usize;
-                    *string_count = *len as usize;
-                    return true
-                }
-            },
-            Self::Dependency {string_start, string_count} => {
-                if let LiveToken::Dependency {index, len} = token {
-                    *string_start = *index as usize;
-                    *string_count = *len as usize;
+            Self::String(rcstring)  => {
+                if let LiveToken::String(other_rcstring) = token {
+                    *rcstring = other_rcstring.clone();
                     return true
                 }
             },
@@ -415,52 +414,6 @@ pub enum LiveUnOp {
     Neg,
 }
 
-#[derive(Debug)]
-pub struct FittedString {
-    buffer: *mut u8,
-    length: u32,
-    capacity: u32
-}
-
-impl PartialEq for FittedString {
-    fn eq(&self, other: &FittedString) -> bool {
-        self.as_str() == other.as_str()
-    }
-    
-    fn ne(&self, other: &FittedString) -> bool {
-        self.as_str() != other.as_str()
-    }
-}
-
-impl FittedString {
-    pub fn from_string(inp: String) -> Self {
-        let mut s = std::mem::ManuallyDrop::new(inp);
-        let buffer = s.as_mut_ptr();
-        let length = s.len();
-        let capacity = s.capacity();
-        FittedString {buffer, length: length as u32, capacity: capacity as u32}
-    }
-    
-    pub fn to_string(self) -> String {
-        unsafe {String::from_raw_parts(self.buffer, self.length as usize, self.capacity as usize)}
-    }
-    
-    pub fn as_str<'a>(&'a self) -> &'a str {
-        unsafe {std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer, self.length as usize))}
-    }
-}
-
-impl Drop for FittedString {
-    fn drop(&mut self) {
-        unsafe {String::from_raw_parts(self.buffer, self.length as usize, self.capacity as usize)};
-    }
-}
-
-impl Clone for FittedString {
-    fn clone(&self) -> Self {
-        Self::from_string(self.as_str().to_string())
-    }
-}
 
 const INLINE_STRING_BUFFER_SIZE: usize = 22;
 #[derive(Clone, Debug, PartialEq)]
@@ -527,6 +480,13 @@ impl LiveValue {
     pub fn is_expr(&self) -> bool {
         match self {
             Self::Expr {..} => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_binding(&self) -> bool {
+        match self {
+            Self::Binding {..} => true,
             _ => false
         }
     }
@@ -601,9 +561,8 @@ impl LiveValue {
         match self {
             Self::Id(_) |
             Self::Str(_) |
-            Self::FittedString(_) |
+            Self::String(_) |
             Self::InlineString {..} |
-            Self::DocumentString {..} |
             Self::Bool(_) |
             Self::Int64(_) |
             Self::Float64(_) |
@@ -705,19 +664,19 @@ impl LiveValue {
         match self {
             Self::None => 0,
             Self::Str(_) => 1,
-            Self::FittedString(_) => 2,
+            Self::String(_) => 2,
             Self::InlineString {..} => 3,
-            Self::DocumentString {..} => 4,
-            Self::Dependency {..} => 5,
-            Self::Bool(_) => 6,
-            Self::Int64(_) => 7,
-            Self::Float64(_) => 8,
-            Self::Float32(_) => 9,
-            Self::Color(_) => 10,
-            Self::Vec2(_) => 11,
-            Self::Vec3(_) => 12,
-            Self::Vec4(_) => 13,
-            Self::Id(_) => 14,
+            Self::Dependency {..} => 4,
+            Self::Bool(_) => 5,
+            Self::Int64(_) => 6,
+            Self::Float64(_) => 7,
+            Self::Float32(_) => 8,
+            Self::Color(_) => 9,
+            Self::Vec2(_) => 10,
+            Self::Vec3(_) => 11,
+            Self::Vec4(_) => 12,
+            Self::Id(_) => 13,
+            Self::IdPath{..}=>14,
             Self::ExprBinOp(_) => 15,
             Self::ExprUnOp(_) => 16,
             Self::ExprMember(_) => 17,
@@ -726,16 +685,17 @@ impl LiveValue {
             Self::BareEnum {..} => 19,
             Self::Array => 20,
             Self::Expr {..} => 21,
-            Self::TupleEnum {..} => 22,
-            Self::NamedEnum {..} => 23,
-            Self::Object => 24,
-            Self::Clone {..} => 25,
-            Self::Class {..} => 26,
-            Self::Close => 27,
+            Self::Binding {..} => 22,
+            Self::TupleEnum {..} => 23,
+            Self::NamedEnum {..} => 24,
+            Self::Object => 25,
+            Self::Clone {..} => 26,
+            Self::Class {..} => 27,
+            Self::Close => 28,
             
-            Self::DSL {..} => 28,
-            Self::Import {..} => 29,
-            Self::Registry {..} => 30
+            Self::DSL {..} => 29,
+            Self::Import {..} => 30,
+            Self::Registry {..} => 31,
         }
     }
 }

@@ -82,9 +82,9 @@ pub use {
             LiveUnOp,
             LiveNodeOrigin,
             InlineString,
-            FittedString, 
             LivePropType,
-            
+            LiveBinding,
+            LiveIdPath,
             //LiveTypeKind,
         },
         live_token::{TokenWithSpan, LiveToken, LiveTokenId},
