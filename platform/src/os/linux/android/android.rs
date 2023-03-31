@@ -345,6 +345,9 @@ impl Cx {
                 CxOsOp::HideTextIME => {
                     to_java.hide_text_ime();
                 },
+                CxOsOp::DisplayClipboardActions => {
+                    to_java.display_clipboard_actions();
+                },
                 _ => ()
             }
         }  
