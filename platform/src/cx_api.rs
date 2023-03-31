@@ -69,7 +69,8 @@ pub enum CxOsOp {
     StartTimer {timer_id: u64, interval: f64, repeats: bool},
     StopTimer(u64),
     StartDragging(DraggedItem),
-    UpdateMenu(Menu)
+    UpdateMenu(Menu),
+    DisplayClipboardActions
 }
 
 impl Cx { 
@@ -116,6 +117,10 @@ impl Cx {
     
     pub fn hide_text_ime(&mut self) {
         self.platform_ops.push(CxOsOp::HideTextIME);
+    }
+
+    pub fn display_clipboard_actions(&mut self) {
+        self.platform_ops.push(CxOsOp::DisplayClipboardActions);
     }
     
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
