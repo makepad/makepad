@@ -112,9 +112,7 @@ KeyEvent.Callback
 
     public boolean onTouch(View view, MotionEvent event) {
         Makepad.onTouch(mCx, event, (Makepad.Callback)this.getContext());
-        lastTouchX = event.getX();
-        lastTouchY = event.getY();
-        return false;
+        return true;
     }
 
     public void swapBuffers() {
@@ -136,7 +134,4 @@ KeyEvent.Callback
     private EGLConfig mEglConfig;
     private EGLContext mEglContext;
     private EGLSurface mEglSurface;
-
-    public float lastTouchX;
-    public float lastTouchY;
 }
