@@ -10,7 +10,10 @@ import android.view.inputmethod.InputMethodManager;
 import android.view.MenuInflater;
 import android.view.ContextMenu;
 import android.view.ContextMenu.ContextMenuInfo;
+import android.view.MenuItem;
 import android.content.Context;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.util.Log;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
@@ -252,8 +255,8 @@ Makepad.Callback{
         imm.hideSoftInputFromWindow(mView.getWindowToken(), 0);
     }
 
-    public void displayClipboardActions() {
-        Log.d("Makepad", "Clipboard options");
+    public void displayClipboardActions(String selected) {
+        mSelectedContent = selected;
         mView.showContextMenu();
     }
 
@@ -264,8 +267,29 @@ Makepad.Callback{
         inflater.inflate(R.menu.context_menu, menu);
     }
 
+    @Override
+    public boolean onContextItemSelected(MenuItem item) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        switch (item.getItemId()) {
+            case R.id.menu_copy:
+                ClipData clip = ClipData.newPlainText("label", mSelectedContent);
+                clipboard.setPrimaryClip(clip);
+                return true;
+            case R.id.menu_paste:
+                if (clipboard.hasPrimaryClip()) {
+                    ClipData.Item cb_item = clipboard.getPrimaryClip().getItemAt(0);
+                    String text = cb_item.getText().toString();
+                    Makepad.pasteFromClipboard(mCx, text, (Makepad.Callback)mView.getContext());
+                }
+                return true;
+            default:
+                return super.onContextItemSelected(item);
+        }
+    }
+
     Handler mHandler;
     HashMap<Long, Runnable> mRunnables;
     MakepadSurfaceView mView;
     long mCx;
+    String mSelectedContent;
 }

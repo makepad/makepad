@@ -232,7 +232,19 @@ impl Cx {
     pub fn from_java_on_midi_device_opened(&mut self, name: String, midi_device: jobject, to_java: AndroidToJava) {
         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device, &to_java);
     }
-    
+
+    pub fn from_java_paste_from_clipboard(&mut self, content: String, to_java: AndroidToJava) {
+        let e = Event::TextInput(
+            TextInputEvent {
+                input: content,
+                replace_last: false,
+                was_paste: true,
+            }
+        );
+        self.call_event_handler(&e);
+        self.after_every_event(&to_java);
+    }
+
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
@@ -345,8 +357,8 @@ impl Cx {
                 CxOsOp::HideTextIME => {
                     to_java.hide_text_ime();
                 },
-                CxOsOp::DisplayClipboardActions => {
-                    to_java.display_clipboard_actions();
+                CxOsOp::DisplayClipboardActions(selected) => {
+                    to_java.display_clipboard_actions(selected.as_str());
                 },
                 _ => ()
             }
