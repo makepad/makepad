@@ -285,6 +285,11 @@ impl TextInput {
             (self.cursor_tail, self.cursor_head)
         }
     }
+
+    pub fn is_in_selected_text(&self, pos: usize) -> bool {
+        let (left, right) = self.sorted_cursor();
+        left < pos && pos < right
+    }
     
     pub fn selected_text(&mut self) -> String {
         let mut ret = String::new();
@@ -590,10 +595,6 @@ impl TextInput {
                 if let Some(pos) = self.draw_label.closest_offset(cx, fe.abs) {
                     //log!("{} {}", pos, fe.abs);
                     let pos = pos.min(self.text.chars().count());
-                    self.cursor_head = pos;
-                    if !fe.mod_shift() {
-                        self.cursor_tail = self.cursor_head;
-                    }
                     if fe.tap_count == 2 {
                         // lets select the word.
                         self.select_word(pos);
@@ -607,6 +608,18 @@ impl TextInput {
             },
             Hit::FingerUp(fe) => {
                 self.double_tap_start = None;
+                if let Some(pos) = self.draw_label.closest_offset(cx, fe.abs) {
+                    let pos = pos.min(self.text.chars().count());
+                    if !fe.mod_shift() && fe.tap_count == 1 && fe.was_tap() {
+                        self.cursor_head = pos;
+                        self.cursor_tail = self.cursor_head;
+                        self.draw_bg.redraw(cx);
+                    }
+                    // TODO move to fingers.rs
+                    if fe.was_long_press() && self.is_in_selected_text(pos) {
+                        cx.display_clipboard_actions();
+                    }
+                }
                 if fe.is_over && fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
@@ -629,8 +642,17 @@ impl TextInput {
                         }
                         self.draw_bg.redraw(cx);
                     }
-                    else if fe.tap_count == 1 && pos != self.cursor_head {
-                        self.cursor_head = pos;
+                    else if fe.tap_count == 1 {
+                        if let Some(pos_start) = self.draw_label.closest_offset(cx, fe.abs_start) {
+                            let pos_start = pos_start.min(self.text.chars().count());
+
+                            self.cursor_head = pos_start;
+                            self.cursor_tail = self.cursor_head;
+                        }
+                        if pos != self.cursor_head {
+                            self.cursor_head = pos;
+                        }
+                        // TODO check if we should prevent this invocation when there is no changes
                         self.draw_bg.redraw(cx);
                     }
                 }
