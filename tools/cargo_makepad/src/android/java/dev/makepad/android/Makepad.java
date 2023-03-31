@@ -14,7 +14,7 @@ public class Makepad {
         void openAllMidiDevices(long delay);
         void showTextIME();
         void hideTextIME();
-        void displayClipboardActions();
+        void displayClipboardActions(String selected);
     }
 
     static {
@@ -34,4 +34,5 @@ public class Makepad {
     static native void onKeyDown(long cx, KeyEvent event, Callback callback);
     static native void onTimeout(long cx, long id, Callback callback);
     static native void onMidiDeviceOpened(long cx, String name, Object midi_device, Callback callback);
+    static native void pasteFromClipboard(long cx, String content, Callback callback);
 }

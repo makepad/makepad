@@ -139,18 +139,20 @@ impl<'a> AndroidToJava<'a> {
     }
 
     /// Display clipboard actions menu
-    pub fn display_clipboard_actions(&self) {
+    pub fn display_clipboard_actions(&self, selected: &str) {
         unsafe {
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
             let name = CString::new("displayClipboardActions").unwrap();
-            let signature = CString::new("()V").unwrap();
+            let signature = CString::new("(Ljava/lang/String;)V").unwrap();
+            let selected = CString::new(selected).unwrap();
+            let selected = ((**self.env).NewStringUTF.unwrap())(self.env, selected.as_ptr());
             let method_id = ((**self.env).GetMethodID.unwrap())(
                 self.env,
                 class,
                 name.as_ptr(),
                 signature.as_ptr(),
             );
-            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
+            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id, selected);
         }
     }
     
@@ -535,6 +537,24 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onMidiDeviceOpened(
     (*(cx as *mut Cx)).from_java_on_midi_device_opened(
         jstring_to_string(env, name),
         midi_device,
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_pasteFromClipboard(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    content: jstring,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_paste_from_clipboard(
+        jstring_to_string(env, content),
         AndroidToJava {
             env,
             callback,

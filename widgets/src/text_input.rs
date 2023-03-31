@@ -616,8 +616,8 @@ impl TextInput {
                         self.draw_bg.redraw(cx);
                     }
                     // TODO move to fingers.rs
-                    if fe.was_long_press() && self.is_in_selected_text(pos) {
-                        cx.display_clipboard_actions();
+                    if fe.was_long_press() {
+                        cx.display_clipboard_actions(self.selected_text());
                     }
                 }
                 if fe.is_over && fe.device.has_hovers() {
