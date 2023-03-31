@@ -199,23 +199,14 @@ impl LiveRegistry {
             LiveValue::Str(v) => {
                 Some(v.to_string())
             }
-            LiveValue::FittedString(v) => {
+            LiveValue::String(v) => {
                 Some(v.as_str().to_string())
             }
             LiveValue::InlineString(v) => {
                 Some(v.as_str().to_string())
             }
-            LiveValue::DocumentString {string_start, string_count} => {
-                let origin_doc = self.token_id_to_origin_doc(node.origin.token_id().unwrap());
-                let mut out = String::new();
-                origin_doc.get_string(*string_start, *string_count, &mut out);
-                Some(out)
-            }
-            LiveValue::Dependency {string_start, string_count} => {
-                let origin_doc = self.token_id_to_origin_doc(node.origin.token_id().unwrap());
-                let mut out = String::new();
-                origin_doc.get_string(*string_start, *string_count, &mut out);
-                Some(out)
+            LiveValue::Dependency (v) => {
+                Some(v.as_str().to_string())
             }
             _ => None
         }
@@ -232,7 +223,7 @@ impl LiveRegistry {
             return None;
         }
         let doc = &self.live_files[first_def.file_id().unwrap().to_index()].original;
-        let token = doc.tokens[token_index - 1];
+        let token = &doc.tokens[token_index - 1];
         if let LiveToken::Ident(id) = token.token {
             return Some(id)
         }
@@ -424,11 +415,10 @@ impl LiveRegistry {
         self.live_files[token_id.file_id().unwrap().to_index()].original.token_id_to_span(token_id)
     }
     
-    pub fn tokenize_from_str(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<(Vec<TokenWithSpan>, Vec<char>), LiveError> {
+    pub fn tokenize_from_str(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<Vec<TokenWithSpan>, LiveError> {
         let mut line_chars = Vec::new();
         let mut state = State::default();
         let mut scratch = String::new();
-        let mut strings = Vec::new();
         let mut tokens = Vec::new();
         let mut pos = start_pos;
         for line_str in source.lines() {
@@ -451,25 +441,7 @@ impl LiveRegistry {
                                 message: format!("Error tokenizing")
                             })
                         },
-                        FullToken::String => {
-                            let len = full_token.len - 2;
-                            tokens.push(TokenWithSpan {span: span, token: LiveToken::String {
-                                index: strings.len() as u32,
-                                len: len as u32
-                            }});
-                            let col = pos.column as usize + 1;
-                            strings.extend(&line_chars[col..col + len]);
-                        },
-                        FullToken::Dependency => {
-                            let len = full_token.len - 3;
-                            tokens.push(TokenWithSpan {span: span, token: LiveToken::Dependency {
-                                index: strings.len() as u32,
-                                len: len as u32
-                            }});
-                            let col = pos.column as usize + 2;
-                            strings.extend(&line_chars[col..col + len]);
-                        },
-                        _ => match LiveToken::from_full_token(full_token.token) {
+                        _ => match LiveToken::from_full_token(&full_token.token) {
                             Some(live_token) => {
                                 // lets build up the span info
                                 tokens.push(TokenWithSpan {span: span, token: live_token})
@@ -488,7 +460,7 @@ impl LiveRegistry {
             pos.column = 0;
         }
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
-        Ok((tokens, strings))
+        Ok(tokens)
     }
     
     // called by the live editor to update a live file
@@ -507,15 +479,13 @@ impl LiveRegistry {
         
         let mut live_tokens = &mut original.tokens;
         let mut new_tokens = Vec::new();
-        let old_strings = &original.strings;
-        let mut new_strings: Vec<char> = Vec::new();
         
         let mut mutated_tokens = Vec::new();
         
         let mut parse_changed = false;
         
         for line in range.start.line..range.end.line {
-            let (line_chars, full_tokens) = get_line(line);
+            let (_, full_tokens) = get_line(line);
             // OK SO now we diff as we go
             let mut column = 0usize;
             for (token_index, full_token) in full_tokens.iter().enumerate() {
@@ -528,7 +498,7 @@ impl LiveRegistry {
                         end: TextPos {column: (column + full_token.len) as u32, line: line as u32}
                     };
                     
-                    match full_token.token {
+                    match &full_token.token {
                         FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
@@ -536,14 +506,8 @@ impl LiveRegistry {
                                 message: format!("Error tokenizing")
                             })
                         },
-                        FullToken::String => {
-                            let new_len = full_token.len - 2;
-                            let new_col = column as usize + 1;
-                            let new_chars = &line_chars[new_col..new_col + new_len];
-                            let new_string = LiveToken::String {
-                                index: new_strings.len() as u32,
-                                len: new_len as u32
-                            };
+                        FullToken::String(s) => {
+                            let new_string = LiveToken::String(s.clone());
                             if live_index >= live_tokens.len() { // just append
                                 if !parse_changed {
                                     new_tokens = live_tokens.clone();
@@ -552,12 +516,8 @@ impl LiveRegistry {
                                 }
                                 live_tokens.push(TokenWithSpan {span: span, token: new_string});
                             }
-                            else if let LiveToken::String {index, len} = live_tokens[live_index].token {
-                                let old_chars = &old_strings[index as usize ..(index + len) as usize];
-                                // compare string or len/position
-                                if new_chars != old_chars || new_strings.len() as u32 != index || new_len as u32 != len {
-                                    mutated_tokens.push(LiveTokenId::new(file_id, live_index));
-                                }
+                            else if let LiveToken::String (_) = &live_tokens[live_index].token {
+                                todo!();
                             }
                             else { // cant replace a sttring type with something else without a reparse
                                 if !parse_changed {
@@ -567,10 +527,9 @@ impl LiveRegistry {
                                 }
                                 live_tokens[live_index] = TokenWithSpan {span: span, token: new_string};
                             }
-                            new_strings.extend(new_chars);
                             live_index += 1;
                         },
-                        _ => match LiveToken::from_full_token(full_token.token) {
+                        _ => match LiveToken::from_full_token(&full_token.token) {
                             Some(live_token) => {
                                 if live_index >= live_tokens.len() { // just append
                                     if !parse_changed {
@@ -581,7 +540,7 @@ impl LiveRegistry {
                                     live_tokens.push(TokenWithSpan {span: span, token: live_token})
                                 }
                                 else {
-                                    if live_tokens[live_index].is_parse_equal(live_token) { // token value changed
+                                    if live_tokens[live_index].is_parse_equal(&live_token) { // token value changed
                                         if live_tokens[live_index].token != live_token {
                                             live_tokens[live_index].token = live_token;
                                             mutated_tokens.push(LiveTokenId::new(file_id, live_index));
@@ -633,7 +592,6 @@ impl LiveRegistry {
             match parser.parse_live_document() {
                 Err(msg) => return Err(msg), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
                 Ok(mut ld) => { // only swap it out when it parses
-                    ld.strings = new_strings;
                     ld.tokens = new_tokens;
                     live_file.next_original = Some(ld);
                 }
@@ -644,8 +602,7 @@ impl LiveRegistry {
         else if mutated_tokens.len()>0 { // its a hotpatch
             // means if we had a next_original its now cancelled
             live_file.next_original = None;
-            original.strings = new_strings;
-            
+           
             let (apply, live_ptrs) = self.update_documents_from_mutated_tokens(&mutated_tokens);
             
             return Ok(Some(LiveEditEvent::Mutation {tokens: mutated_tokens, apply, live_ptrs}))
@@ -766,7 +723,7 @@ impl LiveRegistry {
         }
         let file_id = LiveFileId::new(self.live_files.len());
         
-        let (tokens, strings) = match Self::tokenize_from_str(&source, start_pos, file_id) {
+        let tokens = match Self::tokenize_from_str(&source, start_pos, file_id) {
             Err(msg) => return Err(msg.into_live_file_error(file_name)), //panic!("Lex error {}", msg),
             Ok(lex_result) => lex_result
         };
@@ -778,7 +735,6 @@ impl LiveRegistry {
             Ok(ld) => ld
         };
         
-        original.strings = strings;
         original.tokens = tokens;
         
         // update our live type info

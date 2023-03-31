@@ -167,6 +167,7 @@ pub enum DesktopWindowAction {
     EventForOtherWindow,
     WindowClosed,
     WindowGeomChange(WindowGeomChangeEvent),
+    FrameActions(Vec<WidgetActionItem>),
     None
 }
 
@@ -218,7 +219,6 @@ impl DesktopWindow {
             return dispatch_action(cx, DesktopWindowAction::EventForOtherWindow)
         }
         else {
-            
             let actions = self.frame.handle_widget_event(cx, event);
             if actions.not_empty() {
                 if self.frame.get_button(id!(min)).clicked(&actions) {
@@ -238,6 +238,7 @@ impl DesktopWindow {
                 if self.frame.get_button(id!(xr_on)).clicked(&actions) {
                     cx.xr_start_presenting();
                 }
+                dispatch_action(cx, DesktopWindowAction::FrameActions(actions));
             }
         }
         
@@ -310,7 +311,14 @@ impl Widget for DesktopWindow{
     ) {
         let uid = self.widget_uid();
         self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
+            if let DesktopWindowAction::FrameActions(actions) = action{
+               for action in actions{
+                   dispatch_action(cx, action)
+               } 
+            }
+            else{
+                dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
+            }
         });
     }
 
