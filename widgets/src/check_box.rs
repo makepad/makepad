@@ -247,12 +247,14 @@ impl CheckBox {
 impl Widget for CheckBox {
     fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions, path: &[LiveId]) {
         match db {
-            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.widget_uid()) {
-                match item.action() {
-                    CheckBoxAction::Change(v) => {
-                        nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Bool(v))]);
+            DataBinding::FromWidgets{nodes,..} =>{
+                if let Some(item) = act.find_single_action(self.widget_uid()) {
+                    match item.action() {
+                        CheckBoxAction::Change(v) => {
+                            nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Bool(v))]);
+                        }
+                        _ => ()
                     }
-                    _ => ()
                 }
             }
             DataBinding::ToWidgets{nodes} => {

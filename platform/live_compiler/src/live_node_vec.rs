@@ -1,5 +1,6 @@
 use {
     std::{
+        rc::Rc,
         fmt::Write,
         iter
     },
@@ -15,7 +16,7 @@ use {
         },
         makepad_live_tokenizer::LiveId,
         live_token::LiveTokenId,
-        live_node::{LivePropType, LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString, LiveProp},
+        live_node::{LivePropType, LiveNode, LiveValue, LiveNodeOrigin, InlineString, LiveProp},
     }
 };
 
@@ -693,14 +694,11 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 LiveValue::InlineString(s) => {
                     writeln!(f, "{}{} <InlineString> {}", node.id, pt, s.as_str()).unwrap();
                 },
-                LiveValue::FittedString(s) => {
-                    writeln!(f, "{}{} <FittedString> {}", node.id, pt, s.as_str()).unwrap();
+                LiveValue::String(s) => {
+                    writeln!(f, "{}{} <String> {}", node.id, pt, s.as_str()).unwrap();
                 },
-                LiveValue::DocumentString {string_start, string_count} => {
-                    writeln!(f, "{}{} <DocumentString> string_start:{}, string_end:{}", node.id, pt, string_start, string_count).unwrap();
-                },
-                LiveValue::Dependency {string_start, string_count} => {
-                    writeln!(f, "{}{} <Dependency> string_start:{}, string_end:{}", node.id, pt, string_start, string_count).unwrap();
+                LiveValue::Dependency (s) => {
+                    writeln!(f, "{}{} <Dependency> {}", node.id, pt, s).unwrap();
                 },
                 LiveValue::Bool(v) => {
                     writeln!(f, "{}{} <Bool> {}", node.id, pt, v).unwrap();
@@ -729,6 +727,9 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 LiveValue::Id(id) => {
                     writeln!(f, "{}{} <Id> {}", node.id, pt, id).unwrap();
                 },
+                LiveValue::IdPath(p) => {
+                    writeln!(f, "<IdPath> {:?}", p).unwrap();
+                }
                 LiveValue::ExprBinOp(id) => {
                     writeln!(f, "{}{} <ExprBinOp> {:?}", node.id, pt, id).unwrap();
                 },
@@ -742,6 +743,10 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                     writeln!(f, "{}{} <BareEnum> {}", node.id, pt, variant).unwrap();
                 },
                 // stack items
+                LiveValue::Binding(_) => {
+                    writeln!(f, "{} <Binding> {:?}", node.id, pt).unwrap();
+                    stack_depth += 1;
+                },
                 LiveValue::Expr {expand_index} => {
                     writeln!(f, "{}{} <Expr> {:?}", node.id, pt, expand_index).unwrap();
                     stack_depth += 1;
@@ -973,7 +978,7 @@ impl LiveNodeVecApi for LiveNodeVec {
             self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::InlineString(inline_str)});
         }
         else {
-            self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::FittedString(FittedString::from_string(v.to_string()))});
+            self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::String(Rc::new(v.to_string()))});
         }
     }
     

@@ -180,6 +180,23 @@ pub enum WidgetSet{
     Empty
 }
 
+impl std::fmt::Debug for WidgetSet{
+    fn fmt(&self, f: &mut std::fmt::Formatter)->Result<(), std::fmt::Error>{
+        match self{
+            Self::Inline{len,..}=>{
+                let _ = write!(f, "WidgetSet::Inline: {}", len);
+            },
+            Self::Vec(vec)=>{
+                let _ = write!(f, "WidgetSet::Vec: {}", vec.len());
+            },
+            Self::Empty=>{
+                let _ = write!(f, "WidgetSet::Empty");
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for WidgetSet{
     fn default()->Self{Self::Empty}
 }
@@ -209,6 +226,10 @@ impl WidgetSet{
                     }
                     vec.push(item);
                     *self = Self::Vec(vec);
+                }
+                else{
+                    set[*len] = Some(item);
+                    *len += 1;
                 }
             }
             Self::Vec(vec)=>{
@@ -519,6 +540,7 @@ impl LiveNew for WidgetRef {
     }
 }
 
+#[derive(Clone)]
 pub struct WidgetActionItem {
     pub widget_uid: WidgetUid,
     pub action: Box<dyn WidgetAction>
