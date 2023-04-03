@@ -25,6 +25,9 @@ use {
             TimerEvent,
             TextInputEvent,
             TextCopyEvent,
+            KeyEvent,
+            KeyCode,
+            KeyModifiers,
             WebSocket,
             WebSocketAutoReconnect,
             Event,
@@ -198,14 +201,36 @@ impl Cx {
     /// Called when a touch event happened on the software keyword
     pub fn from_java_on_key_down(&mut self, native_key_code: i32, shift: bool, to_java: AndroidToJava) {
         let key_code = to_key_code(native_key_code);
-        let input = keycode_to_string(key_code, shift).to_string();
-        let e = Event::TextInput(
-            TextInputEvent {
-                input: input,
-                replace_last: false,
-                was_paste: false,
+        let e: Event;
+        match key_code {
+            KeyCode::Backspace => {
+                e = Event::KeyDown(KeyEvent {
+                    key_code: KeyCode::Backspace,
+                    is_repeat: false,
+                    modifiers: KeyModifiers {shift, ..Default::default()},
+                    time: self.os.time_now()
+                });
             }
-        );
+            KeyCode::ReturnKey => {
+                e = Event::KeyDown(KeyEvent {
+                    key_code: KeyCode::ReturnKey,
+                    is_repeat: false,
+                    modifiers: KeyModifiers {shift, ..Default::default()},
+                    time: self.os.time_now()
+                });
+            }
+            _ => {
+                let input = keycode_to_string(key_code, shift).to_string();
+                e = Event::TextInput(
+                    TextInputEvent {
+                        input: input,
+                        replace_last: false,
+                        was_paste: false,
+                    }
+                )
+            }
+        }
+
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }

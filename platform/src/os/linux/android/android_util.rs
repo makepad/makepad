@@ -49,6 +49,9 @@ pub fn to_key_code(key_code: i32) -> KeyCode {
       69 => KeyCode::Minus,
       70 => KeyCode::Equals,
 
+      66 => KeyCode::ReturnKey,
+      67 => KeyCode::Backspace,
+
       _ => KeyCode::Unknown
   }
 }
