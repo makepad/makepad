@@ -373,6 +373,7 @@ impl Cx {
                 CxOsOp::UpdateMenu(menu) => {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)
                 }
+                _ => ()
             }
         }
     }
