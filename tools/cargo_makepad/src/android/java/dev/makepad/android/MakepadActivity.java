@@ -298,19 +298,27 @@ Makepad.Callback{
         ClipData clip;
         switch (item.getItemId()) {
             case R.id.menu_copy:
-                clip = ClipData.newPlainText("label", mSelectedContent);
+                clip = ClipData.newPlainText("Makepad", mSelectedContent);
                 clipboard.setPrimaryClip(clip);
+
+                // Will emit the internal Makepad TextCopy event, just in case
+                // widget developers want to do something else
+                Makepad.copyToClipboard(mCx, (Makepad.Callback)mView.getContext());
                 return true;
             case R.id.menu_paste:
                 if (clipboard.hasPrimaryClip()) {
                     ClipData.Item cb_item = clipboard.getPrimaryClip().getItemAt(0);
                     String text = cb_item.getText().toString();
+
+                    // Will emit TextInput event with the was_paste flag in true
                     Makepad.pasteFromClipboard(mCx, text, (Makepad.Callback)mView.getContext());
                 }
                 return true;
             case R.id.menu_cut:
-                clip = ClipData.newPlainText("label", mSelectedContent);
+                clip = ClipData.newPlainText("Makepad", mSelectedContent);
                 clipboard.setPrimaryClip(clip);
+
+                // Will emit TextCut event so Makepad widgets can strip the selected content
                 Makepad.cutToClipboard(mCx, (Makepad.Callback)mView.getContext());
                 return true;
             default:
