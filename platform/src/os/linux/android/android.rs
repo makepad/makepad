@@ -1,4 +1,6 @@
 use {
+    std::rc::Rc,
+    std::cell::{RefCell},
     std::ffi::CString,
     std::os::raw::{c_char, c_void},
     std::time::Instant,
@@ -22,6 +24,7 @@ use {
             WindowGeomChangeEvent,
             TimerEvent,
             TextInputEvent,
+            TextCopyEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Event,
@@ -233,6 +236,15 @@ impl Cx {
         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device, &to_java);
     }
 
+    pub fn from_java_copy_to_clipboard(&mut self, to_java: AndroidToJava) {
+        let response = Rc::new(RefCell::new(None));
+        let e = Event::TextCopy(TextCopyEvent {
+            response: response.clone()
+        });
+        self.call_event_handler(&e);
+        self.after_every_event(&to_java);
+    }
+
     pub fn from_java_paste_from_clipboard(&mut self, content: String, to_java: AndroidToJava) {
         let e = Event::TextInput(
             TextInputEvent {
@@ -246,7 +258,6 @@ impl Cx {
     }
 
     pub fn from_java_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
-        crate::makepad_error_log::error!("lalalala");
         let e = Event::TextCut;
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
