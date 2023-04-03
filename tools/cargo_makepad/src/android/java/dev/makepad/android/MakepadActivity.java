@@ -256,7 +256,7 @@ Makepad.Callback{
         imm.hideSoftInputFromWindow(mView.getWindowToken(), 0);
     }
 
-    public void displayClipboardActions(String selected) {
+    public void showClipboardActions(String selected) {
         mSelectedContent = selected;
         mView.showContextMenu();
     }
@@ -282,7 +282,10 @@ Makepad.Callback{
         MenuItem pasteItem = menu.findItem(R.id.menu_paste);
         if (!(clipboard.hasPrimaryClip())) {
             pasteItem.setVisible(false);
-        } else if (!(clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN))) {
+        } else if (
+            !(clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) &&
+            !(clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML))
+        ) {
             pasteItem.setVisible(false);
         } else {
             pasteItem.setVisible(true);
