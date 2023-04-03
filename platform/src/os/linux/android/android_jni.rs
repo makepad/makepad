@@ -562,3 +562,19 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_pasteFromClipboard(
         },
     );
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_cutToClipboard(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_cut_to_clipboard(
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
