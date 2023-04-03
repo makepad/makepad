@@ -503,6 +503,13 @@ impl TextInput {
                 self.undo_id += 1;
                 *ce.response.borrow_mut() = Some(self.selected_text())
             }
+            Hit::TextCut => {
+                self.undo_id += 1;
+                if self.cursor_head != self.cursor_tail {
+                    self.create_undo(UndoGroup::Cut(self.undo_id));
+                    self.change(cx, "", dispatch_action);
+                }
+            }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::Tab => {
                     // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
