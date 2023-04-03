@@ -70,7 +70,7 @@ pub enum CxOsOp {
     StopTimer(u64),
     StartDragging(DraggedItem),
     UpdateMenu(Menu),
-    DisplayClipboardActions(String)
+    ShowClipboardActions(String)
 }
 
 impl Cx { 
@@ -119,8 +119,8 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HideTextIME);
     }
 
-    pub fn display_clipboard_actions(&mut self, selected: String) {
-        self.platform_ops.push(CxOsOp::DisplayClipboardActions(selected));
+    pub fn show_clipboard_actions(&mut self, selected: String) {
+        self.platform_ops.push(CxOsOp::ShowClipboardActions(selected));
     }
     
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {

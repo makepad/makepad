@@ -364,8 +364,8 @@ impl Cx {
                 CxOsOp::HideTextIME => {
                     to_java.hide_text_ime();
                 },
-                CxOsOp::DisplayClipboardActions(selected) => {
-                    to_java.display_clipboard_actions(selected.as_str());
+                CxOsOp::ShowClipboardActions(selected) => {
+                    to_java.show_clipboard_actions(selected.as_str());
                 },
                 _ => ()
             }

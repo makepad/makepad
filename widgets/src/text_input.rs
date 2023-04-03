@@ -622,10 +622,9 @@ impl TextInput {
                         self.cursor_tail = self.cursor_head;
                         self.draw_bg.redraw(cx);
                     }
-                    // TODO move to fingers.rs
-                    if fe.was_long_press() {
-                        cx.display_clipboard_actions(self.selected_text());
-                    }
+                }
+                if fe.was_long_press() {
+                    cx.show_clipboard_actions(self.selected_text());
                 }
                 if fe.is_over && fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
