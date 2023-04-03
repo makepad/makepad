@@ -619,6 +619,11 @@ impl Event {
                     return Hit::TextCopy(tc.clone());
                 }
             },
+            Event::TextCut => {
+                if cx.keyboard.has_key_focus(area) {
+                    return Hit::TextCut;
+                }
+            },
             Event::Scroll(e) => {
                 let digit_id = live_id!(mouse).into();
                 

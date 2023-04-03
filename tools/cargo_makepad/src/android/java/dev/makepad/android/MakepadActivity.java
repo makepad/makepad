@@ -13,6 +13,7 @@ import android.view.ContextMenu.ContextMenuInfo;
 import android.view.MenuItem;
 import android.content.Context;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.util.Log;
 import android.content.pm.PackageManager;
@@ -263,16 +264,38 @@ Makepad.Callback{
     @Override
     public void onCreateContextMenu(ContextMenu menu, View v, ContextMenuInfo menuInfo) {
         super.onCreateContextMenu(menu, v, menuInfo);
+
         MenuInflater inflater = getMenuInflater();
         inflater.inflate(R.menu.context_menu, menu);
+
+        MenuItem copyItem = menu.findItem(R.id.menu_copy);
+        MenuItem cutItem = menu.findItem(R.id.menu_cut);
+        if (mSelectedContent == null || mSelectedContent.isEmpty()) {
+            copyItem.setVisible(false);
+            cutItem.setVisible(false);
+        } else {
+            copyItem.setVisible(true);
+            cutItem.setVisible(true);
+        }
+
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        MenuItem pasteItem = menu.findItem(R.id.menu_paste);
+        if (!(clipboard.hasPrimaryClip())) {
+            pasteItem.setVisible(false);
+        } else if (!(clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN))) {
+            pasteItem.setVisible(false);
+        } else {
+            pasteItem.setVisible(true);
+        }
     }
 
     @Override
     public boolean onContextItemSelected(MenuItem item) {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        ClipData clip;
         switch (item.getItemId()) {
             case R.id.menu_copy:
-                ClipData clip = ClipData.newPlainText("label", mSelectedContent);
+                clip = ClipData.newPlainText("label", mSelectedContent);
                 clipboard.setPrimaryClip(clip);
                 return true;
             case R.id.menu_paste:
@@ -281,6 +304,11 @@ Makepad.Callback{
                     String text = cb_item.getText().toString();
                     Makepad.pasteFromClipboard(mCx, text, (Makepad.Callback)mView.getContext());
                 }
+                return true;
+            case R.id.menu_cut:
+                clip = ClipData.newPlainText("label", mSelectedContent);
+                clipboard.setPrimaryClip(clip);
+                Makepad.cutToClipboard(mCx, (Makepad.Callback)mView.getContext());
                 return true;
             default:
                 return super.onContextItemSelected(item);
