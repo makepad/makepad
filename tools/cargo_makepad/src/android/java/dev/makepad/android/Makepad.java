@@ -14,7 +14,7 @@ public class Makepad {
         void openAllMidiDevices(long delay);
         void showTextIME();
         void hideTextIME();
-        void displayClipboardActions(String selected);
+        void showClipboardActions(String selected);
     }
 
     static {

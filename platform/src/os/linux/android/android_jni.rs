@@ -139,10 +139,10 @@ impl<'a> AndroidToJava<'a> {
     }
 
     /// Display clipboard actions menu
-    pub fn display_clipboard_actions(&self, selected: &str) {
+    pub fn show_clipboard_actions(&self, selected: &str) {
         unsafe {
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-            let name = CString::new("displayClipboardActions").unwrap();
+            let name = CString::new("showClipboardActions").unwrap();
             let signature = CString::new("(Ljava/lang/String;)V").unwrap();
             let selected = CString::new(selected).unwrap();
             let selected = ((**self.env).NewStringUTF.unwrap())(self.env, selected.as_ptr());
