@@ -515,6 +515,7 @@ impl TextInput {
                     // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
                 }
                 KeyCode::ReturnKey => {
+                    cx.hide_text_ime();
                     dispatch_action(cx, TextInputAction::Return(self.text.clone()));
                 },
                 KeyCode::Escape => {
