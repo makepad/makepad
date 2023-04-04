@@ -1,11 +1,11 @@
 use crate::makepad_widgets::*;
 
 live_design!{
-    registry Widget::*;
-    
-    import makepad_widgets::theme::*;
-    import makepad_widgets::frame::*;
-    import makepad_draw::shader::std::*;
+registry Widget::*;
+
+import makepad_widgets::theme::*;
+import makepad_widgets::frame::*;
+import makepad_draw::shader::std::*;
     
     const FONT_SIZE_H2 = 9.5
 
@@ -658,7 +658,6 @@ live_design!{
                         ),
                         1.5
                     );
-
 
                     sdf.subtract()
 
@@ -1767,8 +1766,8 @@ live_design!{
         layout: {flow: Right, spacing: (SSPACING_0), align: {x: 0.0, y: 0.0} }
         
         <Frame> { // TODO: Remove excessive nesting?
-            layout: { flow: Down, align: {x: 0.0, y: 0.0}, spacing: 0, padding: <SPACING_2> {} }
-            walk: {height: 135, width: Fill, margin: <SPACING_2> {}}
+        layout: { flow: Down, align: {x: 0.0, y: 0.0}, spacing: 0, padding: <SPACING_2> {} }
+        walk: {height: 135, width: Fill, margin: <SPACING_2> {}}
 
             <Frame> {
                 walk: { width: Fill }
@@ -2037,7 +2036,6 @@ live_design!{
         walk: { width: Fill, height: Fill }
         layout: { flow: Down, padding: 10, spacing: 2 }
 
-        <PresetListEntry> {}
         <PresetListEntry> {}
         <PresetListEntry> {}
         <PresetListEntry> {}
