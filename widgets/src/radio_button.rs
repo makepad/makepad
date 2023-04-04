@@ -3,7 +3,6 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         widget::*,
-        data_binding::DataBinding,
     }
 };
 
@@ -233,8 +232,6 @@ impl RadioButton {
 }
 
 impl Widget for RadioButton {
-    fn bind_to(&mut self, _cx: &mut Cx, _db: &mut DataBinding, _act: &WidgetActions, _path: &[LiveId]) {
-    }
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.draw_radio.redraw(cx);
@@ -291,7 +288,6 @@ impl RadioButtonSet{
     pub fn selected_to_visible(&self, cx: &mut Cx, ui:&WidgetRef, actions: &WidgetActions, paths:&[&[LiveId]] ) {
         // find a widget action that is in our radiogroup
         if let Some(index) = self.selected(cx, actions){
-            log!("SELECTED {}", index);
             // ok now we set visible
             for (i,path) in paths.iter().enumerate(){
                 let mut widget = ui.get_widget(path);

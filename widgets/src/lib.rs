@@ -60,7 +60,7 @@ pub mod data_binding;
 mod theme;
 
 pub use crate::{
-    data_binding::{DataBinding},
+    data_binding::{DataBindingStore, DataBindingMap},
     button::*,
     frame::*,
     label::*,
