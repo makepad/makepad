@@ -36,7 +36,7 @@ live_design!{
         
         draw_cursor: {
             instance focus: 0.0
-            const BORDER_RADIUS = 0.5
+            uniform border_radius: 0.5
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
@@ -44,7 +44,7 @@ live_design!{
                     0.,
                     self.rect_size.x,
                     self.rect_size.y,
-                    BORDER_RADIUS
+                    self.border_radius
                 )
                 sdf.fill(mix(#ccc0, #f, self.focus));
                 return sdf.result
@@ -55,7 +55,7 @@ live_design!{
         draw_select: {
             instance hover: 0.0
             instance focus: 0.0
-            const BORDER_RADIUS = 2.0
+            uniform border_radius: 2.0
             fn pixel(self) -> vec4 {
                 //return mix(#f00,#0f0,self.pos.y)
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -64,7 +64,7 @@ live_design!{
                     0.,
                     self.rect_size.x,
                     self.rect_size.y,
-                    BORDER_RADIUS
+                    self.border_radius
                 )
                 sdf.fill(mix(#5550, #xFFFFFF40, self.focus)); // Pad color
                 return sdf.result

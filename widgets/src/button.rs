@@ -32,8 +32,7 @@ live_design!{
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
-            
-            const BORDER_RADIUS = 3.0
+            uniform border_radius: 3.0
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -49,12 +48,12 @@ live_design!{
                 );
                 
                 // the little drop shadow at the bottom
-                let shift_inward = BORDER_RADIUS + 4.0;
-                sdf.move_to(shift_inward, self.rect_size.y - BORDER_RADIUS);
-                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y - BORDER_RADIUS);
+                let shift_inward = self.border_radius + 4.0;
+                sdf.move_to(shift_inward, self.rect_size.y - self.border_radius);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y - self.border_radius);
                 sdf.stroke(
                     mix(mix(#2f, #1f, self.hover), #0000, self.pressed),
-                    BORDER_RADIUS
+                    self.border_radius
                 )
                 
                 sdf.box(
@@ -62,7 +61,7 @@ live_design!{
                     1.,
                     self.rect_size.x - 2.0,
                     self.rect_size.y - 2.0,
-                    BORDER_RADIUS
+                    self.border_radius
                 )
                 sdf.fill_keep(body)
                 
