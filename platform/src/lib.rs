@@ -73,7 +73,6 @@ pub use {
         LiveErrorOrigin,
         LiveNodeOrigin,
         LiveRegistry,
-        LiveDocNodes,
         LiveId,
         LiveIdMap,
         LiveFileId,

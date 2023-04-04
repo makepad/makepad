@@ -361,9 +361,6 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 LiveValue::ExprMember(_) => {
                     return Err("Cannot serialise LiveValue::ExprMember".into())
                 },
-                LiveValue::Binding(_) => {
-                    return Err("Cannot serialise LiveValue::Expr".into())
-                },
                 LiveValue::Expr {..} => {
                     return Err("Cannot serialise LiveValue::Expr".into())
                 },
@@ -382,7 +379,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 LiveValue::Import(..) => {
                     return Err("Cannot serialise LiveValue::Import".into())
                 }
-                LiveValue::Registry(..) => {
+                LiveValue::Root{..} => {
                     return Err("Cannot serialise LiveValue::Registry".into())
                 }
                 LiveValue::IdPath(..) => {

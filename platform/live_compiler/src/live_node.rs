@@ -1,5 +1,6 @@
 use {
     std::{
+        collections::HashMap,
         rc::Rc,
         fmt,
         ops::{Deref, DerefMut},
@@ -10,6 +11,7 @@ use {
             Vec3,
             Vec4
         },
+        live_registry::LiveScopeTarget,
         makepad_live_tokenizer::{LiveId},
         live_ptr::{LiveModuleId, LivePtr},
         live_token::{LiveToken, LiveTokenId},
@@ -43,8 +45,6 @@ pub enum LiveValue {
     Id(LiveId),
     IdPath(Rc<Vec<LiveId>>),
 
-    Binding(Rc<LiveBinding>),
-
     ExprBinOp(LiveBinOp),
     ExprUnOp(LiveUnOp),
     ExprMember(LiveId),
@@ -52,6 +52,7 @@ pub enum LiveValue {
      // enum thing
     BareEnum (LiveId),
     // tree items
+    Root{id_resolve:Box<HashMap<LiveId,LiveScopeTarget>>},
     Array,
     Expr {expand_index: Option<u32>},
     TupleEnum (LiveId),
@@ -68,7 +69,6 @@ pub enum LiveValue {
         expand_index: Option<u32>
     },
     Import (LiveModuleId),
-    Registry(LiveId)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -449,7 +449,8 @@ impl LiveValue {
             Self::NamedEnum {..} |
             Self::Object | // subnodes including this one
             Self::Clone {..} | // subnodes including this one
-            Self::Class {..} => true, // subnodes including this one
+            Self::Class {..} | 
+            Self::Root {..} => true, // subnodes including this one
             _ => false
         }
     }
@@ -484,13 +485,6 @@ impl LiveValue {
         }
     }
     
-    pub fn is_binding(&self) -> bool {
-        match self {
-            Self::Binding {..} => true,
-            _ => false
-        }
-    }
-    
     pub fn is_class(&self) -> bool {
         match self {
             Self::Class {..} => true,
@@ -518,6 +512,7 @@ impl LiveValue {
             _ => false
         }
     }
+    
     pub fn set_dsl_expand_index_if_none(&mut self, index: usize) {
         match self {
             Self::DSL {expand_index, ..} => if expand_index.is_none() {
@@ -685,17 +680,17 @@ impl LiveValue {
             Self::BareEnum {..} => 19,
             Self::Array => 20,
             Self::Expr {..} => 21,
-            Self::Binding {..} => 22,
-            Self::TupleEnum {..} => 23,
-            Self::NamedEnum {..} => 24,
-            Self::Object => 25,
-            Self::Clone {..} => 26,
-            Self::Class {..} => 27,
+            Self::TupleEnum {..} => 22,
+            Self::NamedEnum {..} => 23,
+            Self::Object => 24,
+            Self::Clone {..} => 25,
+            Self::Class {..} => 26,
+            Self::Root{..}=>27,
             Self::Close => 28,
             
             Self::DSL {..} => 29,
             Self::Import {..} => 30,
-            Self::Registry {..} => 31,
+            //Self::Registry {..} => 30,
         }
     }
 }
