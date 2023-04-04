@@ -76,126 +76,124 @@ impl LiveHook for App {
 
 impl App {
     
-    pub fn data_bind(&mut self, cx: &mut Cx, db: &mut DataBinding, actions: &WidgetActions) {
-        let mut db = db.borrow_cx(cx, &self.ui, actions);
+    pub fn data_bind(&mut self, mut db: DataBindingMap) {
         // touch
-        data_to_widget!(db, touch.scale => touch.scale.slider);
-        data_to_widget!(db, touch.scale => touch.scale.slider);
-        data_to_widget!(db, touch.curve => touch.curve.slider);
-        data_to_widget!(db, touch.offset => touch.offset.slider);
-        data_to_widget!(db, filter1.touch_amount => touch.touchamount.slider);
+        db.bind(id!(touch.scale), ids!(touch.scale.slider));
+        db.bind(id!(touch.curve), ids!(touch.curve.slider));
+        db.bind(id!(touch.offset), ids!(touch.offset.slider));
+        db.bind(id!(filter1.touch_amount), ids!(touch.touchamount.slider));
         
         // sequencer
-        data_to_widget!(db, sequencer.playing => playpause.checkbox);
-        data_to_widget!(db, sequencer.bpm => speed.slider);
-        data_to_widget!(db, sequencer.rootnote => rootnote.dropdown);
-        data_to_widget!(db, sequencer.scale => scaletype.dropdown);
-        data_to_widget!(db, arp.enabled => arp.checkbox);
-        data_to_widget!(db, arp.octaves => arpoctaves.slider);
+        db.bind(id!(sequencer.playing), ids!(playpause.checkbox));
+        db.bind(id!(sequencer.bpm), ids!(speed.slider));
+        db.bind(id!(sequencer.rootnote), ids!(rootnote.dropdown));
+        db.bind(id!(sequencer.scale), ids!(scaletype.dropdown));
+        db.bind(id!(arp.enabled), ids!(arp.checkbox));
+        db.bind(id!(arp.octaves), ids!(arp.octaves.slider));
         
         // Mixer panel
-        data_to_widget!(db, osc_balance => balance.slider);
-        data_to_widget!(db, noise => noise.slider);
-        data_to_widget!(db, sub_osc => sub.slider);
-        data_to_widget!(db, portamento => porta.slider);
+        db.bind(id!(osc_balance), ids!(balance.slider));
+        db.bind(id!(noise), ids!(noise.slider));
+        db.bind(id!(sub_osc), ids!(sub.slider));
+        db.bind(id!(portamento), ids!(porta.slider));
         
         // DelayFX Panel
-        data_to_widget!(db, delay.delaysend => delaysend.slider);
-        data_to_widget!(db, delay.delayfeedback => delayfeedback.slider);
+        db.bind(id!(delay.delaysend), ids!(delaysend.slider));
+        db.bind(id!(delay.delayfeedback), ids!(delayfeedback.slider));
         
-        data_to_widget!(db, bitcrush.enable => crushenable.checkbox);
-        data_to_widget!(db, bitcrush.amount => crushamount.slider);
+        db.bind(id!(bitcrush.enable), ids!(crushenable.checkbox));
+        db.bind(id!(bitcrush.amount), ids!(crushamount.slider));
         
-        data_to_widget!(db, delay.difference => delaydifference.slider);
-        data_to_widget!(db, delay.cross => delaycross.slider);
+        db.bind(id!(delay.difference), ids!(delaydifference.slider));
+        db.bind(id!(delay.cross), ids!(delaycross.slider));
         
         // Chorus panel
-        data_to_widget!(db, chorus.mix => chorusmix.slider);
-        data_to_widget!(db, chorus.mindelay => chorusdelay.slider);
-        data_to_widget!(db, chorus.moddepth => chorusmod.slider);
-        data_to_widget!(db, chorus.rate => chorusrate.slider);
-        data_to_widget!(db, chorus.phasediff => chorusphase.slider);
-        data_to_widget!(db, chorus.feedback => chorusfeedback.slider);
+        db.bind(id!(chorus.mix), ids!(chorusmix.slider));
+        db.bind(id!(chorus.mindelay), ids!(chorusdelay.slider));
+        db.bind(id!(chorus.moddepth), ids!(chorusmod.slider));
+        db.bind(id!(chorus.rate), ids!(chorusrate.slider));
+        db.bind(id!(chorus.phasediff), ids!(chorusphase.slider));
+        db.bind(id!(chorus.feedback), ids!(chorusfeedback.slider));
         
         // Reverb panel
-        data_to_widget!(db, reverb.mix => reverbmix.slider);
-        data_to_widget!(db, reverb.feedback => reverbfeedback.slider);
+        db.bind(id!(reverb.mix), ids!(reverbmix.slider));
+        db.bind(id!(reverb.feedback), ids!(reverbfeedback.slider));
         
         //LFO Panel
-        data_to_widget!(db, lfo.rate => rate.slider);
-        data_to_widget!(db, filter1.lfo_amount => lfoamount.slider);
-        data_to_widget!(db, lfo.synconkey => sync.checkbox);
+        db.bind(id!(lfo.rate), ids!(rate.slider));
+        db.bind(id!(filter1.lfo_amount), ids!(lfoamount.slider));
+        db.bind(id!(lfo.synconkey), ids!(sync.checkbox));
         
         //Volume Envelope
-        data_to_widget!(db, volume_envelope.a => vol_env.attack.slider);
-        data_to_widget!(db, volume_envelope.h => vol_env.hold.slider);
-        data_to_widget!(db, volume_envelope.d => vol_env.decay.slider);
-        data_to_widget!(db, volume_envelope.s => vol_env.sustain.slider);
-        data_to_widget!(db, volume_envelope.r => vol_env.release.slider);
+        db.bind(id!(volume_envelope.a), ids!(vol_env.attack.slider));
+        db.bind(id!(volume_envelope.h), ids!(vol_env.hold.slider));
+        db.bind(id!(volume_envelope.d), ids!(vol_env.decay.slider));
+        db.bind(id!(volume_envelope.s), ids!(vol_env.sustain.slider));
+        db.bind(id!(volume_envelope.r), ids!(vol_env.release.slider));
         
         //Mod Envelope
-        data_to_widget!(db, mod_envelope.a => mod_env.attack.slider);
-        data_to_widget!(db, mod_envelope.h => mod_env.hold.slider);
-        data_to_widget!(db, mod_envelope.d => mod_env.decay.slider);
-        data_to_widget!(db, mod_envelope.s => mod_env.sustain.slider);
-        data_to_widget!(db, mod_envelope.r => mod_env.release.slider);
-        data_to_widget!(db, filter1.envelope_amount => modamount.slider);
+        db.bind(id!(mod_envelope.a), ids!(mod_env.attack.slider));
+        db.bind(id!(mod_envelope.h), ids!(mod_env.hold.slider));
+        db.bind(id!(mod_envelope.d), ids!(mod_env.decay.slider));
+        db.bind(id!(mod_envelope.s), ids!(mod_env.sustain.slider));
+        db.bind(id!(mod_envelope.r), ids!(mod_env.release.slider));
+        db.bind(id!(filter1.envelope_amount), ids!(modamount.slider));
         
         // Filter panel
-        data_to_widget!(db, filter1.filter_type => filter_type.dropdown);
-        data_to_widget!(db, filter1.cutoff => cutoff.slider);
-        data_to_widget!(db, filter1.resonance => resonance.slider);
+        db.bind(id!(filter1.filter_type), ids!(filter_type.dropdown));
+        db.bind(id!(filter1.cutoff), ids!(cutoff.slider));
+        db.bind(id!(filter1.resonance), ids!(resonance.slider));
         
         // Osc1 panel
-        data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
-        data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
-        data_to_widget!(db, supersaw1.spread => osc1.supersaw.spread.slider);
-        data_to_widget!(db, supersaw1.diffuse => osc1.supersaw.diffuse.slider);
-        data_to_widget!(db, supersaw1.spread => osc1.hypersaw.spread.slider);
-        data_to_widget!(db, supersaw1.diffuse => osc1.hypersaw.diffuse.slider);
+        db.bind(id!(supersaw1.spread), ids!(osc1.supersaw.spread.slider));
+        db.bind(id!(supersaw1.diffuse), ids!(osc1.supersaw.diffuse.slider));
+        db.bind(id!(supersaw1.spread), ids!(osc1.supersaw.spread.slider));
+        db.bind(id!(supersaw1.diffuse), ids!(osc1.supersaw.diffuse.slider));
+        db.bind(id!(supersaw1.spread), ids!(osc1.hypersaw.spread.slider));
+        db.bind(id!(supersaw1.diffuse), ids!(osc1.hypersaw.diffuse.slider));
         
-        data_to_widget!(db, osc1.osc_type => osc1.type.dropdown);
-        data_to_widget!(db, osc1.transpose => osc1.transpose.slider);
-        data_to_widget!(db, osc1.detune => osc1.detune.slider);
-        data_to_widget!(db, osc1.harmonic => osc1.harmonicshift.slider);
-        data_to_widget!(db, osc1.harmonicenv => osc1.harmonicenv.slider);
-        data_to_widget!(db, osc1.harmoniclfo => osc1.harmoniclfo.slider);
+        db.bind(id!(osc1.osc_type), ids!(osc1.type.dropdown));
+        db.bind(id!(osc1.transpose), ids!(osc1.transpose.slider));
+        db.bind(id!(osc1.detune), ids!(osc1.detune.slider));
+        db.bind(id!(osc1.harmonic), ids!(osc1.harmonicshift.slider));
+        db.bind(id!(osc1.harmonicenv), ids!(osc1.harmonicenv.slider));
+        db.bind(id!(osc1.harmoniclfo), ids!(osc1.harmoniclfo.slider));
         
         // Osc2 panel
-        data_to_widget!(db, supersaw1.spread => osc2.supersaw.spread.slider);
-        data_to_widget!(db, supersaw1.diffuse => osc2.supersaw.diffuse.slider);
-        data_to_widget!(db, supersaw2.spread => osc2.supersaw.spread.slider);
-        data_to_widget!(db, supersaw2.diffuse => osc2.supersaw.diffuse.slider);
-        data_to_widget!(db, supersaw2.spread => osc2.hypersaw.spread.slider);
-        data_to_widget!(db, supersaw2.diffuse => osc2.hypersaw.diffuse.slider);
+        db.bind(id!(supersaw1.spread), ids!(osc2.supersaw.spread.slider));
+        db.bind(id!(supersaw1.diffuse), ids!(osc2.supersaw.diffuse.slider));
+        db.bind(id!(supersaw2.spread), ids!(osc2.supersaw.spread.slider));
+        db.bind(id!(supersaw2.diffuse), ids!(osc2.supersaw.diffuse.slider));
+        db.bind(id!(supersaw2.spread), ids!(osc2.hypersaw.spread.slider));
+        db.bind(id!(supersaw2.diffuse), ids!(osc2.hypersaw.diffuse.slider));
         
-        data_to_widget!(db, osc2.osc_type => osc2.type.dropdown);
-        data_to_widget!(db, osc2.transpose => osc2.transpose.slider);
-        data_to_widget!(db, osc2.detune => osc2.detune.slider);
-        data_to_widget!(db, osc2.harmonic => osc2.harmonicshift.slider);
-        data_to_widget!(db, osc2.harmonicenv => osc2.harmonicenv.slider);
-        data_to_widget!(db, osc2.harmoniclfo => osc2.harmoniclfo.slider);
+        db.bind(id!(osc2.osc_type), ids!(osc2.type.dropdown));
+        db.bind(id!(osc2.transpose), ids!(osc2.transpose.slider));
+        db.bind(id!(osc2.detune), ids!(osc2.detune.slider));
+        db.bind(id!(osc2.harmonic), ids!(osc2.harmonicshift.slider));
+        db.bind(id!(osc2.harmonicenv), ids!(osc2.harmonicenv.slider));
+        db.bind(id!(osc2.harmoniclfo), ids!(osc2.harmoniclfo.slider));
         
         // sequencer
-        data_to_widget!(db, sequencer.steps => sequencer);
+        db.bind(id!(sequencer.steps), ids!(sequencer));
         
-        data_to_apply!(db, osc1.osc_type => osc1.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
-        data_to_apply!(db, osc2.osc_type => osc2.supersaw, visible => | v | v == id!(SuperSaw).to_enum());
-        data_to_apply!(db, osc1.osc_type => osc1.hypersaw, visible => | v | v == id!(HyperSaw).to_enum());
-        data_to_apply!(db, osc2.osc_type => osc2.hypersaw, visible => | v | v == id!(HyperSaw).to_enum());
-        data_to_apply!(db, osc1.osc_type => osc1.harmonic, visible => | v | v == id!(HarmonicSeries).to_enum());
-        data_to_apply!(db, osc2.osc_type => osc2.harmonic, visible => | v | v == id!(HarmonicSeries).to_enum());
+        db.apply(id!(osc1.osc_type), ids!(osc1.supersaw, visible), | v | v.enum_eq(id!(SuperSaw)));
+        db.apply(id!(osc2.osc_type), ids!(osc2.supersaw, visible), | v | v.enum_eq(id!(SuperSaw)));
+        db.apply(id!(osc1.osc_type), ids!(osc1.hypersaw, visible), | v | v.enum_eq(id!(HyperSaw)));
+        db.apply(id!(osc2.osc_type), ids!(osc2.hypersaw, visible), | v | v.enum_eq(id!(HyperSaw)));
+        db.apply(id!(osc1.osc_type), ids!(osc1.harmonic, visible), | v | v.enum_eq(id!(HarmonicSeries)));
+        db.apply(id!(osc2.osc_type), ids!(osc2.harmonic, visible), | v | v.enum_eq(id!(HarmonicSeries)));
         
-        data_to_apply!(db, mod_envelope.a => mod_env.display, draw_bg.attack => | v | v);
-        data_to_apply!(db, mod_envelope.h => mod_env.display, draw_bg.hold => | v | v);
-        data_to_apply!(db, mod_envelope.d => mod_env.display, draw_bg.decay => | v | v);
-        data_to_apply!(db, mod_envelope.s => mod_env.display, draw_bg.sustain => | v | v);
-        data_to_apply!(db, mod_envelope.r => mod_env.display, draw_bg.release => | v | v);
-        data_to_apply!(db, volume_envelope.a => vol_env.display, draw_bg.attack => | v | v);
-        data_to_apply!(db, volume_envelope.h => vol_env.display, draw_bg.hold => | v | v);
-        data_to_apply!(db, volume_envelope.d => vol_env.display, draw_bg.decay => | v | v);
-        data_to_apply!(db, volume_envelope.s => vol_env.display, draw_bg.sustain => | v | v);
-        data_to_apply!(db, volume_envelope.r => vol_env.display, draw_bg.release => | v | v);
+        db.apply(id!(mod_envelope.a), ids!(mod_env.display, draw_bg.attack), | v | v);
+        db.apply(id!(mod_envelope.h), ids!(mod_env.display, draw_bg.hold), | v | v);
+        db.apply(id!(mod_envelope.d), ids!(mod_env.display, draw_bg.decay), | v | v);
+        db.apply(id!(mod_envelope.s), ids!(mod_env.display, draw_bg.sustain), | v | v);
+        db.apply(id!(mod_envelope.r), ids!(mod_env.display, draw_bg.release), | v | v);
+        db.apply(id!(volume_envelope.a), ids!(vol_env.display, draw_bg.attack), | v | v);
+        db.apply(id!(volume_envelope.h), ids!(vol_env.display, draw_bg.hold), | v | v);
+        db.apply(id!(volume_envelope.d), ids!(vol_env.display, draw_bg.decay), | v | v);
+        db.apply(id!(volume_envelope.s), ids!(vol_env.display, draw_bg.sustain), | v | v);
+        db.apply(id!(volume_envelope.r), ids!(vol_env.display, draw_bg.release), | v | v);
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
@@ -211,14 +209,13 @@ impl AppMain for App {
         }
         
         let ui = self.ui.clone();
-        let mut db = DataBinding::new();
+        let mut db = DataBindingStore::new();
         
-        let actions = ui.handle_widget_event(cx, event);
+        let mut actions = ui.handle_widget_event(cx, event);
         
         if let Event::Construct = event {
-            log!("{}", std::mem::size_of::<LiveValue>());
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            db.to_widgets(ironfish.settings.live_read());
+            db.nodes = ironfish.settings.live_read();
             ui.get_piano(id!(piano)).set_key_focus(cx);
             self.midi_input = cx.midi_input();
             //self.midi_data = cx.midi_output_create_sender();
@@ -302,22 +299,22 @@ impl AppMain for App {
         // lets fetch and update the tick.
         
         if ui.get_button(id!(clear_grid)).clicked(&actions) {
-            sequencer.clear_grid(cx, &mut db);
+            sequencer.clear_grid(cx, &mut actions);
         }
         
         if ui.get_button(id!(grid_down)).clicked(&actions) {
-            sequencer.grid_down(cx, &mut db);
+            sequencer.grid_down(cx, &mut actions);
         }
         
         if ui.get_button(id!(grid_up)).clicked(&actions) {
-            sequencer.grid_up(cx, &mut db);
+            sequencer.grid_up(cx, &mut actions);
         }
         
-        self.data_bind(cx, &mut db, &actions);
-        if let Some(nodes) = db.from_widgets() {
-            let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            ironfish.settings.apply_over(cx, &nodes);
-        }
+        self.data_bind(db.widgets_to_data(cx, &actions, &ui));
+        self.data_bind(db.data_to_widgets(cx, &actions, &ui));
+        
+        let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
+        ironfish.settings.apply_over(cx, &db.nodes);
     }
     /*
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {

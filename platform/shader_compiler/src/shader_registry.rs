@@ -542,7 +542,7 @@ impl ShaderRegistry {
                         LiveValue::Vec3(_) |
                         LiveValue::Vec4(_) | 
                         LiveValue::Expr{..} => {
-                            let before = live_registry.get_node_prefix(prop.origin);
+                            //let before = live_registry.get_node_prefix(prop.origin);
                             if prop.origin.prop_type() != LivePropType::Field{
                                 /*if before == Some(live_id!(const)){
                                     node_iter = doc.nodes.next_child(node_index);

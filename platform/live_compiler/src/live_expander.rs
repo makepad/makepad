@@ -102,10 +102,9 @@ impl<'a> LiveExpander<'a> {
             }
             
             //// determine node overwrite rules
-            let is_root_level = current_parent.len() == 1;
             let out_index = match out_doc.nodes.child_or_append_index_by_name(current_parent.last().unwrap().1, in_node.prop()) {
                 Ok(overwrite) => {
-                    if is_root_level{
+                    if current_parent.len() == 1{
                         if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
                             id_resolve.insert(in_node.id, LiveScopeTarget::LocalPtr(overwrite));
                         }
@@ -168,7 +167,7 @@ impl<'a> LiveExpander<'a> {
                     overwrite
                 }
                 Err(insert_point) => {
-                    if is_root_level{
+                    if current_parent.len() == 1{
                         if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
                             id_resolve.insert(in_node.id, LiveScopeTarget::LocalPtr(insert_point));
                         }
