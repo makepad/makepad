@@ -43,7 +43,7 @@ pub trait LiveNodeSliceApi {
 
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<&LiveValue>;
 
-    fn read_by_field_path(&self, path: &[LiveId]) -> Option<&LiveValue>;
+    fn read_field_value(&self, path: &[LiveId]) -> Option<&LiveValue>;
     
     fn first_node_with_token_id(&self, match_token_id: LiveTokenId, also_in_dsl: bool) -> Option<usize>;
     
@@ -68,7 +68,8 @@ pub trait LiveNodeVecApi {
     fn insert_children_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]);
     fn insert_children_from_self(&mut self, from_index: usize, insert_start: usize);
     
-    fn write_by_field_path(&mut self, path: &[LiveId], values: &[LiveNode]);
+    fn write_field_nodes(&mut self, path: &[LiveId], nodes: &[LiveNode]);
+    fn write_field_value(&mut self, path: &[LiveId], values: LiveValue);
     fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     
@@ -549,7 +550,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
         }
     }
     
-    fn read_by_field_path(&self, path: &[LiveId]) -> Option<&LiveValue> {
+    fn read_field_value(&self, path: &[LiveId]) -> Option<&LiveValue> {
         if let Some(index) = self.child_by_field_path(0, path) {
             Some(&self.as_ref()[index].value)
         }
@@ -859,7 +860,11 @@ impl LiveNodeVecApi for LiveNodeVec {
         insert_point + num_nodes
     }
     
-    fn write_by_field_path(&mut self, path: &[LiveId], nodes: &[LiveNode]) {
+    fn write_field_value(&mut self, path: &[LiveId], value: LiveValue){
+        self.write_field_nodes(path, &[LiveNode::from_value(value)])
+    }
+
+    fn write_field_nodes(&mut self, path: &[LiveId], nodes: &[LiveNode]) {
         let mut ids = [LiveProp(LiveId(0), LivePropType::Field); 8];
         if path.len() > ids.len(){
             eprintln!("write_by_field_path too many path segs");

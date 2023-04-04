@@ -5,7 +5,6 @@ use {
         makepad_derive_widget::*,
         popup_menu::{PopupMenu, PopupMenuAction},
         makepad_draw::*,
-        data_binding::DataBinding,
         widget::*,
     }
 };
@@ -362,28 +361,27 @@ impl DropDown {
 }
 
 impl Widget for DropDown {
-    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions, path: &[LiveId]) {
-        match db {
-            DataBinding::FromWidgets {nodes, ..} => if let Some(item) = act.find_single_action(self.widget_uid()) {
-                match item.action() {
-                    DropDownAction::Select(_, value) => {
-                        nodes.write_by_field_path(path, &[LiveNode::from_value(value.clone())]);
-                    }
-                    _ => ()
+    
+    fn widget_to_data(&self, _cx: &mut Cx, actions:&WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
+        match actions.single_action(self.widget_uid()) {
+            DropDownAction::Select(_, value) => {
+                nodes.write_field_value(path, value.clone());
+                true
+            }
+            _ => false
+        }
+    }
+    
+   fn data_to_widget(&mut self, cx: &mut Cx, nodes:&[LiveNode], path: &[LiveId]){
+        if let Some(value) = nodes.read_field_value(path) {
+            if let Some(index) = self.values.iter().position( | v | v == value) {
+                if self.selected_item != index {
+                    self.selected_item = index;
+                    self.redraw(cx);
                 }
             }
-            DataBinding::ToWidgets {nodes} => {
-                if let Some(value) = nodes.read_by_field_path(path) {
-                    if let Some(index) = self.values.iter().position( | v | v == value) {
-                        if self.selected_item != index {
-                            self.selected_item = index;
-                            self.redraw(cx);
-                        }
-                    }
-                    else {
-                        error!("Value not in values list {:?}", value);
-                    }
-                }
+            else {
+                error!("Value not in values list {:?}", value);
             }
         }
     }
