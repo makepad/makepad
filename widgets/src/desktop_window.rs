@@ -18,7 +18,6 @@ live_design!{
     
     DesktopWindow = {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
-        var caption = "Makepad"
         frame: <Frame>{
             layout: {
                 flow: Down
@@ -32,7 +31,7 @@ live_design!{
                 caption_label = <Frame> {
                     walk: {width: Fill, height: Fill}
                     layout: {align: {x: 0.5, y: 0.5}},
-                    <Label> {text: (caption), walk: {margin: {left: 100}}}
+                    <Label> {text: "Makepad", walk: {margin: {left: 100}}}
                 }
                 windows_buttons = <Frame> {
                     visible: false,

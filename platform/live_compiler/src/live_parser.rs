@@ -208,7 +208,7 @@ impl<'a> LiveParser<'a> {
         
         Ok(())
     }
-    
+    /*
    fn expect_registry(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
         let token_id = self.get_token_id();
         let crate_id = self.expect_ident() ?;
@@ -229,7 +229,7 @@ impl<'a> LiveParser<'a> {
             value: LiveValue::Registry(crate_id)
         });
         Ok(())
-    }
+    }*/
     
     fn expect_fn(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
         let token_start = self.token_index - 1;
@@ -810,10 +810,6 @@ impl<'a> LiveParser<'a> {
                             }
                             live_id!(import) => {
                                 self.expect_import(ld) ?;
-                                self.accept_optional_delim();
-                            }
-                            live_id!(registry) => {
-                                self.expect_registry(ld) ?;
                                 self.accept_optional_delim();
                             }
                             _ => {

@@ -1,21 +1,31 @@
 use crate::makepad_widgets::*;
 
 live_design!{
-    registry Widget::*;
-    
     import makepad_widgets::theme::*;
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
     
-    const FONT_SIZE_H2 = 9.5
+    import makepad_widgets::label::Label;
+    import makepad_widgets::drop_down::DropDown;
+    import makepad_widgets::button::Button;
+    import makepad_widgets::slider::Slider;
+    import makepad_widgets::check_box::CheckBox;
+    import makepad_widgets::text_input::TextInput;
+    import makepad_widgets::radio_button::RadioButton;
+
+    import makepad_example_ironfish::sequencer::Sequencer;
+    import makepad_audio_widgets::display_audio::DisplayAudio;
+    import makepad_audio_widgets::piano::Piano;
+
+    FONT_SIZE_H2 = 9.5
     
-    const HEIGHT_AUDIOVIZ = 150
+    HEIGHT_AUDIOVIZ = 150
     
-    const SSPACING_0 = 0.0
-    const SSPACING_1 = 4.0
-    const SSPACING_2 = (SSPACING_1 * 2)
-    const SSPACING_3 = (SSPACING_1 * 3)
-    const SSPACING_4 = (SSPACING_1 * 4)
+    SSPACING_0 = 0.0
+    SSPACING_1 = 4.0
+    SSPACING_2 = (SSPACING_1 * 2)
+    SSPACING_3 = (SSPACING_1 * 3)
+    SSPACING_4 = (SSPACING_1 * 4)
     
     SPACING_0 = {top: (SSPACING_0), right: (SSPACING_0), bottom: (SSPACING_0), left: (SSPACING_0)}
     SPACING_1 = {top: (SSPACING_1), right: (SSPACING_1), bottom: (SSPACING_1), left: (SSPACING_1)}
@@ -31,35 +41,35 @@ live_design!{
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
     
-    const COLOR_DOWN_FULL = #000
+    COLOR_DOWN_FULL = #000
     
-    const COLOR_DOWN_0 = #x00000000
-    const COLOR_DOWN_1 = #x00000011
-    const COLOR_DOWN_2 = #x00000022
-    const COLOR_DOWN_3 = #x00000044
-    const COLOR_DOWN_4 = #x00000066
-    const COLOR_DOWN_5 = #x000000AA
-    const COLOR_DOWN_6 = #x000000CC
+    COLOR_DOWN_0 = #x00000000
+    COLOR_DOWN_1 = #x00000011
+    COLOR_DOWN_2 = #x00000022
+    COLOR_DOWN_3 = #x00000044
+    COLOR_DOWN_4 = #x00000066
+    COLOR_DOWN_5 = #x000000AA
+    COLOR_DOWN_6 = #x000000CC
     
-    const COLOR_UP_0 = #xFFFFFF00
-    const COLOR_UP_1 = #xFFFFFF0A
-    const COLOR_UP_2 = #xFFFFFF10
-    const COLOR_UP_3 = #xFFFFFF20
-    const COLOR_UP_4 = #xFFFFFF40
-    const COLOR_UP_5 = #xFFFFFF66
-    const COLOR_UP_6 = #xFFFFFFCC
-    const COLOR_UP_FULL = #xFFFFFFFF
+    COLOR_UP_0 = #xFFFFFF00
+    COLOR_UP_1 = #xFFFFFF0A
+    COLOR_UP_2 = #xFFFFFF10
+    COLOR_UP_3 = #xFFFFFF20
+    COLOR_UP_4 = #xFFFFFF40
+    COLOR_UP_5 = #xFFFFFF66
+    COLOR_UP_6 = #xFFFFFFCC
+    COLOR_UP_FULL = #xFFFFFFFF
     
-    const COLOR_ALERT = #xFF0000FF
-    const COLOR_OSC = #xFFFF99FF
-    const COLOR_ENV = #xF9A894
-    const COLOR_FILTER = #x88FF88
-    const COLOR_FX = #x99EEFF
-    const COLOR_DEFAULT = (COLOR_UP_6)
+    COLOR_ALERT = #xFF0000FF
+    COLOR_OSC = #xFFFF99FF
+    COLOR_ENV = #xF9A894
+    COLOR_FILTER = #x88FF88
+    COLOR_FX = #x99EEFF
+    COLOR_DEFAULT = (COLOR_UP_6)
     
-    const COLOR_VIZ_1 = (COLOR_DOWN_2)
-    const COLOR_VIZ_2 = (COLOR_DOWN_6)
-    const COLOR_DIVIDER = (COLOR_DOWN_5)
+    COLOR_VIZ_1 = (COLOR_DOWN_2)
+    COLOR_VIZ_2 = (COLOR_DOWN_6)
+    COLOR_DIVIDER = (COLOR_DOWN_5)
     
     // HELPERS
     FillerH = <Frame> {
