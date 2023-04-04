@@ -684,8 +684,8 @@ impl Widget for Frame {
                 }
                 if !local_results.is_empty() {
                     results.extend_from_set(&local_results);
-                    self.find_cache.insert(hash, local_results);
                 }
+                self.find_cache.insert(hash, local_results);
             }
             WidgetCache::No => {
                 if let Some(child) = self.children.get_mut(&path[0]) {

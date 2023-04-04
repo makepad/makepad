@@ -633,6 +633,23 @@ impl LiveValue {
         }
     }
     
+    pub fn enum_eq(&self, id_eq:&[LiveId])->LiveValue{
+        match self{
+            Self::BareEnum(id) if *id == id_eq[0]=>{
+                LiveValue::Bool(true)
+            }
+            _=>LiveValue::Bool(false)
+        }
+    }
+    
+    pub fn enum_neq(&self, id_eq:&[LiveId])->LiveValue{
+        match self{
+            Self::BareEnum(id) if *id != id_eq[0]=>{
+                LiveValue::Bool(true)
+            }
+            _=>LiveValue::Bool(false)
+        }
+    }
     /*
     pub fn named_class_id(&self) -> Option<Id> {
         match self {

@@ -68,7 +68,7 @@ live_design!{
         grid_x: 16,
         grid_y: 16,
         walk: {
-            margin: { top: 3, right: 10, bottom: 3, left: 10 },
+            margin: {top: 3, right: 10, bottom: 3, left: 10},
             width: Fit,
             height: Fit
         }
@@ -95,7 +95,7 @@ pub struct SeqButton {
 pub struct SeqButtonId(pub LiveId);
 
 #[derive(Live)]
-#[live_design_with{widget_factory!(cx, Sequencer)}]
+#[live_design_with {widget_factory!(cx, Sequencer)}]
 pub struct Sequencer {
     #[rust] area: Area,
     walk: Walk,
@@ -267,6 +267,17 @@ impl Sequencer {
             button.set_is_active(cx, active, Animate::Yes);
         }
     }
+    
+    pub fn write_state_to_data(&self, cx: &mut Cx, nodes: &mut LiveNodeVec, path: &[LiveId]) {
+        let steps = self.get_steps(cx);
+        let mut array = LiveNodeVec::new();
+        array.open_array(LiveId(0));
+        for step in steps {
+            array.push(LiveNode::from_value(LiveValue::Int64(step as i64)));
+        }
+        array.close();
+        nodes.write_field_nodes(path, &array);
+    }
 }
 
 
@@ -291,34 +302,28 @@ impl Widget for Sequencer {
         WidgetDraw::done()
     }
     
-    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, actions: &WidgetActions, path: &[LiveId]) {
-        match db {
-            DataBinding::FromWidgets{nodes, updated} =>{
-                let uid = self.widget_uid();
-                if actions.find_single_action(uid).is_some() || updated.contains(&uid){
-                    let steps = self.get_steps(cx);
-                    let mut array = LiveNodeVec::new();
-                    array.open_array(LiveId(0));
-                    for step in steps{
-                        array.push(LiveNode::from_value(LiveValue::Int64(step as i64)));
-                    }
-                    array.close();
-                    nodes.write_by_field_path(path, &array);
+    fn widget_to_data(&self, cx: &mut Cx, actions: &WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId]) -> bool {
+        let uid = self.widget_uid();
+        if actions.find_single_action(uid).is_some() {
+            self.write_state_to_data(cx, nodes, path);
+            true
+        }
+        else {
+            false
+        }
+    }
+
+    fn data_to_widget(&mut self, cx: &mut Cx, nodes:&[LiveNode], path: &[LiveId]){
+        if let Some(mut index) = nodes.child_by_field_path(0, path) {
+            let mut steps = Vec::new();
+            if nodes[index].is_array() {
+                index += 1;
+                while !nodes[index].is_close() {
+                    steps.push(nodes[index].value.as_int().unwrap_or(0) as u32);
+                    index += 1;
                 }
             }
-            DataBinding::ToWidgets{nodes} => {
-                if let Some(mut index) = nodes.child_by_field_path(0,path) {
-                    let mut steps = Vec::new();
-                    if nodes[index].is_array(){
-                        index += 1;
-                        while !nodes[index].is_close(){
-                            steps.push(nodes[index].value.as_int().unwrap_or(0) as u32);
-                            index += 1;
-                        }
-                    }
-                    self.set_steps(cx, &steps);
-                }
-            }
+            self.set_steps(cx, &steps);
         }
     }
 }
@@ -326,40 +331,37 @@ impl Widget for Sequencer {
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct SequencerRef(WidgetRef);
 
-impl SequencerRef{
+impl SequencerRef {
     
-    pub fn clear_grid(&self, cx:&mut Cx, db: &mut DataBinding){
-        if let Some(mut inner) = self.inner_mut(){
+    pub fn clear_grid(&self, cx: &mut Cx, actions: &mut WidgetActions) {
+        if let Some(mut inner) = self.inner_mut() {
             let mut steps = inner.get_steps(cx);
-            for step in &mut steps{*step = 0};
+            for step in &mut steps {*step = 0};
             inner.set_steps(cx, &steps);
-            db.set_updated(inner.widget_uid())
         }
     }
     
-    pub fn grid_down(&self, cx:&mut Cx, db: &mut DataBinding){
-        if let Some(mut inner) = self.inner_mut(){
+    pub fn grid_down(&self, cx: &mut Cx, actions: &mut WidgetActions) {
+        if let Some(mut inner) = self.inner_mut() {
             let mut steps = inner.get_steps(cx);
-            for step in &mut steps{
+            for step in &mut steps {
                 let mut modstep = *step << 1;
                 if (modstep & 1 << 16) == 1 << 16 {modstep += 1; modstep -= 1 << 16};
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            db.set_updated(inner.widget_uid())
         }
     }
     
-    pub fn grid_up(&self, cx:&mut Cx, db: &mut DataBinding){
-        if let Some(mut inner) = self.inner_mut(){
+    pub fn grid_up(&self, cx: &mut Cx, actions: &mut WidgetActions) {
+        if let Some(mut inner) = self.inner_mut() {
             let mut steps = inner.get_steps(cx);
-            for step in &mut steps{
+            for step in &mut steps {
                 let mut modstep = *step >> 1;
                 if (*step & 1) == 1 {modstep += 1 << 15;}
                 *step = modstep;
             }
             inner.set_steps(cx, &steps);
-            db.set_updated(inner.widget_uid())
         }
     }
 }

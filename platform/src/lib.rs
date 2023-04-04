@@ -206,7 +206,6 @@ pub use {
         },
         live_prims::{
             LiveDependency,
-            LiveIdToEnum,
         },
         live_traits::{
             LiveBody,

@@ -761,7 +761,7 @@ impl ToLiveValue for &str{
     }
 }
 
-
+/*
 pub trait LiveIdToEnum{
     fn to_enum(&self) -> LiveValue;
 }
@@ -770,7 +770,7 @@ impl LiveIdToEnum for &[LiveId;1]{
     fn to_enum(&self) -> LiveValue {
         LiveValue::BareEnum(self[0])
     }
-}
+}*/
 
 #[derive(Debug, Default, Clone)]
 pub struct LiveDependency(String);

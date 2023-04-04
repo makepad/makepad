@@ -1,6 +1,5 @@
 use {
     crate::makepad_draw::*,
-    crate::data_binding::{DataBinding},
     std::collections::BTreeMap,
     std::any::TypeId,
     std::cell::RefCell,
@@ -44,8 +43,9 @@ pub trait Widget: LiveApply {
    // fn widget_uid(&self)->WidgetUid;
     fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as *const () as u64)}
     
-    fn bind_to(&mut self, _cx: &mut Cx, _db: &mut DataBinding,  _act: &WidgetActions, _data_id: &[LiveId]) {}
-        
+    fn widget_to_data(&self, _cx: &mut Cx, _actions:&WidgetActions, _nodes: &mut LiveNodeVec, _path: &[LiveId])->bool{false}
+    fn data_to_widget(&mut self, _cx: &mut Cx, _nodes:&[LiveNode], _path: &[LiveId]){}
+    
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw;
     fn get_walk(&self) -> Walk;
     fn redraw(&mut self, _cx: &mut Cx);
@@ -371,9 +371,16 @@ impl WidgetRef {
         WidgetUid(0)
     }
 
-    pub fn bind_to(&self, cx: &mut Cx, db: &mut DataBinding,  act: &WidgetActions, path: &[LiveId]) {
+    pub fn widget_to_data(&self, cx: &mut Cx, actions:&WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.bind_to(cx, db, act, path);
+            return inner.widget_to_data(cx, actions, nodes, path);
+        }
+        false
+    }
+    
+    pub fn data_to_widget(&self, cx: &mut Cx, nodes:&[LiveNode], path: &[LiveId]){
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.data_to_widget(cx, nodes, path);
         }
     }
     
@@ -550,6 +557,7 @@ pub type WidgetActions = Vec<WidgetActionItem>;
 
 pub trait WidgetActionsApi {
     fn find_single_action(&self, widget_uid: WidgetUid) -> Option<&WidgetActionItem>;
+    fn single_action<T: WidgetAction + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone;
     fn not_empty(&self) -> bool;
 }
 
@@ -557,6 +565,16 @@ impl WidgetActionsApi for WidgetActions {
     fn find_single_action(&self, widget_uid: WidgetUid) -> Option<&WidgetActionItem> {
         self.iter().find( | v | v.widget_uid == widget_uid)
     }
+
+    fn single_action<T: WidgetAction + 'static >(&self, widget_uid: WidgetUid) -> T where T: Default + Clone {
+        if let Some(item) = self.find_single_action(widget_uid){
+            item.action.cast::<T>()
+        }
+        else{
+            T::default()
+        }
+    }
+    
     fn not_empty(&self) -> bool {
         self.len()>0
     }
