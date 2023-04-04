@@ -73,11 +73,16 @@ impl<'a> DataBindingMap<'a> {
     pub fn bind(&mut self, data_id: &[LiveId], widgets: &[&[LiveId]]) {
         // alright so. we have a direction.
         if self.is_data_to_widgets() {
+            let mut any_found = false;
             for widget in self.ui.get_widgets(widgets).iter() {
+                any_found = true;
                 let uid = widget.widget_uid();
                 if !self.store.mutated_by.contains(&uid) {
                     widget.data_to_widget(self.cx, &self.store.nodes, data_id);
                 }
+            }
+            if !any_found{
+                log!("No widgets found for databinding {:?}", widgets);
             }
         }
         else {

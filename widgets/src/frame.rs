@@ -351,8 +351,8 @@ pub struct Frame { // draw info per UI element
     pub walk: Walk,
     
     image: LiveDependency,
-    
     image_texture: Texture,
+    image_scale: f64,
     
     use_cache: bool,
     has_view: bool,
@@ -404,6 +404,9 @@ impl LiveHook for Frame {
                     if image_path.ends_with(".jpg") {
                         match jpeg::decode(data) {
                             Ok(image) => {
+                                if self.image_scale != 0.0{
+                                    self.walk = Walk::fixed_size(DVec2{x:image.width as f64 * self.image_scale, y:image.height as f64* self.image_scale});
+                                }
                                 image_buffer = Some(image);
                             }
                             Err(err) => {
@@ -414,6 +417,9 @@ impl LiveHook for Frame {
                     else if image_path.ends_with(".png") {
                         match png::decode(data) {
                             Ok(image) => {
+                                if self.image_scale != 0.0{
+                                    self.walk = Walk::fixed_size(DVec2{x:image.width as f64 * self.image_scale, y:image.height as f64* self.image_scale});
+                                }
                                 image_buffer = Some(image);
                             }
                             Err(err) => {
