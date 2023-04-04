@@ -32,7 +32,7 @@ macro_rules!data_to_widget {
 impl DataBinding {
     pub fn new() -> Self {
         let mut nodes = Vec::new();
-        nodes.open();
+        nodes.open_object(LiveId(0));
         nodes.close();
         Self::FromWidgets {nodes, updated: Vec::new()}
     }

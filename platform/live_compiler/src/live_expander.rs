@@ -1,4 +1,5 @@
 use {
+    std::collections::HashMap,
     crate::{
         makepad_live_id::*,
         makepad_live_tokenizer::{live_error_origin, LiveErrorOrigin},
@@ -43,8 +44,13 @@ impl<'a> LiveExpander<'a> {
     }
     
     pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation: LiveFileGeneration) {
-
-        out_doc.nodes.push(in_doc.nodes[0].clone());
+        
+        //out_doc.nodes.push(in_doc.nodes[0].clone());
+        out_doc.nodes.push(LiveNode{
+            origin: in_doc.nodes[0].origin,
+            id: LiveId(0),
+            value: LiveValue::Root{id_resolve:Box::new(HashMap::new())}
+        });
         let mut current_parent = vec![(LiveId(0), 0usize)];
         let mut in_index = 1;
         
@@ -62,54 +68,48 @@ impl<'a> LiveExpander<'a> {
                     in_index += 1;
                     continue;
                 }
-                LiveValue::Registry(component_type) => {
-                    let registries = self.live_registry.components.0.borrow();
-                    if let Some(registry) = registries.values().find( | v | v.component_type() == *component_type) {
-                        if in_node.id != LiveId(0) && registry.get_component_info(in_node.id).is_none() {
-                            self.errors.push(LiveError {
-                                origin: live_error_origin!(),
-                                span: in_node.origin.token_id().unwrap().into(),
-                                message: format!("Use statement component not found {}::{}", component_type, in_node.id)
-                            });
-                        }
-                    }
-                    else {
-                        self.errors.push(LiveError {
-                            origin: live_error_origin!(),
-                            span: in_node.origin.token_id().unwrap().into(),
-                            message: format!("Use statement invalid component type {}::{}", component_type, in_node.id)
-                        });
-                    }
-                    let index = out_doc.nodes.append_child_index(current_parent.last().unwrap().1);
-                    let old_len = out_doc.nodes.len();
-                    out_doc.nodes.insert(index, in_node.clone());
-                    self.shift_parent_stack(&mut current_parent, &out_doc.nodes, index, old_len, out_doc.nodes.len());
-                    in_index += 1;
-                    continue;
-                }
                 LiveValue::Import(module_id) => {
                     // lets verify it points anywhere
-                    if self.live_registry.module_id_and_name_to_doc(*module_id, in_node.id).is_none() {
+                    let mut found = false;
+                    let is_glob = in_node.id == LiveId::empty();
+                    if let Some(nodes) = self.live_registry.module_id_to_expanded_nodes(*module_id){
+                        let file_id = self.live_registry.module_id_to_file_id(*module_id).unwrap();
+                        let mut node_iter = Some(1);
+                        while let Some(index) = node_iter {
+                            if is_glob || nodes[index].id == in_node.id{ // its *
+                                // ok so what do we store...
+                                if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
+                                    id_resolve.insert(nodes[index].id, LiveScopeTarget::LivePtr(
+                                        self.live_registry.file_id_index_to_live_ptr(file_id, index)
+                                    ));
+                                }
+                                found = true;
+                            }
+                            node_iter = nodes.next_child(index);
+                        }
+                    }
+                    if !found{
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_node.origin.token_id().unwrap().into(),
-                            message: format!("Import statement invalid target {}::{}", module_id, in_node.id)
+                            message: format!("Import statement nothing found {}::{}", module_id, in_node.id)
                         });
                     }
-                    let index = out_doc.nodes.append_child_index(current_parent.last().unwrap().1);
-                    let old_len = out_doc.nodes.len();
-                    out_doc.nodes.insert(index, in_node.clone());
-                    self.shift_parent_stack(&mut current_parent, &out_doc.nodes, index, old_len, out_doc.nodes.len());
                     in_index += 1;
                     continue;
                 }
-                _ => ()
+                _=>()
             }
             
             //// determine node overwrite rules
-            
+            let is_root_level = current_parent.len() == 1;
             let out_index = match out_doc.nodes.child_or_append_index_by_name(current_parent.last().unwrap().1, in_node.prop()) {
                 Ok(overwrite) => {
+                    if is_root_level{
+                        if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
+                            id_resolve.insert(in_node.id, LiveScopeTarget::LocalPtr(overwrite));
+                        }
+                    } 
                     let out_value = &out_doc.nodes[overwrite].value;
                     let out_origin = out_doc.nodes[overwrite].origin;
                     
@@ -125,8 +125,7 @@ impl<'a> LiveExpander<'a> {
                         // do nothing
                     }
                     // replacing object types
-                    else if out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() ||
-                            out_value.is_binding() || in_value.is_binding() && out_value.is_value_type() {
+                    else if out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
                         // replace range
                         let next_index = out_doc.nodes.skip_node(overwrite);
                         
@@ -169,8 +168,14 @@ impl<'a> LiveExpander<'a> {
                     overwrite
                 }
                 Err(insert_point) => {
+                    if is_root_level{
+                        if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
+                            id_resolve.insert(in_node.id, LiveScopeTarget::LocalPtr(insert_point));
+                        }
+                    }
+
                     // ok so. if we are inserting an expression, just do the whole thing in one go.
-                    if in_node.is_expr() || in_node.is_binding() {
+                    if in_node.is_expr(){
                         // splice it in
                         let old_len = out_doc.nodes.len();
                         out_doc.nodes.splice(insert_point..insert_point, in_doc.nodes.node_slice(in_index).iter().cloned());
@@ -192,10 +197,11 @@ impl<'a> LiveExpander<'a> {
                 }
             };
             
+            
             // process stacks
             match in_value {
                 LiveValue::Clone(clone) => {
-                    if let Some(target) = self.live_registry.find_scope_target_via_start(*clone, out_index, &out_doc.nodes) {
+                    if let Some(target) = self.live_registry.find_scope_target(*clone, &out_doc.nodes) {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
                                 

@@ -12,11 +12,14 @@ use crate::{
 //use std::fs::File;
 //use std::io::prelude::*;
 live_design!{
+    import makepad_widgets::frame::*
     import makepad_example_ironfish::app_desktop::AppDesktop
     import makepad_example_ironfish::app_mobile::AppMobile
     import makepad_widgets::desktop_window::DesktopWindow
-    import makepad_widgets::frame::*
-    registry AudioComponent::*;
+    
+    import makepad_audio_graph::mixer::Mixer;
+    import makepad_audio_graph::instrument::Instrument;
+    import makepad_synth_ironfish::ironfish::IronFish;
     
     // APP
     App = {{App}} {
@@ -213,6 +216,7 @@ impl AppMain for App {
         let actions = ui.handle_widget_event(cx, event);
         
         if let Event::Construct = event {
+            log!("{}", std::mem::size_of::<LiveValue>());
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
             db.to_widgets(ironfish.settings.live_read());
             ui.get_piano(id!(piano)).set_key_focus(cx);

@@ -68,14 +68,14 @@ impl Default for LiveRegistry {
         }
     }
 }
-
+/*
 pub struct LiveDocNodes<'a> {
     pub nodes: &'a [LiveNode],
     pub file_id: LiveFileId,
     pub index: usize
-}
+}*/
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum LiveScopeTarget {
     LocalPtr(usize),
     LivePtr(LivePtr)
@@ -230,24 +230,10 @@ impl LiveRegistry {
         None
     }
     
-    pub fn module_id_and_name_to_doc(&self, module_id: LiveModuleId, name: LiveId) -> Option<LiveDocNodes> {
+    pub fn module_id_to_expanded_nodes(&self, module_id: LiveModuleId) -> Option<&[LiveNode]> {
         if let Some(file_id) = self.module_id_to_file_id.get(&module_id) {
             let doc = &self.live_files[file_id.to_index()].expanded;
-            if name != LiveId::empty() {
-                if doc.nodes.len() == 0 {
-                    error!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
-                    return None
-                }
-                if let Some(index) = doc.nodes.child_by_name(0, name.as_instance()) {
-                    return Some(LiveDocNodes {nodes: &doc.nodes, file_id: *file_id, index});
-                }
-                else {
-                    return None
-                }
-            }
-            else {
-                return Some(LiveDocNodes {nodes: &doc.nodes, file_id: *file_id, index: 0});
-            }
+            return Some(&doc.nodes)
         }
         None
     }
@@ -323,50 +309,23 @@ impl LiveRegistry {
         }
         None
     }
+      
+    pub fn find_scope_target(&self, item: LiveId, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
+        if let LiveValue::Root{id_resolve} = &nodes[0].value{
+            id_resolve.get(&item).cloned()
+        }
+        else{
+            log!("Can't find scope target on rootnode without id_resolve");
+            return None
+        }
+    }
     
-    pub fn find_scope_target_via_start(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
-        if let Some(index) = nodes.scope_up_down_by_name(index, item.as_instance()) {
-            match &nodes[index].value {
-                LiveValue::Import(module_id) => {
-                    if let Some(ret) = self.find_module_id_name(item, *module_id) {
-                        return Some(ret)
-                    }
-                }
-                LiveValue::Registry(component_type) => {
-                    if let Some(info) = self.components.find_component(*component_type, item) {
-                        if let Some(ret) = self.find_module_id_name(item, info.module_id) {
-                            return Some(ret)
-                        }
-                    };
-                }
-                _ => {
-                    return Some(LiveScopeTarget::LocalPtr(index))
-                }
-            }
+    
+    pub fn find_scope_target_one_level_or_global(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
+        if let Some(index) = nodes.scope_up_down_by_name(index, item.as_instance(), 1) {
+            return Some(LiveScopeTarget::LocalPtr(index))
         }
-        // ok now look at the glob use * things
-        let mut node_iter = Some(1);
-        while let Some(index) = node_iter {
-            if nodes[index].id == LiveId::empty() {
-                match &nodes[index].value {
-                    LiveValue::Import(module_id) => {
-                        if let Some(ret) = self.find_module_id_name(item, *module_id) {
-                            return Some(ret)
-                        }
-                    }
-                    LiveValue::Registry(component_type) => {
-                        if let Some(info) = self.components.find_component(*component_type, item) {
-                            if let Some(ret) = self.find_module_id_name(item, info.module_id) {
-                                return Some(ret)
-                            }
-                        };
-                    }
-                    _ => ()
-                }
-            }
-            node_iter = nodes.next_child(index);
-        }
-        None
+        return self.find_scope_target(item, nodes);
     }
     
     pub fn find_scope_ptr_via_expand_index(&self, file_id: LiveFileId, index: usize, item: LiveId) -> Option<LivePtr> {
@@ -375,7 +334,7 @@ impl LiveRegistry {
         //let index = origin.node_index().unwrap();
         //let file_id = token_id.file_id();
         let file = self.file_id_to_file(file_id);
-        match self.find_scope_target_via_start(item, index, &file.expanded.nodes) {
+        match self.find_scope_target_one_level_or_global(item, index, &file.expanded.nodes) {
             Some(LiveScopeTarget::LocalPtr(index)) => Some(LivePtr {file_id: file_id, index: index as u32, generation: file.generation}),
             Some(LiveScopeTarget::LivePtr(ptr)) => Some(ptr),
             None => None
@@ -636,7 +595,7 @@ impl LiveRegistry {
         //let mutated_tokens = self.mutated_tokens.take().unwrap();
         let mut diff = Vec::new();
         let mut live_ptrs = Vec::new();
-        diff.open();
+        diff.open_object(LiveId(0));
         for token_id in mutated_tokens {
             let token_index = token_id.token_index();
             let file_id = token_id.file_id().unwrap();
@@ -758,12 +717,12 @@ impl LiveRegistry {
                     };
                     deps.insert(*module_id);
                 }, // import
-                LiveValue::Registry(component_id) => {
+                /*LiveValue::Registry(component_id) => {
                     let reg = self.components.0.borrow();
                     if let Some(entry) = reg.values().find(|entry| entry.component_type() == *component_id){
                         entry.get_module_set(&mut deps);
                     }
-                }, 
+                }, */
                 LiveValue::Class {live_type, ..} => { // hold up. this is always own_module_path
                     let infos = self.live_type_infos.get(&live_type).unwrap();
                     for sub_type in infos.fields.clone() {

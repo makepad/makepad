@@ -37,7 +37,7 @@ live_design!{
             instance hover: 0.0
             instance pressed: 0.0
             instance focus: 0.0,
-            const BORDER_RADIUS = 0.5
+            uniform border_radius: 0.5
             
             fn get_bg(self, inout sdf: Sdf2d) {
                 sdf.box(
@@ -45,7 +45,7 @@ live_design!{
                     0.,
                     self.rect_size.x,
                     self.rect_size.y,
-                    BORDER_RADIUS
+                    self.border_radius
                 )
                 sdf.fill(mix(#2, #3, self.hover));
             }
