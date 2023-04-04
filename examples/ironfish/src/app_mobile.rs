@@ -90,7 +90,6 @@ live_design!{
         draw_radio: {
             radio_type: Tab,
             color_inactive: (COLOR_UP_OFF),
-            COLOR_UP_3: (COLOR_UP_OFF)
         }
         draw_label: {
             color_selected: (COLOR_UP_8),
@@ -1049,7 +1048,7 @@ live_design!{
                 draw_bg: {color: (COLOR_DOWN_1)}
             }
             
-            <SequencerControls> {}
+            <SequencerControls> { }
             
             application_pages = <Box> {
                 tab1_frame = <ModeSequencer> {}
