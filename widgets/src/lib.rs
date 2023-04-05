@@ -28,7 +28,6 @@ pub mod tab;
 pub mod tab_bar;
 //#[cfg(ide_widgets)]
 pub mod tab_close_button;
-pub mod bare_window;
 
 pub mod desktop_button;
 pub mod desktop_window;
@@ -61,8 +60,7 @@ pub mod data_binding;
 mod theme;
 
 pub use crate::{
-    data_binding::{DataBinding},
-    bare_window::BareWindow,
+    data_binding::{DataBindingStore, DataBindingMap},
     button::*,
     frame::*,
     label::*,
@@ -112,7 +110,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::button::live_design(cx);
     crate::desktop_button::live_design(cx);
     crate::desktop_window::live_design(cx);
-    crate::bare_window::live_design(cx);
     crate::window_menu::live_design(cx);
     crate::scroll_bar::live_design(cx);
     crate::scroll_bars::live_design(cx);

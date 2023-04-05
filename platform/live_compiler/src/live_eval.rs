@@ -58,9 +58,8 @@ impl LiveError {
 pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, nodes: &[LiveNode]) -> Result<LiveEval,LiveError> {
     Ok(match &nodes[*index].value {
         LiveValue::Str(_) |
-        LiveValue::FittedString(_) |
-        LiveValue::InlineString(_) |
-        LiveValue::DocumentString {..} => {
+        LiveValue::String(_) |
+        LiveValue::InlineString(_) => {
             LiveEval::String(live_registry.live_node_as_string(&nodes[*index]).unwrap())
         }
         LiveValue::Float32(v) => {
@@ -120,9 +119,8 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     LiveValue::Vec4(val) => LiveEval::Vec4(*val),
                     LiveValue::Color(c) => LiveEval::Vec4(Vec4::from_u32(*c)),
                     LiveValue::Str(_) |
-                    LiveValue::FittedString(_) |
-                    LiveValue::InlineString(_) |
-                    LiveValue::DocumentString {..} => LiveEval::String(live_registry.live_node_as_string(&nodes[index]).unwrap()),
+                    LiveValue::String(_) |
+                    LiveValue::InlineString(_) => LiveEval::String(live_registry.live_node_as_string(&nodes[index]).unwrap()),
                     LiveValue::Expr {..} => { // expr depends on expr
                         live_eval(live_registry, index, &mut (index + 1), nodes)?
                     }
@@ -146,7 +144,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     }
                 })
             }
-            if let Some(index) = nodes.scope_up_by_name(start - 1, id.as_field()) {
+            /*if let Some(index) = nodes.scope_up_by_name(start - 1, id.as_field()) {
                 // found ok now what. it depends on the type of the thing here
                 value_to_live_value(live_registry, index, nodes)?
             }
@@ -155,7 +153,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                 // found ok now what. it depends on the type of the thing here
                 value_to_live_value(live_registry, index, nodes)?
             }
-            else if let Some(token_id) = nodes[start].origin.token_id() { // lets find it on live registry via origin
+            else */if let Some(token_id) = nodes[start].origin.token_id() { // lets find it on live registry via origin
                 
                 let origin_file_id = token_id.file_id().unwrap();
                 let expand_index = nodes[start].get_expr_expand_index().unwrap();

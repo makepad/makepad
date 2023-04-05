@@ -1,91 +1,101 @@
 use crate::{
     makepad_platform::*,
-    frame::*,
     widget::*,
 };
 
-pub enum DataBinding {
-    ToWidgets {nodes: Vec<LiveNode>},
-    FromWidgets {nodes: Vec<LiveNode>, updated: Vec<WidgetUid>}
+pub struct DataBindingStore {
+    pub nodes: Vec<LiveNode>,
+    mutated_by: Vec<WidgetUid>
 }
 
-pub struct DataBindingCxBorrow<'a> {
-    db: &'a mut DataBinding,
-    cx: &'a mut Cx,
-    act: &'a WidgetActions,
-    ui: &'a WidgetRef,
-}
-
-#[macro_export]
-macro_rules!data_to_apply {
-    ( $ db: expr, $($data:ident).+ => $($widget:ident).+, $($value:ident).+ => $ map: expr) => {
-        $ db.data_to_apply(id!($($data).+), id!($($widget).+), id!($($value).+), | v | { $ map(v).to_live_value()})
-    };
-}
-
-#[macro_export]
-macro_rules!data_to_widget {
-    ( $ db: expr, $($data:ident).+ => $($widget:ident).+) => {
-        $ db.data_to_widget(id!($($data).+), id!($($widget).+))
-    }
-}
-
-impl DataBinding {
+impl DataBindingStore {
     pub fn new() -> Self {
         let mut nodes = Vec::new();
-        nodes.open();
+        nodes.open_object(LiveId(0));
         nodes.close();
-        Self::FromWidgets {nodes, updated: Vec::new()}
-    }
-    
-    pub fn set_updated(&mut self, uid: WidgetUid) {
-        match self {
-            Self::FromWidgets {updated, ..} =>
-            if !updated.contains(&uid) {updated.push(uid)}
-            _ => ()
+        Self {
+            nodes,
+            mutated_by: Vec::new()
         }
     }
     
-    pub fn to_widgets(&mut self, nodes: Vec<LiveNode>) {
-        *self = Self::ToWidgets {nodes};
+    pub fn set_mutated_by(&mut self, uid:WidgetUid){
+        if !self.mutated_by.contains(&uid) {
+            self.mutated_by.push(uid);
+        }        
     }
-    
-    pub fn from_widgets(&self) -> Option<&[LiveNode]> {
-        match self {
-            Self::FromWidgets {nodes, ..} if nodes.len() > 2 => Some(nodes),
-            _ => None
-        }
-    }
-    
-    pub fn nodes(&self) -> &[LiveNode] {
-        match self {
-            Self::FromWidgets {nodes, ..} => nodes,
-            Self::ToWidgets {nodes} => nodes
-        }
-    }
-    
-    pub fn borrow_cx<'a>(&'a mut self, cx: &'a mut Cx, ui: &'a FrameRef, act: &'a WidgetActions) -> DataBindingCxBorrow<'a> {
-        DataBindingCxBorrow {
-            db: self,
+}
+
+enum Direction {
+    DataToWidgets,
+    WidgetsToData
+}
+
+pub struct DataBindingMap<'a> {
+    pub store: &'a mut DataBindingStore,
+    pub cx: &'a mut Cx,
+    direction: Direction,
+    pub actions: &'a WidgetActions,
+    pub ui: &'a WidgetRef,
+}
+
+impl DataBindingStore {
+    pub fn data_to_widgets<'a>(&'a mut self, cx: &'a mut Cx, actions: &'a WidgetActions, ui: &'a WidgetRef) -> DataBindingMap {
+        DataBindingMap {
+            direction: Direction::DataToWidgets,
+            store: self,
             cx,
             ui,
-            act
+            actions
+        }
+    }
+    
+    pub fn widgets_to_data<'a>(&'a mut self, cx: &'a mut Cx, actions: &'a WidgetActions, ui: &'a WidgetRef) -> DataBindingMap {
+        DataBindingMap {
+            direction: Direction::WidgetsToData,
+            store: self,
+            cx,
+            ui,
+            actions
         }
     }
 }
 
-impl<'a> DataBindingCxBorrow<'a> {
-    pub fn data_to_widget(&mut self, data: &[LiveId], widget: &[LiveId]) {
-        self.ui.get_widget(widget).bind_to(self.cx, self.db, self.act, data);
+impl<'a> DataBindingMap<'a> {
+    pub fn is_data_to_widgets(&self) -> bool {
+        if let Direction::DataToWidgets = self.direction {true}else {false}
     }
     
-    pub fn data_to_apply<F>(&mut self, data: &[LiveId], widget: &[LiveId], value: &[LiveId], map: F)
-    where F: FnOnce(LiveValue) -> LiveValue{
-        let data_nodes = self.db.nodes();
-        if let Some(v) = data_nodes.read_by_field_path(data){
+    pub fn is_widgets_to_data(&self) -> bool {
+        if let Direction::WidgetsToData = self.direction {true}else {false}
+    }
+    
+    pub fn bind(&mut self, data_id: &[LiveId], widgets: &[&[LiveId]]) {
+        // alright so. we have a direction.
+        if self.is_data_to_widgets() {
+            for widget in self.ui.get_widgets(widgets).iter() {
+                let uid = widget.widget_uid();
+                if !self.store.mutated_by.contains(&uid) {
+                    widget.data_to_widget(self.cx, &self.store.nodes, data_id);
+                }
+            }
+        }
+        else {
+            for widget in self.ui.get_widgets(widgets).iter() {
+                if widget.widget_to_data(self.cx, self.actions, &mut self.store.nodes, data_id) {
+                    self.store.set_mutated_by(widget.widget_uid());
+                }
+            }
+        }
+    }
+    
+    pub fn apply<F>(&mut self, data: &[LiveId], widget_val:&[&[LiveId];2], map:F)
+        where F: FnOnce(LiveValue) -> LiveValue{
+        if let Some(v) = self.store.nodes.read_field_value(data){
             let mut ui_nodes = LiveNodeVec::new();
-            ui_nodes.write_by_field_path(value, &[LiveNode::from_value(map(v.clone()))]);
-            self.ui.get_widget(widget).apply_over(self.cx, &ui_nodes)
+            ui_nodes.write_field_value(widget_val[1], map(v.clone()));
+            self.ui.get_widget(widget_val[0]).apply_over(self.cx, &ui_nodes)
         }
     }
 }
+

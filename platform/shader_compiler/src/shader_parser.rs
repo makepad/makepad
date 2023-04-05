@@ -71,7 +71,7 @@ impl<'a> ShaderParser<'a> {
     
     #[inline]
     fn peek_token(&self) -> LiveToken {
-        self.token_with_span.token
+        self.token_with_span.token.clone()
     }
     
     #[inline]
@@ -456,7 +456,7 @@ impl<'a> ShaderParser<'a> {
         if self.accept_token(LiveToken::Open(Delim::Bracket)) {
             let elem_ty_expr = Box::new(acc);
             let token = self.peek_token();
-            if let Some(Lit::Int(len)) = Lit::from_token(token) {
+            if let Some(Lit::Int(len)) = Lit::from_token(&token) {
                 self.skip_token();
                 self.expect_token(LiveToken::Close(Delim::Bracket)) ?;
                 acc = span.end(self, | span | TyExpr {
