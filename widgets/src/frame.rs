@@ -359,6 +359,8 @@ pub struct Frame { // draw info per UI element
     #[live(true)] visible: bool,
     user_draw: bool,
     
+    #[live(false)] no_signal_events: bool,
+    
     #[rust] find_cache: HashMap<u64, WidgetSet>,
     
     cursor: Option<MouseCursor>,
@@ -404,8 +406,8 @@ impl LiveHook for Frame {
                     if image_path.ends_with(".jpg") {
                         match jpeg::decode(data) {
                             Ok(image) => {
-                                if self.image_scale != 0.0{
-                                    self.walk = Walk::fixed_size(DVec2{x:image.width as f64 * self.image_scale, y:image.height as f64* self.image_scale});
+                                if self.image_scale != 0.0 {
+                                    self.walk = Walk::fixed_size(DVec2 {x: image.width as f64 * self.image_scale, y: image.height as f64 * self.image_scale});
                                 }
                                 image_buffer = Some(image);
                             }
@@ -417,8 +419,8 @@ impl LiveHook for Frame {
                     else if image_path.ends_with(".png") {
                         match png::decode(data) {
                             Ok(image) => {
-                                if self.image_scale != 0.0{
-                                    self.walk = Walk::fixed_size(DVec2{x:image.width as f64 * self.image_scale, y:image.height as f64* self.image_scale});
+                                if self.image_scale != 0.0 {
+                                    self.walk = Walk::fixed_size(DVec2 {x: image.width as f64 * self.image_scale, y: image.height as f64 * self.image_scale});
                                 }
                                 image_buffer = Some(image);
                             }
@@ -548,6 +550,11 @@ impl Widget for Frame {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
+        if self.no_signal_events {
+            if let Event::Signal = event {
+                return
+            }
+        }
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             let mut redraw = false;
             scroll_bars.handle_main_event(cx, event, &mut | _, _ | {
@@ -833,7 +840,7 @@ impl Frame {
                     if !cx.inside_pass() {
                         child.draw_walk_widget(cx, Walk::default()) ?;
                     }
-                    else {
+                    else if child.is_visible(){
                         let walk = child.get_walk();
                         if let Some(fw) = cx.defer_walk(walk) {
                             self.defer_walks.push((id, fw));
