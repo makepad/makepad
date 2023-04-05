@@ -22,7 +22,9 @@ live_design!{
     import makepad_synth_ironfish::ironfish::IronFish;
     
     // APP
+    //ui: <AppMobile> {}
     App = {{App}} {
+        
         audio_graph: {
             root: <Mixer> {
                 c1 = <Instrument> {
@@ -31,9 +33,9 @@ live_design!{
             }
         }
         
-        //ui: <AppMobile> {}
         ui: <Frame> {
-            <DesktopWindow> {
+            no_signal_events: true,
+            <DesktopWindow> { 
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
                 frame: {body = {
@@ -41,7 +43,7 @@ live_design!{
                 }}
             }
             <DesktopWindow> {
-                window: {inner_size: vec2(400, 600)},
+                window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
                 pass: {clear_color: #2A}
                 frame: {body = {
                     <AppMobile> {}
@@ -78,10 +80,10 @@ impl App {
     
     pub fn data_bind(&mut self, mut db: DataBindingMap) {
         // touch
-        db.bind(id!(touch.scale), ids!(touch.scale.slider));
-        db.bind(id!(touch.curve), ids!(touch.curve.slider));
-        db.bind(id!(touch.offset), ids!(touch.offset.slider));
-        db.bind(id!(filter1.touch_amount), ids!(touch.touchamount.slider));
+        //db.bind(id!(touch.scale), ids!(touch.scale.slider));
+        //db.bind(id!(touch.curve), ids!(touch.curve.slider));
+        //db.bind(id!(touch.offset), ids!(touch.offset.slider));
+        //db.bind(id!(filter1.touch_amount), ids!(touch.touchamount.slider));
         
         // sequencer
         db.bind(id!(sequencer.playing), ids!(playpause.checkbox));
@@ -89,7 +91,7 @@ impl App {
         db.bind(id!(sequencer.rootnote), ids!(rootnote.dropdown));
         db.bind(id!(sequencer.scale), ids!(scaletype.dropdown));
         db.bind(id!(arp.enabled), ids!(arp.checkbox));
-        db.bind(id!(arp.octaves), ids!(arp.octaves.slider));
+        //db.bind(id!(arp.octaves), ids!(arp.octaves.slider));
         
         // Mixer panel
         db.bind(id!(osc_balance), ids!(balance.slider));
@@ -140,7 +142,7 @@ impl App {
         db.bind(id!(filter1.envelope_amount), ids!(modamount.slider));
         
         // Filter panel
-        db.bind(id!(filter1.filter_type), ids!(filter_type.dropdown));
+        //db.bind(id!(filter1.filter_type), ids!(filter_type.dropdown));
         db.bind(id!(filter1.cutoff), ids!(cutoff.slider));
         db.bind(id!(filter1.resonance), ids!(resonance.slider));
         
@@ -210,7 +212,6 @@ impl AppMain for App {
         
         let ui = self.ui.clone();
         let mut db = DataBindingStore::new();
-        
         let mut actions = ui.handle_widget_event(cx, event);
         
         if let Event::Construct = event {
@@ -231,31 +232,23 @@ impl AppMain for App {
             cx.use_audio_outputs(&devices.default_output());
         }
         
-        // ui.get_radio_group(&[
-        //     id!(envelopes.tab1),
-        //     id!(envelopes.tab2),
-        // ]).selected_to_visible(cx, &ui, &actions, &[
-        //     id!(envelopes.tab1_frame),
-        //     id!(envelopes.tab2_frame),
-        // ]);
+        ui.get_radio_buttons(ids!(
+            oscillators.tab1,
+            oscillators.tab2,
+        )).selected_to_visible(cx, &ui, &actions, ids!(
+            oscillators.osc1,
+            oscillators.osc2,
+        ));
         
-        ui.get_radio_buttons(&[
-            id!(oscillators.tab1),
-            id!(oscillators.tab2),
-        ]).selected_to_visible(cx, &ui, &actions, &[
-            id!(oscillators.osc1),
-            id!(oscillators.osc2),
-        ]);
-        
-        ui.get_radio_buttons(&[
-            id!(mobile_modes.tab1),
-            id!(mobile_modes.tab2),
-            id!(mobile_modes.tab3),
-        ]).selected_to_visible(cx, &ui, &actions, &[
-            id!(application_pages.tab1_frame),
-            id!(application_pages.tab2_frame),
-            id!(application_pages.tab3_frame),
-        ]);
+        ui.get_radio_buttons(ids!(
+            mobile_modes.tab1,
+            mobile_modes.tab2,
+            mobile_modes.tab3,
+        )).selected_to_visible(cx, &ui, &actions, ids!(
+            application_pages.tab1_frame,
+            application_pages.tab2_frame,
+            application_pages.tab3_frame,
+        ));
         
         let display_audio = ui.get_display_audio(id!(display_audio));
         
@@ -290,7 +283,7 @@ impl AppMain for App {
             }.into());
         }
         
-        if ui.get_button(id!(panic)).clicked(&actions) {
+        if ui.get_buttons(ids!(panic)).clicked(&actions) {
             cx.midi_reset();
             self.audio_graph.all_notes_off();
         }
@@ -298,15 +291,15 @@ impl AppMain for App {
         let sequencer = ui.get_sequencer(id!(sequencer));
         // lets fetch and update the tick.
         
-        if ui.get_button(id!(clear_grid)).clicked(&actions) {
+        if ui.get_buttons(ids!(clear_grid)).clicked(&actions) {
             sequencer.clear_grid(cx, &mut actions);
         }
         
-        if ui.get_button(id!(grid_down)).clicked(&actions) {
+        if ui.get_buttons(ids!(grid_down)).clicked(&actions) {
             sequencer.grid_down(cx, &mut actions);
         }
         
-        if ui.get_button(id!(grid_up)).clicked(&actions) {
+        if ui.get_buttons(ids!(grid_up)).clicked(&actions) {
             sequencer.grid_up(cx, &mut actions);
         }
         

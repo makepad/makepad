@@ -35,7 +35,14 @@ pub fn profile_start() -> Instant {
 
 #[macro_export] 
 macro_rules!profile_end {
-    ( $name:expr, $inst:expr) => {
-        log!("Profile {} time {} ms", $name, ($inst.elapsed().as_nanos() as f64) / 1000000f64);
+    ($inst:expr) => {
+        log!("Profile time {} ms", ($inst.elapsed().as_nanos() as f64) / 1000000f64);
+    }  
+}  
+
+#[macro_export] 
+macro_rules!profile_log {
+    ($inst:expr, $ ( $ t: tt) *) => {
+        log!("Profile time {} ms - {}", ($inst.elapsed().as_nanos() as f64) / 1000000f64, format!( $ ( $ t) *));
     }  
 }  

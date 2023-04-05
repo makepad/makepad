@@ -13,14 +13,15 @@ macro_rules!app_main {
         pub fn app_main() {
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Cx::new(Box::new(move | cx, event | {
-                
                 if let Event::Construct = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
                 }
                 <AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }));
+            let dt = profile_start();
             live_design(&mut cx);
-            cx.init();
+            cx.init_cx_os();
+            profile_end!(dt);
             cx.event_loop();
         }
         
@@ -40,7 +41,7 @@ macro_rules!app_main {
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
             })));
             live_design(&mut cx);
-            cx.init();
+            cx.init_cx_os();
             
             let ptr = Box::into_raw(cx) as i64;
             ptr
@@ -62,7 +63,7 @@ macro_rules!app_main {
             })));
             
             live_design(&mut cx);
-            cx.init();
+            cx.init_cx_os();
             Box::into_raw(cx) as u32
         }
 
