@@ -271,6 +271,19 @@ impl WidgetSet{
     }
 }                     
 
+impl LiveHook for WidgetSet {}
+impl LiveApply for WidgetSet {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        for inner in self.iter(){
+            let mut inner = inner.0.borrow_mut();
+            if let Some(component) = &mut *inner {
+                return component.apply(cx, from, index, nodes)
+            }
+        }
+        nodes.skip_node(index)
+    }
+}
+
 impl WidgetSet{
     pub fn empty()->Self{Self::Empty}
     pub fn iter(&self)->WidgetSetIterator{

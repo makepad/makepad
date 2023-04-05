@@ -22,7 +22,9 @@ live_design!{
     import makepad_synth_ironfish::ironfish::IronFish;
     
     // APP
+    //ui: <AppMobile> {}
     App = {{App}} {
+        
         audio_graph: {
             root: <Mixer> {
                 c1 = <Instrument> {
@@ -31,9 +33,9 @@ live_design!{
             }
         }
         
-        //ui: <AppMobile> {}
         ui: <Frame> {
-            <DesktopWindow> {
+            no_signal_events: true,
+            <DesktopWindow> { 
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
                 frame: {body = {
@@ -41,7 +43,7 @@ live_design!{
                 }}
             }
             <DesktopWindow> {
-                window: {inner_size: vec2(400, 600)},
+                window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
                 pass: {clear_color: #2A}
                 frame: {body = {
                     <AppMobile> {}
@@ -210,7 +212,6 @@ impl AppMain for App {
         
         let ui = self.ui.clone();
         let mut db = DataBindingStore::new();
-        
         let mut actions = ui.handle_widget_event(cx, event);
         
         if let Event::Construct = event {
