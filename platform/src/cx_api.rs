@@ -112,10 +112,18 @@ impl Cx {
     }
     
     pub fn show_text_ime(&mut self, area: Area, pos: DVec2) {
-        self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
+        if !self.keyboard.text_ime_dismissed {
+            self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
+        }
     }
     
     pub fn hide_text_ime(&mut self) {
+        self.keyboard.reset_text_ime_dismissed();
+        self.platform_ops.push(CxOsOp::HideTextIME);
+    }
+
+    pub fn text_ime_was_dismissed(&mut self) {
+        self.keyboard.set_text_ime_dismissed();
         self.platform_ops.push(CxOsOp::HideTextIME);
     }
 
