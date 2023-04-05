@@ -181,6 +181,7 @@ impl Cx {
     pub fn from_java_on_touch(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
         let time = self.os.time_now();
         for touch in &mut touches {
+            if self.os.is_text_ime_visible { touch.abs.y += 1000.0 };
             touch.abs /= self.os.dpi_factor;
         }
         self.fingers.process_touch_update_start(time, &touches);
@@ -261,6 +262,12 @@ impl Cx {
         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device, &to_java);
     }
 
+    pub fn from_java_on_hide_text_ime(&mut self, to_java: AndroidToJava) {
+        self.text_ime_was_dismissed();
+        self.redraw_all();
+        self.after_every_event(&to_java);
+    }
+
     pub fn from_java_copy_to_clipboard(&mut self, to_java: AndroidToJava) {
         let response = Rc::new(RefCell::new(None));
         let e = Event::TextCopy(TextCopyEvent {
@@ -294,14 +301,15 @@ impl Cx {
         to_java: &AndroidToJava,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-        
+
         self.setup_render_pass(pass_id, self.os.dpi_factor);
         
         // keep repainting in a loop 
         self.passes[pass_id].paint_dirty = false;
+        let y = if self.os.is_text_ime_visible { 1000 } else { 0 };
         
         unsafe {
-            gl_sys::Viewport(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
+            gl_sys::Viewport(0, y, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
         
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -395,9 +403,11 @@ impl Cx {
                     //android_app.stop_timer(timer_id);
                 },
                 CxOsOp::ShowTextIME(_area, _pos) => {
+                    self.os.is_text_ime_visible = true;
                     to_java.show_text_ime();
                 },
                 CxOsOp::HideTextIME => {
+                    self.os.is_text_ime_visible = false;
                     to_java.hide_text_ime();
                 },
                 CxOsOp::ShowClipboardActions(selected) => {
@@ -437,6 +447,7 @@ impl Default for CxOs {
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             time_start: Instant::now(),
+            is_text_ime_visible: false,
             media: CxAndroidMedia::default()
         }
     }
@@ -447,6 +458,7 @@ pub struct CxOs {
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub time_start: Instant,
+    pub is_text_ime_visible: bool,
     pub (crate) media: CxAndroidMedia,
 }
 
