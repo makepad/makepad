@@ -18,10 +18,8 @@ macro_rules!app_main {
                 }
                 <AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }));
-            let dt = profile_start();
             live_design(&mut cx);
             cx.init_cx_os();
-            profile_end!(dt);
             cx.event_loop();
         }
         
