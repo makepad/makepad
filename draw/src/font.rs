@@ -12,6 +12,7 @@ pub use {
         turtle::{Walk, Layout},
         view::{ManyInstances, View, ViewRedrawingApi},
         geometry::GeometryQuad2D,
+        shader::draw_trapezoid::DrawTrapezoidVector,
         makepad_vector::font::Glyph,
         makepad_vector::trapezoidator::Trapezoidator,
         makepad_vector::geometry::{AffineTransformation, Transform, Vector},
@@ -19,98 +20,6 @@ pub use {
         makepad_vector::path::PathIterator,
     }
 };
-
-live_design!{
-    DrawTrapezoidText= {{DrawTrapezoidText}} {
-        
-        varying v_p0: vec2;
-        varying v_p1: vec2;
-        varying v_p2: vec2;
-        varying v_p3: vec2;
-        varying v_pixel: vec2;
-        
-        fn intersect_line_segment_with_vertical_line(p0: vec2, p1: vec2, x: float) -> vec2 {
-            return vec2(
-                x,
-                mix(p0.y, p1.y, (x - p0.x) / (p1.x - p0.x))
-            );
-        }
-        
-        fn intersect_line_segment_with_horizontal_line(p0: vec2, p1: vec2, y: float) -> vec2 {
-            return vec2(
-                mix(p0.x, p1.x, (y - p0.y) / (p1.y - p0.y)),
-                y
-            );
-        }
-        
-        fn compute_clamped_right_trapezoid_area(p0: vec2, p1: vec2, p_min: vec2, p_max: vec2) -> float {
-            let x0 = clamp(p0.x, p_min.x, p_max.x);
-            let x1 = clamp(p1.x, p_min.x, p_max.x);
-            if (p0.x < p_min.x && p_min.x < p1.x) {
-                p0 = intersect_line_segment_with_vertical_line(p0, p1, p_min.x);
-            }
-            if (p0.x < p_max.x && p_max.x < p1.x) {
-                p1 = intersect_line_segment_with_vertical_line(p0, p1, p_max.x);
-            }
-            if (p0.y < p_min.y && p_min.y < p1.y) {
-                p0 = intersect_line_segment_with_horizontal_line(p0, p1, p_min.y);
-            }
-            if (p1.y < p_min.y && p_min.y < p0.y) {
-                p1 = intersect_line_segment_with_horizontal_line(p1, p0, p_min.y);
-            }
-            if (p0.y < p_max.y && p_max.y < p1.y) {
-                p1 = intersect_line_segment_with_horizontal_line(p0, p1, p_max.y);
-            }
-            if (p1.y < p_max.y && p_max.y < p0.y) {
-                p0 = intersect_line_segment_with_horizontal_line(p1, p0, p_max.y);
-            }
-            p0 = clamp(p0, p_min, p_max);
-            p1 = clamp(p1, p_min, p_max);
-            let h0 = p_max.y - p0.y;
-            let h1 = p_max.y - p1.y;
-            let a0 = (p0.x - x0) * h0;
-            let a1 = (p1.x - p0.x) * (h0 + h1) * 0.5;
-            let a2 = (x1 - p1.x) * h1;
-            return a0 + a1 + a2;
-        }
-        
-        fn compute_clamped_trapezoid_area(self, p_min: vec2, p_max: vec2) -> float {
-            let a0 = compute_clamped_right_trapezoid_area(self.v_p0, self.v_p1, p_min, p_max);
-            let a1 = compute_clamped_right_trapezoid_area(self.v_p2, self.v_p3, p_min, p_max);
-            return a0 - a1;
-        }
-        
-        fn pixel(self) -> vec4 {
-            let p_min = self.v_pixel.xy - 0.5;
-            let p_max = self.v_pixel.xy + 0.5;
-            let t_area = self.compute_clamped_trapezoid_area(p_min, p_max);
-            if self.chan < 0.5 {
-                return vec4(t_area, 0., 0., 0.);
-            }
-            if self.chan < 1.5 {
-                return vec4(0., t_area, 0., 0.);
-            }
-            if self.chan < 2.5 {
-                return vec4(0., 0., t_area, 0.);
-            }
-            return vec4(t_area, t_area, t_area, 0.);
-        }
-        
-        fn vertex(self) -> vec4 {
-            let pos_min = vec2(self.a_xs.x, min(self.a_ys.x, self.a_ys.y));
-            let pos_max = vec2(self.a_xs.y, max(self.a_ys.z, self.a_ys.w));
-            let pos = mix(pos_min - 1.0, pos_max + 1.0, self.geom_pos);
-            
-            // set the varyings
-            self.v_p0 = vec2(self.a_xs.x, self.a_ys.x);
-            self.v_p1 = vec2(self.a_xs.y, self.a_ys.y);
-            self.v_p2 = vec2(self.a_xs.x, self.a_ys.z);
-            self.v_p3 = vec2(self.a_xs.y, self.a_ys.w);
-            self.v_pixel = pos;
-            return self.camera_projection * vec4(pos, 0.0, 1.0);
-        }
-    }
-}
 
 pub struct CxFontsAtlas {
     pub fonts: Vec<Option<CxFont >>,
@@ -164,10 +73,6 @@ impl CxFontsAtlasAlloc {
         let ty1 = self.ypos / self.texture_size.y;
         
         self.xpos += w + 1.0;
-        
-        if h > self.hmax {
-            self.hmax = h;
-        }
         
         CxFontAtlasGlyph {
             tx1: tx1,
@@ -238,83 +143,10 @@ impl CxFontsAtlas {
     }
 }
 
-
-#[derive(Live, LiveHook)]
-#[repr(C)]
-pub struct DrawTrapezoidText {
-    #[rust] pub trapezoidator: Trapezoidator,
-    #[live] pub geometry: GeometryQuad2D,
-    #[calc] pub draw_vars: DrawVars,
-    #[calc] pub a_xs: Vec2,
-    #[calc] pub a_ys: Vec4,
-    #[calc] pub chan: f32,
-}
-
-impl DrawTrapezoidText {
-    
-    // test api for directly drawing a glyph
-    /*
-    pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32, dpi_factor:f32) {
-        // now lets make a draw_character function
-        let many = cx.begin_many_instances(&self.draw_vars);
-        if many.is_none(){
-            return
-        }
-        let mut many = many.unwrap();
-        
-        let trapezoids = {
-            let cxfont = cx.fonts[font_id].as_ref().unwrap();
-            let font = &cxfont.ttf_font;
-            
-            let slot = if c < '\u{10000}' {
-                cxfont.ttf_font.char_code_to_glyph_index_map[c as usize]
-            } else {
-                0
-            };
-            
-            if slot == 0 {
-                return
-            }
-            let glyph = &cxfont.ttf_font.glyphs[slot];
-            //let dpi_factor = cx.current_dpi_factor;
-            let pos = cx.get_turtle_pos();
-            let font_scale_logical = font_size * 96.0 / (72.0 * font.units_per_em);
-            let font_scale_pixels = font_scale_logical * dpi_factor;
-            let mut trapezoids = Vec::new();
-            let trapezoidate = self.trapezoidator.trapezoidate(
-                glyph
-                    .outline
-                    .commands()
-                    .map({
-                    move | command | {
-                        command.transform(
-                            &AffineTransformation::identity()
-                                .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
-                                .uniform_scale(font_scale_pixels)
-                                .translate(Vector::new(pos.x, pos.y))
-                        )
-                    }
-                }).linearize(0.5),
-            );
-            if let Some(trapezoidate) = trapezoidate {
-                trapezoids.extend_from_internal_iter(
-                    trapezoidate
-                );
-            }
-            trapezoids
-        };
-        for trapezoid in trapezoids {
-            self.a_xs = Vec2 {x: trapezoid.xs[0], y: trapezoid.xs[1]};
-            self.a_ys = Vec4 {x: trapezoid.ys[0], y: trapezoid.ys[1], z: trapezoid.ys[2], w: trapezoid.ys[3]};
-            self.chan = 3.0;
-            many.instances.extend_from_slice(self.draw_vars.as_slice());
-        }
-        
-        cx.end_many_instances(many);
-    }*/
+impl DrawTrapezoidVector {
     
     // atlas drawing function used by CxAfterDraw
-    pub fn draw_todo(&mut self, fonts_atlas: &CxFontsAtlas, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
+    fn draw_todo(&mut self, fonts_atlas: &CxFontsAtlas, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
         //let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
         let mut size = 1.0;
         for i in 0..3 {
@@ -380,7 +212,7 @@ impl DrawTrapezoidText {
 pub struct CxDrawFontsAtlasRc(pub Rc<RefCell<CxDrawFontsAtlas >>);
 
 pub struct CxDrawFontsAtlas {
-    pub draw_trapezoid_text: DrawTrapezoidText,
+    pub draw_trapezoid: DrawTrapezoidVector,
     pub atlas_pass: Pass,
     pub atlas_view: View,
     pub atlas_texture: Texture,
@@ -394,11 +226,11 @@ impl CxDrawFontsAtlas {
         
         //cx.fonts_atlas.texture_id = Some(atlas_texture.texture_id());
         
-        let draw_trapezoid_text = DrawTrapezoidText::new_local(cx);
+        let draw_trapezoid = DrawTrapezoidVector::new_local(cx);
         // ok we need to initialize drawtrapezoidtext from a live pointer.
         Self {
             counter: 0,
-            draw_trapezoid_text,
+            draw_trapezoid,
             atlas_pass: Pass::new(cx),
             atlas_view: View::new(cx),
             atlas_texture: atlas_texture
@@ -456,10 +288,10 @@ impl<'a> Cx2d<'a> {
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut fonts_atlas.alloc.todo, &mut atlas_todo);
             
-            if let Some(mut many) = self.begin_many_instances(&draw_fonts_atlas.draw_trapezoid_text.draw_vars) {
+            if let Some(mut many) = self.begin_many_instances(&draw_fonts_atlas.draw_trapezoid.draw_vars) {
 
                 for todo in atlas_todo {
-                    draw_fonts_atlas.draw_trapezoid_text.draw_todo(fonts_atlas, todo, &mut many);
+                    draw_fonts_atlas.draw_trapezoid.draw_todo(fonts_atlas, todo, &mut many);
                 }
                 
                 self.end_many_instances(many);

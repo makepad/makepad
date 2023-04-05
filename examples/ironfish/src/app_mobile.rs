@@ -612,12 +612,6 @@ live_design!{
                     }
                     text: "Preset Name"
                 }
-                
-                <FishButton> {
-                    text: "Edit"
-                    walk: {width: Fit, height: Fit}
-                    draw_label: {text_style: {font_size: (FONT_SIZE_H2)}}
-                }
             }
             
             <Frame> {}

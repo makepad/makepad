@@ -11,7 +11,8 @@ pub mod turtle;
 pub mod font;
 pub mod geometry;
 pub mod nav;
-
+pub mod icon;
+ 
 pub use crate::{
     font::Font,
     turtle::{
@@ -62,5 +63,5 @@ pub fn live_design(cx: &mut Cx) {
     crate::shader::draw_text::live_design(cx);
     crate::geometry::geometry_gen::live_design(cx);
     crate::shader::std::live_design(cx);
-    crate::font::live_design(cx);
+    crate::shader::draw_trapezoid::live_design(cx);
 }
