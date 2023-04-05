@@ -95,6 +95,10 @@ impl<'a> Cx2d<'a> {
         self.pass_stack.last().unwrap().dpi_factor
     }
     
+    pub fn inside_pass(&self)->bool{
+        self.pass_stack.len()>0
+    }
+    
     pub fn make_child_pass(&mut self, pass: &Pass) {
         let pass_id = self.pass_stack.last().unwrap().pass_id;
         let cxpass = &mut self.passes[pass.pass_id()];

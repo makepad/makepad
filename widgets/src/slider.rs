@@ -1,8 +1,6 @@
 use {
     crate::{
         makepad_derive_widget::*,
-        frame::*,
-        data_binding::DataBinding,
         makepad_draw::*,
         widget::*,
         text_input::{TextInput, TextInputAction}
@@ -319,30 +317,28 @@ impl Widget for Slider {
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
     
-    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions, path: &[LiveId]) {
-        match db {
-            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.widget_uid()) {
-                match item.action() {
-                    SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
-                        nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Float64(v as f64))]);
-                    }
-                    _ => ()
-                }
+    fn widget_to_data(&self, _cx: &mut Cx, actions:&WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
+        match actions.single_action(self.widget_uid()) {
+            SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
+                nodes.write_field_value(path, LiveValue::Float64(v as f64));
+                true
             }
-            DataBinding::ToWidgets{nodes,..} => {
-                if let Some(value) = nodes.read_by_field_path(path) {
-                    if let Some(value) = value.as_float() {
-                        if self.set_internal(value) {
-                            self.redraw(cx)
-                        }
-                        self.update_text_input(cx);
-                    }
+            _ => false
+        }
+    }
+    
+    fn data_to_widget(&mut self, cx: &mut Cx, nodes:&[LiveNode], path: &[LiveId]){
+        if let Some(value) = nodes.read_field_value(path) {
+            if let Some(value) = value.as_float() {
+                if self.set_internal(value) {
+                    self.redraw(cx)
                 }
+                self.update_text_input(cx);
             }
         }
     }

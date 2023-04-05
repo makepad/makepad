@@ -88,12 +88,12 @@ impl Widget for SlidesView {
         self.frame.redraw(cx)
     }
     
-    fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache) -> WidgetResult {
-        self.frame.find_widget(path, cached)
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        self.frame.find_widgets(path, cached, results);
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        self.frame.draw_widget(cx, walk)
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        self.frame.draw_walk_widget(cx, walk)
     }
 }
 
@@ -155,7 +155,7 @@ impl SlidesView {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        while self.frame.draw_widget(cx, walk).is_not_done() {
+        while self.frame.draw_walk_widget(cx, walk).is_not_done() {
         }
     }
 }

@@ -11,10 +11,7 @@ use {
 };
 
 live_design!{
-    registry AudioComponent::*;
     AudioGraph= {{AudioGraph}} {
-        root: BasicSynth {
-        }
     }
 }
 

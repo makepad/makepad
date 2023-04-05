@@ -17,7 +17,7 @@ live_design!{
         wrapping: None
         text_style: {
             font: {
-                path: d"crate://makepad-widgets/resources/IBMPlexSans-Text.ttf"
+                path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")
             }
         }
         

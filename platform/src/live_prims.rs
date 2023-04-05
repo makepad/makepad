@@ -1,4 +1,5 @@
 use {
+    std::rc::Rc,
     crate::{
         makepad_live_compiler::*,
         makepad_math::*,
@@ -701,7 +702,7 @@ live_primitive!(
                 self.push_str(v);
                 index + 1
             }
-            LiveValue::FittedString(v) => {
+            LiveValue::String(v) => {
                 self.clear();
                 self.push_str(v.as_str());
                 index + 1
@@ -709,12 +710,6 @@ live_primitive!(
             LiveValue::InlineString(v) => {
                 self.clear();
                 self.push_str(v.as_str());
-                index + 1
-            }
-            LiveValue::DocumentString {string_start, string_count} => {
-                let live_registry = cx.live_registry.borrow();
-                let origin_doc = live_registry.token_id_to_origin_doc(nodes[index].origin.token_id().unwrap());
-                origin_doc.get_string(*string_start, *string_count, self);
                 index + 1
             }
             LiveValue::Expr {..} => {
@@ -748,7 +743,7 @@ live_primitive!(
             LiveValue::InlineString(inline_str)
         }
         else {
-            LiveValue::FittedString(FittedString::from_string(self.clone()))
+            LiveValue::String(Rc::new(self.clone()))
         }
     }
 );
@@ -761,12 +756,12 @@ impl ToLiveValue for &str{
             LiveValue::InlineString(inline_str)
         }
         else {
-            LiveValue::FittedString(FittedString::from_string(self.to_string()))
+            LiveValue::String(Rc::new(self.to_string()))
         }
     }
 }
 
-
+/*
 pub trait LiveIdToEnum{
     fn to_enum(&self) -> LiveValue;
 }
@@ -775,7 +770,7 @@ impl LiveIdToEnum for &[LiveId;1]{
     fn to_enum(&self) -> LiveValue {
         LiveValue::BareEnum(self[0])
     }
-}
+}*/
 
 #[derive(Debug, Default, Clone)]
 pub struct LiveDependency(String);
@@ -784,11 +779,8 @@ impl LiveDependency{
     pub fn into_string(self)->String{self.0}
     pub fn as_ref(&self)->&str{&self.0}
     pub fn qualify(cx:&Cx, node:&LiveNode)->Self{
-        if let LiveValue::Dependency{string_start, string_count} = node.value{
+        if let LiveValue::Dependency(path) = &node.value{
             let live_registry = cx.live_registry.borrow();
-            let origin_doc = live_registry.token_id_to_origin_doc(node.origin.token_id().unwrap());
-            let mut path = String::new();
-            origin_doc.get_string(string_start, string_count, &mut path);
             if let Some(path) = path.strip_prefix("crate://self/"){
                 let file_id = node.origin.token_id().unwrap().file_id().unwrap();
                 let mut final_path = live_registry.file_id_to_cargo_manifest_path(file_id);
@@ -810,7 +802,7 @@ impl LiveDependency{
                 }                
             }
             else{
-                return Self(path)
+                return Self(path.to_string())
             }
         }
         panic!()

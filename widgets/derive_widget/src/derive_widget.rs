@@ -139,20 +139,10 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             tb.add("}");
 
-            let frame_ext = format!("{}FrameRefExt", clean_name);
+            //let frame_ext = format!("{}FrameRefExt", clean_name);
             let widget_ext = format!("{}WidgetRefExt", clean_name);
             let get_fn = format!("get_{}", snake_name);
             let into_fn = format!("into_{}", snake_name);
-            
-            tb.add("pub trait").ident(&frame_ext).add("{");
-            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&struct_name).add(";");
-            tb.add("}");
-
-            tb.add("impl ").ident(&frame_ext).add(" for FrameRef{");
-            tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&struct_name).add("{");
-            tb.add("        ").ident(&struct_name).add("(self.get_widget(path))");
-            tb.add("    }");
-            tb.add("}");
 
             tb.add("pub trait").ident(&widget_ext).add("{");
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&struct_name).add(";");
@@ -165,6 +155,81 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             tb.add("    fn ").ident(&into_fn).add("(self) -> ").ident(&struct_name).add("{");
             tb.add("        ").ident(&struct_name).add("(self)");
+            tb.add("    }");
+            tb.add("}");
+            return tb.end();
+        }
+    }
+    return parser.unexpected()
+}
+
+
+pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new();
+    let mut parser = TokenParser::new(input);
+    let _main_attribs = parser.eat_attributes();
+    parser.eat_ident("pub");
+    if parser.eat_ident("struct") {
+        if let Some(struct_name) = parser.eat_any_ident() {
+            let clean_name = if let Some(sn) = struct_name.strip_suffix("Set"){
+                sn
+            }
+            else{
+                return error("derive WidgetRef can only be done on a struct with ending name Ref")
+            };
+            let snake_name = camel_case_to_snake_case(&clean_name);
+            
+            tb.add("impl std::ops::Deref for ").ident(&struct_name).add("{");
+            tb.add("    type Target = WidgetSet;");
+            tb.add("    fn deref(&self)->&Self::Target{");
+            tb.add("        &self.0");
+            tb.add("    }");
+            tb.add("}");
+            tb.add("impl std::ops::DerefMut for ").ident(&struct_name).add("{");
+            tb.add("    fn deref_mut(&mut self)->&mut Self::Target{");
+            tb.add("        &mut self.0");
+            tb.add("    }");
+            tb.add("}");
+            tb.add("impl").ident(&struct_name).add("{");
+            
+            tb.add("}");
+            
+            tb.add("impl LiveHook for ").ident(&struct_name).add("{}");
+            tb.add("impl LiveApply for ").ident(&struct_name).add("{");
+            tb.add("    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {");
+            tb.add("        for mut item in self.iter(){");
+            tb.add("            item.apply(cx, from, index, nodes);");
+            tb.add("        }");
+            tb.add("        nodes.skip_node(index)");
+            tb.add("    }");
+            tb.add("}");
+
+            let set_ext = format!("{}SetWidgetSetExt", clean_name);
+            let ref_ext = format!("{}SetWidgetRefExt", clean_name);
+            let get_fn = format!("get_{}s", snake_name);
+            let into_fn = format!("into_{}s", snake_name);
+            
+            tb.add("pub trait").ident(&set_ext).add("{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, paths: &[&[LiveId]]) -> ").ident(&struct_name).add(";");
+            tb.add("    fn ").ident(&into_fn).add("(self) -> ").ident(&struct_name).add(";");
+            tb.add("}");
+
+            tb.add("impl ").ident(&set_ext).add(" for WidgetSet{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, paths: &[&[LiveId]]) -> ").ident(&struct_name).add("{");
+            tb.add("        ").ident(&struct_name).add("(self.get_widgets(paths))");
+            tb.add("    }");
+            tb.add("    fn ").ident(&into_fn).add("(self) -> ").ident(&struct_name).add("{");
+            tb.add("        ").ident(&struct_name).add("(self)");
+            tb.add("    }");
+            tb.add("}");
+
+            tb.add("pub trait").ident(&ref_ext).add("{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, paths: &[&[LiveId]]) -> ").ident(&struct_name).add(";");
+            tb.add("}");
+
+            tb.add("impl ").ident(&ref_ext).add(" for WidgetRef{");
+            tb.add("    fn ").ident(&get_fn).add("(&self, paths: &[&[LiveId]]) -> ").ident(&struct_name).add("{");
+            tb.add("        ").ident(&struct_name).add("(self.get_widgets(paths))");
             tb.add("    }");
             tb.add("}");
             return tb.end();
