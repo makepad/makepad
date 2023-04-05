@@ -21,7 +21,7 @@ use {
     }
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CocoaEvent {
     AppGotFocus,
     AppLostFocus,

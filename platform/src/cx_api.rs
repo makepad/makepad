@@ -40,7 +40,7 @@ use {
 
 
 pub trait CxOsApi {
-    fn init(&mut self);
+    fn init_cx_os(&mut self);
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
     
