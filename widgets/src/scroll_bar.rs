@@ -6,7 +6,7 @@ live_design!{
     
     DrawScrollBar= {{DrawScrollBar}} {
         draw_depth: 5.0
-        const BORDER_RADIUS = 1.5
+        uniform border_radius: 1.5
         instance bar_width:6.0
         instance pressed: 0.0
         instance hover: 0.0
@@ -19,7 +19,7 @@ live_design!{
                     self.rect_size.y * self.norm_scroll,
                     self.bar_width,
                     self.rect_size.y * self.norm_handle,
-                    BORDER_RADIUS
+                    self.border_radius
                 );
             }
             else {
@@ -28,7 +28,7 @@ live_design!{
                     1.,
                     self.rect_size.x * self.norm_handle,
                     self.bar_width,
-                    BORDER_RADIUS
+                    self.border_radius
                 );
             }
             return sdf.fill(mix(

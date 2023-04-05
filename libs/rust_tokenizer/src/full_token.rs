@@ -1,5 +1,6 @@
 use {
     std::{
+        rc::Rc,
         ops::Deref,
         ops::DerefMut,
     },
@@ -29,7 +30,7 @@ pub enum FullToken {
     Open(Delim),
     Close(Delim),
 
-    String,
+    String(Rc<String>),
     Bool(bool),
     Color(u32),
     Float(f64),

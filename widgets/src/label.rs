@@ -2,7 +2,6 @@ use {
     crate::{
         makepad_derive_widget::*,
         makepad_draw::*,
-        frame::*,
         widget::*
     }
 };
@@ -43,7 +42,7 @@ impl Widget for Label {
         self.walk
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
         let lines = self.text.split("\\n");
         for line in lines{
             // lets debugdraw the cliprect

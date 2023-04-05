@@ -1,5 +1,7 @@
 use {
     std::{
+        collections::HashMap,
+        rc::Rc,
         fmt::Write,
         iter
     },
@@ -15,7 +17,7 @@ use {
         },
         makepad_live_tokenizer::LiveId,
         live_token::LiveTokenId,
-        live_node::{LivePropType, LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString, LiveProp},
+        live_node::{LivePropType, LiveNode, LiveValue, LiveNodeOrigin, InlineString, LiveProp},
     }
 };
 
@@ -41,14 +43,14 @@ pub trait LiveNodeSliceApi {
 
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<&LiveValue>;
 
-    fn read_by_field_path(&self, path: &[LiveId]) -> Option<&LiveValue>;
+    fn read_field_value(&self, path: &[LiveId]) -> Option<&LiveValue>;
     
     fn first_node_with_token_id(&self, match_token_id: LiveTokenId, also_in_dsl: bool) -> Option<usize>;
     
     fn get_num_sibling_nodes(&self, child_index: usize) -> usize;
     
     fn scope_up_by_name(&self, parent_index: usize, name: LiveProp) -> Option<usize>;
-    fn scope_up_down_by_name(&self, parent_index: usize, name: LiveProp) -> Option<usize>;
+    fn scope_up_down_by_name(&self, parent_index: usize, name: LiveProp, levels_up:usize) -> Option<usize>;
     
     fn count_children(&self, parent_index: usize) -> usize;
     fn skip_node(&self, node_index: usize) -> usize;
@@ -66,7 +68,8 @@ pub trait LiveNodeVecApi {
     fn insert_children_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]);
     fn insert_children_from_self(&mut self, from_index: usize, insert_start: usize);
     
-    fn write_by_field_path(&mut self, path: &[LiveId], values: &[LiveNode]);
+    fn write_field_nodes(&mut self, path: &[LiveId], nodes: &[LiveNode]);
+    fn write_field_value(&mut self, path: &[LiveId], values: LiveValue);
     fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     
@@ -89,7 +92,7 @@ pub trait LiveNodeVecApi {
     fn open_clone(&mut self, id: LiveId, clone: LiveId);
     fn open_array(&mut self, id: LiveId);
     
-    fn open(&mut self);
+    fn root2(&mut self);
     fn close(&mut self);
 }
 
@@ -206,7 +209,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
         None
     }
     
-    fn scope_up_down_by_name(&self, start_index: usize, name: LiveProp) -> Option<usize> {
+    fn scope_up_down_by_name(&self, start_index: usize,  name: LiveProp, mut levels_up:usize) -> Option<usize> {
         let self_ref = self.as_ref();
         if self_ref.len() == 0 {
             return None
@@ -222,6 +225,12 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                             return Some(child_index)
                         }
                     }
+                    if levels_up == 1{
+                        return None
+                    }
+                    if levels_up > 1{
+                        levels_up -= 1;
+                    }
                 }
                 if stack_depth>0 {
                     stack_depth -= 1;
@@ -230,21 +239,6 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
             else if self_ref[index].is_close() { 
                 stack_depth += 1;
             }
-            /*
-            if stack_depth == 0 {
-                
-                if self_ref[index].id == name && index != start_index && !self_ref[index].value.is_close() { // valuenode
-                    return Some(index)
-                }
-                // scan child down
-                if self_ref[index].is_open() {
-                    if let Some(child_index) = self.child_by_name(index, name) {
-                        if child_index != start_index {
-                            return Some(child_index)
-                        }
-                    }
-                }
-            }*/
             if index == 0 {
                 break
             }
@@ -556,7 +550,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
         }
     }
     
-    fn read_by_field_path(&self, path: &[LiveId]) -> Option<&LiveValue> {
+    fn read_field_value(&self, path: &[LiveId]) -> Option<&LiveValue> {
         if let Some(index) = self.child_by_field_path(0, path) {
             Some(&self.as_ref()[index].value)
         }
@@ -693,14 +687,11 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 LiveValue::InlineString(s) => {
                     writeln!(f, "{}{} <InlineString> {}", node.id, pt, s.as_str()).unwrap();
                 },
-                LiveValue::FittedString(s) => {
-                    writeln!(f, "{}{} <FittedString> {}", node.id, pt, s.as_str()).unwrap();
+                LiveValue::String(s) => {
+                    writeln!(f, "{}{} <String> {}", node.id, pt, s.as_str()).unwrap();
                 },
-                LiveValue::DocumentString {string_start, string_count} => {
-                    writeln!(f, "{}{} <DocumentString> string_start:{}, string_end:{}", node.id, pt, string_start, string_count).unwrap();
-                },
-                LiveValue::Dependency {string_start, string_count} => {
-                    writeln!(f, "{}{} <Dependency> string_start:{}, string_end:{}", node.id, pt, string_start, string_count).unwrap();
+                LiveValue::Dependency (s) => {
+                    writeln!(f, "{}{} <Dependency> {}", node.id, pt, s).unwrap();
                 },
                 LiveValue::Bool(v) => {
                     writeln!(f, "{}{} <Bool> {}", node.id, pt, v).unwrap();
@@ -729,6 +720,9 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 LiveValue::Id(id) => {
                     writeln!(f, "{}{} <Id> {}", node.id, pt, id).unwrap();
                 },
+                LiveValue::IdPath(p) => {
+                    writeln!(f, "<IdPath> {:?}", p).unwrap();
+                }
                 LiveValue::ExprBinOp(id) => {
                     writeln!(f, "{}{} <ExprBinOp> {:?}", node.id, pt, id).unwrap();
                 },
@@ -741,7 +735,6 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 LiveValue::BareEnum(variant) => {
                     writeln!(f, "{}{} <BareEnum> {}", node.id, pt, variant).unwrap();
                 },
-                // stack items
                 LiveValue::Expr {expand_index} => {
                     writeln!(f, "{}{} <Expr> {:?}", node.id, pt, expand_index).unwrap();
                     stack_depth += 1;
@@ -773,6 +766,10 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                     writeln!(f, "{}{} <Class> {:?}", node.id, pt, live_type).unwrap();
                     stack_depth += 1;
                 }, // subnodes including this one
+                LiveValue::Root {..} => {
+                    writeln!(f, "{}{} <Root>", node.id, pt).unwrap();
+                    stack_depth += 1;
+                }, // subnodes including this one                
                 LiveValue::Close => {
                     if stack_depth == 0 {
                         writeln!(f, "<CloseMisaligned> {}", node.id).unwrap();
@@ -795,9 +792,9 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 LiveValue::Import(module_path) => {
                     writeln!(f, "<Import> {}::{}", module_path, node.id).unwrap();
                 }
-                LiveValue::Registry(component_id) => {
+                /*LiveValue::Registry(component_id) => {
                     writeln!(f, "<Registry> {}::{}", component_id, node.id).unwrap();
-                }
+                }*/
             }
             index += 1;
         }
@@ -863,7 +860,11 @@ impl LiveNodeVecApi for LiveNodeVec {
         insert_point + num_nodes
     }
     
-    fn write_by_field_path(&mut self, path: &[LiveId], nodes: &[LiveNode]) {
+    fn write_field_value(&mut self, path: &[LiveId], value: LiveValue){
+        self.write_field_nodes(path, &[LiveNode::from_value(value)])
+    }
+
+    fn write_field_nodes(&mut self, path: &[LiveId], nodes: &[LiveNode]) {
         let mut ids = [LiveProp(LiveId(0), LivePropType::Field); 8];
         if path.len() > ids.len(){
             eprintln!("write_by_field_path too many path segs");
@@ -878,7 +879,7 @@ impl LiveNodeVecApi for LiveNodeVec {
         }
         let was_empty = self.len() == 0;
         if was_empty {
-            self.open();
+            self.open_object(LiveId(0));
         }
         self.replace_or_insert_last_node_by_path(
             0,
@@ -973,7 +974,7 @@ impl LiveNodeVecApi for LiveNodeVec {
             self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::InlineString(inline_str)});
         }
         else {
-            self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::FittedString(FittedString::from_string(v.to_string()))});
+            self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::String(Rc::new(v.to_string()))});
         }
     }
     
@@ -993,5 +994,5 @@ impl LiveNodeVecApi for LiveNodeVec {
     fn open_clone(&mut self, id: LiveId, clone: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Clone(clone)})}
     fn open_array(&mut self, id: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Array})}
     fn close(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Close})}
-    fn open(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Object})}
+    fn root2(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Root{id_resolve:Box::new(HashMap::new())}})}
 }

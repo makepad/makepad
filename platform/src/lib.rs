@@ -73,7 +73,6 @@ pub use {
         LiveErrorOrigin,
         LiveNodeOrigin,
         LiveRegistry,
-        LiveDocNodes,
         LiveId,
         LiveIdMap,
         LiveFileId,
@@ -90,8 +89,9 @@ pub use {
         LiveProp,
         LiveIdAsProp,
         LiveValue,
-        FittedString,
         InlineString,
+        LiveBinding,
+        LiveIdPath,
         LiveNodeSliceToCbor,
         LiveNodeVecFromCbor,
         LiveModuleId,
@@ -206,7 +206,6 @@ pub use {
         },
         live_prims::{
             LiveDependency,
-            LiveIdToEnum,
         },
         live_traits::{
             LiveBody,
