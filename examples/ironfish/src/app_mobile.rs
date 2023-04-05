@@ -1,21 +1,31 @@
 use crate::makepad_widgets::*;
 
 live_design!{
-    registry Widget::*;
-    
     import makepad_widgets::theme::*;
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
     
-    const SPACING_OS = 40.0;
-    const SPACING_CONTROLS = 7.5;
-    const SPACING_BASE_PADDING = 6.0;
+    import makepad_widgets::label::Label;
+    import makepad_widgets::drop_down::DropDown;
+    import makepad_widgets::button::Button;
+    import makepad_widgets::slider::Slider;
+    import makepad_widgets::check_box::CheckBox;
+    import makepad_widgets::text_input::TextInput;
+    import makepad_widgets::radio_button::RadioButton;
+
+    import makepad_example_ironfish::sequencer::Sequencer;
+    import makepad_audio_widgets::display_audio::DisplayAudio;
+    import makepad_audio_widgets::piano::Piano;
     
-    const SSPACING_0 = 0.0
-    const SSPACING_1 = 4.0
-    const SSPACING_2 = (SSPACING_1 * 2)
-    const SSPACING_3 = (SSPACING_1 * 3)
-    const SSPACING_4 = (SSPACING_1 * 4)
+    SPACING_OS = 40.0;
+    SPACING_CONTROLS = 7.5;
+    SPACING_BASE_PADDING = 6.0;
+    
+    SSPACING_0 = 0.0
+    SSPACING_1 = 4.0
+    SSPACING_2 = (SSPACING_1 * 2)
+    SSPACING_3 = (SSPACING_1 * 3)
+    SSPACING_4 = (SSPACING_1 * 4)
 
     SPACING_0 = {top: (SSPACING_0), right: (SSPACING_0), bottom: (SSPACING_0), left: (SSPACING_0)}
     SPACING_1 = {top: (SSPACING_1), right: (SSPACING_1), bottom: (SSPACING_1), left: (SSPACING_1)}
@@ -23,33 +33,44 @@ live_design!{
     SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
 
-    const COLOR_CLEAR = #x3;
+    COLOR_CLEAR = #x3;
     
-    const COLOR_PLAYARROW_INNER = #xFFFDDDFF;
+    COLOR_PLAYARROW_INNER = #xFFFDDDFF;
     
-    const COLOR_DOWN_OFF = #x00000000;
-    const COLOR_DOWN_1 = #x00000022;
-    const COLOR_DOWN_2 = #x00000044;
-    const COLOR_DOWN_3 = #x00000066;
-    const COLOR_DOWN_4 = #x00000088;
-    const COLOR_DOWN_5 = #x000000AA;
-    const COLOR_DOWN_FULL = #x000000FF;
+    COLOR_DOWN_OFF = #x00000000;
+    COLOR_DOWN_1 = #x00000022;
+    COLOR_DOWN_2 = #x00000044;
+    COLOR_DOWN_3 = #x00000066;
+    COLOR_DOWN_4 = #x00000088;
+    COLOR_DOWN_5 = #x000000AA;
+    COLOR_DOWN_FULL = #x000000FF;
     
-    const COLOR_UP_OFF = #xFFFFFF00;
-    const COLOR_UP_2 = #xFFFFFF11;
-    const COLOR_UP_3 = #xFFFFFF22;
-    const COLOR_UP_4 = #xFFFFFF33;
-    const COLOR_UP_5 = #xFFFFFF44;
-    const COLOR_UP_6 = #xFFFFFF66;
-    const COLOR_UP_7 = #xFFFFFF88;
-    const COLOR_UP_8 = #xFFFFFFCC;
-    const COLOR_UP_FULL = #xFFFFFFFF;
+    COLOR_UP_OFF = #xFFFFFF00;
+    COLOR_UP_2 = #xFFFFFF11;
+    COLOR_UP_3 = #xFFFFFF22;
+    COLOR_UP_4 = #xFFFFFF33;
+    COLOR_UP_5 = #xFFFFFF44;
+    COLOR_UP_6 = #xFFFFFF66;
+    COLOR_UP_7 = #xFFFFFF88;
+    COLOR_UP_8 = #xFFFFFFCC;
+    COLOR_UP_FULL = #xFFFFFFFF;
     
-    const GRADIENT_A = #x08221D;
-    const GRADIENT_B = #x3F3769;
+    GRADIENT_A = #x08221D;
+    GRADIENT_B = #x3F3769;
     
-    const FONT_SIZE_H1 = 17.5;
-    const FONT_SIZE_H2 = 12.0;
+    FONT_SIZE_H1 = 17.5;
+    FONT_SIZE_H2 = 12.0;
+    
+    H2_TEXT_BOLD = {
+        font_size: (FONT_SIZE_H2),
+        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
+    }
+    
+    H2_TEXT_NORMAL = {
+        font_size: (FONT_SIZE_H2),
+        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
+    }
+    
     
     // WIDGETS
     
@@ -95,11 +116,7 @@ live_design!{
             color_selected: (COLOR_UP_8),
             color_unselected: (COLOR_UP_6),
             color_unselected_hover: (COLOR_UP_6),
-            text_style:
-            {
-                font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"},
-                font_size: (FONT_SIZE_H2)
-            }
+            text_style:<H2_TEXT_BOLD>{}
         }
     }
     
@@ -108,7 +125,7 @@ live_design!{
         layout: {padding: {top: (SPACING_BASE_PADDING), right: 18.0, bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
         
         draw_label: {
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+            text_style: <H2_TEXT_BOLD>{},
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -156,7 +173,7 @@ live_design!{
         }
         
         draw_label: {
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}
+            text_style: <H2_TEXT_BOLD>{}
             fn get_color(self) -> vec4 {
                 return mix( (COLOR_UP_6), (COLOR_UP_6), self.pressed )
             }
@@ -194,7 +211,7 @@ live_design!{
             height: 36,
         }
         label: "Change Me"
-        label_text: {text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}, color: (COLOR_UP_6)}
+        label_text: {text_style: <H2_TEXT_BOLD>{}, color: (COLOR_UP_6)}
         text_input: {
             cursor_margin_bottom: 3.0,
             cursor_margin_top: 4.0,
@@ -292,7 +309,7 @@ live_design!{
                 }
             }
             draw_label: {
-                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                text_style: <H2_TEXT_BOLD>{},
                 color: (COLOR_UP_6)
             }
         }
@@ -304,7 +321,7 @@ live_design!{
             walk: {width: Fit}
             draw_label: {
                 color: (COLOR_UP_6)
-                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                text_style: <H2_TEXT_BOLD>{},
             }
         }
         dropdown = <FishDropDown> {
@@ -392,7 +409,7 @@ live_design!{
                 }
             }
             draw_label: {
-                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                text_style: <H2_TEXT_BOLD>{},
                 color: (COLOR_UP_5)
             }
         }
@@ -427,7 +444,7 @@ live_design!{
             }
         }
         draw_label: {
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+            text_style: <H2_TEXT_BOLD>{},
             color: (COLOR_UP_6)
         }
     }
@@ -621,7 +638,7 @@ live_design!{
         }
         
         draw_label: {
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}}
+            text_style: <H2_TEXT_BOLD>{}
             fn get_color(self) -> vec4 {
                 return mix( (COLOR_UP_6), (COLOR_UP_6), self.pressed )
             }
@@ -671,7 +688,7 @@ live_design!{
         label = <Label> {
             walk: {width: Fill, height: Fill, margin: 10}
             draw_label: {
-                text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                text_style: <H2_TEXT_BOLD>{},
                 color: (COLOR_UP_6)
             }
             text: "change me"
@@ -816,7 +833,7 @@ live_design!{
             }
         }
         draw_label: {
-            text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+            text_style: <H2_TEXT_BOLD>{},
             color: (COLOR_UP_6)
         }
     }
@@ -836,7 +853,7 @@ live_design!{
                     fn get_color(self) -> vec4 {
                         return mix( (COLOR_UP_5), (COLOR_UP_4), self.pressed )
                     }
-                    text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                    text_style: <H2_TEXT_BOLD>{},
                     color: (COLOR_UP_6)
                 }
                 draw_bg: {
@@ -859,7 +876,7 @@ live_design!{
                 share = <FishButton> {
                     walk: { margin: {top: 5} }
                     draw_label: {
-                        text_style: {font_size: (FONT_SIZE_H2), font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"}},
+                        text_style: <H2_TEXT_BOLD>{},
                         fn get_color(self) -> vec4 {
                             return mix(
                                 (COLOR_UP_4),
@@ -1001,11 +1018,7 @@ live_design!{
                     layout: {align: {x: 0.0, y: 0.5}}
                     text: "Search"
                     draw_label: {
-                        text_style:
-                        {
-                            font: {path: d"crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf"},
-                            font_size: (FONT_SIZE_H1)
-                        }
+                        text_style:<H2_TEXT_BOLD>{font_size: (FONT_SIZE_H1)}
                     }
                 }
                 

@@ -270,8 +270,8 @@ live_design!{
         instance color2: #f00
         instance dither: 1.0
         fn get_color(self) -> vec4 {
-            let dither = Math::random_2d(self.pos.xy)* 0.04 * self.dither;
-            return mix(self.color, self.color2, self.pos.x+ dither)
+            let dither = Math::random_2d(self.pos.xy) * 0.04 * self.dither;
+            return mix(self.color, self.color2, self.pos.x + dither)
         }
         
         fn pixel(self) -> vec4 {
@@ -325,7 +325,7 @@ live_design!{
                 return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
             }
             fn pixel(self) -> vec4 {
-                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked,0.0,0.0,0.0);
+                return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
             }
             
             shape: Solid,
@@ -340,7 +340,7 @@ live_design!{
 }
 
 #[derive(Live)]
-#[live_design_with{widget_factory!(cx,Frame)}]
+#[live_design_with {widget_factory!(cx, Frame)}]
 pub struct Frame { // draw info per UI element
     draw_bg: DrawColor,
     
@@ -359,7 +359,7 @@ pub struct Frame { // draw info per UI element
     #[live(true)] visible: bool,
     user_draw: bool,
     
-    #[rust] find_cache: HashMap<u64, (WidgetRef, usize)>,
+    #[rust] find_cache: HashMap<u64, WidgetSet>,
     
     cursor: Option<MouseCursor>,
     scroll_bars: Option<LivePtr>,
@@ -370,7 +370,7 @@ pub struct Frame { // draw info per UI element
     #[rust] view_size: Option<DVec2>,
     #[rust] area: Area,
     #[rust] pub view: Option<View>,
-    #[rust] cache: Option<FrameTextureCache>,
+    #[rust] texture_cache: Option<FrameTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] templates: ComponentMap<LiveId, (LivePtr, usize)>,
@@ -480,7 +480,7 @@ impl LiveHook for Frame {
 pub struct FrameRef(WidgetRef);
 
 impl FrameRef {
-    
+    /*
     pub fn handle_event(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
         self.0.handle_widget_event(cx, event)
     }
@@ -490,7 +490,7 @@ impl FrameRef {
             return inner.draw(cx)
         }
         WidgetDraw::done()
-    }
+    }*/
     
     pub fn set_visible(&self, visible: bool) {
         if let Some(mut inner) = self.inner_mut() {
@@ -498,18 +498,17 @@ impl FrameRef {
         }
     }
     
-    pub fn set_texture(&self, slot:usize, texture: &Texture) {
+    pub fn set_texture(&self, slot: usize, texture: &Texture) {
         if let Some(mut inner) = self.inner_mut() {
             inner.draw_bg.set_texture(slot, texture);
         }
     }
     
-    pub fn set_uniform(&self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
+    pub fn set_uniform(&self, cx: &Cx, uniform: &[LiveId], value: &[f32]) {
         if let Some(mut inner) = self.inner_mut() {
             inner.draw_bg.set_uniform(cx, uniform, value);
         }
     }
-    
     
     pub fn set_scroll_pos(&self, cx: &mut Cx, v: DVec2) {
         if let Some(mut inner) = self.inner_mut() {
@@ -526,7 +525,7 @@ impl FrameRef {
         }
     }
     
-    pub fn child_count(&self)->usize{
+    pub fn child_count(&self) -> usize {
         if let Some(inner) = self.inner() {
             inner.draw_order.len()
         }
@@ -589,7 +588,7 @@ impl Widget for Frame {
         self.walk
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk)
     }
     
@@ -657,7 +656,7 @@ impl Widget for Frame {
         self.children.get_mut(&new_id).unwrap().clone()
     }
     
-    fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache,) -> WidgetResult {
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         match cached {
             WidgetCache::Yes | WidgetCache::Clear => {
                 if let WidgetCache::Clear = cached {
@@ -667,55 +666,41 @@ impl Widget for Frame {
                 for i in 0..path.len() {
                     hash ^= path[i].0
                 }
-                if let Some((widget, store_count)) = self.find_cache.get(&hash) {
-                    let now_count = widget.strong_count();
-                    if now_count >= *store_count {
-                        return WidgetResult::found(widget.clone())
-                    }
+                if let Some(widget_set) = self.find_cache.get(&hash) {
+                    results.extend_from_set(widget_set);
+                    return
                 }
-                
+                let mut local_results = WidgetSet::empty();
                 if let Some(child) = self.children.get_mut(&path[0]) {
                     if path.len()>1 {
-                        if let Some(result) = child.find_widget(&path[1..], WidgetCache::No).into_found() {
-                            let store_count = result.strong_count();
-                            self.find_cache.insert(hash, (result.clone(), store_count));
-                            return WidgetResult::found(result)
-                        }
+                        child.find_widgets(&path[1..], WidgetCache::No, &mut local_results);
                     }
                     else {
-                        return WidgetResult::found(child.clone());
+                        local_results.push(child.clone());
                     }
                 }
                 for child in self.children.values_mut() {
-                    if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
-                        let store_count = result.strong_count();
-                        self.find_cache.insert(hash, (result.clone(), store_count));
-                        return WidgetResult::found(result)
-                    }
+                    child.find_widgets(path, WidgetCache::No, &mut local_results);
                 }
+                if !local_results.is_empty() {
+                    results.extend_from_set(&local_results);
+                }
+                self.find_cache.insert(hash, local_results);
             }
             WidgetCache::No => {
-                if let WidgetCache::Clear = cached {
-                    self.find_cache.clear();
-                }
                 if let Some(child) = self.children.get_mut(&path[0]) {
                     if path.len()>1 {
-                        if let Some(result) = child.find_widget(&path[1..], WidgetCache::No).into_found() {
-                            return WidgetResult::found(result)
-                        }
+                        child.find_widgets(&path[1..], WidgetCache::No, results);
                     }
                     else {
-                        return WidgetResult::found(child.clone());
+                        results.push(child.clone());
                     }
                 }
                 for child in self.children.values_mut() {
-                    if let Some(result) = child.find_widget(path, WidgetCache::No).into_found() {
-                        return WidgetResult::found(result)
-                    }
+                    child.find_widgets(path, WidgetCache::No, results);
                 }
             }
         }
-        WidgetResult::not_found()
     }
     
     fn find_template(&self, id: &[LiveId; 1]) -> Option<LivePtr> {
@@ -776,29 +761,29 @@ impl Frame {
                 if self.use_cache {
                     let walk = self.walk_from_previous_size(walk);
                     if !cx.view_will_redraw(self.view.as_mut().unwrap(), walk) {
-                        if let Some(cache) = &self.cache {
-                            self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
+                        if let Some(texture_cache) = &self.texture_cache {
+                            self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
                             let rect = cx.walk_turtle_with_area(&mut self.area, walk);
                             self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
-                            cx.set_pass_area(&cache.pass, self.area);
+                            cx.set_pass_area(&texture_cache.pass, self.area);
                         }
                         return WidgetDraw::done()
                     }
                     // lets start a pass
-                    if self.cache.is_none() {
-                        self.cache = Some(FrameTextureCache {
+                    if self.texture_cache.is_none() {
+                        self.texture_cache = Some(FrameTextureCache {
                             pass: Pass::new(cx),
                             _depth_texture: Texture::new(cx),
                             color_texture: Texture::new(cx)
                         });
-                        let cache = self.cache.as_mut().unwrap();
+                        let texture_cache = self.texture_cache.as_mut().unwrap();
                         //cache.pass.set_depth_texture(cx, &cache.depth_texture, PassClearDepth::ClearWith(1.0));
-                        cache.pass.add_color_texture(cx, &cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+                        texture_cache.pass.add_color_texture(cx, &texture_cache.color_texture, PassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
                     }
-                    let cache = self.cache.as_mut().unwrap();
-                    cx.make_child_pass(&cache.pass);
-                    cx.begin_pass(&cache.pass);
+                    let texture_cache = self.texture_cache.as_mut().unwrap();
+                    cx.make_child_pass(&texture_cache.pass);
+                    cx.begin_pass(&texture_cache.pass);
                     self.view.as_mut().unwrap().begin_always(cx)
                 }
                 else {
@@ -826,10 +811,9 @@ impl Frame {
                 }
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
             }
-            else {
+            else if cx.inside_pass() {
                 cx.begin_turtle(walk, self.layout.with_scroll(scroll));
             }
-            
             
             if self.user_draw {
                 return WidgetDraw::not_done(WidgetRef::empty())
@@ -840,12 +824,17 @@ impl Frame {
             if step < self.draw_order.len() {
                 let id = self.draw_order[step];
                 if let Some(child) = self.children.get_mut(&id) {
-                    let walk = child.get_walk();
-                    if let Some(fw) = cx.defer_walk(walk) {
-                        self.defer_walks.push((id, fw));
+                    if !cx.inside_pass() {
+                        child.draw_walk_widget(cx, Walk::default()) ?;
                     }
                     else {
-                        child.draw_widget(cx, walk) ?;
+                        let walk = child.get_walk();
+                        if let Some(fw) = cx.defer_walk(walk) {
+                            self.defer_walks.push((id, fw));
+                        }
+                        else {
+                            child.draw_walk_widget(cx, walk) ?;
+                        }
                     }
                 }
                 self.draw_state.set(DrawState::Drawing(step + 1));
@@ -860,7 +849,7 @@ impl Frame {
                 let (id, dw) = &self.defer_walks[step];
                 if let Some(child) = self.children.get_mut(&id) {
                     let walk = dw.resolve(cx);
-                    child.draw_widget(cx, walk) ?;
+                    child.draw_walk_widget(cx, walk) ?;
                 }
                 self.draw_state.set(DrawState::DeferWalk(step + 1));
             }
@@ -876,7 +865,7 @@ impl Frame {
                     self.draw_bg.end(cx);
                     self.area = self.draw_bg.area();
                 }
-                else {
+                else if cx.inside_pass() {
                     cx.end_turtle_with_area(&mut self.area);
                 };
                 
@@ -891,19 +880,19 @@ impl Frame {
                     self.view.as_mut().unwrap().end(cx);
                     
                     if self.use_cache {
-                        let cache = self.cache.as_mut().unwrap();
-                        cx.end_pass(&cache.pass);
+                        let texture_cache = self.texture_cache.as_mut().unwrap();
+                        cx.end_pass(&texture_cache.pass);
                         /*if cache.pass.id_equals(4){
                             self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[1.0]);
                         }
                         else{
                             self.draw_bg.draw_vars.set_uniform(cx, id!(marked),&[0.0]);
                         }*/
-                        self.draw_bg.draw_vars.set_texture(0, &cache.color_texture);
+                        self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
-                        let cache = self.cache.as_mut().unwrap();
-                        cx.set_pass_area(&cache.pass, area);
+                        let texture_cache = self.texture_cache.as_mut().unwrap();
+                        cx.set_pass_area(&texture_cache.pass, area);
                     }
                 }
                 self.draw_state.end();

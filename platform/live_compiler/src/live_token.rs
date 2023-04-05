@@ -1,5 +1,6 @@
 use {
     std::{
+        rc::Rc,
         fmt,
         ops::Deref,
         ops::DerefMut,
@@ -16,7 +17,7 @@ use {
     }
 };
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TokenWithSpan {
     pub span: TextSpan,
     pub token: LiveToken,
@@ -37,7 +38,7 @@ impl fmt::Display for TokenWithSpan {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LiveToken {
     Punct(LiveId),
     Ident(LiveId),
@@ -45,8 +46,7 @@ pub enum LiveToken {
     Open(Delim),
     Close(Delim),
     
-    Dependency{index: u32, len: u32},
-    String {index: u32, len: u32},
+    String (Rc<String>),
     Bool(bool),
     Int(i64),
     Float(f64),
@@ -168,31 +168,32 @@ impl LiveToken {
         }
     }
     
-    pub fn is_parse_equal(&self, other: LiveToken) -> bool {
-        match *self {
-            LiveToken::Punct(p) => if let LiveToken::Punct(o) = other {p == o}else {false},
-            LiveToken::Ident(p) => if let LiveToken::Ident(o) = other {p == o}else {false},
-            LiveToken::Open(p) => if let LiveToken::Open(o) = other {p == o}else {false},
-            LiveToken::Close(p) => if let LiveToken::Close(o) = other {p == o}else {false},
+    pub fn is_parse_equal(&self, other: &LiveToken) -> bool {
+        match self {
+            LiveToken::String(p) => if let LiveToken::String(o) = other {*p == *o}else {false},
+            LiveToken::Punct(p) => if let LiveToken::Punct(o) = other {*p == *o}else {false},
+            LiveToken::Ident(p) => if let LiveToken::Ident(o) = other {*p == *o}else {false},
+            LiveToken::Open(p) => if let LiveToken::Open(o) = other {*p == *o}else {false},
+            LiveToken::Close(p) => if let LiveToken::Close(o) = other {*p == *o}else {false},
             LiveToken::Bool(_) => if let LiveToken::Bool(_) = other {true}else {false},
             LiveToken::Int(_) => if let LiveToken::Int(_) = other {true}else if let LiveToken::Float(_) = other {true} else {false},
             LiveToken::Float(_) => if let LiveToken::Float(_) = other {true}else if let LiveToken::Int(_) = other {true} else {false},
             LiveToken::Color(_) => if let LiveToken::Color(_) = other {true}else {false},
             LiveToken::Eof => if let LiveToken::Eof = other {true}else {false},
-            _ => true
         }
     }
     
-    pub fn from_full_token(full_token: FullToken) -> Option<Self> {
+    pub fn from_full_token(full_token: &FullToken) -> Option<Self> {
         match full_token {
-            FullToken::Punct(p) => Some(LiveToken::Punct(p)),
-            FullToken::Ident(p) => Some(LiveToken::Ident(p)),
-            FullToken::Open(p) => Some(LiveToken::Open(p)),
-            FullToken::Close(p) => Some(LiveToken::Close(p)),
-            FullToken::Bool(p) => Some(LiveToken::Bool(p)),
-            FullToken::Int(p) => Some(LiveToken::Int(p)),
-            FullToken::Float(p) => Some(LiveToken::Float(p)),
-            FullToken::Color(p) => Some(LiveToken::Color(p)),
+            FullToken::String(s) => Some(LiveToken::String(s.clone())),
+            FullToken::Punct(p) => Some(LiveToken::Punct(*p)),
+            FullToken::Ident(p) => Some(LiveToken::Ident(*p)),
+            FullToken::Open(p) => Some(LiveToken::Open(*p)),
+            FullToken::Close(p) => Some(LiveToken::Close(*p)),
+            FullToken::Bool(p) => Some(LiveToken::Bool(*p)),
+            FullToken::Int(p) => Some(LiveToken::Int(*p)),
+            FullToken::Float(p) => Some(LiveToken::Float(*p)),
+            FullToken::Color(p) => Some(LiveToken::Color(*p)),
             _ => None
         }
     }
@@ -202,8 +203,7 @@ impl fmt::Display for LiveToken {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Eof => write!(f, "<eof>"),
-            Self::String {..} => write!(f, "\"STRINGDATANOTAVAILABLE\""),
-            Self::Dependency {..} => write!(f, "\"DEPENDENCYDATANOTAVAILABLE\""),
+            Self::String(v) => write!(f, "{}", v),
             Self::Punct(id) => write!(f, "{}", id),
             Self::Ident(id) => write!(f, "{}", id),
             Self::Open(Delim::Paren) => write!(f, "("),

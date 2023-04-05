@@ -3,8 +3,6 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         widget::*,
-        data_binding::DataBinding,
-        frame::*,
     }
 };
 
@@ -234,8 +232,6 @@ impl RadioButton {
 }
 
 impl Widget for RadioButton {
-    fn bind_to(&mut self, _cx: &mut Cx, _db: &mut DataBinding, _act: &WidgetActions, _path: &[LiveId]) {
-    }
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.draw_radio.redraw(cx);
@@ -250,7 +246,7 @@ impl Widget for RadioButton {
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
@@ -267,22 +263,18 @@ impl RadioButtonRef{
     }
 }
 
-#[derive(Clone, PartialEq)]
-pub struct RadioGroupRef<const N: usize>([RadioButtonRef; N]);
+#[derive(Clone, WidgetSet)]
+pub struct RadioButtonSet(WidgetSet);
 
-pub trait RadioGroupFrameRefExt {
-    fn get_radio_group<'a, const N: usize>(&self, paths: &[&[LiveId]; N]) -> RadioGroupRef<N>;
-}
-
-impl<const N: usize> RadioGroupRef<N>{
+impl RadioButtonSet{
     
     pub fn selected(&self, cx: &mut Cx, actions: &WidgetActions)->Option<usize>{
         for action in actions{
             match action.action() {
                 RadioButtonAction::Clicked => if let Some(index) = self.0.iter().position(|v| v.widget_uid() == action.widget_uid){
-                    for i in 0..self.0.len(){
+                    for (i, item) in self.0.iter().enumerate(){
                         if i != index{
-                            self.0[i].unselect(cx);
+                            RadioButtonRef(item).unselect(cx);
                         }
                     }
                     return Some(index);
@@ -293,7 +285,7 @@ impl<const N: usize> RadioGroupRef<N>{
         None
     }
     
-    pub fn selected_to_visible(&self, cx: &mut Cx, ui:&FrameRef, actions: &WidgetActions, paths:&[&[LiveId];N] ) {
+    pub fn selected_to_visible(&self, cx: &mut Cx, ui:&WidgetRef, actions: &WidgetActions, paths:&[&[LiveId]] ) {
         // find a widget action that is in our radiogroup
         if let Some(index) = self.selected(cx, actions){
             // ok now we set visible
@@ -303,14 +295,5 @@ impl<const N: usize> RadioGroupRef<N>{
                 widget.redraw(cx);
             }
         }
-    }
-}
-
-impl RadioGroupFrameRefExt for FrameRef{
-    fn get_radio_group<const N: usize>(&self, paths: &[&[LiveId]; N]) -> RadioGroupRef<N> {
-        // lets return a radio group
-        RadioGroupRef(core::array::from_fn( | i | {
-            RadioButtonRef(self.get_widget(paths[i]))
-        }))
     }
 }

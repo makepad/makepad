@@ -353,7 +353,7 @@ impl Widget for ListBox {
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.begin(cx, walk);
         for (i, item_str) in self.items.iter().enumerate() {
             let node_id = live_id_num!(listbox, i as u64).into();

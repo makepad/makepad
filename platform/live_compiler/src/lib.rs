@@ -42,7 +42,7 @@ pub use {
         live_registry::{
             LiveEditEvent,
             LiveRegistry,
-            LiveDocNodes,
+            //LiveDocNodes,
         },
         live_ptr::{
             LiveModuleId,
@@ -82,9 +82,9 @@ pub use {
             LiveUnOp,
             LiveNodeOrigin,
             InlineString,
-            FittedString, 
             LivePropType,
-            
+            LiveBinding,
+            LiveIdPath,
             //LiveTypeKind,
         },
         live_token::{TokenWithSpan, LiveToken, LiveTokenId},

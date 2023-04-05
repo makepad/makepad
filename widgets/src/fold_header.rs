@@ -101,17 +101,17 @@ impl Widget for FoldHeader {
     
     fn get_walk(&self) -> Walk {self.walk}
 
-    fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache) -> WidgetResult {
-        self.header.find_widget(path, cached) ?;
-        self.body.find_widget(path, cached)
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        self.header.find_widgets(path, cached, results);
+        self.body.find_widgets(path, cached, results);
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
         if let Some(DrawState::DrawHeader) = self.draw_state.get() {
-            self.header.draw_walk_widget(cx) ?;
+            self.header.draw_widget(cx) ?;
             cx.begin_turtle(
                 self.body_walk,
                 Layout::flow_down()
@@ -120,7 +120,7 @@ impl Widget for FoldHeader {
             self.draw_state.set(DrawState::DrawBody);
         }
         if let Some(DrawState::DrawBody) = self.draw_state.get() {
-            self.body.draw_walk_widget(cx) ?;
+            self.body.draw_widget(cx) ?;
             self.rect_size = cx.turtle().used().y;
             cx.end_turtle();
             cx.end_turtle_with_area(&mut self.area);
