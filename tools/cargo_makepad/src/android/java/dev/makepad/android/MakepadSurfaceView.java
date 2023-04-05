@@ -8,6 +8,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.inputmethod.InputMethodManager;
 import android.util.Log;
 
 import javax.microedition.khronos.egl.EGL10;
@@ -18,10 +19,13 @@ import javax.microedition.khronos.egl.EGLSurface;
 import javax.microedition.khronos.opengles.GL10;
 
 import android.view.KeyEvent;
+import android.view.ViewTreeObserver;
+import android.view.WindowInsets;
 
 public class MakepadSurfaceView extends SurfaceView implements 
 SurfaceHolder.Callback, 
 View.OnTouchListener,
+ViewTreeObserver.OnGlobalLayoutListener,
 KeyEvent.Callback
 {
     public MakepadSurfaceView(Context context, long cx) {
@@ -30,6 +34,7 @@ KeyEvent.Callback
         setWillNotDraw(false);
         getHolder().addCallback(this);
         setOnTouchListener(this);
+        getViewTreeObserver().addOnGlobalLayoutListener(this);
 
         mCx = cx;
 
@@ -73,13 +78,14 @@ KeyEvent.Callback
     }
 
     @Override
-    public void onDraw(Canvas canvas) {      
+    public void onDraw(Canvas canvas) {
         if (!mEgl.eglMakeCurrent(mEglDisplay, mEglSurface, mEglSurface, mEglContext)) {
             throw new RuntimeException("eglMakeCurrent failed");
         }
         Makepad.onDraw(mCx, (Makepad.Callback)this.getContext());
     }
 
+    @Override
     public void surfaceCreated(SurfaceHolder holder) {
         int[] attrib_list = new int[]{
                 EGL_CONTEXT_CLIENT_VERSION, 2,
@@ -100,16 +106,26 @@ KeyEvent.Callback
         }
     }
 
+    @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
         if (!mEgl.eglDestroySurface(mEglDisplay, mEglSurface)) {
             throw new RuntimeException("eglDestroySurface failed");
         }
     }
 
+    @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         Makepad.onResize(mCx, width, height, (Makepad.Callback)this.getContext());
     }
 
+    @Override
+    public void onGlobalLayout() {
+        if (!(this.getRootWindowInsets().isVisible(WindowInsets.Type.ime()))) {
+            Makepad.onHideTextIME(mCx, (Makepad.Callback)this.getContext());
+        }
+    }
+
+    @Override
     public boolean onTouch(View view, MotionEvent event) {
         Makepad.onTouch(mCx, event, (Makepad.Callback)this.getContext());
         return true;
@@ -134,4 +150,7 @@ KeyEvent.Callback
     private EGLConfig mEglConfig;
     private EGLContext mEglContext;
     private EGLSurface mEglSurface;
+
+    private int mCurrentSurfaceWidth;
+    private int mCurrentSurfaceHeight;
 }
