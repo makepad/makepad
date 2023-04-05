@@ -181,7 +181,7 @@ impl Cx {
     pub fn from_java_on_touch(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
         let time = self.os.time_now();
         for touch in &mut touches {
-            if self.os.is_text_ime_visible { touch.abs.y += 1000.0 };
+            if self.os.is_text_ime_visible { touch.abs.y += self.os.text_ime_screen_offset };
             touch.abs /= self.os.dpi_factor;
         }
         self.fingers.process_touch_update_start(time, &touches);
@@ -306,10 +306,10 @@ impl Cx {
         
         // keep repainting in a loop 
         self.passes[pass_id].paint_dirty = false;
-        let y = if self.os.is_text_ime_visible { 1000 } else { 0 };
+        let y = if self.os.is_text_ime_visible { self.os.text_ime_screen_offset } else { 0.0 };
         
         unsafe {
-            gl_sys::Viewport(0, y, self.os.display_size.x as i32, self.os.display_size.y as i32);
+            gl_sys::Viewport(0, y as i32, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
         
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -402,8 +402,22 @@ impl Cx {
                     to_java.cancel_timeout(timer_id as i64);
                     //android_app.stop_timer(timer_id);
                 },
-                CxOsOp::ShowTextIME(_area, _pos) => {
+                CxOsOp::ShowTextIME(area, _pos) => {
                     self.os.is_text_ime_visible = true;
+
+                    // TODO Remove hardcoded values and extract to function
+                    // named "calculate_text_ime_screen_offset" or similar
+                    let offset_y = area.get_clipped_rect(self).pos.y;
+                    let screen_height = 1800.;
+                    let ime_keyboard_height = 1000.;
+                    let buffer = 200.;
+
+                    if offset_y > screen_height - ime_keyboard_height {
+                        self.os.text_ime_screen_offset = offset_y - (screen_height - ime_keyboard_height) + buffer;
+                    } else {
+                        self.os.text_ime_screen_offset = 0.0;
+                    }
+
                     to_java.show_text_ime();
                 },
                 CxOsOp::HideTextIME => {
@@ -448,6 +462,7 @@ impl Default for CxOs {
             dpi_factor: 1.5,
             time_start: Instant::now(),
             is_text_ime_visible: false,
+            text_ime_screen_offset: 0.0,
             media: CxAndroidMedia::default()
         }
     }
@@ -459,6 +474,7 @@ pub struct CxOs {
     pub dpi_factor: f64,
     pub time_start: Instant,
     pub is_text_ime_visible: bool,
+    pub text_ime_screen_offset: f64,
     pub (crate) media: CxAndroidMedia,
 }
 
