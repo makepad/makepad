@@ -18,8 +18,8 @@ use {
         nav::{
             CxNavTreeRc,
         },
-        icon::CxIconAtlasRc,
-        font::{
+        icon_atlas::CxIconAtlasRc,
+        font_atlas::{
             CxFontsAtlasRc,
         },
         view::View,

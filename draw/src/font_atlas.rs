@@ -75,10 +75,8 @@ impl CxFontsAtlasAlloc {
         self.xpos += w + 1.0;
         
         CxFontAtlasGlyph {
-            tx1: tx1,
-            ty1: ty1,
-            tx2: (tx1 + (w / self.texture_size.x)),
-            ty2: (ty1 + (h / self.texture_size.y))
+            t1: dvec2(tx1, ty1).into(),
+            t2: dvec2( tx1 + (w / self.texture_size.x), ty1 + (h / self.texture_size.y)).into()
         }
     }
 }
@@ -169,8 +167,8 @@ impl DrawTrapezoidVector {
                 }
                 
                 let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
-                let tx = glyphtc.tx1 * fonts_atlas.alloc.texture_size.x + todo.subpixel_x_fract * atlas_page.dpi_factor;
-                let ty = 1.0 + glyphtc.ty1 * fonts_atlas.alloc.texture_size.y - todo.subpixel_y_fract * atlas_page.dpi_factor;
+                let tx = glyphtc.t1.x as f64 * fonts_atlas.alloc.texture_size.x + todo.subpixel_x_fract * atlas_page.dpi_factor;
+                let ty = 1.0 + glyphtc.t1.y as f64 * fonts_atlas.alloc.texture_size.y - todo.subpixel_y_fract * atlas_page.dpi_factor;
                 
                 let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
@@ -322,10 +320,8 @@ pub struct CxFontAtlasPage {
 
 #[derive(Clone, Copy)]
 pub struct CxFontAtlasGlyph {
-    pub tx1: f64,
-    pub ty1: f64,
-    pub tx2: f64,
-    pub ty2: f64,
+    pub t1: Vec2,
+    pub t2: Vec2,
 }
 
 #[derive(Default, Debug)]
