@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        icon::{CxIconAtlas},
+        icon_atlas::{CxIconAtlas},
         view::ManyInstances,
         geometry::GeometryQuad2D,
         cx_2d::Cx2d
@@ -11,11 +11,11 @@ use {
 
 live_design!{
     
-    DrawIcon= {{DrawIcon}} {
+    DrawIcon = {{DrawIcon}} {
         color: #fff
         
-        uniform brightness: float
-        uniform curve: float
+        uniform u_brightness: float
+        uniform u_curve: float
         
         texture tex: texture2d
         
@@ -36,8 +36,8 @@ live_design!{
             //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
             
             self.tex_coord1 = mix(
-                self.font_t1.xy,
-                self.font_t2.xy,
+                self.icon_t1.xy,
+                self.icon_t2.xy,
                 normalized.xy
             )
             
@@ -62,9 +62,9 @@ live_design!{
             // mipmaps are stored in red/green/blue channel
             let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
             
-            s = pow(s, self.curve);
+            s = pow(s, self.u_curve);
             let col = self.get_color(); //color!(white);//get_color();
-            return vec4(s * col.rgb * self.brightness * col.a, s * col.a);
+            return vec4(s * col.rgb * self.u_brightness * col.a, s * col.a);
         }
     }
 }
@@ -73,20 +73,19 @@ live_design!{
 #[repr(C)]
 pub struct DrawIcon {
     #[rust] pub many_instances: Option<ManyInstances>,
-    
     #[live] pub geometry: GeometryQuad2D,
-
+    
     #[live(1.0)] pub brightness: f32,
     #[live(0.6)] pub curve: f32,
-    
-    #[live(1.0)] pub font_scale: f64,
     #[live(1.0)] pub draw_depth: f32,
+    
+    #[live] pub path: String,
     
     #[calc] pub draw_vars: DrawVars,
     // these values are all generated
     #[live] pub color: Vec4,
-    #[calc] pub font_t1: Vec2,
-    #[calc] pub font_t2: Vec2,
+    #[calc] pub icon_t1: Vec2,
+    #[calc] pub icon_t2: Vec2,
     #[calc] pub rect_pos: Vec2,
     #[calc] pub rect_size: Vec2,
     #[calc] pub draw_clip: Vec4,
@@ -98,27 +97,40 @@ pub struct DrawIcon {
 
 impl DrawIcon {
     
-    pub fn draw(&mut self, _cx: &mut Cx2d, _pos: DVec2, _val: &str) {
-        //self.draw_inner(cx, pos, val);
+    pub fn update_abs(&mut self, cx: &mut Cx, rect: Rect) {
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();
+        self.draw_vars.update_rect(cx, rect);
     }
     
-    pub fn draw_rel(&mut self, _cx: &mut Cx2d, _pos: DVec2, _val: &str) {
-        //self.draw_inner(cx, pos + cx.turtle().origin(), val);
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect, path: Option<&str>) {
+        self.draw_clip = cx.turtle().draw_clip().into();
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();
+        self.draw(cx, path);
     }
     
-    pub fn draw_abs(&mut self, _cx: &mut Cx2d, _pos: DVec2, _val: &str) {
-        //self.draw_inner(cx, pos, val);
+    pub fn draw_rel(&mut self, cx: &mut Cx2d, rect: Rect, path: Option<&str>) {
+        let rect = rect.translate(cx.turtle().origin());
+        self.draw_clip = cx.turtle().draw_clip().into();
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();
+        self.draw(cx, path);
+    }
+    
+    pub fn new_draw_call(&self, cx: &mut Cx2d) {
+        cx.new_draw_call(&self.draw_vars);
+    }
+    
+    pub fn append_to_draw_call(&self, cx: &mut Cx2d) {
+        cx.new_draw_call(&self.draw_vars);
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
         let icon_atlas_rc = cx.icon_atlas_rc.clone();
         let icon_atlas = icon_atlas_rc.0.borrow();
-        self.begin_many_instances_internal(cx, &*icon_atlas);
-    }
-    
-    fn begin_many_instances_internal(&mut self, cx: &mut Cx2d, icon_atlas: &CxIconAtlas) {
-        self.update_draw_call_vars(icon_atlas);
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
+        self.update_draw_call_vars(&*icon_atlas);
         self.many_instances = mi;
     }
     
@@ -129,12 +141,36 @@ impl DrawIcon {
         }
     }
     
-    pub fn new_draw_call(&self, cx: &mut Cx2d) {
-        cx.new_draw_call(&self.draw_vars);
+    pub fn draw(&mut self, cx: &mut Cx2d, path: Option<&str>) {
+        // allocate our path on the icon atlas
+        let path = if let Some(path) = path {path} else {&self.path};
+        
+        // lets allocate/fetch our path on the icon atlas
+        let icon_atlas_rc = cx.icon_atlas_rc.clone();
+        let mut icon_atlas = icon_atlas_rc.0.borrow_mut();
+        let icon_atlas = &mut*icon_atlas;
+        let dpi_factor = cx.current_dpi_factor() as f32;
+        //alright we have an icon atlas. lets look up our subpixel + size + path hash
+        let subpixel_fract = vec2(
+            self.rect_pos.x - (self.rect_pos.x * dpi_factor).floor() / dpi_factor,
+            self.rect_pos.y - (self.rect_pos.y * dpi_factor).floor() / dpi_factor
+        );
+        
+        let tc = icon_atlas.get_icon_pos(subpixel_fract, self.rect_size, path);
+        self.icon_t1 = tc.t1;
+        self.icon_t2 = tc.t2;
+        
+        if let Some(mi) = &mut self.many_instances {
+            mi.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        else if self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
     }
     
-    pub fn update_draw_call_vars(&mut self, font_atlas: &CxIconAtlas) {
-        self.draw_vars.texture_slots[0] = Some(font_atlas.texture_id);
+    pub fn update_draw_call_vars(&mut self, atlas: &CxIconAtlas) {
+        self.draw_vars.texture_slots[0] = Some(atlas.texture_id);
         self.draw_vars.user_uniforms[0] = self.brightness;
         self.draw_vars.user_uniforms[1] = self.curve;
     }

@@ -34,7 +34,7 @@ live_design!{
     }
     
     Mandelbrot = {{Mandelbrot}} {
-        max_iter: 256,
+        max_iter: 3200,
     }
 }
 
@@ -459,7 +459,7 @@ impl Widget for Mandelbrot {
         self.view_area.redraw(cx)
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         let _ = self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
