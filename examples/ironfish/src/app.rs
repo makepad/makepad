@@ -42,13 +42,13 @@ live_design!{
                     <AppDesktop> {}
                 }}
             }
-            <DesktopWindow> {
+            /*<DesktopWindow> {
                 window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
                 pass: {clear_color: #2A}
                 frame: {body = {
                     <AppMobile> {}
                 }}
-            }
+            }*/
             
         }
     }
