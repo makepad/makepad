@@ -42,6 +42,7 @@ pub struct CxIconAtlasTodo {
     pub subpixel_y_fract: f64,
 }
 
+#[derive(Debug)]
 pub enum SvgPathOp {
     MoveTo(DVec2),
     LineTo(DVec2),
@@ -93,25 +94,26 @@ impl CxIconAtlas {
         
         struct NumState {
             num: f64,
-            num_div: f64,
-            num_dot: bool,
+            mul: f64,
+            has_dot: bool,
         }
         
         impl NumState {
-            fn new(v: f64) -> Self {Self {num: v, num_div: 1.0, num_dot: false}}
-            fn finalize(self) -> f64 {if self.num_dot {self.num / self.num_div}else {self.num}}
+            fn new_pos(v: f64) -> Self {Self {num: v, mul: 1.0, has_dot: false}}
+            fn new_min() -> Self {Self {num: 0.0, mul: -1.0, has_dot: false}}
+            fn finalize(self) -> f64 {self.num * self.mul}
             fn add_digit(&mut self, digit: f64) {
                 self.num *= 10.0;
                 self.num += digit;
-                if self.num_dot {
-                    self.num_div *= 10.0
+                if self.has_dot {
+                    self.mul *= 0.1;
                 }
             }
         }
         
         impl ParseState {
             fn next_cmd(&mut self, cmd: Cmd) -> Result<(), String> {
-                self.finalize_cmd()?;
+                self.finalize_cmd() ?;
                 self.expect_nums = match cmd {
                     Cmd::Unknown => panic!(),
                     Cmd::Move(_) => 2,
@@ -126,28 +128,39 @@ impl CxIconAtlas {
                 Ok(())
             }
             
+            fn add_min(&mut self) -> Result<(), String> {
+                if self.expect_nums == self.num_count {
+                    self.finalize_cmd() ?;
+                }
+                if self.expect_nums == 0 {
+                    return Err(format!("Unexpected minus"));
+                }
+                self.num_state = Some(NumState::new_min());
+                Ok(())
+            }
+            
             fn add_digit(&mut self, digit: f64) -> Result<(), String> {
                 if let Some(num_state) = &mut self.num_state {
                     num_state.add_digit(digit);
                 }
                 else {
                     if self.expect_nums == self.num_count {
-                        self.finalize_cmd()?;
+                        self.finalize_cmd() ?;
                     }
-                    if self.expect_nums == 0{
+                    if self.expect_nums == 0 {
                         return Err(format!("Unexpected digit"));
                     }
-                    self.num_state = Some(NumState::new(digit))
+                    self.num_state = Some(NumState::new_pos(digit))
                 }
                 Ok(())
             }
             
             fn add_dot(&mut self) -> Result<(), String> {
                 if let Some(num_state) = &mut self.num_state {
-                    if num_state.num_dot{
+                    if num_state.has_dot {
                         return Err(format!("Unexpected ."));
                     }
-                    num_state.num_dot = true;
+                    num_state.has_dot = true;
                 }
                 else {
                     return Err(format!("Unexpected ."));
@@ -173,48 +186,48 @@ impl CxIconAtlas {
                         if abs {
                             self.last_pt = dvec2(self.nums[0], self.nums[1]);
                         }
-                        else{
+                        else {
                             self.last_pt += dvec2(self.nums[0], self.nums[1]);
                         }
                         self.out.push(SvgPathOp::MoveTo(self.last_pt));
                     },
-                    Cmd::Hor(abs)=>{
-                        if abs{
+                    Cmd::Hor(abs) => {
+                        if abs {
                             self.last_pt = dvec2(self.nums[0], self.last_pt.y);
                         }
-                        else{
+                        else {
                             self.last_pt += dvec2(self.nums[0], 0.0);
                         }
                         self.out.push(SvgPathOp::LineTo(self.last_pt));
                     }
-                    Cmd::Vert(abs)=>{
-                        if abs{
+                    Cmd::Vert(abs) => {
+                        if abs {
                             self.last_pt = dvec2(self.last_pt.x, self.nums[0]);
                         }
-                        else{
+                        else {
                             self.last_pt += dvec2(0.0, self.nums[0]);
                         }
                         self.out.push(SvgPathOp::LineTo(self.last_pt));
                     }
-                    Cmd::Line(abs)=>{
+                    Cmd::Line(abs) => {
                         let pt = dvec2(self.nums[0], self.nums[1]);
-                        if abs{
+                        if abs {
                             self.last_pt = pt;
                         }
-                        else{
+                        else {
                             self.last_pt += pt;
                         }
                         self.out.push(SvgPathOp::LineTo(self.last_pt));
                     },
-                    Cmd::Cubic(abs)=> {
+                    Cmd::Cubic(abs) => {
                         let pt = dvec2(self.nums[4], self.nums[5]);
-                        if abs{
+                        if abs {
                             self.last_pt = pt;
                         }
-                        else{
+                        else {
                             self.last_pt += pt;
                         }
-                        self.out.push(SvgPathOp::Cubic{
+                        self.out.push(SvgPathOp::Cubic {
                             c1: dvec2(self.nums[0], self.nums[1]),
                             c2: dvec2(self.nums[2], self.nums[3]),
                             p: self.last_pt
@@ -222,16 +235,16 @@ impl CxIconAtlas {
                     },
                     Cmd::Quadratic(abs) => {
                         let pt = dvec2(self.nums[2], self.nums[3]);
-                        if abs{
+                        if abs {
                             self.last_pt = pt;
                         }
-                        else{
+                        else {
                             self.last_pt += pt;
                         }
-                        self.out.push(SvgPathOp::Quadratic{
+                        self.out.push(SvgPathOp::Quadratic {
                             c1: dvec2(self.nums[0], self.nums[1]),
                             p: self.last_pt
-                        });                        
+                        });
                     }
                     Cmd::Close => {
                         self.out.push(SvgPathOp::Close);
@@ -243,35 +256,37 @@ impl CxIconAtlas {
         }
         
         let mut state = ParseState::default();
-        for i in 0..path.len(){
-            match path[i] as char {
-                'M' => state.next_cmd(Cmd::Move(true))?,
-                'm' => state.next_cmd(Cmd::Move(false))?,
-                'Q' => state.next_cmd(Cmd::Quadratic(true))?,
-                'q' => state.next_cmd(Cmd::Quadratic(false))?,
-                'C' => state.next_cmd(Cmd::Cubic(true))?,
-                'c' => state.next_cmd(Cmd::Cubic(false))?,
-                'H' => state.next_cmd(Cmd::Hor(true))?,
-                'h' => state.next_cmd(Cmd::Hor(false))?,
-                'V' => state.next_cmd(Cmd::Vert(true))?,
-                'v' => state.next_cmd(Cmd::Vert(false))?,
-                'L' => state.next_cmd(Cmd::Line(true))?,
-                'l' => state.next_cmd(Cmd::Line(false))?,
-                'Z' | 'z' => state.next_cmd(Cmd::Close)?,
-                '0'..='9' => {
-                    state.add_digit((path[i] - '0' as u8) as f64)?;
+        for i in 0..path.len() {
+            match path[i]  {
+                b'M' => state.next_cmd(Cmd::Move(true)) ?,
+                b'm' => state.next_cmd(Cmd::Move(false)) ?,
+                b'Q' => state.next_cmd(Cmd::Quadratic(true)) ?,
+                b'q' => state.next_cmd(Cmd::Quadratic(false)) ?,
+                b'C' => state.next_cmd(Cmd::Cubic(true)) ?,
+                b'c' => state.next_cmd(Cmd::Cubic(false)) ?,
+                b'H' => state.next_cmd(Cmd::Hor(true)) ?,
+                b'h' => state.next_cmd(Cmd::Hor(false)) ?,
+                b'V' => state.next_cmd(Cmd::Vert(true)) ?,
+                b'v' => state.next_cmd(Cmd::Vert(false)) ?,
+                b'L' => state.next_cmd(Cmd::Line(true)) ?,
+                b'l' => state.next_cmd(Cmd::Line(false)) ?,
+                b'Z' | b'z' => state.next_cmd(Cmd::Close) ?,
+                b'-' => state.add_min() ?,
+                b'0'..=b'9' => state.add_digit((path[i] - b'0') as f64) ?,
+                b'.' => state.add_dot() ?,
+                b' ' | b'\r' | b'\n' | b'\t' => (),
+                x => {
+                    return Err(format!("Unexpected character {}", x))
                 }
-                '.' => {
-                    state.add_dot()?;
-                }
-                _ => ()
             }
         }
+        state.finalize_cmd() ?;
         Ok(state.out)
     }
     
     pub fn get_icon_pos(&mut self, _fract: Vec2, size: Vec2, path: &str) -> CxIconAtlasEntry {
-        let _ = Self::parse_svg_path(path.as_bytes());
+        let ret = Self::parse_svg_path(path.as_bytes());
+        log!("{:?}", ret);
         // lets parse this thing
         self.alloc.alloc_icon(size.x as f64, size.y as f64)
     }
