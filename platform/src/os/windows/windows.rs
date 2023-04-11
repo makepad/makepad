@@ -300,7 +300,7 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
-    fn init(&mut self) {
+    fn init_cx_os(&mut self) {
         self.live_expand();
         self.live_scan_dependencies();
         self.native_load_dependencies();
