@@ -562,6 +562,24 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHideTextIME(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onResizeTextIME(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    ime_height: jint,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_resize_text_ime(
+        ime_height,
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_copyToClipboard(
     env: *mut JNIEnv,
     _: jclass,

@@ -3,6 +3,7 @@ package dev.makepad.android;
 import android.Manifest;
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Rect;
 import android.opengl.GLES20;
 import android.view.MotionEvent;
 import android.view.View;
@@ -120,7 +121,15 @@ KeyEvent.Callback
 
     @Override
     public void onGlobalLayout() {
-        if (!(this.getRootWindowInsets().isVisible(WindowInsets.Type.ime()))) {
+        if (this.getRootWindowInsets().isVisible(WindowInsets.Type.ime())) {
+            Rect r = new Rect();
+            this.getWindowVisibleDisplayFrame(r);
+            int screenHeight = this.getRootView().getHeight();
+            int visibleHeight = r.height();
+            int keyboardHeight = screenHeight - visibleHeight;
+
+            Makepad.onResizeTextIME(mCx, keyboardHeight, (Makepad.Callback)this.getContext());
+        } else {
             Makepad.onHideTextIME(mCx, (Makepad.Callback)this.getContext());
         }
     }
