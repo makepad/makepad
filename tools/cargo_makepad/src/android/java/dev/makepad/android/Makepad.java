@@ -35,6 +35,7 @@ public class Makepad {
     static native void onTimeout(long cx, long id, Callback callback);
     static native void onMidiDeviceOpened(long cx, String name, Object midi_device, Callback callback);
     static native void onHideTextIME(long cx, Callback callback);
+    static native void onResizeTextIME(long cx, int ime_height, Callback callback);
     static native void copyToClipboard(long cx, Callback callback);
     static native void pasteFromClipboard(long cx, String content, Callback callback);
     static native void cutToClipboard(long cx, Callback callback);
