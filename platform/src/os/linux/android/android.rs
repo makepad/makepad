@@ -14,6 +14,7 @@ use {
         gl_sys,
         //libc_sys,
     },
+    core::cmp,
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
@@ -181,7 +182,7 @@ impl Cx {
     pub fn from_java_on_touch(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
         let time = self.os.time_now();
         for touch in &mut touches {
-            if self.os.is_text_ime_visible { touch.abs.y += self.os.text_ime_screen_offset };
+            if self.os.is_text_ime_visible { touch.abs.y += self.os.text_ime_panning_offset };
             touch.abs /= self.os.dpi_factor;
         }
         self.fingers.process_touch_update_start(time, &touches);
@@ -268,6 +269,12 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
+    pub fn from_java_on_resize_text_ime(&mut self, ime_height: i32, to_java: AndroidToJava) {
+        self.panning_adjust_for_text_ime(ime_height);
+        self.redraw_all();
+        self.after_every_event(&to_java);
+    }
+
     pub fn from_java_copy_to_clipboard(&mut self, to_java: AndroidToJava) {
         let response = Rc::new(RefCell::new(None));
         let e = Event::TextCopy(TextCopyEvent {
@@ -306,7 +313,7 @@ impl Cx {
         
         // keep repainting in a loop 
         self.passes[pass_id].paint_dirty = false;
-        let y = if self.os.is_text_ime_visible { self.os.text_ime_screen_offset } else { 0.0 };
+        let y = if self.os.is_text_ime_visible { self.os.text_ime_panning_offset } else { 0.0 };
         
         unsafe {
             gl_sys::Viewport(0, y as i32, self.os.display_size.x as i32, self.os.display_size.y as i32);
@@ -372,6 +379,26 @@ impl Cx {
             }
         }
     }
+
+    fn panning_adjust_for_text_ime(&mut self, android_ime_height: i32) {
+        self.os.is_text_ime_visible = true;
+
+        let size = self.os.display_size / self.os.dpi_factor;
+        let screen_height = cmp::max(size.x as i32, size.y as i32);
+        let vertical_offset = self.os.text_ime_trigger_position.y as i32;
+        let ime_height = android_ime_height / self.os.dpi_factor as i32;
+
+        // Make sure there is some room between the software keyword and the text input or widget that triggered
+        // the TextIME event
+        let vertical_space = ime_height / 5;
+
+        let should_be_panned = vertical_offset > screen_height - ime_height;
+        if should_be_panned {
+            self.os.text_ime_panning_offset = (vertical_offset - (screen_height - ime_height) + vertical_space) as f64;
+        } else {
+            self.os.text_ime_panning_offset = 0.0;
+        }
+    }
     
     fn handle_platform_ops(&mut self, to_java: &AndroidToJava) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
@@ -403,21 +430,7 @@ impl Cx {
                     //android_app.stop_timer(timer_id);
                 },
                 CxOsOp::ShowTextIME(area, _pos) => {
-                    self.os.is_text_ime_visible = true;
-
-                    // TODO Remove hardcoded values and extract to function
-                    // named "calculate_text_ime_screen_offset" or similar
-                    let offset_y = area.get_clipped_rect(self).pos.y;
-                    let screen_height = 1800.;
-                    let ime_keyboard_height = 1000.;
-                    let buffer = 200.;
-
-                    if offset_y > screen_height - ime_keyboard_height {
-                        self.os.text_ime_screen_offset = offset_y - (screen_height - ime_keyboard_height) + buffer;
-                    } else {
-                        self.os.text_ime_screen_offset = 0.0;
-                    }
-
+                    self.os.text_ime_trigger_position = area.get_clipped_rect(self).pos;
                     to_java.show_text_ime();
                 },
                 CxOsOp::HideTextIME => {
@@ -462,7 +475,8 @@ impl Default for CxOs {
             dpi_factor: 1.5,
             time_start: Instant::now(),
             is_text_ime_visible: false,
-            text_ime_screen_offset: 0.0,
+            text_ime_trigger_position: DVec2::default(),
+            text_ime_panning_offset: 0.0,
             media: CxAndroidMedia::default()
         }
     }
@@ -474,7 +488,8 @@ pub struct CxOs {
     pub dpi_factor: f64,
     pub time_start: Instant,
     pub is_text_ime_visible: bool,
-    pub text_ime_screen_offset: f64,
+    pub text_ime_trigger_position: DVec2,
+    pub text_ime_panning_offset: f64,
     pub (crate) media: CxAndroidMedia,
 }
 
