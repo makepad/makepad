@@ -18,7 +18,8 @@ use {
         nav::{
             CxNavTreeRc,
         },
-        font::{
+        icon_atlas::CxIconAtlasRc,
+        font_atlas::{
             CxFontsAtlasRc,
         },
         view::View,
@@ -44,6 +45,7 @@ pub struct Cx2d<'a> {
     pub (crate) turtle_walks: Vec<TurtleWalk>,
     pub (crate) align_list: Vec<Area>,
     pub fonts_atlas_rc: CxFontsAtlasRc,
+    pub icon_atlas_rc: CxIconAtlasRc,
     pub nav_tree_rc: CxNavTreeRc,
 }
 
@@ -53,6 +55,7 @@ impl<'a> DerefMut for Cx2d<'a> {fn deref_mut(&mut self) -> &mut Self::Target {se
 impl<'a> Drop for Cx2d<'a>{
     fn drop(&mut self){
         self.draw_font_atlas();
+        self.draw_icon_atlas();
     }
 }
 
@@ -72,10 +75,11 @@ impl<'a> Cx2d<'a> {
     pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
         Self::lazy_construct_font_atlas(cx);
         Self::lazy_construct_nav_tree(cx);
+        Self::lazy_construct_icon_atlas(cx);
         cx.redraw_id += 1;
         let fonts_atlas_rc = cx.get_global::<CxFontsAtlasRc>().clone();
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
-
+        let icon_atlas_rc = cx.get_global::<CxIconAtlasRc>().clone();
         Self {
             overlay_id: None,
             fonts_atlas_rc,
@@ -88,6 +92,7 @@ impl<'a> Cx2d<'a> {
             turtles: Vec::new(),
             align_list: Vec::new(),
             nav_tree_rc,
+            icon_atlas_rc
         }
     }
     
