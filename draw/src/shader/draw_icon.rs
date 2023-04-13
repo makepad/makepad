@@ -2,9 +2,9 @@ use {
     crate::{
         makepad_platform::*,
         icon_atlas::{CxIconAtlas},
-        view::ManyInstances,
-        geometry::GeometryQuad2D,
-        cx_2d::Cx2d
+        shader::draw_quad::DrawQuad,
+        cx_2d::Cx2d,
+        turtle::{Walk}
     },
 };
 
@@ -23,30 +23,15 @@ live_design!{
         varying clipped: vec2
         
         fn vertex(self) -> vec4 {
-            let min_pos = vec2(self.rect_pos.x, self.rect_pos.y)
-            let max_pos = vec2(self.rect_pos.x + self.rect_size.x, self.rect_pos.y - self.rect_size.y)
-            
-            self.clipped = clamp(
-                mix(min_pos, max_pos, self.geom_pos),
-                self.draw_clip.xy,
-                self.draw_clip.zw
-            )
-            
-            let normalized: vec2 = (self.clipped - min_pos) / vec2(self.rect_size.x, -self.rect_size.y)
-            //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
-            
+            let ret = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+             
             self.tex_coord1 = mix(
                 self.icon_t1.xy,
                 self.icon_t2.xy,
-                normalized.xy
+                self.pos.xy
             )
             
-            return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
-                self.clipped.x,
-                self.clipped.y,
-                self.char_depth + self.draw_zbias,
-                1.
-            )))
+            return ret
         }
         
         fn get_color(self) -> vec4 {
@@ -54,14 +39,13 @@ live_design!{
         }
         
         fn pixel(self) -> vec4 {
-            
             let dx = dFdx(vec2(self.tex_coord1.x * 2048.0, 0.)).x;
             let dp = 1.0 / 2048.0;
             
             // basic hardcoded mipmapping so it stops 'swimming' in VR
             // mipmaps are stored in red/green/blue channel
             let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
-            
+            //return mix(#f00,#0f0,s);
             s = pow(s, self.u_curve);
             let col = self.get_color(); //color!(white);//get_color();
             return vec4(s * col.rgb * self.u_brightness * col.a, s * col.a);
@@ -72,27 +56,17 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawIcon {
-    #[rust] pub many_instances: Option<ManyInstances>,
-    #[live] pub geometry: GeometryQuad2D,
-    
     #[live(1.0)] pub brightness: f32,
     #[live(0.6)] pub curve: f32,
     #[live(1.0)] pub draw_depth: f32,
-    
     #[live] pub path: String,
+    #[live] pub translate: DVec2,
+    #[live(1.0)] pub scale: f64,
+    #[live()] pub draw_super: DrawQuad,
     
-    #[calc] pub draw_vars: DrawVars,
-    // these values are all generated
     #[live] pub color: Vec4,
     #[calc] pub icon_t1: Vec2,
     #[calc] pub icon_t2: Vec2,
-    #[calc] pub rect_pos: Vec2,
-    #[calc] pub rect_size: Vec2,
-    #[calc] pub draw_clip: Vec4,
-    #[calc] pub char_depth: f32,
-    #[calc] pub delta: Vec2,
-    #[calc] pub font_size: f32,
-    #[calc] pub advance: f32,
 }
 
 impl DrawIcon {
@@ -102,12 +76,21 @@ impl DrawIcon {
         self.rect_size = rect.size.into();
         self.draw_vars.update_rect(cx, rect);
     }
-    
+
     pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect, path: Option<&str>) {
         self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos.into();
         self.rect_size = rect.size.into();
         self.draw(cx, path);
+    }
+
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, path: Option<&str>) -> Rect {
+        let rect = cx.walk_turtle(walk);
+        self.draw_clip = cx.turtle().draw_clip().into();
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();
+        self.draw(cx, path);
+        rect
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, rect: Rect, path: Option<&str>) {
@@ -155,17 +138,18 @@ impl DrawIcon {
             self.rect_pos.x - (self.rect_pos.x * dpi_factor).floor() / dpi_factor,
             self.rect_pos.y - (self.rect_pos.y * dpi_factor).floor() / dpi_factor
         );
-        
-        let tc = icon_atlas.get_icon_pos(subpixel_fract, self.rect_size, path);
-        self.icon_t1 = tc.t1;
-        self.icon_t2 = tc.t2;
-        
-        if let Some(mi) = &mut self.many_instances {
-            mi.instances.extend_from_slice(self.draw_vars.as_slice());
-        }
-        else if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
-            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+
+        if let Some(tc) = icon_atlas.get_icon_pos(self.translate, self.scale, subpixel_fract, self.rect_size, path){
+            self.icon_t1 = tc.t1;
+            self.icon_t2 = tc.t2;
+            if let Some(mi) = &mut self.draw_super.many_instances {
+                mi.instances.extend_from_slice(self.draw_super.draw_vars.as_slice());
+            }
+            else if self.draw_vars.can_instance() {
+                self.update_draw_call_vars(icon_atlas);
+                let new_area = cx.add_aligned_instance(&self.draw_vars);
+                self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+            }
         }
     }
     

@@ -57,6 +57,15 @@ impl Path {
         self.points.push(p);
     }
 
+    // Adds a quadratic Bezier curve segment to the current contour, starting at the current point.
+    pub fn cubic_to(&mut self, p1: Point, p2: Point, p: Point) {
+        self.verbs.push(Verb::QuadraticTo);
+        self.points.push(p1);
+        self.points.push(p2);
+        self.points.push(p);
+    }
+
+
     /// Closes the current contour.
     pub fn close(&mut self) {
         self.verbs.push(Verb::Close);
@@ -79,6 +88,7 @@ impl ExtendFromInternalIterator<PathCommand> for Path {
                 PathCommand::MoveTo(p) => self.move_to(p),
                 PathCommand::LineTo(p) => self.line_to(p),
                 PathCommand::QuadraticTo(p1, p) => self.quadratic_to(p1, p),
+                PathCommand::CubicTo(p1, p2,  p) => self.cubic_to(p1, p2, p),
                 PathCommand::Close => self.close(),
             }
             true
