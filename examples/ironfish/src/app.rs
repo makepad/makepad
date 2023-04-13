@@ -42,13 +42,14 @@ live_design!{
                     <AppDesktop> {}
                 }}
             }
-            <DesktopWindow> {
+            /*<DesktopWindow> {
                 window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
                 pass: {clear_color: #2A}
                 frame: {body = {
                     <AppMobile> {}
                 }}
-            }
+            }*/
+            
         }
     }
 }
@@ -197,17 +198,13 @@ impl App {
         db.apply(id!(volume_envelope.s), ids!(vol_env.display, draw_bg.sustain), | v | v);
         db.apply(id!(volume_envelope.r), ids!(vol_env.display, draw_bg.release), | v | v);
     }
-    
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        while self.ui.draw_widget(cx).is_not_done() {};
-    }
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
         if let Event::Draw(event) = event {
-            return self.draw(&mut Cx2d::new(cx, event));
+            return self.ui.draw_widget(&mut Cx2d::new(cx, event));
         }
         
         let ui = self.ui.clone();

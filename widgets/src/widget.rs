@@ -54,8 +54,12 @@ pub trait Widget: LiveApply {
         true
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d) -> WidgetDraw {
+    fn draw_widget_continue(&mut self, cx: &mut Cx2d) -> WidgetDraw {
         self.draw_walk_widget(cx, self.get_walk())
+    }
+    
+    fn draw_widget(&mut self, cx: &mut Cx2d) {
+        while self.draw_widget_continue(cx).is_not_done() {};
     }
     
     fn create_child(
@@ -471,9 +475,15 @@ impl WidgetRef {
         true
     }
     
-    pub fn draw_widget(&self, cx: &mut Cx2d) -> WidgetDraw {
+    pub fn draw_widget(&self, cx: &mut Cx2d)  {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.draw_widget(cx)
+        }
+    }
+    
+    pub fn draw_widget_continue(&self, cx: &mut Cx2d) -> WidgetDraw {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.draw_widget_continue(cx)
         }
         WidgetDraw::done()
     }

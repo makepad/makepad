@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_platform::*,
         turtle::{Walk, Size, Flow, Align},
-        font::{CxFontsAtlasTodo, CxFontsAtlas, Font},
+        font_atlas::{CxFontsAtlasTodo, CxFontsAtlas, Font},
         view::ManyInstances,
         geometry::GeometryQuad2D,
         cx_2d::Cx2d
@@ -311,10 +311,8 @@ impl DrawText {
             };
             
             // give the callback a chance to do things
-            self.font_t1.x = tc.tx1 as f32;
-            self.font_t1.y = tc.ty1 as f32;
-            self.font_t2.x = tc.tx2 as f32;
-            self.font_t2.y = tc.ty2 as f32;
+            self.font_t1 = tc.t1;
+            self.font_t2 = tc.t2;
             self.rect_pos = dvec2(walk_x + delta_x, pos.y + delta_y).into();
             self.rect_size = dvec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor).into();
             self.char_depth = char_depth;
@@ -435,10 +433,8 @@ impl DrawText {
             // give the callback a chance to do things
             //et scaled_min_pos_x = walk_x + delta_x;
             //let scaled_min_pos_y = pos.y - delta_y;
-            self.font_t1.x = tc.tx1 as f32;
-            self.font_t1.y = tc.ty1 as f32;
-            self.font_t2.x = tc.tx2 as f32;
-            self.font_t2.y = tc.ty2 as f32;
+            self.font_t1 = tc.t1;
+            self.font_t2 = tc.t2;
             self.rect_pos = dvec2(walk_x + delta_x, pos.y + delta_y).into();
             self.rect_size = dvec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor).into();
             self.char_depth = char_depth;

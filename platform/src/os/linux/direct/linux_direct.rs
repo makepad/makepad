@@ -301,7 +301,7 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
-    fn init(&mut self) {
+    fn init_cx_os(&mut self) {
         let p = profile_start();
         self.live_expand();
         self.live_scan_dependencies();
