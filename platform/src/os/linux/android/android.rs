@@ -27,7 +27,6 @@ use {
             TextInputEvent,
             TextCopyEvent,
             KeyEvent,
-            KeyCode,
             KeyModifiers,
             WebSocket,
             WebSocketAutoReconnect,
@@ -42,6 +41,8 @@ use {
         pass::{PassClearColor, PassClearDepth, PassId},
     }
 };
+
+use num_traits::FromPrimitive;
 
 #[link(name = "EGL")]
 extern "C" {
@@ -201,28 +202,11 @@ impl Cx {
     }
 
     /// Called when a touch event happened on the software keyword
-    pub fn from_java_on_key_down(&mut self, native_key_code: i32, shift: bool, to_java: AndroidToJava) {
-        let key_code = to_key_code(native_key_code);
-        let e: Event;
-        match key_code {
-            KeyCode::Backspace => {
-                e = Event::KeyDown(KeyEvent {
-                    key_code: KeyCode::Backspace,
-                    is_repeat: false,
-                    modifiers: KeyModifiers {shift, ..Default::default()},
-                    time: self.os.time_now()
-                });
-            }
-            KeyCode::ReturnKey => {
-                e = Event::KeyDown(KeyEvent {
-                    key_code: KeyCode::ReturnKey,
-                    is_repeat: false,
-                    modifiers: KeyModifiers {shift, ..Default::default()},
-                    time: self.os.time_now()
-                });
-            }
-            _ => {
-                let input = keycode_to_string(key_code, shift).to_string();
+    pub fn from_java_on_key_down(&mut self, key_code_val: i32, shift: bool, to_java: AndroidToJava) {
+        if let Some(native_keycode) = AndroidKeyCode::from_i32(key_code_val) {
+            let e: Event;
+            if let Some(input_str) = native_keycode.to_string(shift) {
+                let input = input_str.to_string();
                 e = Event::TextInput(
                     TextInputEvent {
                         input: input,
@@ -230,11 +214,20 @@ impl Cx {
                         was_paste: false,
                     }
                 )
+            } else {
+                e = Event::KeyDown(
+                    KeyEvent {
+                        key_code: AndroidKeyCode::to_makepad_key_code(key_code_val),
+                        is_repeat: false,
+                        modifiers: KeyModifiers {shift, ..Default::default()},
+                        time: self.os.time_now()
+                    }
+                )
             }
-        }
 
-        self.call_event_handler(&e);
-        self.after_every_event(&to_java);
+            self.call_event_handler(&e);
+            self.after_every_event(&to_java);
+        }
     }
     
     /// Called when a timeout expired.
