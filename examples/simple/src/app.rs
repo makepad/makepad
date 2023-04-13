@@ -10,6 +10,7 @@ use makepad_widgets::*;
 // the runtime to automatically update the affected widgets.
 live_design!{
     import makepad_widgets::button::Button;
+    import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
     import makepad_widgets::frame::Image;
     import makepad_widgets::text_input::TextInput;
@@ -23,7 +24,8 @@ live_design!{
         // for other widgets. Since the `ui` property on the DSL object `App` corresponds with the
         // `ui` field on the Rust struct `App`, the latter will be initialized from the DSL object
         // here below.
-        ui: {
+        ui: <DesktopWindow>{frame: {body = {
+            
             show_bg: true
             // The `layout` property determines how child widgets are laid out within a frame. In
             // this case, child widgets flow downward, with 20 pixels of spacing in between them,
@@ -80,10 +82,13 @@ live_design!{
             // existing values.
             
             <Image> {
-                image: d"crate://self/dump155.jpg",
+                image: dep("crate://self/dump155.jpg"),
                 walk: {width: 640, height: 480}
             }
             button1 = <Button> {
+                draw_icon:{
+                    path:"M7399.39,1614.16C7357.53,1615.77 7324.04,1650.26 7324.04,1692.51C7324.04,1702.28 7316.11,1710.22 7306.33,1710.22C7296.56,1710.22 7288.62,1702.28 7288.62,1692.51C7288.62,1630.8 7337.85,1580.49 7399.14,1578.74L7389.04,1569.44C7381,1562.04 7380.49,1549.51 7387.88,1541.47C7395.28,1533.44 7407.81,1532.92 7415.85,1540.32L7461.76,1582.58C7465.88,1586.37 7468.2,1591.73 7468.15,1597.32C7468.1,1602.91 7465.68,1608.23 7461.5,1611.94L7415.59,1652.71C7407.42,1659.97 7394.9,1659.23 7387.65,1651.06C7380.39,1642.89 7381.14,1630.37 7389.3,1623.12L7399.39,1614.16Z"
+                }
                 text: "Click to count"
             }
             input1 = <TextInput> {
@@ -97,7 +102,7 @@ live_design!{
                 },
                 text: "Counter: 0"
             }
-        }
+        }}}
     }
 }
 
@@ -123,9 +128,8 @@ app_main!(App);
 }]
 pub struct App {
     // A chromeless window for our application. Used to contain our frame widget.
-    window: DesktopWindow,
     // A frame widget. Used to contain our button and label.
-    ui: FrameRef,
+    ui: WidgetRef,
     
     // The value for our counter.
     //
@@ -142,16 +146,13 @@ impl AppMain for App{
         if let Event::Draw(event) = event {
             // This is a draw event, so create a draw context and use that to draw our application.
             let mut draw_cx = Cx2d::new(cx, event);
-            return self.draw(&mut draw_cx);
+            return self.ui.draw_widget(&mut draw_cx);
         }
-        
-        // Forward the event to the window.
-        self.window.handle_event(cx, event);
         
         // Forward the event to the frame. In this case, handle_event returns a list of actions.
         // Actions are similar to events, except that events are always forwarded downward to child
         // widgets, while actions are always returned back upwards to parent widgets.
-        let actions = self.ui.handle_event(cx, event);
+        let actions = self.ui.handle_widget_event(cx, event);
         
         // Get a reference to our button from the frame, and check if one of the actions returned by
         // the frame was a notification that the button was clicked.
@@ -165,22 +166,5 @@ impl AppMain for App{
             label.set_text(&format!("Counter: {}", self.counter));
             label.redraw(cx);
         }
-    }
-}
-
-impl App {
-
-    // This function is used to draw the application. It is called automatically by the code we
-    // generated with the call to the macro `main_app` above.
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        // Indicate that we want to begin drawing to the window.
-        if self.window.begin(cx).is_not_redrawing() {
-            return;
-        }
-        // Draw the frame to the window.
-        let _ = self.ui.draw(cx);
-        
-        // Indicate that we finished drawing to the window.
-        self.window.end(cx);
     }
 }

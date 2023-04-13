@@ -329,7 +329,7 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
-    fn init(&mut self) {
+    fn init_cx_os(&mut self) {
         self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         self.live_expand();
         self.live_scan_dependencies();
