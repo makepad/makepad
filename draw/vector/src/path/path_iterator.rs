@@ -58,6 +58,9 @@ where
                             f(LinePathCommand::LineTo(p))
                         })
                 }
+                PathCommand::CubicTo(_p1,_p2, _p) => {
+                    todo!()
+                }
                 PathCommand::Close => {
                     current_point = initial_point;
                     f(LinePathCommand::Close)

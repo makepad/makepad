@@ -147,6 +147,10 @@ impl LiveId {
         let bytes = id_str.as_bytes();
         Self::from_bytes(self.0, bytes, 0, bytes.len())
     }
+
+    pub const fn bytes_append(self, bytes: &[u8]) -> Self {
+        Self::from_bytes(self.0, bytes, 0, bytes.len())
+    }
     
     pub const fn from_str_num_unchecked(id_str: &str, num:u64) -> Self {
         let bytes = id_str.as_bytes();
