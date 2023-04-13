@@ -8,12 +8,13 @@ pub mod cx_2d;
 pub mod view;
 pub mod shader;
 pub mod turtle;
-pub mod font;
+pub mod font_atlas;
 pub mod geometry;
 pub mod nav;
-
+pub mod icon_atlas;
+ 
 pub use crate::{
-    font::Font,
+    font_atlas::Font,
     turtle::{
         Axis,
         Layout,
@@ -45,6 +46,7 @@ pub use crate::{
     },
     shader::{
         //draw_shape::{DrawShape, Shape, Fill},
+        draw_icon::DrawIcon,
         draw_quad::DrawQuad,
         draw_text::DrawText,
         draw_color::DrawColor,
@@ -58,9 +60,9 @@ pub use crate::{
 pub fn live_design(cx: &mut Cx) {
     crate::shader::draw_quad::live_design(cx);
     crate::shader::draw_color::live_design(cx);
-    //crate::shader::draw_shape::live_design(cx);
+    crate::shader::draw_icon::live_design(cx);
     crate::shader::draw_text::live_design(cx);
     crate::geometry::geometry_gen::live_design(cx);
     crate::shader::std::live_design(cx);
-    crate::font::live_design(cx);
+    crate::shader::draw_trapezoid::live_design(cx);
 }

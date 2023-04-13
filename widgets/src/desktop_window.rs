@@ -272,7 +272,7 @@ impl DesktopWindow {
         self.overlay.begin(cx);
         
         //while self.frame.draw(cx).is_ok(){}
-        if self.frame.draw_widget(cx).is_done() {
+        if self.frame.draw_widget_continue(cx).is_done() {
             self.end(cx);
             return ViewRedrawing::no()
         }
@@ -280,7 +280,7 @@ impl DesktopWindow {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw_widget(cx).is_not_done() {}
+        while self.frame.draw_widget_continue(cx).is_not_done() {}
         self.debug_view.draw(cx);
         
         // lets draw our cursor
@@ -340,7 +340,7 @@ impl Widget for DesktopWindow{
         }
         
         if let Some(DrawState::Drawing) = self.draw_state.get(){
-            self.frame.draw_widget(cx)?;
+            self.frame.draw_widget_continue(cx)?;
             self.draw_state.end();
         }        
 

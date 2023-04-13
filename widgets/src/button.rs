@@ -136,6 +136,7 @@ pub struct Button {
     
     draw_bg: DrawQuad,
     draw_label: DrawLabelText,
+    draw_icon: DrawIcon,
     
     walk: Walk,
     
