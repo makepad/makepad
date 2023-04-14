@@ -371,6 +371,21 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onKeyDown(
         ((**env).CallIntMethod.unwrap())(env, event, method_id)
     };
 
+    let characters:Option<String> = unsafe {
+        let class = ((**env).GetObjectClass.unwrap())(env, event);
+        let name = CString::new("getCharacters").unwrap();
+        let signature = CString::new("()Ljava/lang/String;").unwrap();
+        let method_id =
+        ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
+        let string_value = ((**env).CallObjectMethod.unwrap())(env, event, method_id);
+
+        if string_value == std::ptr::null_mut() {
+            None
+        } else {
+            Some(jstring_to_string(env, string_value))
+        }
+    };
+
     let shift = unsafe {
         let class = ((**env).GetObjectClass.unwrap())(env, event);
         let name = CString::new("isShiftPressed").unwrap();
@@ -383,6 +398,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onKeyDown(
 
     (*(cx as *mut Cx)).from_java_on_key_down(
         key_code,
+        characters,
         shift_bool,
         AndroidToJava {
             env,
