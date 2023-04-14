@@ -475,7 +475,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                     }
                     self.out.push(PathCommand::CubicTo(
                         Point{x:self.nums[0], y:self.nums[1]},
-                        Point{x:self.nums[1], y:self.nums[2]},
+                        Point{x:self.nums[2], y:self.nums[3]},
                         self.last_pt,
                     ))
                 },
