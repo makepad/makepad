@@ -186,7 +186,7 @@ impl DrawTrapezoidVector {
                             PathCommand::MoveTo(_p)=>cmd,
                             PathCommand::LineTo(_p)=>cmd,
                             PathCommand::QuadraticTo(_p1, _p)=>cmd,
-                            PathCommand::CubicTo(_p1,_p2,p)=>PathCommand::LineTo(p),
+                            PathCommand::CubicTo(_p1,_p2,_p)=>cmd,
                             PathCommand::Close=>cmd
                         }
                     }
