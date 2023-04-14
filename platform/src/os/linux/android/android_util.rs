@@ -500,15 +500,19 @@ impl AndroidKeyCode {
         else {
             match self {
                 AndroidKeyCode::Key1 => Some("!"),
-                AndroidKeyCode::Slash => Some("?"),
+                AndroidKeyCode::Key2 => Some("@"),
+                AndroidKeyCode::Key3 => Some("#"),
                 AndroidKeyCode::Key4 => Some("$"),
                 AndroidKeyCode::Key5 => Some("%"),
                 AndroidKeyCode::Key6 => Some("^"),
                 AndroidKeyCode::Key7 => Some("&"),
-                AndroidKeyCode::Minus => Some("_"),
+                AndroidKeyCode::Key8 => Some("*"),
                 AndroidKeyCode::Key9 => Some("("),
                 AndroidKeyCode::Key0 => Some(")"),
                 AndroidKeyCode::Grave => Some("~"),
+                AndroidKeyCode::Slash => Some("?"),
+                AndroidKeyCode::Minus => Some("_"),
+                AndroidKeyCode::Equals => Some("+"),
                 AndroidKeyCode::LeftBracket => Some("{"),
                 AndroidKeyCode::RightBracket => Some("}"),
 
