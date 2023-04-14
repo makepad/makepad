@@ -42,7 +42,7 @@ impl CubicSegment {
         let p0123 = p012.lerp(p123, t);
         (
             CubicSegment::new(self.p0, p01, p012, p0123),
-            CubicSegment::new(p0123, p123, p23, self.p2),
+            CubicSegment::new(p0123, p123, p23, self.p3),
         )
     }
 
@@ -93,7 +93,7 @@ impl InternalIterator for Linearize {
         F: FnMut(Point) -> bool,
     {
         if self.segment.is_approximately_linear(self.epsilon) {
-            return f(self.segment.p2);
+            return f(self.segment.p3);
         }
         let (segment_0, segment_1) = self.segment.split(0.5);
         if !segment_0.linearize(self.epsilon).for_each(f) {
