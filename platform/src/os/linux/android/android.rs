@@ -202,31 +202,44 @@ impl Cx {
     }
 
     /// Called when a touch event happened on the software keyword
-    pub fn from_java_on_key_down(&mut self, key_code_val: i32, shift: bool, to_java: AndroidToJava) {
-        if let Some(native_keycode) = AndroidKeyCode::from_i32(key_code_val) {
-            let e: Event;
-            if let Some(input_str) = native_keycode.to_string(shift) {
-                let input = input_str.to_string();
+    pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, shift: bool, to_java: AndroidToJava) {
+        let e: Event;
+        match characters {
+            Some(input) => {
                 e = Event::TextInput(
                     TextInputEvent {
                         input: input,
                         replace_last: false,
                         was_paste: false,
                     }
-                )
-            } else {
-                e = Event::KeyDown(
-                    KeyEvent {
-                        key_code: AndroidKeyCode::to_makepad_key_code(key_code_val),
-                        is_repeat: false,
-                        modifiers: KeyModifiers {shift, ..Default::default()},
-                        time: self.os.time_now()
-                    }
-                )
+                );
+                self.call_event_handler(&e);
+                self.after_every_event(&to_java);
             }
-
-            self.call_event_handler(&e);
-            self.after_every_event(&to_java);
+            None =>
+                if let Some(native_keycode) = AndroidKeyCode::from_i32(key_code_val) {
+                    if let Some(input_str) = native_keycode.to_string(shift) {
+                        let input = input_str.to_string();
+                        e = Event::TextInput(
+                            TextInputEvent {
+                                input: input,
+                                replace_last: false,
+                                was_paste: false,
+                            }
+                        )
+                    } else {
+                        e = Event::KeyDown(
+                            KeyEvent {
+                                key_code: AndroidKeyCode::to_makepad_key_code(key_code_val),
+                                is_repeat: false,
+                                modifiers: KeyModifiers {shift, ..Default::default()},
+                                time: self.os.time_now()
+                            }
+                        )
+                    }
+                    self.call_event_handler(&e);
+                    self.after_every_event(&to_java);
+                }
         }
     }
     

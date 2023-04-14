@@ -152,6 +152,14 @@ KeyEvent.Callback
         return true;
     }
 
+    @Override
+    public boolean onKeyMultiple(int keyCode, int count, KeyEvent event) {
+        // This event is fired when the character is formed by keys combinations or long-pressed tap
+        // It happens for UTF-8 characters, where there is no a keyCode associated.
+        Makepad.onKeyDown(mCx, event, (Makepad.Callback)this.getContext());
+        return true;
+    }
+
     private static final int EGL_CONTEXT_CLIENT_VERSION = 0x3098;
     private long mCx;
     private EGL10 mEgl;
