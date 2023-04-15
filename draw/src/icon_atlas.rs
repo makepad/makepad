@@ -16,36 +16,37 @@ pub use {
         makepad_vector::trapezoidator::Trapezoidator,
         makepad_vector::geometry::{AffineTransformation, Transform, Vector, Point},
         makepad_vector::internal_iter::*,
-        makepad_vector::path::{PathIterator,PathCommand},
+        makepad_vector::path::{PathIterator, PathCommand},
     }
 };
 
 #[derive(Clone, Copy)]
-pub struct CxIconAtlasPos {
+pub struct CxIconSlot {
     pub t1: Vec2,
     pub t2: Vec2,
     pub chan: f32
 }
 
 #[derive(Clone)]
-pub struct CxIconAtlasEntry {
-    pub pos: CxIconAtlasPos,
-    pub translate: DVec2,
-    pub path: Vec<PathCommand>,
-    pub subpixel_fract: Vec2,
-    pub size: Vec2,
-    pub scale: f64,
+pub struct CxIconEntry {
+    path_hash: CxIconPathHash,
+    slot: CxIconSlot,
+    args: CxIconArgs,
 }
 
+struct CxIconPathCommands {
+    bounds: Rect,
+    path: Vec<PathCommand>
+}
 
-impl<'a> InternalIterator for &CxIconAtlasEntry {
+impl<'a> InternalIterator for &CxIconPathCommands {
     type Item = PathCommand;
     fn for_each<F>(self, f: &mut F) -> bool
     where
-        F: FnMut(PathCommand) -> bool,
+    F: FnMut(PathCommand) -> bool,
     {
-        for item in &self.path{
-            if !f(item.clone()){
+        for item in &self.path {
+            if !f(item.clone()) {
                 return false
             }
         }
@@ -53,11 +54,18 @@ impl<'a> InternalIterator for &CxIconAtlasEntry {
     }
 }
 
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct CxIconPathHash(LiveId);
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct CxIconEntryHash(LiveId);
+
 pub struct CxIconAtlas {
     pub texture_id: TextureId,
     pub clear_buffer: bool,
-    pub entries: HashMap<u64, CxIconAtlasEntry>,
-    pub alloc: CxIconAtlasAlloc
+    paths: HashMap<CxIconPathHash, CxIconPathCommands>,
+    entries: HashMap<CxIconEntryHash, CxIconEntry>,
+    alloc: CxIconAtlasAlloc
 }
 
 #[derive(Default)]
@@ -66,9 +74,26 @@ pub struct CxIconAtlasAlloc {
     pub xpos: f64,
     pub ypos: f64,
     pub hmax: f64,
-    pub todo: Vec<u64>,
+    pub todo: Vec<CxIconEntryHash>,
 }
 
+#[derive(Clone)]
+pub struct CxIconArgs {
+    pub size: DVec2,
+    pub translate: DVec2,
+    pub scale: f64,
+}
+
+impl CxIconArgs {
+    fn hash(&self) -> LiveId {
+        LiveId::seeded()
+            .bytes_append(&self.translate.x.to_be_bytes())
+            .bytes_append(&self.translate.y.to_be_bytes())
+            .bytes_append(&self.scale.to_be_bytes())
+            .bytes_append(&self.size.x.to_be_bytes())
+            .bytes_append(&self.size.y.to_be_bytes())
+    }
+}
 
 impl CxIconAtlas {
     pub fn new(texture_id: TextureId) -> Self {
@@ -76,6 +101,7 @@ impl CxIconAtlas {
             texture_id,
             clear_buffer: false,
             entries: HashMap::new(),
+            paths: HashMap::new(),
             alloc: CxIconAtlasAlloc {
                 texture_size: DVec2 {x: 2048.0, y: 2048.0},
                 xpos: 0.0,
@@ -86,45 +112,75 @@ impl CxIconAtlas {
         }
     }
     
-    pub fn get_icon_pos(&mut self, translate:DVec2, scale:f64, subpixel_fract: Vec2, size: Vec2, path: &str) -> Option<CxIconAtlasPos> {
-        let hash = LiveId::from_str_unchecked(path)
-            .bytes_append(&subpixel_fract.x.to_be_bytes())
-            .bytes_append(&subpixel_fract.y.to_be_bytes())
-            .bytes_append(&size.x.to_be_bytes())
-            .bytes_append(&size.y.to_be_bytes())
-            .bytes_append(&translate.x.to_be_bytes())
-            .bytes_append(&translate.y.to_be_bytes())
-            .bytes_append(&scale.to_be_bytes());
-        
-        if let Some(entry) = self.entries.get(&hash.0){
-            return Some(entry.pos)
+    pub fn get_icon_bounds(&mut self, path_str: &Rc<String>) -> Option<(CxIconPathHash, Rect)> {
+        let path_hash = CxIconPathHash(LiveId(Rc::as_ptr(path_str) as u64));
+
+        if let Some(path) = self.paths.get(&path_hash) {
+            return Some((path_hash, path.bounds))
         }
-        match parse_svg_path(path.as_bytes()){
-            Ok(path)=>{
-                let pos = self.alloc.alloc_icon_pos(size.x as f64, size.y as f64);
-                self.entries.insert(
-                    hash.0,
-                    CxIconAtlasEntry{
-                        translate,
-                        scale,
-                        pos,
-                        path,
-                        subpixel_fract,
-                        size
+        match parse_svg_path(path_str.as_str().as_bytes()) {
+            Ok(path) => {
+                let mut min = dvec2(f64::INFINITY, f64::INFINITY);
+                let mut max = dvec2(-f64::INFINITY, -f64::INFINITY);
+                fn bound(p: &Point, min: &mut DVec2, max: &mut DVec2) {
+                    if p.x < min.x {min.x = p.x}
+                    if p.y < min.y {min.y = p.y}
+                    if p.x > max.x {max.x = p.x}
+                    if p.y > max.y {max.y = p.y}
+                }
+                for cmd in &path {
+                    match cmd {
+                        PathCommand::MoveTo(p) => {bound(p, &mut min, &mut max)},
+                        PathCommand::LineTo(p) => {bound(p, &mut min, &mut max)},
+                        PathCommand::QuadraticTo(p1, p) => {
+                            bound(p1, &mut min, &mut max);
+                            bound(p, &mut min, &mut max);
+                        },
+                        PathCommand::CubicTo(p1, p2, p) => {
+                            bound(p1, &mut min, &mut max);
+                            bound(p2, &mut min, &mut max);
+                            bound(p, &mut min, &mut max);
+                        },
+                        PathCommand::Close => ()
                     }
-                );
-                self.alloc.todo.push(hash.0);
-                return Some(pos)
+                }
+                let bounds = Rect{pos: min, size: max-min};
+                self.paths.insert(path_hash, CxIconPathCommands{
+                    bounds,
+                    path
+                });
+                return Some((path_hash, bounds));
             }
-            Err(v)=>{
-                error!("Error parsing svg path {:?}", v);
-                None
+            Err(e) => {
+                return None
             }
         }
     }
+    
+    pub fn get_icon_slot(&mut self, args: CxIconArgs, path_hash: CxIconPathHash) -> CxIconSlot {
+        let entry_hash = CxIconEntryHash(path_hash.0.id_append(args.hash()));
+        
+        if let Some(entry) = self.entries.get(&entry_hash) {
+            return entry.slot
+        }
+
+        let slot = self.alloc.alloc_icon_slot(args.size.x as f64, args.size.y as f64);
+        self.entries.insert(
+            entry_hash,
+            CxIconEntry {
+                path_hash,
+                slot,
+                args
+            }
+        );
+        self.alloc.todo.push(entry_hash);
+        
+        return slot
+    }
+    
 }
 impl CxIconAtlasAlloc {
-    pub fn alloc_icon_pos(&mut self, w: f64, h: f64) -> CxIconAtlasPos {
+    pub fn alloc_icon_slot(&mut self, w: f64, h: f64) -> CxIconSlot {
         if w + self.xpos >= self.texture_size.x {
             self.xpos = 0.0;
             self.ypos += self.hmax + 1.0;
@@ -142,7 +198,7 @@ impl CxIconAtlasAlloc {
         
         self.xpos += w + 1.0;
         
-        CxIconAtlasPos {
+        CxIconSlot {
             chan: 0.0,
             t1: dvec2(tx1, ty1).into(),
             t2: dvec2(tx1 + (w / self.texture_size.x), ty1 + (h / self.texture_size.y)).into()
@@ -169,26 +225,27 @@ impl CxIconAtlas {
 
 impl DrawTrapezoidVector {
     // atlas drawing function used by CxAfterDraw
-    pub fn draw_vector(&mut self, entry:&CxIconAtlasEntry,  many: &mut ManyInstances) {
+    fn draw_vector(&mut self, entry: &CxIconEntry, path:&CxIconPathCommands, many: &mut ManyInstances) {
         let trapezoids = {
             let mut trapezoids = Vec::new();
             //log_str(&format!("Serializing char {} {} {} {}", glyphtc.tx1 , cx.fonts_atlas.texture_size.x ,todo.subpixel_x_fract ,atlas_page.dpi_factor));
             let trapezoidate = self.trapezoidator.trapezoidate(
-                entry.map({
+                path.map({
                     move | cmd | {
                         let cmd = cmd.transform(
                             &AffineTransformation::identity()
-                                .translate(Vector::new(entry.translate.x, entry.translate.y))
-                                .uniform_scale(entry.scale)
+                                .translate(Vector::new(entry.args.translate.x, entry.args.translate.y))
+                                .uniform_scale(entry.args.scale)
                         );
+                        cmd
                         //log!("GOT COMMAND {:?}", cmd);
-                        match cmd{
-                            PathCommand::MoveTo(_p)=>cmd,
-                            PathCommand::LineTo(_p)=>cmd,
-                            PathCommand::QuadraticTo(_p1, _p)=>cmd,
-                            PathCommand::CubicTo(_p1,_p2,p)=>PathCommand::LineTo(p),
-                            PathCommand::Close=>cmd
-                        }
+                        /*match cmd {
+                            PathCommand::MoveTo(_p) => cmd,
+                            PathCommand::LineTo(_p) => cmd,
+                            PathCommand::QuadraticTo(_p1, _p) => cmd,
+                            PathCommand::CubicTo(_p1, _p2, p) => PathCommand::LineTo(p),
+                            PathCommand::Close => cmd
+                        }*/
                     }
                 }).linearize(0.5)
             );
@@ -267,7 +324,7 @@ impl<'a> Cx2d<'a> {
         // we need to start a pass that just uses the texture
         if atlas.alloc.todo.len()>0 {
             self.begin_pass(&draw_atlas.atlas_pass);
-
+            
             let texture_size = atlas.alloc.texture_size;
             draw_atlas.atlas_pass.set_size(self.cx, texture_size);
             
@@ -282,15 +339,15 @@ impl<'a> Cx2d<'a> {
             draw_atlas.atlas_pass.clear_color_textures(self.cx);
             draw_atlas.atlas_pass.add_color_texture(self.cx, &draw_atlas.atlas_texture, clear);
             draw_atlas.atlas_view.begin_always(self);
-
+            
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut atlas.alloc.todo, &mut atlas_todo);
             
             if let Some(mut many) = self.begin_many_instances(&draw_atlas.draw_trapezoid.draw_vars) {
                 for todo in atlas_todo {
                     let entry = atlas.entries.get(&todo).unwrap();
-                    
-                    draw_atlas.draw_trapezoid.draw_vector(entry, &mut many);
+                    let path = atlas.paths.get(&entry.path_hash).unwrap();
+                    draw_atlas.draw_trapezoid.draw_vector(entry, path, &mut many);
                 }
                 
                 self.end_many_instances(many);
@@ -299,8 +356,9 @@ impl<'a> Cx2d<'a> {
             self.end_pass(&draw_atlas.atlas_pass);
         }
     }
+    
+    
 }
-
 
 fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
     #[derive(Debug)]
@@ -412,7 +470,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
             }
         }
         
-        fn whitespace(&mut self)-> Result<(), String> {
+        fn whitespace(&mut self) -> Result<(), String> {
             self.finalize_num();
             if self.expect_nums == self.num_count {
                 self.finalize_cmd() ?;
@@ -422,7 +480,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
         
         fn finalize_cmd(&mut self) -> Result<(), String> {
             self.finalize_num();
-            if self.chain && self.num_count == 0{
+            if self.chain && self.num_count == 0 {
                 return Ok(())
             }
             if self.expect_nums != self.num_count {
@@ -432,62 +490,62 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                 Cmd::Unknown => (),
                 Cmd::Move(abs) => {
                     if abs {
-                        self.last_pt = Point{x:self.nums[0], y:self.nums[1]};
+                        self.last_pt = Point {x: self.nums[0], y: self.nums[1]};
                     }
                     else {
-                        self.last_pt += Vector{x:self.nums[0], y:self.nums[1]};
+                        self.last_pt += Vector {x: self.nums[0], y: self.nums[1]};
                     }
                     self.out.push(PathCommand::MoveTo(self.last_pt));
                 },
                 Cmd::Hor(abs) => {
                     if abs {
-                        self.last_pt = Point{x:self.nums[0], y:self.last_pt.y};
+                        self.last_pt = Point {x: self.nums[0], y: self.last_pt.y};
                     }
                     else {
-                        self.last_pt += Vector{x:self.nums[0], y:0.0};
+                        self.last_pt += Vector {x: self.nums[0], y: 0.0};
                     }
                     self.out.push(PathCommand::LineTo(self.last_pt));
                 }
                 Cmd::Vert(abs) => {
                     if abs {
-                        self.last_pt = Point{x:self.last_pt.x, y:self.nums[0]};
+                        self.last_pt = Point {x: self.last_pt.x, y: self.nums[0]};
                     }
                     else {
-                        self.last_pt += Vector{x:0.0, y:self.nums[0]};
+                        self.last_pt += Vector {x: 0.0, y: self.nums[0]};
                     }
                     self.out.push(PathCommand::LineTo(self.last_pt));
                 }
                 Cmd::Line(abs) => {
                     if abs {
-                        self.last_pt = Point{x:self.nums[0], y:self.nums[1]};
+                        self.last_pt = Point {x: self.nums[0], y: self.nums[1]};
                     }
                     else {
-                        self.last_pt += Vector{x:self.nums[0], y:self.nums[1]};
+                        self.last_pt += Vector {x: self.nums[0], y: self.nums[1]};
                     }
                     self.out.push(PathCommand::LineTo(self.last_pt));
                 },
                 Cmd::Cubic(abs) => {
                     if abs {
-                        self.last_pt = Point{x:self.nums[4], y:self.nums[5]};
+                        self.last_pt = Point {x: self.nums[4], y: self.nums[5]};
                     }
                     else {
-                        self.last_pt += Vector{x:self.nums[4], y:self.nums[5]};
+                        self.last_pt += Vector {x: self.nums[4], y: self.nums[5]};
                     }
                     self.out.push(PathCommand::CubicTo(
-                        Point{x:self.nums[0], y:self.nums[1]},
-                        Point{x:self.nums[1], y:self.nums[2]},
+                        Point {x: self.nums[0], y: self.nums[1]},
+                        Point {x: self.nums[1], y: self.nums[2]},
                         self.last_pt,
                     ))
                 },
                 Cmd::Quadratic(abs) => {
                     if abs {
-                        self.last_pt = Point{x:self.nums[2], y:self.nums[3]};
+                        self.last_pt = Point {x: self.nums[2], y: self.nums[3]};
                     }
                     else {
-                        self.last_pt += Vector{x:self.nums[2], y:self.nums[3]};
+                        self.last_pt += Vector {x: self.nums[2], y: self.nums[3]};
                     }
                     self.out.push(PathCommand::QuadraticTo(
-                        Point{x:self.nums[0], y:self.nums[1]},
+                        Point {x: self.nums[0], y: self.nums[1]},
                         self.last_pt
                     ));
                 }
@@ -503,7 +561,7 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
     
     let mut state = ParseState::default();
     for i in 0..path.len() {
-        match path[i]  {
+        match path[i] {
             b'M' => state.next_cmd(Cmd::Move(true)) ?,
             b'm' => state.next_cmd(Cmd::Move(false)) ?,
             b'Q' => state.next_cmd(Cmd::Quadratic(true)) ?,
@@ -520,13 +578,14 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
             b'-' => state.add_min() ?,
             b'0'..=b'9' => state.add_digit((path[i] - b'0') as f64) ?,
             b'.' => state.add_dot() ?,
-            b',' | b' ' | b'\r' | b'\n' | b'\t' => state.whitespace()?,
+            b',' | b' ' | b'\r' | b'\n' | b'\t' => state.whitespace() ?,
             x => {
                 return Err(format!("Unexpected character {} - {}", x, x as char))
             }
         }
     }
     state.finalize_cmd() ?;
+    
     Ok(state.out)
 }
 
