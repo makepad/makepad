@@ -118,8 +118,6 @@ impl DrawIcon {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) {
-        // allocate our path on the icon atlas
-        // lets allocate/fetch our path on the icon atlas
         let icon_atlas_rc = cx.icon_atlas_rc.clone();
         let mut icon_atlas = icon_atlas_rc.0.borrow_mut();
         let icon_atlas = &mut*icon_atlas;
@@ -170,17 +168,7 @@ impl DrawIcon {
                 let new_area = cx.add_aligned_instance(&self.draw_vars);
                 self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
             }
-            
-            // ok now what
-            // we have a bounds rect we can use to set up a translate/scale
-            // what kind of walks do we have
-            // Fixed, Fit and Fill
-            // only 'Fit' we can now look up
-            // so how do we compute 'fit'.
         }
-        
-        //alright we have an icon atlas. lets look up our subpixel + size + path hash
-        
     }
     
     pub fn update_draw_call_vars(&mut self, atlas: &CxIconAtlas) {
