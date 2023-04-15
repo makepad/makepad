@@ -218,7 +218,7 @@ impl Button {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), &self.text);
-        self.draw_icon.draw_walk(cx, self.icon_walk, None);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_bg.end(cx);
     }
 }

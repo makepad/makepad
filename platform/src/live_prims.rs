@@ -748,6 +748,59 @@ live_primitive!(
     }
 );
 
+live_primitive!(
+    Rc<String>,
+    Default::default(),
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Str(v) => {
+                *self = Rc::new(v.to_string());
+                index + 1
+            }
+            LiveValue::String(v) => {
+                *self = v.clone();
+                index + 1
+            }
+            LiveValue::InlineString(v) => {
+                *self = Rc::new(v.as_str().to_string());
+                index + 1
+            }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::String(v) => {*self = Rc::new(v);}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::Array => {
+                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        // lets check our byte size and choose a storage mode appropriately.
+        //let bytes = self.as_bytes();
+        if let Some(inline_str) = InlineString::from_str(&self) {
+            LiveValue::InlineString(inline_str)
+        }
+        else {
+            LiveValue::String(self.clone())
+        }
+    }
+);
+
 impl ToLiveValue for &str{
     fn to_live_value(&self) -> LiveValue {
         // lets check our byte size and choose a storage mode appropriately.
