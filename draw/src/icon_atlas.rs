@@ -152,6 +152,7 @@ impl CxIconAtlas {
                 return Some((path_hash, bounds));
             }
             Err(e) => {
+                log!("Error in SVG Path {}", e);
                 return None
             }
         }
@@ -238,14 +239,6 @@ impl DrawTrapezoidVector {
                                 .uniform_scale(entry.args.scale)
                         );
                         cmd
-                        //log!("GOT COMMAND {:?}", cmd);
-                        /*match cmd {
-                            PathCommand::MoveTo(_p) => cmd,
-                            PathCommand::LineTo(_p) => cmd,
-                            PathCommand::QuadraticTo(_p1, _p) => cmd,
-                            PathCommand::CubicTo(_p1, _p2, p) => PathCommand::LineTo(p),
-                            PathCommand::Close => cmd
-                        }*/
                     }
                 }).linearize(0.5)
             );
@@ -256,6 +249,7 @@ impl DrawTrapezoidVector {
             }
             trapezoids
         };
+        
         for trapezoid in trapezoids {
             self.a_xs = Vec2 {x: trapezoid.xs[0], y: trapezoid.xs[1]};
             self.a_ys = Vec4 {x: trapezoid.ys[0], y: trapezoid.ys[1], z: trapezoid.ys[2], w: trapezoid.ys[3]};
@@ -532,8 +526,9 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                         self.last_pt += Vector {x: self.nums[4], y: self.nums[5]};
                     }
                     self.out.push(PathCommand::CubicTo(
-                        Point {x: self.nums[0], y: self.nums[1]},
-                        Point {x: self.nums[1], y: self.nums[2]},
+                        Point{x:self.nums[0], y:self.nums[1]},
+                        Point{x:self.nums[2], y:self.nums[3]},
+
                         self.last_pt,
                     ))
                 },
