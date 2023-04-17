@@ -39,6 +39,7 @@ live_design!{
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
                 frame: {body = {
+
                     <AppDesktop> {}
                 }}
             }
