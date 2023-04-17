@@ -10,7 +10,6 @@ import android.view.View;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.inputmethod.InputMethodManager;
-import android.util.Log;
 
 import javax.microedition.khronos.egl.EGL10;
 import javax.microedition.khronos.egl.EGLConfig;
