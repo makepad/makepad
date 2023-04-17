@@ -211,8 +211,8 @@ impl Cx {
     /// Called when a touch event happened on the software keyword
     pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
         let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
-
         let e: Event;
+
         match characters {
             Some(input) => {
                 e = Event::TextInput(
@@ -227,8 +227,14 @@ impl Cx {
             }
             None =>
                 if let Some(native_keycode) = AndroidKeyCode::from_i32(key_code_val) {
-                    if let Some(input_str) = native_keycode.to_string(shift) {
-                        let input = input_str.to_string();
+                    let control = meta_state & ANDROID_META_CTRL_MASK != 0;
+                    let alt = meta_state & ANDROID_META_ALT_MASK != 0;
+
+                    let is_shortcut = control || alt;
+                    let input_str = native_keycode.to_string(shift);
+
+                    if input_str.is_some() && !is_shortcut {
+                        let input = input_str.unwrap().to_string();
                         e = Event::TextInput(
                             TextInputEvent {
                                 input: input,
@@ -237,8 +243,6 @@ impl Cx {
                             }
                         )
                     } else {
-                        let control = meta_state & ANDROID_META_CTRL_MASK != 0;
-                        let alt = meta_state & ANDROID_META_ALT_MASK != 0;
                         e = Event::KeyDown(
                             KeyEvent {
                                 key_code: AndroidKeyCode::to_makepad_key_code(key_code_val),
