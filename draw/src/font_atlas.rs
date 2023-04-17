@@ -180,12 +180,14 @@ impl DrawTrapezoidVector {
                         .commands()
                         .map({
                         move | command | {
-                            command.transform(
+                            let cmd = command.transform(
                                 &AffineTransformation::identity()
                                     .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
                                     .uniform_scale(font_scale_pixels * size)
                                     .translate(Vector::new(tx, ty))
-                            )
+                        );
+                        
+                            cmd
                         }
                     }).linearize(0.5),
                 );

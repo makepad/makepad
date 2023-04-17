@@ -6,6 +6,7 @@ pub enum PathCommand {
     MoveTo(Point),
     LineTo(Point),
     QuadraticTo(Point, Point),
+    CubicTo(Point, Point, Point),
     Close,
 }
 
@@ -20,6 +21,9 @@ impl Transform for PathCommand {
             PathCommand::QuadraticTo(p1, p) => {
                 PathCommand::QuadraticTo(p1.transform(t), p.transform(t))
             }
+            PathCommand::CubicTo(p1, p2, p) => {
+                PathCommand::CubicTo(p1.transform(t), p2.transform(t), p.transform(t))
+            }
             PathCommand::Close => PathCommand::Close,
         }
     }
@@ -31,3 +35,4 @@ impl Transform for PathCommand {
         *self = self.transform(t);
     }
 }
+
