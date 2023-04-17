@@ -14,17 +14,58 @@ pub use {
         view::{ManyInstances, View, ViewRedrawingApi},
         geometry::GeometryQuad2D,
         makepad_vector::trapezoidator::Trapezoidator,
-        makepad_vector::geometry::{AffineTransformation, Transform, Vector},
+        makepad_vector::geometry::{AffineTransformation, Transform, Vector, Point},
         makepad_vector::internal_iter::*,
-        makepad_vector::path::PathIterator,
+        makepad_vector::path::{PathIterator, PathCommand},
     }
 };
+
+#[derive(Clone, Copy)]
+pub struct CxIconSlot {
+    pub t1: Vec2,
+    pub t2: Vec2,
+    pub chan: f32
+}
+
+#[derive(Clone)]
+pub struct CxIconEntry {
+    path_hash: CxIconPathHash,
+    slot: CxIconSlot,
+    args: CxIconArgs,
+}
+
+struct CxIconPathCommands {
+    bounds: Rect,
+    path: Vec<PathCommand>
+}
+
+impl<'a> InternalIterator for &CxIconPathCommands {
+    type Item = PathCommand;
+    fn for_each<F>(self, f: &mut F) -> bool
+    where
+    F: FnMut(PathCommand) -> bool,
+    {
+        for item in &self.path {
+            if !f(item.clone()) {
+                return false
+            }
+        }
+        true
+    }
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct CxIconPathHash(LiveId);
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct CxIconEntryHash(LiveId);
 
 pub struct CxIconAtlas {
     pub texture_id: TextureId,
     pub clear_buffer: bool,
-    pub entries: Vec<CxIconAtlasEntry>,
-    pub alloc: CxIconAtlasAlloc
+    paths: HashMap<CxIconPathHash, CxIconPathCommands>,
+    entries: HashMap<CxIconEntryHash, CxIconEntry>,
+    alloc: CxIconAtlasAlloc
 }
 
 #[derive(Default)]
@@ -33,22 +74,25 @@ pub struct CxIconAtlasAlloc {
     pub xpos: f64,
     pub ypos: f64,
     pub hmax: f64,
-    pub todo: Vec<CxIconAtlasTodo>,
+    pub todo: Vec<CxIconEntryHash>,
 }
 
-#[derive(Default, Debug)]
-pub struct CxIconAtlasTodo {
-    pub subpixel_x_fract: f64,
-    pub subpixel_y_fract: f64,
+#[derive(Clone)]
+pub struct CxIconArgs {
+    pub size: DVec2,
+    pub translate: DVec2,
+    pub scale: f64,
 }
 
-#[derive(Debug)]
-pub enum SvgPathOp {
-    MoveTo(DVec2),
-    LineTo(DVec2),
-    Cubic {c1: DVec2, c2: DVec2, p: DVec2},
-    Quadratic {c1: DVec2, p: DVec2},
-    Close
+impl CxIconArgs {
+    fn hash(&self) -> LiveId {
+        LiveId::seeded()
+            .bytes_append(&self.translate.x.to_be_bytes())
+            .bytes_append(&self.translate.y.to_be_bytes())
+            .bytes_append(&self.scale.to_be_bytes())
+            .bytes_append(&self.size.x.to_be_bytes())
+            .bytes_append(&self.size.y.to_be_bytes())
+    }
 }
 
 impl CxIconAtlas {
@@ -56,7 +100,8 @@ impl CxIconAtlas {
         Self {
             texture_id,
             clear_buffer: false,
-            entries: Vec::new(),
+            entries: HashMap::new(),
+            paths: HashMap::new(),
             alloc: CxIconAtlasAlloc {
                 texture_size: DVec2 {x: 2048.0, y: 2048.0},
                 xpos: 0.0,
@@ -67,232 +112,76 @@ impl CxIconAtlas {
         }
     }
     
-    fn parse_svg_path(path: &[u8]) -> Result<Vec<SvgPathOp>, String> {
-        #[derive(Debug)]
-        enum Cmd {
-            Unknown,
-            Move(bool),
-            Hor(bool),
-            Vert(bool),
-            Line(bool),
-            Cubic(bool),
-            Quadratic(bool),
-            Close
+    pub fn get_icon_bounds(&mut self, path_str: &Rc<String>) -> Option<(CxIconPathHash, Rect)> {
+        let path_hash = CxIconPathHash(LiveId(Rc::as_ptr(path_str) as u64));
+
+        if let Some(path) = self.paths.get(&path_hash) {
+            return Some((path_hash, path.bounds))
         }
-        impl Default for Cmd {fn default() -> Self {Self::Unknown}}
-        
-        #[derive(Default)]
-        struct ParseState {
-            cmd: Cmd,
-            expect_nums: usize,
-            nums: [f64; 8],
-            num_count: usize,
-            last_pt: DVec2,
-            out: Vec<SvgPathOp>,
-            num_state: Option<NumState>
-        }
-        
-        struct NumState {
-            num: f64,
-            mul: f64,
-            has_dot: bool,
-        }
-        
-        impl NumState {
-            fn new_pos(v: f64) -> Self {Self {num: v, mul: 1.0, has_dot: false}}
-            fn new_min() -> Self {Self {num: 0.0, mul: -1.0, has_dot: false}}
-            fn finalize(self) -> f64 {self.num * self.mul}
-            fn add_digit(&mut self, digit: f64) {
-                self.num *= 10.0;
-                self.num += digit;
-                if self.has_dot {
-                    self.mul *= 0.1;
+        match parse_svg_path(path_str.as_str().as_bytes()) {
+            Ok(path) => {
+                let mut min = dvec2(f64::INFINITY, f64::INFINITY);
+                let mut max = dvec2(-f64::INFINITY, -f64::INFINITY);
+                fn bound(p: &Point, min: &mut DVec2, max: &mut DVec2) {
+                    if p.x < min.x {min.x = p.x}
+                    if p.y < min.y {min.y = p.y}
+                    if p.x > max.x {max.x = p.x}
+                    if p.y > max.y {max.y = p.y}
                 }
+                for cmd in &path {
+                    match cmd {
+                        PathCommand::MoveTo(p) => {bound(p, &mut min, &mut max)},
+                        PathCommand::LineTo(p) => {bound(p, &mut min, &mut max)},
+                        PathCommand::QuadraticTo(p1, p) => {
+                            bound(p1, &mut min, &mut max);
+                            bound(p, &mut min, &mut max);
+                        },
+                        PathCommand::CubicTo(p1, p2, p) => {
+                            bound(p1, &mut min, &mut max);
+                            bound(p2, &mut min, &mut max);
+                            bound(p, &mut min, &mut max);
+                        },
+                        PathCommand::Close => ()
+                    }
+                }
+                let bounds = Rect{pos: min, size: max-min};
+                self.paths.insert(path_hash, CxIconPathCommands{
+                    bounds,
+                    path
+                });
+                return Some((path_hash, bounds));
             }
-        }
-        
-        impl ParseState {
-            fn next_cmd(&mut self, cmd: Cmd) -> Result<(), String> {
-                self.finalize_cmd() ?;
-                self.expect_nums = match cmd {
-                    Cmd::Unknown => panic!(),
-                    Cmd::Move(_) => 2,
-                    Cmd::Hor(_) => 1,
-                    Cmd::Vert(_) => 1,
-                    Cmd::Line(_) => 2,
-                    Cmd::Cubic(_) => 8,
-                    Cmd::Quadratic(_) => 6,
-                    Cmd::Close => 0
-                };
-                self.cmd = cmd;
-                Ok(())
-            }
-            
-            fn add_min(&mut self) -> Result<(), String> {
-                if self.expect_nums == self.num_count {
-                    self.finalize_cmd() ?;
-                }
-                if self.expect_nums == 0 {
-                    return Err(format!("Unexpected minus"));
-                }
-                self.num_state = Some(NumState::new_min());
-                Ok(())
-            }
-            
-            fn add_digit(&mut self, digit: f64) -> Result<(), String> {
-                if let Some(num_state) = &mut self.num_state {
-                    num_state.add_digit(digit);
-                }
-                else {
-                    if self.expect_nums == self.num_count {
-                        self.finalize_cmd() ?;
-                    }
-                    if self.expect_nums == 0 {
-                        return Err(format!("Unexpected digit"));
-                    }
-                    self.num_state = Some(NumState::new_pos(digit))
-                }
-                Ok(())
-            }
-            
-            fn add_dot(&mut self) -> Result<(), String> {
-                if let Some(num_state) = &mut self.num_state {
-                    if num_state.has_dot {
-                        return Err(format!("Unexpected ."));
-                    }
-                    num_state.has_dot = true;
-                }
-                else {
-                    return Err(format!("Unexpected ."));
-                }
-                Ok(())
-            }
-            
-            fn finalize_num(&mut self) {
-                if let Some(num_state) = self.num_state.take() {
-                    self.nums[self.num_count] = num_state.finalize();
-                    self.num_count += 1;
-                }
-            }
-            
-            fn finalize_cmd(&mut self) -> Result<(), String> {
-                self.finalize_num();
-                if self.expect_nums != self.num_count {
-                    return Err(format!("SVG Path command {:?} expected {} points, got {}", self.cmd, self.expect_nums, self.num_count));
-                }
-                match self.cmd {
-                    Cmd::Unknown => (),
-                    Cmd::Move(abs) => {
-                        if abs {
-                            self.last_pt = dvec2(self.nums[0], self.nums[1]);
-                        }
-                        else {
-                            self.last_pt += dvec2(self.nums[0], self.nums[1]);
-                        }
-                        self.out.push(SvgPathOp::MoveTo(self.last_pt));
-                    },
-                    Cmd::Hor(abs) => {
-                        if abs {
-                            self.last_pt = dvec2(self.nums[0], self.last_pt.y);
-                        }
-                        else {
-                            self.last_pt += dvec2(self.nums[0], 0.0);
-                        }
-                        self.out.push(SvgPathOp::LineTo(self.last_pt));
-                    }
-                    Cmd::Vert(abs) => {
-                        if abs {
-                            self.last_pt = dvec2(self.last_pt.x, self.nums[0]);
-                        }
-                        else {
-                            self.last_pt += dvec2(0.0, self.nums[0]);
-                        }
-                        self.out.push(SvgPathOp::LineTo(self.last_pt));
-                    }
-                    Cmd::Line(abs) => {
-                        let pt = dvec2(self.nums[0], self.nums[1]);
-                        if abs {
-                            self.last_pt = pt;
-                        }
-                        else {
-                            self.last_pt += pt;
-                        }
-                        self.out.push(SvgPathOp::LineTo(self.last_pt));
-                    },
-                    Cmd::Cubic(abs) => {
-                        let pt = dvec2(self.nums[4], self.nums[5]);
-                        if abs {
-                            self.last_pt = pt;
-                        }
-                        else {
-                            self.last_pt += pt;
-                        }
-                        self.out.push(SvgPathOp::Cubic {
-                            c1: dvec2(self.nums[0], self.nums[1]),
-                            c2: dvec2(self.nums[2], self.nums[3]),
-                            p: self.last_pt
-                        });
-                    },
-                    Cmd::Quadratic(abs) => {
-                        let pt = dvec2(self.nums[2], self.nums[3]);
-                        if abs {
-                            self.last_pt = pt;
-                        }
-                        else {
-                            self.last_pt += pt;
-                        }
-                        self.out.push(SvgPathOp::Quadratic {
-                            c1: dvec2(self.nums[0], self.nums[1]),
-                            p: self.last_pt
-                        });
-                    }
-                    Cmd::Close => {
-                        self.out.push(SvgPathOp::Close);
-                    }
-                }
-                self.num_count = 0;
-                Ok(())
+            Err(e) => {
+                log!("Error in SVG Path {}", e);
+                return None
             }
         }
-        
-        let mut state = ParseState::default();
-        for i in 0..path.len() {
-            match path[i]  {
-                b'M' => state.next_cmd(Cmd::Move(true)) ?,
-                b'm' => state.next_cmd(Cmd::Move(false)) ?,
-                b'Q' => state.next_cmd(Cmd::Quadratic(true)) ?,
-                b'q' => state.next_cmd(Cmd::Quadratic(false)) ?,
-                b'C' => state.next_cmd(Cmd::Cubic(true)) ?,
-                b'c' => state.next_cmd(Cmd::Cubic(false)) ?,
-                b'H' => state.next_cmd(Cmd::Hor(true)) ?,
-                b'h' => state.next_cmd(Cmd::Hor(false)) ?,
-                b'V' => state.next_cmd(Cmd::Vert(true)) ?,
-                b'v' => state.next_cmd(Cmd::Vert(false)) ?,
-                b'L' => state.next_cmd(Cmd::Line(true)) ?,
-                b'l' => state.next_cmd(Cmd::Line(false)) ?,
-                b'Z' | b'z' => state.next_cmd(Cmd::Close) ?,
-                b'-' => state.add_min() ?,
-                b'0'..=b'9' => state.add_digit((path[i] - b'0') as f64) ?,
-                b'.' => state.add_dot() ?,
-                b' ' | b'\r' | b'\n' | b'\t' => (),
-                x => {
-                    return Err(format!("Unexpected character {}", x))
-                }
-            }
-        }
-        state.finalize_cmd() ?;
-        Ok(state.out)
     }
     
-    pub fn get_icon_pos(&mut self, _fract: Vec2, size: Vec2, path: &str) -> CxIconAtlasEntry {
-        let ret = Self::parse_svg_path(path.as_bytes());
-        log!("{:?}", ret);
-        // lets parse this thing
-        self.alloc.alloc_icon(size.x as f64, size.y as f64)
+    pub fn get_icon_slot(&mut self, args: CxIconArgs, path_hash: CxIconPathHash) -> CxIconSlot {
+        let entry_hash = CxIconEntryHash(path_hash.0.id_append(args.hash()));
+        
+        if let Some(entry) = self.entries.get(&entry_hash) {
+            return entry.slot
+        }
+
+        let slot = self.alloc.alloc_icon_slot(args.size.x as f64, args.size.y as f64);
+        self.entries.insert(
+            entry_hash,
+            CxIconEntry {
+                path_hash,
+                slot,
+                args
+            }
+        );
+        self.alloc.todo.push(entry_hash);
+        
+        return slot
     }
+    
 }
 impl CxIconAtlasAlloc {
-    pub fn alloc_icon(&mut self, w: f64, h: f64) -> CxIconAtlasEntry {
+    pub fn alloc_icon_slot(&mut self, w: f64, h: f64) -> CxIconSlot {
         if w + self.xpos >= self.texture_size.x {
             self.xpos = 0.0;
             self.ypos += self.hmax + 1.0;
@@ -310,8 +199,8 @@ impl CxIconAtlasAlloc {
         
         self.xpos += w + 1.0;
         
-        
-        CxIconAtlasEntry {
+        CxIconSlot {
+            chan: 0.0,
             t1: dvec2(tx1, ty1).into(),
             t2: dvec2(tx1 + (w / self.texture_size.x), ty1 + (h / self.texture_size.y)).into()
         }
@@ -334,29 +223,24 @@ impl CxIconAtlas {
     }
 }
 
+
 impl DrawTrapezoidVector {
     // atlas drawing function used by CxAfterDraw
-    pub fn draw_vector(&mut self, _many: &mut ManyInstances) {
-        
-        /*
-        let mut size = 1.0;
+    fn draw_vector(&mut self, entry: &CxIconEntry, path:&CxIconPathCommands, many: &mut ManyInstances) {
         let trapezoids = {
-            
+            let mut trapezoids = Vec::new();
             //log_str(&format!("Serializing char {} {} {} {}", glyphtc.tx1 , cx.fonts_atlas.texture_size.x ,todo.subpixel_x_fract ,atlas_page.dpi_factor));
             let trapezoidate = self.trapezoidator.trapezoidate(
-                glyph
-                    .outline
-                    .commands()
-                    .map({
-                    move | command | {
-                        command.transform(
+                path.map({
+                    move | cmd | {
+                        let cmd = cmd.transform(
                             &AffineTransformation::identity()
-                                .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
-                                .uniform_scale(font_scale_pixels * size)
-                                .translate(Vector::new(tx, ty))
-                        )
+                                .translate(Vector::new(entry.args.translate.x, entry.args.translate.y))
+                                .uniform_scale(entry.args.scale)
+                        );
+                        cmd
                     }
-                }).linearize(0.5),
+                }).linearize(0.5)
             );
             if let Some(trapezoidate) = trapezoidate {
                 trapezoids.extend_from_internal_iter(
@@ -365,12 +249,13 @@ impl DrawTrapezoidVector {
             }
             trapezoids
         };
+        
         for trapezoid in trapezoids {
             self.a_xs = Vec2 {x: trapezoid.xs[0], y: trapezoid.xs[1]};
             self.a_ys = Vec4 {x: trapezoid.ys[0], y: trapezoid.ys[1], z: trapezoid.ys[2], w: trapezoid.ys[3]};
-            self.chan = i as f32;
+            self.chan = 0.0 as f32;
             many.instances.extend_from_slice(self.draw_vars.as_slice());
-        }*/
+        }
     }
 }
 
@@ -425,52 +310,277 @@ impl<'a> Cx2d<'a> {
     
     pub fn draw_icon_atlas(&mut self) {
         let draw_atlas_rc = self.cx.get_global::<CxDrawIconAtlasRc>().clone();
-        let mut _draw_atlas = draw_atlas_rc.0.borrow_mut();
+        let mut draw_atlas = draw_atlas_rc.0.borrow_mut();
         let atlas_rc = self.icon_atlas_rc.clone();
         let mut atlas = atlas_rc.0.borrow_mut();
-        let _atlas = &mut*atlas;
+        let atlas = &mut*atlas;
         //let start = Cx::profile_time_ns();
         // we need to start a pass that just uses the texture
-        /*
-        if fonts_atlas.alloc.todo.len()>0 {
-            self.begin_pass(&draw_fonts_atlas.atlas_pass);
-
-            let texture_size = fonts_atlas.alloc.texture_size;
-            draw_fonts_atlas.atlas_pass.set_size(self.cx, texture_size);
+        if atlas.alloc.todo.len()>0 {
+            self.begin_pass(&draw_atlas.atlas_pass);
             
-            let clear = if fonts_atlas.clear_buffer {
-                fonts_atlas.clear_buffer = false;
+            let texture_size = atlas.alloc.texture_size;
+            draw_atlas.atlas_pass.set_size(self.cx, texture_size);
+            
+            let clear = if atlas.clear_buffer {
+                atlas.clear_buffer = false;
                 PassClearColor::ClearWith(Vec4::default())
             }
             else {
                 PassClearColor::InitWith(Vec4::default())
             };
             
-            draw_fonts_atlas.atlas_pass.clear_color_textures(self.cx);
-            draw_fonts_atlas.atlas_pass.add_color_texture(self.cx, &draw_fonts_atlas.atlas_texture, clear);
-            draw_fonts_atlas.atlas_view.begin_always(self);
-
-            let mut atlas_todo = Vec::new();
-            std::mem::swap(&mut fonts_atlas.alloc.todo, &mut atlas_todo);
+            draw_atlas.atlas_pass.clear_color_textures(self.cx);
+            draw_atlas.atlas_pass.add_color_texture(self.cx, &draw_atlas.atlas_texture, clear);
+            draw_atlas.atlas_view.begin_always(self);
             
-            if let Some(mut many) = self.begin_many_instances(&draw_fonts_atlas.draw_trapezoid.draw_vars) {
-
+            let mut atlas_todo = Vec::new();
+            std::mem::swap(&mut atlas.alloc.todo, &mut atlas_todo);
+            
+            if let Some(mut many) = self.begin_many_instances(&draw_atlas.draw_trapezoid.draw_vars) {
                 for todo in atlas_todo {
-                    draw_fonts_atlas.draw_trapezoid.draw_vector(todo, &mut many);
+                    let entry = atlas.entries.get(&todo).unwrap();
+                    let path = atlas.paths.get(&entry.path_hash).unwrap();
+                    draw_atlas.draw_trapezoid.draw_vector(entry, path, &mut many);
                 }
                 
                 self.end_many_instances(many);
             }
-            draw_fonts_atlas.atlas_view.end(self);
-            self.end_pass(&draw_fonts_atlas.atlas_pass);
-        }*/
-        //println!("TOTALT TIME {}", Cx::profile_time_ns() - start);
+            draw_atlas.atlas_view.end(self);
+            self.end_pass(&draw_atlas.atlas_pass);
+        }
     }
+    
+    
 }
 
-#[derive(Clone, Copy)]
-pub struct CxIconAtlasEntry {
-    pub t1: Vec2,
-    pub t2: Vec2,
+fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
+    #[derive(Debug)]
+    enum Cmd {
+        Unknown,
+        Move(bool),
+        Hor(bool),
+        Vert(bool),
+        Line(bool),
+        Cubic(bool),
+        Quadratic(bool),
+        Close
+    }
+    impl Default for Cmd {fn default() -> Self {Self::Unknown}}
+    
+    #[derive(Default)]
+    struct ParseState {
+        cmd: Cmd,
+        expect_nums: usize,
+        chain: bool,
+        nums: [f64; 6],
+        num_count: usize,
+        last_pt: Point,
+        out: Vec<PathCommand>,
+        num_state: Option<NumState>
+    }
+    
+    struct NumState {
+        num: f64,
+        mul: f64,
+        has_dot: bool,
+    }
+    
+    impl NumState {
+        fn new_pos(v: f64) -> Self {Self {num: v, mul: 1.0, has_dot: false}}
+        fn new_min() -> Self {Self {num: 0.0, mul: -1.0, has_dot: false}}
+        fn finalize(self) -> f64 {self.num * self.mul}
+        fn add_digit(&mut self, digit: f64) {
+            self.num *= 10.0;
+            self.num += digit;
+            if self.has_dot {
+                self.mul *= 0.1;
+            }
+        }
+    }
+    
+    impl ParseState {
+        fn next_cmd(&mut self, cmd: Cmd) -> Result<(), String> {
+            self.finalize_cmd() ?;
+            self.chain = false;
+            self.expect_nums = match cmd {
+                Cmd::Unknown => panic!(),
+                Cmd::Move(_) => 2,
+                Cmd::Hor(_) => 1,
+                Cmd::Vert(_) => 1,
+                Cmd::Line(_) => 2,
+                Cmd::Cubic(_) => 6,
+                Cmd::Quadratic(_) => 4,
+                Cmd::Close => 0
+            };
+            self.cmd = cmd;
+            Ok(())
+        }
+        
+        fn add_min(&mut self) -> Result<(), String> {
+            if self.expect_nums == self.num_count {
+                self.finalize_cmd() ?;
+            }
+            if self.expect_nums == 0 {
+                return Err(format!("Unexpected minus"));
+            }
+            self.num_state = Some(NumState::new_min());
+            Ok(())
+        }
+        
+        fn add_digit(&mut self, digit: f64) -> Result<(), String> {
+            if let Some(num_state) = &mut self.num_state {
+                num_state.add_digit(digit);
+            }
+            else {
+                if self.expect_nums == self.num_count {
+                    self.finalize_cmd() ?;
+                }
+                if self.expect_nums == 0 {
+                    return Err(format!("Unexpected digit"));
+                }
+                self.num_state = Some(NumState::new_pos(digit))
+            }
+            Ok(())
+        }
+        
+        fn add_dot(&mut self) -> Result<(), String> {
+            if let Some(num_state) = &mut self.num_state {
+                if num_state.has_dot {
+                    return Err(format!("Unexpected ."));
+                }
+                num_state.has_dot = true;
+            }
+            else {
+                return Err(format!("Unexpected ."));
+            }
+            Ok(())
+        }
+        
+        fn finalize_num(&mut self) {
+            if let Some(num_state) = self.num_state.take() {
+                self.nums[self.num_count] = num_state.finalize();
+                self.num_count += 1;
+            }
+        }
+        
+        fn whitespace(&mut self) -> Result<(), String> {
+            self.finalize_num();
+            if self.expect_nums == self.num_count {
+                self.finalize_cmd() ?;
+            }
+            Ok(())
+        }
+        
+        fn finalize_cmd(&mut self) -> Result<(), String> {
+            self.finalize_num();
+            if self.chain && self.num_count == 0 {
+                return Ok(())
+            }
+            if self.expect_nums != self.num_count {
+                return Err(format!("SVG Path command {:?} expected {} points, got {}", self.cmd, self.expect_nums, self.num_count));
+            }
+            match self.cmd {
+                Cmd::Unknown => (),
+                Cmd::Move(abs) => {
+                    if abs {
+                        self.last_pt = Point {x: self.nums[0], y: self.nums[1]};
+                    }
+                    else {
+                        self.last_pt += Vector {x: self.nums[0], y: self.nums[1]};
+                    }
+                    self.out.push(PathCommand::MoveTo(self.last_pt));
+                },
+                Cmd::Hor(abs) => {
+                    if abs {
+                        self.last_pt = Point {x: self.nums[0], y: self.last_pt.y};
+                    }
+                    else {
+                        self.last_pt += Vector {x: self.nums[0], y: 0.0};
+                    }
+                    self.out.push(PathCommand::LineTo(self.last_pt));
+                }
+                Cmd::Vert(abs) => {
+                    if abs {
+                        self.last_pt = Point {x: self.last_pt.x, y: self.nums[0]};
+                    }
+                    else {
+                        self.last_pt += Vector {x: 0.0, y: self.nums[0]};
+                    }
+                    self.out.push(PathCommand::LineTo(self.last_pt));
+                }
+                Cmd::Line(abs) => {
+                    if abs {
+                        self.last_pt = Point {x: self.nums[0], y: self.nums[1]};
+                    }
+                    else {
+                        self.last_pt += Vector {x: self.nums[0], y: self.nums[1]};
+                    }
+                    self.out.push(PathCommand::LineTo(self.last_pt));
+                },
+                Cmd::Cubic(abs) => {
+                    if abs {
+                        self.last_pt = Point {x: self.nums[4], y: self.nums[5]};
+                    }
+                    else {
+                        self.last_pt += Vector {x: self.nums[4], y: self.nums[5]};
+                    }
+                    self.out.push(PathCommand::CubicTo(
+                        Point{x:self.nums[0], y:self.nums[1]},
+                        Point{x:self.nums[2], y:self.nums[3]},
+
+                        self.last_pt,
+                    ))
+                },
+                Cmd::Quadratic(abs) => {
+                    if abs {
+                        self.last_pt = Point {x: self.nums[2], y: self.nums[3]};
+                    }
+                    else {
+                        self.last_pt += Vector {x: self.nums[2], y: self.nums[3]};
+                    }
+                    self.out.push(PathCommand::QuadraticTo(
+                        Point {x: self.nums[0], y: self.nums[1]},
+                        self.last_pt
+                    ));
+                }
+                Cmd::Close => {
+                    self.out.push(PathCommand::Close);
+                }
+            }
+            self.num_count = 0;
+            self.chain = true;
+            Ok(())
+        }
+    }
+    
+    let mut state = ParseState::default();
+    for i in 0..path.len() {
+        match path[i] {
+            b'M' => state.next_cmd(Cmd::Move(true)) ?,
+            b'm' => state.next_cmd(Cmd::Move(false)) ?,
+            b'Q' => state.next_cmd(Cmd::Quadratic(true)) ?,
+            b'q' => state.next_cmd(Cmd::Quadratic(false)) ?,
+            b'C' => state.next_cmd(Cmd::Cubic(true)) ?,
+            b'c' => state.next_cmd(Cmd::Cubic(false)) ?,
+            b'H' => state.next_cmd(Cmd::Hor(true)) ?,
+            b'h' => state.next_cmd(Cmd::Hor(false)) ?,
+            b'V' => state.next_cmd(Cmd::Vert(true)) ?,
+            b'v' => state.next_cmd(Cmd::Vert(false)) ?,
+            b'L' => state.next_cmd(Cmd::Line(true)) ?,
+            b'l' => state.next_cmd(Cmd::Line(false)) ?,
+            b'Z' | b'z' => state.next_cmd(Cmd::Close) ?,
+            b'-' => state.add_min() ?,
+            b'0'..=b'9' => state.add_digit((path[i] - b'0') as f64) ?,
+            b'.' => state.add_dot() ?,
+            b',' | b' ' | b'\r' | b'\n' | b'\t' => state.whitespace() ?,
+            x => {
+                return Err(format!("Unexpected character {} - {}", x, x as char))
+            }
+        }
+    }
+    state.finalize_cmd() ?;
+    
+    Ok(state.out)
 }
 
