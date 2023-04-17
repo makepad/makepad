@@ -44,6 +44,13 @@ use {
 
 use num_traits::FromPrimitive;
 
+// Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
+const ANDROID_META_CTRL_MASK: i32 = 28672;
+// Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_SHIFT_MASK
+const ANDROID_META_SHIFT_MASK: i32 = 193;
+// Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_ALT_MASK
+const ANDROID_META_ALT_MASK: i32 = 50;
+
 #[link(name = "EGL")]
 extern "C" {
     fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
@@ -202,7 +209,9 @@ impl Cx {
     }
 
     /// Called when a touch event happened on the software keyword
-    pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, shift: bool, to_java: AndroidToJava) {
+    pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
+        let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
+
         let e: Event;
         match characters {
             Some(input) => {
@@ -228,11 +237,13 @@ impl Cx {
                             }
                         )
                     } else {
+                        let control = meta_state & ANDROID_META_CTRL_MASK != 0;
+                        let alt = meta_state & ANDROID_META_ALT_MASK != 0;
                         e = Event::KeyDown(
                             KeyEvent {
                                 key_code: AndroidKeyCode::to_makepad_key_code(key_code_val),
                                 is_repeat: false,
-                                modifiers: KeyModifiers {shift, ..Default::default()},
+                                modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
                                 time: self.os.time_now()
                             }
                         )
