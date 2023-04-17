@@ -79,6 +79,7 @@ pub struct CxIconAtlasAlloc {
 
 #[derive(Clone)]
 pub struct CxIconArgs {
+    pub linearize: f64,
     pub size: DVec2,
     pub translate: DVec2,
     pub scale: f64,
@@ -87,6 +88,7 @@ pub struct CxIconArgs {
 impl CxIconArgs {
     fn hash(&self) -> LiveId {
         LiveId::seeded()
+            .bytes_append(&self.linearize.to_be_bytes())
             .bytes_append(&self.translate.x.to_be_bytes())
             .bytes_append(&self.translate.y.to_be_bytes())
             .bytes_append(&self.scale.to_be_bytes())
@@ -113,8 +115,10 @@ impl CxIconAtlas {
     }
     
     pub fn get_icon_bounds(&mut self, path_str: &Rc<String>) -> Option<(CxIconPathHash, Rect)> {
+        if path_str.len() == 0{
+            return None
+        }
         let path_hash = CxIconPathHash(LiveId(Rc::as_ptr(path_str) as u64));
-
         if let Some(path) = self.paths.get(&path_hash) {
             return Some((path_hash, path.bounds))
         }
@@ -240,7 +244,7 @@ impl DrawTrapezoidVector {
                         );
                         cmd
                     }
-                }).linearize(0.5)
+                }).linearize(entry.args.linearize)
             );
             if let Some(trapezoidate) = trapezoidate {
                 trapezoids.extend_from_internal_iter(
