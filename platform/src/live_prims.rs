@@ -715,7 +715,10 @@ live_primitive!(
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                        LiveEval::String(v) => {*self = v;}
+                        LiveEval::String(v) => {
+                            self.clear();
+                            self.push_str(v.as_str());                            
+                        }
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
                         }
@@ -768,7 +771,7 @@ live_primitive!(
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                        LiveEval::String(v) => {*self = Rc::new(v);}
+                        LiveEval::String(v) => {*self = v.clone();}
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
                         }
