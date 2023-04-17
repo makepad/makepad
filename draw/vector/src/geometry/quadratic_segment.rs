@@ -19,15 +19,15 @@ impl QuadraticSegment {
     /// Returns true if `self` is approximately linear with tolerance `epsilon`.
     pub fn is_approximately_linear(self, epsilon: f64) -> bool {
         let v1 = self.p1 - self.p0;
-        (if let Some(vx) = (self.p2 - self.p0).normalize() {
+        if let Some(vx) = (self.p2 - self.p0).normalize() {
             // If the baseline is a line segment, the segment is approximately linear if the
             // rejection of the control point from the baseline is less than `epsilon`.
-            v1.cross(vx).abs()
+            v1.cross(vx).abs() < epsilon
         } else {
             // If the baseline is a single point, the segment is approximately linear if the
             // distance of the control point from the baseline is less than `epsilon`.
-            v1.length()
-        }) < epsilon
+            v1.length() < epsilon
+        }
     }
 
     /// Splits `self` into two quadratic Bezier curve segments, at parameter `t`.
