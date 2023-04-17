@@ -74,6 +74,7 @@ live_design!{
 pub struct DrawIcon {
     #[live(1.0)] pub brightness: f32,
     #[live(0.6)] pub curve: f32,
+    #[live(0.5)] pub linearize: f32,
     
     #[live] pub path: Rc<String>,
     #[live] pub translate: DVec2,
@@ -121,7 +122,6 @@ impl DrawIcon {
         let icon_atlas_rc = cx.icon_atlas_rc.clone();
         let mut icon_atlas = icon_atlas_rc.0.borrow_mut();
         let icon_atlas = &mut*icon_atlas;
-        
         if let Some((path_hash, bounds)) = icon_atlas.get_icon_bounds(&self.path) {
             let width_is_fit = walk.width.is_fit();
             let height_is_fit = walk.height.is_fit();
@@ -139,6 +139,9 @@ impl DrawIcon {
                 };
                 walk.height = Size::Fixed(bounds.size.y * self.scale * scale);
             }
+            if !width_is_fit && !height_is_fit{
+                scale = (peek_rect.size.y / bounds.size.y).min(peek_rect.size.x / bounds.size.x);
+            }
             let rect = cx.walk_turtle(walk);
             
             let dpi_factor = cx.current_dpi_factor();
@@ -149,6 +152,7 @@ impl DrawIcon {
             );
             
             let slot = icon_atlas.get_icon_slot(CxIconArgs {
+                linearize: self.linearize as f64,
                 size: rect.size * dpi_factor,
                 scale: self.scale * scale * dpi_factor,
                 translate: self.translate - bounds.pos + subpixel
