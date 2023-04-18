@@ -283,12 +283,12 @@ Makepad.Callback{
         if (!(clipboard.hasPrimaryClip())) {
             pasteItem.setVisible(false);
         } else if (
-            !(clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) &&
-            !(clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML))
+            clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) ||
+            clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML)
         ) {
-            pasteItem.setVisible(false);
-        } else {
             pasteItem.setVisible(true);
+        } else {
+            pasteItem.setVisible(false);
         }
     }
 
