@@ -74,16 +74,21 @@ live_design!{
     
     // WIDGETS
     
-    Divider = <Frame> {
+    DividerX = <Frame> {
+        walk: {width: Fit, height: Fill, margin: {top: (SPACING_BASE_PADDING), right: 1.0, bottom: (SPACING_BASE_PADDING), left: 1.0}}
+        layout: {flow: Right}
+        <Box> {
+            walk: {width: 4.0, height: Fill}
+            draw_bg: {color: (COLOR_UP_2)}
+        }
+    }
+
+    DividerY = <Frame> {
         walk: {width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
         layout: {flow: Down}
         <Box> {
             walk: {width: Fill, height: 1.0}
             draw_bg: {color: (COLOR_DOWN_5)}
-        }
-        <Box> {
-            walk: {width: Fill, height: 1.0}
-            draw_bg: {color: (COLOR_UP_5)}
         }
     }
     
@@ -120,7 +125,6 @@ live_design!{
         }
     }
     
-
     FishDropDown = <DropDown> {
         walk: {width: Fit}
         layout: {padding: {top: (SPACING_BASE_PADDING), right: 18.0, bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
@@ -507,8 +511,8 @@ live_design!{
         
 
         <Frame> {
-            walk: {width: Fill, height: Fit}
-            layout: {align: {x: 0.0, y: 0.5}, spacing: (SPACING_CONTROLS)}
+            walk: {width: Fill, height: Fit, margin: 0.0}
+            layout: {align: {x: 0.0, y: 0.5}, spacing: (SPACING_CONTROLS), padding: 0.0}
             
             <FillerX> {}
             
@@ -522,8 +526,8 @@ live_design!{
         }
 
         <Frame> {
-            layout: {flow: Right, padding: 0, spacing: 0.0, align: {x: 0.0, y: 0.5}}
             walk: {width: Fill, height: Fit, margin: 0.0}
+            layout: {flow: Right, padding: 0.0, spacing: 0.0, align: {x: 0.0, y: 0.5}}
 
             playpause = <PlayPause> {}
             
@@ -672,12 +676,9 @@ live_design!{
         }
     }
     
-    ChordButton = <Button> {
-        walk: {width: Fill, height: Fill}
-        layout: {
-            align: {x: 0.5, y: 0.5},
-            padding: 0,
-        }
+    ChordButtonA = <Button> {
+        walk: {width: Fill, height: Fill, margin: 2.5}
+        layout: { align: {x: 0.5, y: 0.5}, padding: 0.0 }
         
         draw_label: {
             text_style: <H2_TEXT_BOLD>{}
@@ -717,13 +718,56 @@ live_design!{
         }
         
     }
+
+    ChordButtonB = <Button> {
+        walk: {width: Fill, height: Fill, margin: {top: 2.5, right: 0.0, bottom: 2.5, left: 0}}
+        layout: { align: {x: 0.5, y: 0.5}, padding: 0.0 }
+        
+        draw_label: {
+            text_style: <H2_TEXT_BOLD>{}
+            fn get_color(self) -> vec4 {
+                return mix( (COLOR_UP_6), (COLOR_UP_6), self.pressed )
+            }
+        }
+        
+        draw_bg: {
+            instance pressed: 0.0
+            instance color_default: 0.0
+            instance COLOR_UP_3: 0.0
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    2.0
+                )
+                
+                sdf.fill(
+                    mix(
+                        self.color_default,
+                        (COLOR_UP_2),
+                        self.pressed
+                    )
+                );
+                
+                return sdf.result
+            }
+            
+            color_default: (COLOR_UP_OFF),
+            COLOR_UP_3: (COLOR_UP_3);
+        }
+        
+    }
     
     ChordStrip = <Box> {
         walk: {width: Fill, height: Fill}
-        layout: {flow: Right, spacing: (SPACING_CONTROLS / 2), padding: 5}
+        layout: {flow: Right, spacing: 0.0, padding: {top: 0.0, left: 0.0, bottom: 0.0, right: 5}}
         draw_bg: {
             color: (COLOR_UP_2),
-            radius: 5.0
+            radius: 2.5
         }
         
         
@@ -736,14 +780,16 @@ live_design!{
             text: "change me"
         }
         
-        <ChordButton> {text: ""}
-        <ChordButton> {text: ""}
-        <ChordButton> {text: ""}
-        <ChordButton> {text: ""}
-        <ChordButton> {text: ""}
-        <ChordButton> {text: ""}
-        <ChordButton> {text: ""}
-        <ChordButton> {text: ""}
+        <ChordButtonA> {}
+        <ChordButtonA> {}
+        <ChordButtonA> {}
+        <ChordButtonB> {}
+        <DividerX> {}
+        <ChordButtonB> {}
+        <DividerX> {}
+        <ChordButtonB> {}
+        <DividerX> {}
+        <ChordButtonB> {}
         
     }
     
@@ -994,27 +1040,27 @@ live_design!{
         layout: {flow: Down, align: {x: 0.5, y: 0.0},}
         
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
         
     }
@@ -1025,9 +1071,9 @@ live_design!{
         layout: {flow: Down, align: {x: 0.5, y: 0.0},}
         
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
-        <Divider> {}
+        <DividerY> {}
         <PresetListEntry> {}
         
     }
