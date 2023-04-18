@@ -66,7 +66,7 @@ live_design!{
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
     
-    H2_TEXT_NORMAL = {
+    H2_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
@@ -205,6 +205,56 @@ live_design!{
             }
         }
         
+    }
+    
+    GraphicalButton = <Button> {
+        draw_icon:{
+            // instance hover: 0.0
+            // instance pressed: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #f00,
+                        #0ff,
+                        self.hover
+                    ),
+                    #9,
+                    self.pressed
+                )
+            }
+            path:"M7399.39,1614.16C7357.53,1615.77 7324.04,1650.26 7324.04,1692.51C7324.04,1702.28 7316.11,1710.22 7306.33,1710.22C7296.56,1710.22 7288.62,1702.28 7288.62,1692.51C7288.62,1630.8 7337.85,1580.49 7399.14,1578.74L7389.04,1569.44C7381,1562.04 7380.49,1549.51 7387.88,1541.47C7395.28,1533.44 7407.81,1532.92 7415.85,1540.32L7461.76,1582.58C7465.88,1586.37 7468.2,1591.73 7468.15,1597.32C7468.1,1602.91 7465.68,1608.23 7461.5,1611.94L7415.59,1652.71C7407.42,1659.97 7394.9,1659.23 7387.65,1651.06C7380.39,1642.89 7381.14,1630.37 7389.3,1623.12L7399.39,1614.16Z",
+            //path:"M0,0 L20.0,0.0 L20.0,20.0 Z"
+            // fn get_color(self) -> vec4 {
+            //     return mix( #ff0, #ff0, self.pressed)
+            // }
+            // fn get_color(self) -> vec4 {
+            //     return mix(#f00, #00f, self.pressed)
+            // }
+        }
+        icon_walk:{margin:{left:10}, width:16,height:Fit}
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    2.0
+                )
+                
+                sdf.fill(
+                    mix(
+                        (COLOR_UP_OFF),
+                        (COLOR_UP_3),
+                        self.pressed
+                    )
+                );
+                
+                return sdf.result
+            }
+        }
+        text: "Click to count"
     }
     
     FishSlider = <Slider> {
@@ -453,7 +503,7 @@ live_design!{
 
     SequencerControls = <Box> {
         layout: {flow: Down, padding: 0, spacing: 0.0, align: {x: 0.0, y: 0.5}}
-        walk: {width: Fill, height: Fit, margin: {top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS)}}
+        walk: {width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS)}}
         
 
         <Frame> {
@@ -486,6 +536,8 @@ live_design!{
                     label: "BPM"
                 }
             }
+
+            <FillerX> {}
             
             rootnote = <InstrumentDropdown> {
                 walk: {height: Fill, width: Fit, margin: 0}
@@ -544,28 +596,33 @@ live_design!{
                         sdf.glow_keep(
                             mix(
                                 (COLOR_UP_OFF),
-                                (COLOR_UP_4),
+                                (COLOR_UP_5),
                                 self.active
-                            ),
-                            1.0
+                            ), 1.5
                         );
-                        sdf.glow_keep(
+                        // sdf.glow_keep(
+                        //     mix(
+                        //         (COLOR_UP_OFF),
+                        //         (COLOR_UP_3),
+                        //         self.active
+                        //     ),
+                        //     1.5
+                        // );
+                        // sdf.glow_keep(
+                        //     mix(
+                        //         (COLOR_UP_OFF),
+                        //         (COLOR_UP_2),
+                        //         self.active
+                        //     ),
+                        //     2.0
+                        // );
+                        sdf.fill(
                             mix(
-                                (COLOR_UP_OFF),
-                                (COLOR_UP_3),
-                                self.active
-                            ),
-                            1.5
-                        );
-                        sdf.glow_keep(
-                            mix(
-                                (COLOR_UP_OFF),
                                 (COLOR_UP_2),
+                                (COLOR_UP_5),
                                 self.active
-                            ),
-                            2.0
-                        );
-                        sdf.fill(mix((COLOR_UP_2), (COLOR_UP_FULL), self.active))
+                            )
+                        )
                         return sdf.result
                     }
                     
@@ -673,7 +730,7 @@ live_design!{
         label = <Label> {
             walk: {width: Fill, height: Fill, margin: 10}
             draw_label: {
-                text_style: <H2_TEXT_BOLD>{},
+                text_style: <H2_TEXT_REGULAR>{},
                 color: (COLOR_UP_6)
             }
             text: "change me"
@@ -694,15 +751,14 @@ live_design!{
         layout: {flow: Down, spacing: (SPACING_CONTROLS), padding: {left: (SPACING_OS), right: (SPACING_OS)}}
         walk: {width: Fill, height: Fill}
         
-        <ChordStrip> {}
-        <ChordStrip> {}
-        <ChordStrip> {}
-        <ChordStrip> {}
-        <ChordStrip> {}
-        <ChordStrip> {}
-        <ChordStrip> {}
-        <ChordStrip> {}
-        <ChordStrip> {}
+        <ChordStrip> { label= { text: "Em" } }
+        <ChordStrip> { label= { text: "Am" } }
+        <ChordStrip> { label= { text: "Dm" } }
+        <ChordStrip> { label= { text: "G" } }
+        <ChordStrip> { label= { text: "C" } }
+        <ChordStrip> { label= { text: "F" } }
+        <ChordStrip> { label= { text: "Bb" } }
+        <ChordStrip> { label= { text: "Bdim" } }
     }
     
     ModePlay = <Frame> {
@@ -744,7 +800,7 @@ live_design!{
             
             <Frame> {
                 layout: {flow: Down}
-                walk: {width: Fill, height: Fit}
+                walk: {width: Fill, height: Fill}
                 
                 crushamount = <FishSlider> {
                     label: "Crush"
@@ -756,6 +812,8 @@ live_design!{
                     }
                 }
                 
+                <FillerY> {}
+                
                 chorusmix = <FishSlider> {
                     label: "Chorus"
                     slider = {
@@ -764,6 +822,8 @@ live_design!{
                         label: "Mix"
                     }
                 }
+
+                <FillerY> {}
                 
                 delaysend = <FishSlider> {
                     label: "Delay",
@@ -774,6 +834,8 @@ live_design!{
                     }
                 }
                 
+                <FillerY> {}
+
                 porta = <FishSlider> {
                     label: "Portamento",
                     slider = {
@@ -812,6 +874,7 @@ live_design!{
                 sdf.line_to(c.x + szs + offset, c.y - szs + offset);
                 
                 sdf.stroke_keep(mix(#fff0, (COLOR_DOWN_FULL), self.selected), 1.75);
+
                 
                 return sdf.result
             }
@@ -852,9 +915,16 @@ live_design!{
             <Box> {
                 walk: {width: Fit, height: Fit}
 
-                presetfavorite = <PresetFavorite> {
-                    walk: {width: 30, height: 30, margin: {top: 15} }
-                    label: " "
+                // presetfavorite = <PresetFavorite> {
+                //     walk: {width: 30, height: 30, margin: {top: 15} }
+                //     label: " "
+                // }
+
+                <GraphicalButton> {
+                    draw_icon:{
+                        path:"M9032.27,1268.13C9050.13,1236.44 9085.85,1236.44 9103.71,1252.29C9121.57,1268.13 9121.57,1299.83 9103.71,1331.52C9091.21,1355.29 9059.06,1379.06 9032.27,1394.9C9005.48,1379.06 8973.34,1355.29 8960.84,1331.52C8942.98,1299.83 8942.98,1268.13 8960.84,1252.29C8978.69,1236.44 9014.41,1236.44 9032.27,1268.13Z"
+                    }
+                    text: ""
                 }
 
                 share = <FishButton> {
@@ -870,40 +940,6 @@ live_design!{
                         }
                     }
 
-                    // draw_bg: {
-                    //     instance hover: 0.0
-                    //     instance pressed: 0.0
-                        
-                    //     fn pixel(self) -> vec4 {
-                    //         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    //         sdf.box(
-                    //             1.,
-                    //             1.,
-                    //             self.rect_size.x - 2.0,
-                    //             self.rect_size.y - 2.0,
-                    //             2.0
-                    //         )
-                            
-                    //         sdf.stroke_keep(
-                    //             mix(
-                    //                 #0000,
-                    //                 mix((COLOR_DOWN_5), (COLOR_UP_3), pow(self.pos.y, 3)),
-                    //                 self.pressed
-                    //             ),
-                    //             1.
-                    //         );
-
-                    //         sdf.fill(
-                    //             mix(
-                    //                 #FFFFFF00,
-                    //                 mix((COLOR_DOWN_4), (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 0.3)),
-                    //                 self.pressed
-                    //             )
-                    //         );
-                            
-                    //         return sdf.result
-                    //     }
-                    // }
                     text: "→"
                     walk: {width: Fit, height: Fit}
                     draw_label: { text_style: {font_size: (FONT_SIZE_H2)} }
@@ -1054,50 +1090,11 @@ live_design!{
             layout: {flow: Down, spacing: (SPACING_BASE_PADDING)}
             
             os_header_placeholder = <Box> {
-                walk: {width: Fill, height: 50}
-                layout: {flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20}
+                walk: {width: Fill, height: 50, marin: 0}
+                layout: {flow: Right, spacing: (SPACING_BASE_PADDING), padding: 0}
                 draw_bg: {color: (COLOR_DOWN_1)}
             }
             
-            button1 = <Button> {
-                draw_icon:{
-                    // instance pressed: 0.0
-
-                    path:"M7399.39,1614.16C7357.53,1615.77 7324.04,1650.26 7324.04,1692.51C7324.04,1702.28 7316.11,1710.22 7306.33,1710.22C7296.56,1710.22 7288.62,1702.28 7288.62,1692.51C7288.62,1630.8 7337.85,1580.49 7399.14,1578.74L7389.04,1569.44C7381,1562.04 7380.49,1549.51 7387.88,1541.47C7395.28,1533.44 7407.81,1532.92 7415.85,1540.32L7461.76,1582.58C7465.88,1586.37 7468.2,1591.73 7468.15,1597.32C7468.1,1602.91 7465.68,1608.23 7461.5,1611.94L7415.59,1652.71C7407.42,1659.97 7394.9,1659.23 7387.65,1651.06C7380.39,1642.89 7381.14,1630.37 7389.3,1623.12L7399.39,1614.16Z",
-                    //path:"M0,0 L20.0,0.0 L20.0,20.0 Z"
-                    // fn get_color(self) -> vec4 {
-                    //     return mix( #ff0, #ff0, self.pressed)
-                    // }
-                    // fn get_color(self) -> vec4 {
-                    //     return mix(#f00, #00f, self.pressed)
-                    // }
-                }
-                icon_walk:{margin:{left:10}, width:16,height:Fit}
-                draw_bg: {
-                    fn pixel(self) -> vec4 {
-                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        sdf.box(
-                            1.,
-                            1.,
-                            self.rect_size.x - 2.0,
-                            self.rect_size.y - 2.0,
-                            2.0
-                        )
-                        
-                        sdf.fill(
-                            mix(
-                                (COLOR_UP_OFF),
-                                (COLOR_UP_3),
-                                self.pressed
-                            )
-                        );
-                        
-                        return sdf.result
-                    }
-                }
-                text: "Click to count"
-            }
-
             <SequencerControls> { }
             
             application_pages = <Frame> {
@@ -1107,7 +1104,7 @@ live_design!{
             }
             
             mobile_menu = <Box> {
-                walk: {width: Fill, height: 150}
+                walk: {width: Fill, height: 120}
                 layout: {flow: Right, spacing: (SPACING_BASE_PADDING), padding: 20}
                 draw_bg: {color: (COLOR_DOWN_2)}
                 
