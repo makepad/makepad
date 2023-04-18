@@ -285,11 +285,6 @@ impl TextInput {
             (self.cursor_tail, self.cursor_head)
         }
     }
-
-    pub fn is_in_selected_text(&self, pos: usize) -> bool {
-        let (left, right) = self.sorted_cursor();
-        left < pos && pos < right
-    }
     
     pub fn selected_text(&mut self) -> String {
         let mut ret = String::new();
@@ -659,7 +654,6 @@ impl TextInput {
                         if pos != self.cursor_head {
                             self.cursor_head = pos;
                         }
-                        // TODO check if we should prevent this invocation when there is no changes
                         self.draw_bg.redraw(cx);
                     }
                 }

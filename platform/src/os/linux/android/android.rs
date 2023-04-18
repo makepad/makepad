@@ -190,7 +190,10 @@ impl Cx {
     pub fn from_java_on_touch(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
         let time = self.os.time_now();
         for touch in &mut touches {
-            if self.os.is_text_ime_visible { touch.abs.y += self.os.text_ime_panning_offset };
+            // When the software keyboard shifted the UI in the vertical axis,
+            //we need to make the math here to keep touch events positions synchronized.
+            if self.os.keyboard_visible { touch.abs.y += self.os.keyboard_panning_offset as f64 };
+
             touch.abs /= self.os.dpi_factor;
         }
         self.fingers.process_touch_update_start(time, &touches);
@@ -291,6 +294,7 @@ impl Cx {
     }
 
     pub fn from_java_on_resize_text_ime(&mut self, ime_height: i32, to_java: AndroidToJava) {
+        self.os.keyboard_visible = true;
         self.panning_adjust_for_text_ime(ime_height);
         self.redraw_all();
         self.after_every_event(&to_java);
@@ -334,10 +338,10 @@ impl Cx {
         
         // keep repainting in a loop 
         self.passes[pass_id].paint_dirty = false;
-        let y = if self.os.is_text_ime_visible { self.os.text_ime_panning_offset } else { 0.0 };
+        let panning_offset = if self.os.keyboard_visible { self.os.keyboard_panning_offset } else { 0 };
         
         unsafe {
-            gl_sys::Viewport(0, y as i32, self.os.display_size.x as i32, self.os.display_size.y as i32);
+            gl_sys::Viewport(0, panning_offset, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
         
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -402,11 +406,11 @@ impl Cx {
     }
 
     fn panning_adjust_for_text_ime(&mut self, android_ime_height: i32) {
-        self.os.is_text_ime_visible = true;
+        self.os.keyboard_visible = true;
 
         let size = self.os.display_size / self.os.dpi_factor;
         let screen_height = cmp::max(size.x as i32, size.y as i32);
-        let vertical_offset = self.os.text_ime_trigger_position.y as i32;
+        let vertical_offset = self.os.keyboard_trigger_position.y as i32;
         let ime_height = android_ime_height / self.os.dpi_factor as i32;
 
         // Make sure there is some room between the software keyword and the text input or widget that triggered
@@ -415,9 +419,9 @@ impl Cx {
 
         let should_be_panned = vertical_offset > screen_height - ime_height;
         if should_be_panned {
-            self.os.text_ime_panning_offset = (vertical_offset - (screen_height - ime_height) + vertical_space) as f64;
+            self.os.keyboard_panning_offset = vertical_offset - (screen_height - ime_height) + vertical_space;
         } else {
-            self.os.text_ime_panning_offset = 0.0;
+            self.os.keyboard_panning_offset = 0;
         }
     }
     
@@ -451,11 +455,11 @@ impl Cx {
                     //android_app.stop_timer(timer_id);
                 },
                 CxOsOp::ShowTextIME(area, _pos) => {
-                    self.os.text_ime_trigger_position = area.get_clipped_rect(self).pos;
+                    self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
                     to_java.show_text_ime();
                 },
                 CxOsOp::HideTextIME => {
-                    self.os.is_text_ime_visible = false;
+                    self.os.keyboard_visible = false;
                     to_java.hide_text_ime();
                 },
                 CxOsOp::ShowClipboardActions(selected) => {
@@ -495,9 +499,9 @@ impl Default for CxOs {
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             time_start: Instant::now(),
-            is_text_ime_visible: false,
-            text_ime_trigger_position: DVec2::default(),
-            text_ime_panning_offset: 0.0,
+            keyboard_visible: false,
+            keyboard_trigger_position: DVec2::default(),
+            keyboard_panning_offset: 0,
             media: CxAndroidMedia::default()
         }
     }
@@ -508,9 +512,11 @@ pub struct CxOs {
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub time_start: Instant,
-    pub is_text_ime_visible: bool,
-    pub text_ime_trigger_position: DVec2,
-    pub text_ime_panning_offset: f64,
+
+    pub keyboard_visible: bool,
+    pub keyboard_trigger_position: DVec2,
+    pub keyboard_panning_offset: i32,
+
     pub (crate) media: CxAndroidMedia,
 }
 
