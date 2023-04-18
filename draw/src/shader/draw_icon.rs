@@ -76,6 +76,7 @@ pub struct DrawIcon {
     #[live(0.6)] pub curve: f32,
     #[live(0.5)] pub linearize: f32,
     
+    #[live] pub svg: LiveDependency,
     #[live] pub path: Rc<String>,
     #[live] pub translate: DVec2,
     #[live(1.0)] pub scale: f64,

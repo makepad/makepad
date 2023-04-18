@@ -834,7 +834,7 @@ pub struct LiveDependency(String);
 impl LiveDependency{
     pub fn into_string(self)->String{self.0}
     pub fn as_ref(&self)->&str{&self.0}
-    pub fn qualify(cx:&Cx, node:&LiveNode)->Self{
+    pub fn expand_crate_path(cx:&Cx, node:&LiveNode)->Self{
         if let LiveValue::Dependency(path) = &node.value{
             let live_registry = cx.live_registry.borrow();
             if let Some(path) = path.strip_prefix("crate://self/"){
@@ -871,7 +871,7 @@ live_primitive!(
     fn apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Dependency {..} => {
-                *self = LiveDependency::qualify(cx, &nodes[index]);
+                *self = LiveDependency::expand_crate_path(cx, &nodes[index]);
                 index + 1
             }
             _ => {
