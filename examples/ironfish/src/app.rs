@@ -13,6 +13,7 @@ use crate::{
 //use std::io::prelude::*;
 live_design!{
     import makepad_widgets::frame::*
+    import makepad_widgets::button::Button;
     import makepad_example_ironfish::app_desktop::AppDesktop
     import makepad_example_ironfish::app_mobile::AppMobile
     import makepad_widgets::desktop_window::DesktopWindow
@@ -39,7 +40,13 @@ live_design!{
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
                 frame: {body = {
-
+                    button1 = <Button> {
+                draw_icon:{
+                    svg:dep("crate://self/resources/Icon_Redo.svg")
+                }
+                icon_walk:{margin:{left:10}, width:16,height:Fit}
+                text: "Click to count"
+            }
                     <AppDesktop> {}
                 }}
             }

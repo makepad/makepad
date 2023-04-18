@@ -29,6 +29,22 @@ live_design!{
     }
     
     Button= {{Button}} {
+        draw_icon:{
+            instance hover: 0.0
+            instance pressed: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.pressed
+                )
+            }
+        }
+        
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
@@ -92,6 +108,7 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_icon: {pressed: 0.0, hover: 0.0}
                         draw_label: {pressed: 0.0, hover: 0.0}
                     }
                 }
@@ -103,6 +120,7 @@ live_design!{
                     }
                     apply: {
                         draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                         draw_label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
@@ -111,6 +129,7 @@ live_design!{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                         draw_label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }

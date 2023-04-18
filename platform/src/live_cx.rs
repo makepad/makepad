@@ -185,7 +185,7 @@ impl Cx {
             for node in &file.original.nodes {
                 match &node.value {
                     LiveValue::Dependency {..} => {
-                        let dep = LiveDependency::qualify(self, &node);
+                        let dep = LiveDependency::expand_crate_path(self, &node);
                         self.dependencies.insert(dep.into_string(), CxDependency {
                             data: None
                         });
