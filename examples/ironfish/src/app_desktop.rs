@@ -2174,7 +2174,6 @@ live_design!{
             <GradientY> {
                 walk: {width: Fill, height: (HEIGHT_AUDIOVIZ)}
                 draw_bg: {color: (COLOR_VIZ_1), color2: (COLOR_VIZ_2)}
-
                 display_audio = <DisplayAudio> {
                     walk: {height: Fill, width: Fill}
                 }

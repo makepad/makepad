@@ -63,6 +63,9 @@ impl<'a> LiveExpander<'a> {
             let in_value = &in_node.value;
             
             match in_value {
+                /*LiveValue::Dependency(dep)=>{
+                    
+                },*/
                 LiveValue::Close => {
                     current_parent.pop();
                     in_index += 1;
