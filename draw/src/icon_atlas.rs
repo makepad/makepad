@@ -30,6 +30,7 @@ pub struct CxIconSlot {
 #[derive(Clone)]
 pub struct CxIconEntry {
     path_hash: CxIconPathHash,
+    pos: DVec2,
     slot: CxIconSlot,
     args: CxIconArgs,
 }
@@ -83,6 +84,7 @@ pub struct CxIconArgs {
     pub linearize: f64,
     pub size: DVec2,
     pub translate: DVec2,
+    pub subpixel: DVec2,
     pub scale: f64,
 }
 
@@ -92,6 +94,8 @@ impl CxIconArgs {
             .bytes_append(&self.linearize.to_be_bytes())
             .bytes_append(&self.translate.x.to_be_bytes())
             .bytes_append(&self.translate.y.to_be_bytes())
+            .bytes_append(&self.subpixel.x.to_be_bytes())
+            .bytes_append(&self.subpixel.y.to_be_bytes())
             .bytes_append(&self.scale.to_be_bytes())
             .bytes_append(&self.size.x.to_be_bytes())
             .bytes_append(&self.size.y.to_be_bytes())
@@ -218,12 +222,13 @@ impl CxIconAtlas {
             return entry.slot
         }
         
-        let slot = self.alloc.alloc_icon_slot(args.size.x as f64, args.size.y as f64);
+        let (slot,pos) = self.alloc.alloc_icon_slot(args.size.x as f64, args.size.y as f64);
         self.entries.insert(
             entry_hash,
             CxIconEntry {
                 path_hash,
                 slot,
+                pos,
                 args
             }
         );
@@ -234,7 +239,7 @@ impl CxIconAtlas {
     
 }
 impl CxIconAtlasAlloc {
-    pub fn alloc_icon_slot(&mut self, w: f64, h: f64) -> CxIconSlot {
+    pub fn alloc_icon_slot(&mut self, w: f64, h: f64) -> (CxIconSlot,DVec2) {
         if w + self.xpos >= self.texture_size.x {
             self.xpos = 0.0;
             self.ypos += self.hmax + 1.0;
@@ -247,16 +252,19 @@ impl CxIconAtlasAlloc {
             self.hmax = h;
         }
         
-        let tx1 = self.xpos / self.texture_size.x;
-        let ty1 = self.ypos / self.texture_size.y;
+        let px = self.xpos;
+        let py = self.ypos;
+        
+        let tx1 = px / self.texture_size.x;
+        let ty1 = py / self.texture_size.y;
         
         self.xpos += w + 1.0;
         
-        CxIconSlot {
+        (CxIconSlot {
             chan: 0.0,
             t1: dvec2(tx1, ty1).into(),
             t2: dvec2(tx1 + (w / self.texture_size.x), ty1 + (h / self.texture_size.y)).into()
-        }
+        },dvec2(px, py).into())
     }
 }
 
@@ -290,6 +298,7 @@ impl DrawTrapezoidVector {
                             &AffineTransformation::identity()
                                 .translate(Vector::new(entry.args.translate.x, entry.args.translate.y))
                                 .uniform_scale(entry.args.scale)
+                                .translate(Vector::new(entry.pos.x + entry.args.subpixel.x, entry.pos.y + entry.args.subpixel.y))
                         );
                         cmd
                     }
