@@ -175,7 +175,7 @@ impl SeqButton {
                 self.animate_state(cx, id!(hover.on));
             }
             Hit::FingerUp(se) => {
-                if !se.is_sweep && se.device.has_hovers() {
+                if !se.is_sweep && se.is_over && se.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else {
