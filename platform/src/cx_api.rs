@@ -5,7 +5,7 @@ use {
     crate::{
         makepad_math::{DVec2, Rect},
         gpu_info::GpuInfo,
-        cx::{Cx, OsType, XrCapabilities},
+        cx::{Cx, CxRef, OsType, XrCapabilities},
         event::{
             DraggedItem, 
             Timer,
@@ -75,6 +75,10 @@ impl Cx {
     pub fn xr_capabilities(&self) -> &XrCapabilities {
         &self.xr_capabilities 
     } 
+    
+    pub fn get_ref(&self)->CxRef{
+        CxRef(self.self_ref.clone().unwrap())
+    }
     
     pub fn get_dependency(&self, path: &str) -> Result<&Vec<u8>,
     String> { 
