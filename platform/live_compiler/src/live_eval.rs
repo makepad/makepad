@@ -62,6 +62,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
         LiveValue::InlineString(_) => {
             LiveEval::String(Rc::new(live_registry.live_node_as_string(&nodes[*index]).unwrap()))
         }
+        LiveValue::Dependency(v)=>LiveEval::String(v.clone()),
         LiveValue::String(v)=>LiveEval::String(v.clone()),
         LiveValue::Float32(v) => {
             *index += 1;
@@ -122,6 +123,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     LiveValue::Str(_) |
                     LiveValue::InlineString(_) => LiveEval::String(Rc::new(live_registry.live_node_as_string(&nodes[index]).unwrap())),
                     LiveValue::String(v) =>LiveEval::String(v.clone()),
+                    LiveValue::Dependency(v) =>LiveEval::String(v.clone()),
                     LiveValue::Expr {..} => { // expr depends on expr
                         live_eval(live_registry, index, &mut (index + 1), nodes)?
                     }
