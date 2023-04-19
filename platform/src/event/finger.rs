@@ -90,7 +90,7 @@ pub enum TouchState {
     Stop,
     Move,
     Stable
-}  
+}
 
 #[derive(Clone, Debug)]
 pub struct TouchPoint {
@@ -336,30 +336,30 @@ impl CxFingers {
         return self.tap.count
     }
     
-    pub (crate) fn process_touch_update_start(&mut self, time:f64, touches:&[TouchPoint]){
-        for touch in touches{
-            if let TouchState::Start = touch.state{
+    pub (crate) fn process_touch_update_start(&mut self, time: f64, touches: &[TouchPoint]) {
+        for touch in touches {
+            if let TouchState::Start = touch.state {
                 self.process_tap_count(touch.abs, time);
             }
         }
     }
     
-    pub (crate) fn process_touch_update_end(&mut self, touches:&[TouchPoint]){
-        for touch in touches{
+    pub (crate) fn process_touch_update_end(&mut self, touches: &[TouchPoint]) {
+        for touch in touches {
             let digit_id = live_id_num!(touch, touch.uid).into();
-            match touch.state{
-                TouchState::Stop=>{
+            match touch.state {
+                TouchState::Stop => {
                     self.release_digit(digit_id);
                     self.remove_hover(digit_id);
                 }
-                TouchState::Start | TouchState::Move | TouchState::Stable =>{
+                TouchState::Start | TouchState::Move | TouchState::Stable => {
                     self.cycle_hover_area(digit_id);
                 }
             }
         }
-        self.switch_captures();        
+        self.switch_captures();
     }
-
+    
     pub (crate) fn mouse_down(&mut self, button: usize) {
         if self.first_mouse_button.is_none() {
             self.first_mouse_button = Some(button);
@@ -392,14 +392,14 @@ impl CxFingers {
         false
     }
     
-    pub fn sweep_lock(&mut self, area:Area){
-        if self.sweep_lock.is_none(){
+    pub fn sweep_lock(&mut self, area: Area) {
+        if self.sweep_lock.is_none() {
             self.sweep_lock = Some(area);
         }
     }
     
-    pub fn sweep_unlock(&mut self, area:Area){
-        if self.sweep_lock == Some(area){
+    pub fn sweep_unlock(&mut self, area: Area) {
+        if self.sweep_lock == Some(area) {
             self.sweep_lock = None;
         }
     }
@@ -634,7 +634,7 @@ impl Event {
                 }
             },
             Event::TouchUpdate(e) => {
-                if cx.fingers.test_sweep_lock(options.sweep_area){
+                if cx.fingers.test_sweep_lock(options.sweep_area) {
                     return Hit::Nothing
                 }
                 for t in &e.touches {
@@ -773,10 +773,10 @@ impl Event {
                 }
             }
             Event::MouseMove(e) => { // ok so we dont get hovers
-                if cx.fingers.test_sweep_lock(options.sweep_area){
+                if cx.fingers.test_sweep_lock(options.sweep_area) {
                     return Hit::Nothing
                 }
-
+                
                 let digit_id = live_id!(mouse).into();
                 
                 let tap_count = cx.fingers.get_tap_count();
@@ -811,6 +811,7 @@ impl Event {
                                     }
                                     else if capture.sweep_area == options.sweep_area { // take over the capture
                                         capture.switch_capture = Some(area);
+                                        cx.fingers.new_hover_area(digit_id, area);
                                         return Hit::FingerDown(FingerDownEvent {
                                             window_id: e.window_id,
                                             abs: e.abs,
@@ -846,7 +847,8 @@ impl Event {
                             }
                         }
                         else if capture.area == area {
-                            return Hit::FingerMove(FingerMoveEvent {
+                            
+                            let event= Hit::FingerMove(FingerMoveEvent {
                                 window_id: e.window_id,
                                 abs: e.abs,
                                 digit_id,
@@ -857,7 +859,9 @@ impl Event {
                                 abs_start: capture.abs_start,
                                 rect,
                                 is_over: Margin::rect_contains_with_margin(&rect, e.abs, &options.margin),
-                            })
+                            });
+                            cx.fingers.new_hover_area(digit_id, area);
+                            return event
                         }
                     }
                 }
@@ -899,10 +903,10 @@ impl Event {
                 }
             },
             Event::MouseDown(e) => {
-                if cx.fingers.test_sweep_lock(options.sweep_area){
+                if cx.fingers.test_sweep_lock(options.sweep_area) {
                     return Hit::Nothing
                 }
-
+                
                 let digit_id = live_id!(mouse).into();
                 
                 if !e.handled.get().is_empty() {
@@ -928,7 +932,7 @@ impl Event {
                 
                 cx.fingers.capture_digit(digit_id, area, options.sweep_area, e.time, e.abs);
                 e.handled.set(area);
-                
+                cx.fingers.new_hover_area(digit_id, area);
                 return Hit::FingerDown(FingerDownEvent {
                     window_id: e.window_id,
                     abs: e.abs,
@@ -941,10 +945,10 @@ impl Event {
                 })
             },
             Event::MouseUp(e) => {
-                if cx.fingers.test_sweep_lock(options.sweep_area){
+                if cx.fingers.test_sweep_lock(options.sweep_area) {
                     return Hit::Nothing
                 }
-
+                
                 if cx.fingers.first_mouse_button != Some(e.button) {
                     return Hit::Nothing
                 }
@@ -956,9 +960,11 @@ impl Event {
                 };
                 let tap_count = cx.fingers.get_tap_count();
                 let rect = area.get_clipped_rect(&cx);
+                
                 if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
                     if capture.area == area {
-                        return Hit::FingerUp(FingerUpEvent {
+                        let is_over = rect.contains(e.abs);
+                        let event =  Hit::FingerUp(FingerUpEvent {
                             abs_start: capture.abs_start,
                             rect: rect,
                             window_id: e.window_id,
@@ -969,9 +975,13 @@ impl Event {
                             capture_time: capture.time,
                             modifiers: e.modifiers.clone(),
                             time: e.time,
-                            is_over: rect.contains(e.abs),
+                            is_over,
                             is_sweep: false,
-                        })
+                        });
+                        if is_over {
+                            cx.fingers.new_hover_area(digit_id, area);
+                        }
+                        return event
                     }
                 }
             },

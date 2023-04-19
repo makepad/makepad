@@ -20,7 +20,7 @@ live_design!{
                 mix(
                     mix(
                         mix(#xFFFFFF18, #xFFFDDD30, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.5)), // 1st value = center, 2nd value = outer edges
-                        mix(#xFFFFFF40, #xFFFFFF20, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                        mix(#xFF0000FF, #xFF0000FF, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
                         self.hover
                     ),
                     mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
