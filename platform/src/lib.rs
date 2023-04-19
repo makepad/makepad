@@ -127,6 +127,7 @@ pub use {
         },
         cx::{
             Cx,
+            CxRef,
             OsType
         },
         area::{

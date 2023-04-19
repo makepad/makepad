@@ -119,9 +119,12 @@ pub struct Cx {
     pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
     
     pub debug: Debug,
+    
+    pub (crate) self_ref: Option<Rc<RefCell<Cx>>>
 }
 
-//pub struct CxRef(Rc<RefCell<Cx>>);
+#[derive(Clone)]
+pub struct CxRef(pub (crate) Rc<RefCell<Cx>>);
 
 pub struct CxDependency {
     pub data: Option<Result<Vec<u8>, String >>
@@ -254,6 +257,8 @@ impl Cx {
             debug: Default::default(),
             
             globals: Default::default(),
+            
+            self_ref: None
         }
     }
 }

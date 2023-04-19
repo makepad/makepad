@@ -24,10 +24,12 @@ use {
 
 impl Cx {
     
-    pub fn event_loop(mut self) {
-        self.os_type = OsType::Windows;
+    pub fn event_loop(cx:Rc<RefCell<Cx>>) {
+        
+        cx.borrow_mut().self_ref = Some(cx.clone());
+        cx.borrow_mut().os_type = OsType::Windows;
+        
         let d3d11_cx = Rc::new(RefCell::new(D3d11Cx::new()));
-        let cx = Rc::new(RefCell::new(self));
         
         let d3d11_windows = Rc::new(RefCell::new(Vec::new()));
         
