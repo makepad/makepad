@@ -137,7 +137,16 @@ pub struct App {
     #[rust]
     counter: usize,
 }
+/*
+impl App{
+    async fn do_network_request(cx:CxRef, ui:WidgetRef, url:&str)->String{
+        let x = fetch(urL).await;
+        ui.get_label(id!(thing)).set_text(cx.deref().unwrap(), x);
+    }
+}*/
+
 impl AppMain for App{
+    
     
     // This function is used to handle any incoming events from the host system. It is called
     // automatically by the code we generated with the call to the macro `main_app` above.
@@ -156,6 +165,7 @@ impl AppMain for App{
         // Get a reference to our button from the frame, and check if one of the actions returned by
         // the frame was a notification that the button was clicked.
         if self.ui.get_button(id!(button1)).clicked(&actions) {
+            
             // Increment the counter.
             self.counter += 1;
             
