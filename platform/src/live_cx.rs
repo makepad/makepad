@@ -15,7 +15,6 @@ use {
             LiveTokenId,
             LiveFileId,
         },
-        live_prims::LiveDependency,
         makepad_error_log::*,
         makepad_live_compiler::LiveTypeInfo,
         makepad_math::*,
@@ -182,11 +181,10 @@ impl Cx {
     pub fn live_scan_dependencies(&mut self) {
         let live_registry = self.live_registry.borrow();
         for file in &live_registry.live_files {
-            for node in &file.original.nodes {
+            for node in &file.expanded.nodes {
                 match &node.value {
-                    LiveValue::Dependency {..} => {
-                        let dep = LiveDependency::expand_crate_path(self, &node);
-                        self.dependencies.insert(dep.into_string(), CxDependency {
+                    LiveValue::Dependency(dep)=> {
+                        self.dependencies.insert(dep.as_str().to_string(), CxDependency {
                             data: None
                         });
                     }, 

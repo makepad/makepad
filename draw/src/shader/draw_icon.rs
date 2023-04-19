@@ -76,8 +76,8 @@ pub struct DrawIcon {
     #[live(0.6)] pub curve: f32,
     #[live(0.5)] pub linearize: f32,
     
-    #[live] pub svg: LiveDependency,
-    #[live] pub path: Rc<String>,
+    #[live] pub svg_file: LiveDependency,
+    #[live] pub svg_path: Rc<String>,
     #[live] pub translate: DVec2,
     #[live(1.0)] pub scale: f64,
     
@@ -123,7 +123,7 @@ impl DrawIcon {
         let icon_atlas_rc = cx.icon_atlas_rc.clone();
         let mut icon_atlas = icon_atlas_rc.0.borrow_mut();
         let icon_atlas = &mut*icon_atlas;
-        if let Some((path_hash, bounds)) = icon_atlas.get_icon_bounds(&self.path) {
+        if let Some((path_hash, bounds)) = icon_atlas.get_icon_bounds(cx, &self.svg_path, self.svg_file.as_ref()) {
             let width_is_fit = walk.width.is_fit();
             let height_is_fit = walk.height.is_fit();
             let peek_rect = cx.peek_walk_turtle(walk);
