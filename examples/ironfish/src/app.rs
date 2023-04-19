@@ -40,14 +40,14 @@ live_design!{
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
                 frame: {body = {
-                    button1 = <Button> {
-                draw_icon:{
-                    svg:dep("crate://self/resources/Icon_Redo.svg")
-                }
-                icon_walk:{margin:{left:10}, width:16,height:Fit}
-                text: "Click to count"
-            }
-                    <AppDesktop> {}
+            //         button1 = <Button> {
+            //     draw_icon:{
+            //         svg:dep("crate://self/resources/Icon_Redo.svg")
+            //     }
+            //     icon_walk:{margin:{left:10}, width:16,height:Fit}
+            //     text: "Click to count"
+            // }
+                    <AppMobile> {}
                 }}
             }
             /*<DesktopWindow> {
@@ -243,6 +243,14 @@ impl AppMain for App {
         )).selected_to_visible(cx, &ui, &actions, ids!(
             oscillators.osc1,
             oscillators.osc2,
+        ));
+
+        ui.get_radio_buttons(ids!(
+            filter_modes.tab1,
+            filter_modes.tab2,
+        )).selected_to_visible(cx, &ui, &actions, ids!(
+            preset_pages.tab1_frame,
+            preset_pages.tab2_frame,
         ));
         
         ui.get_radio_buttons(ids!(
