@@ -28,15 +28,15 @@ use {
 };
 
 impl Cx {
-    pub fn event_loop(mut self) {
-        self.os_type = OsType::LinuxWindow(LinuxWindowParams{
+    pub fn event_loop(cx:Rc<RefCell<Cx>>) {
+        cx.borrow_mut().self_ref = Some(cx.clone());
+        cx.borrow_mut().os_type = OsType::LinuxWindow(LinuxWindowParams{
             custom_window_chrome: false
         });
-        self.gpu_info.performance = GpuPerformance::Tier1;
+        cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
         
         let opengl_cx = Rc::new(RefCell::new(None));
         let opengl_windows = Rc::new(RefCell::new(Vec::new()));
-        let cx = Rc::new(RefCell::new(self));
         
         init_xlib_app_global(Box::new({
             let cx = cx.clone();
