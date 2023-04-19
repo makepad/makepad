@@ -63,6 +63,7 @@ pub struct CxIconEntryHash(LiveId);
 pub struct CxIconAtlas {
     pub texture_id: TextureId,
     pub clear_buffer: bool,
+    svg_deps: HashMap<String, CxIconPathHash>,
     paths: HashMap<CxIconPathHash, CxIconPathCommands>,
     entries: HashMap<CxIconEntryHash, CxIconEntry>,
     alloc: CxIconAtlasAlloc
@@ -103,6 +104,7 @@ impl CxIconAtlas {
             texture_id,
             clear_buffer: false,
             entries: HashMap::new(),
+            svg_deps: HashMap::new(),
             paths: HashMap::new(),
             alloc: CxIconAtlasAlloc {
                 texture_size: DVec2 {x: 2048.0, y: 2048.0},
@@ -114,15 +116,8 @@ impl CxIconAtlas {
         }
     }
     
-    pub fn get_icon_bounds(&mut self, path_str: &Rc<String>) -> Option<(CxIconPathHash, Rect)> {
-        if path_str.len() == 0{
-            return None
-        }
-        let path_hash = CxIconPathHash(LiveId(Rc::as_ptr(path_str) as u64));
-        if let Some(path) = self.paths.get(&path_hash) {
-            return Some((path_hash, path.bounds))
-        }
-        match parse_svg_path(path_str.as_str().as_bytes()) {
+    pub fn parse_and_cache_path(&mut self, path_hash: CxIconPathHash, path: &[u8]) -> Option<(CxIconPathHash, Rect)> {
+        match parse_svg_path(path) {
             Ok(path) => {
                 let mut min = dvec2(f64::INFINITY, f64::INFINITY);
                 let mut max = dvec2(-f64::INFINITY, -f64::INFINITY);
@@ -148,8 +143,8 @@ impl CxIconAtlas {
                         PathCommand::Close => ()
                     }
                 }
-                let bounds = Rect{pos: min, size: max-min};
-                self.paths.insert(path_hash, CxIconPathCommands{
+                let bounds = Rect {pos: min, size: max - min};
+                self.paths.insert(path_hash, CxIconPathCommands {
                     bounds,
                     path
                 });
@@ -162,13 +157,67 @@ impl CxIconAtlas {
         }
     }
     
+    pub fn get_icon_bounds(&mut self, cx: &Cx, path_str: &Rc<String>, svg_dep: &Rc<String>) -> Option<(CxIconPathHash, Rect)> {
+        if svg_dep.len() != 0 {
+            
+            // alright so. lets see if we have a path hash
+            if let Some(path_hash) = self.svg_deps.get(svg_dep.as_str()) {
+                if let Some(path) = self.paths.get(&path_hash) {
+                    return Some((*path_hash, path.bounds))
+                }
+                return None
+            }
+            let path_hash = CxIconPathHash(LiveId(self.svg_deps.len() as u64));
+            self.svg_deps.insert(svg_dep.as_str().to_string(), path_hash);
+            // lets parse the path range out of the svg file
+            match cx.get_dependency(svg_dep.as_str()) {
+                Ok(data)=>{
+                    fn find_path_str(data:&[u8])->Option<&[u8]>{
+                        let pat = "path d=\"".as_bytes();
+                        'outer:for i in 0..data.len(){
+                            for j in 0..pat.len(){
+                                if data[i+j] != pat[j]{
+                                    continue 'outer;
+                                }
+                            }
+                            for k in i+pat.len()..data.len(){
+                                if data[k] == '\"' as u8{
+                                    return Some(&data[i+pat.len()..k])
+                                }
+                            }
+                            return None
+                        }
+                        None
+                    }
+                    if let Some(data) = find_path_str(data){
+                       
+                        return self.parse_and_cache_path(path_hash, data)
+                    }
+                    return None
+                    
+                }
+                Err(_err)=>{
+                    return None
+                }
+            }
+        }
+        if path_str.len() == 0 {
+            return None
+        }
+        let path_hash = CxIconPathHash(LiveId(Rc::as_ptr(path_str) as u64));
+        if let Some(path) = self.paths.get(&path_hash) {
+            return Some((path_hash, path.bounds))
+        }
+        self.parse_and_cache_path(path_hash, path_str.as_str().as_bytes())
+    }
+    
     pub fn get_icon_slot(&mut self, args: CxIconArgs, path_hash: CxIconPathHash) -> CxIconSlot {
         let entry_hash = CxIconEntryHash(path_hash.0.id_append(args.hash()));
         
         if let Some(entry) = self.entries.get(&entry_hash) {
             return entry.slot
         }
-
+        
         let slot = self.alloc.alloc_icon_slot(args.size.x as f64, args.size.y as f64);
         self.entries.insert(
             entry_hash,
@@ -230,7 +279,7 @@ impl CxIconAtlas {
 
 impl DrawTrapezoidVector {
     // atlas drawing function used by CxAfterDraw
-    fn draw_vector(&mut self, entry: &CxIconEntry, path:&CxIconPathCommands, many: &mut ManyInstances) {
+    fn draw_vector(&mut self, entry: &CxIconEntry, path: &CxIconPathCommands, many: &mut ManyInstances) {
         let trapezoids = {
             let mut trapezoids = Vec::new();
             //log_str(&format!("Serializing char {} {} {} {}", glyphtc.tx1 , cx.fonts_atlas.texture_size.x ,todo.subpixel_x_fract ,atlas_page.dpi_factor));
@@ -530,9 +579,9 @@ fn parse_svg_path(path: &[u8]) -> Result<Vec<PathCommand>, String> {
                         self.last_pt += Vector {x: self.nums[4], y: self.nums[5]};
                     }
                     self.out.push(PathCommand::CubicTo(
-                        Point{x:self.nums[0], y:self.nums[1]},
-                        Point{x:self.nums[2], y:self.nums[3]},
-
+                        Point {x: self.nums[0], y: self.nums[1]},
+                        Point {x: self.nums[2], y: self.nums[3]},
+                        
                         self.last_pt,
                     ))
                 },
