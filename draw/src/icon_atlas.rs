@@ -163,7 +163,6 @@ impl CxIconAtlas {
     
     pub fn get_icon_bounds(&mut self, cx: &Cx, path_str: &Rc<String>, svg_dep: &Rc<String>) -> Option<(CxIconPathHash, Rect)> {
         if svg_dep.len() != 0 {
-            
             // alright so. lets see if we have a path hash
             if let Some(path_hash) = self.svg_deps.get(svg_dep.as_str()) {
                 if let Some(path) = self.paths.get(&path_hash) {
@@ -194,7 +193,6 @@ impl CxIconAtlas {
                         None
                     }
                     if let Some(data) = find_path_str(data){
-                       
                         return self.parse_and_cache_path(path_hash, data)
                     }
                     return None
@@ -246,7 +244,7 @@ impl CxIconAtlasAlloc {
             self.hmax = 0.0;
         }
         if h + self.ypos >= self.texture_size.y {
-            println!("VECTOR ATLAS FULL, TODO FIX THIS {} > {},", h + self.ypos, self.texture_size.y);
+            println!("ICON ATLAS FULL, TODO FIX THIS {} > {},", h + self.ypos, self.texture_size.y);
         }
         if h > self.hmax {
             self.hmax = h;
