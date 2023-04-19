@@ -42,7 +42,7 @@ live_design!{
                 frame: {body = {
                     button1 = <Button> {
                 draw_icon:{
-                    svg:dep("crate://self/resources/Icon_Redo.svg")
+                    svg_file:dep("crate://self/resources/Icon_Redo.svg")
                 }
                 icon_walk:{margin:{left:10}, width:16,height:Fit}
                 text: "Click to count"
@@ -50,13 +50,13 @@ live_design!{
                     <AppDesktop> {}
                 }}
             }
-            /*<DesktopWindow> {
+            <DesktopWindow> {
                 window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
                 pass: {clear_color: #2A}
                 frame: {body = {
                     <AppMobile> {}
                 }}
-            }*/
+            }
             
         }
     }
