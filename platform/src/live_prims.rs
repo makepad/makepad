@@ -829,49 +829,21 @@ impl LiveIdToEnum for &[LiveId;1]{
 }*/
 
 #[derive(Debug, Default, Clone)]
-pub struct LiveDependency(String);
+pub struct LiveDependency(Rc<String>);
 
 impl LiveDependency{
-    pub fn into_string(self)->String{self.0}
-    pub fn as_ref(&self)->&str{&self.0}
-    pub fn expand_crate_path(cx:&Cx, node:&LiveNode)->Self{
-        if let LiveValue::Dependency(path) = &node.value{
-            let live_registry = cx.live_registry.borrow();
-            if let Some(path) = path.strip_prefix("crate://self/"){
-                let file_id = node.origin.token_id().unwrap().file_id().unwrap();
-                let mut final_path = live_registry.file_id_to_cargo_manifest_path(file_id);
-                final_path.push('/');
-                final_path.push_str(path);
-                return Self(final_path);
-            }
-            else 
-            if let Some(path) = path.strip_prefix("crate://"){
-                let mut split = path.split('/');
-                if let Some(crate_name) = split.next(){
-                    if let Some(mut final_path) = live_registry.crate_name_to_cargo_manifest_path(crate_name){
-                        while let Some(next) = split.next(){
-                            final_path.push('/');
-                            final_path.push_str(next);
-                        }
-                        return Self(final_path);
-                    }
-                }                
-            }
-            else{
-                return Self(path.to_string())
-            }
-        }
-        panic!()
-    }
+    pub fn as_str(&self)->&str{&self.0}
+    pub fn as_ref(&self)->&Rc<String>{&self.0}
 }
+
 
 live_primitive!(
     LiveDependency,
     LiveDependency::default(),
     fn apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Dependency {..} => {
-                *self = LiveDependency::expand_crate_path(cx, &nodes[index]);
+            LiveValue::Dependency (dep)=> {
+                *self = Self(dep.clone());
                 index + 1
             }
             _ => {
@@ -882,7 +854,6 @@ live_primitive!(
     },
     fn to_live_value(&self) -> LiveValue { panic!() }
 );
-
 
 
 live_primitive!(
