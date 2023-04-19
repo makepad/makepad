@@ -43,16 +43,17 @@ const KEEP_ALIVE_COUNT: usize = 5;
 
 impl Cx {
     
-    pub fn event_loop(mut self) {
+    pub fn event_loop(cx:Rc<RefCell<Cx>>) {
         for arg in std::env::args() {
             if arg == "--metal-xpc" {
                 return start_xpc_service();
             }
         }
         
-        self.os_type = OsType::Macos;
+        cx.borrow_mut().self_ref = Some(cx.clone());
+        cx.borrow_mut().os_type = OsType::Macos;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
-        let cx = Rc::new(RefCell::new(self));
+        //let cx = Rc::new(RefCell::new(self));
         
         for arg in std::env::args() {
             if arg == "--stdin-loop" {
