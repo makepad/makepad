@@ -132,6 +132,9 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn defer_walk(&mut self, walk: Walk) -> Option<DeferWalk> {
+        if walk.abs_pos.is_some(){
+            return None
+        }
         let turtle = self.turtles.last_mut().unwrap();
         let defer_index = turtle.defer_count;
         let pos = turtle.pos;

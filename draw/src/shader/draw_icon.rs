@@ -127,41 +127,48 @@ impl DrawIcon {
             let width_is_fit = walk.width.is_fit();
             let height_is_fit = walk.height.is_fit();
             let peek_rect = cx.peek_walk_turtle(walk);
-            let mut scale  = 1.0;
+            let mut scale = 1.0;
             if width_is_fit {
-                if !height_is_fit{
+                if !height_is_fit {
                     scale = peek_rect.size.y / bounds.size.y
                 };
                 walk.width = Size::Fixed(bounds.size.x * self.scale * scale);
             }
             if height_is_fit {
-                if !width_is_fit{
+                if !width_is_fit {
                     scale = peek_rect.size.x / bounds.size.x
                 };
                 walk.height = Size::Fixed(bounds.size.y * self.scale * scale);
             }
-            if !width_is_fit && !height_is_fit{
+            if !width_is_fit && !height_is_fit {
                 scale = (peek_rect.size.y / bounds.size.y).min(peek_rect.size.x / bounds.size.x);
             }
             let rect = cx.walk_turtle(walk);
             
             let dpi_factor = cx.current_dpi_factor();
             
+            // we should snap the subpixel to 8x8 steps
+            let dpi_pos = rect.pos * dpi_factor;
+            let snapped_pos = dpi_pos.floor();
+            let snapped_size = (rect.size * dpi_factor).ceil() + dvec2(1.0, 1.0);
             let subpixel = dvec2(
-                rect.pos.x as f64 - (rect.pos.x as f64 * dpi_factor).floor() / dpi_factor,
-                rect.pos.y as f64 - (rect.pos.y as f64 * dpi_factor).floor() / dpi_factor
+                ((dpi_pos.x - snapped_pos.x) * 8.0).floor() / 8.0,
+                ((dpi_pos.y - snapped_pos.y) * 8.0).floor() / 8.0
             );
-            
+            // ok now we need to snap our rect to real pixels
             let slot = icon_atlas.get_icon_slot(CxIconArgs {
                 linearize: self.linearize as f64,
-                size: rect.size * dpi_factor,
+                size: snapped_size,
                 scale: self.scale * scale * dpi_factor,
-                translate: self.translate - bounds.pos + subpixel
+                translate: self.translate - bounds.pos,
+                subpixel: subpixel 
             }, path_hash);
             
             self.draw_clip = cx.turtle().draw_clip().into();
-            self.rect_pos = rect.pos.into();
-            self.rect_size = rect.size.into();
+            // lets snap the pos/size to actual pixels
+            self.rect_pos = (snapped_pos / dpi_factor).into();
+            self.rect_size = (snapped_size / dpi_factor).into();
+            
             self.icon_t1 = slot.t1;
             self.icon_t2 = slot.t2;
             
