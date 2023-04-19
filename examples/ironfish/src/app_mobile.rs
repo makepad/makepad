@@ -783,6 +783,7 @@ live_design!{
         <ChordButtonA> {}
         <ChordButtonA> {}
         <ChordButtonA> {}
+        <ChordButtonA> {walk: {margin: {right: 5}}}
         <ChordButtonB> {}
         <DividerX> {}
         <ChordButtonB> {}
