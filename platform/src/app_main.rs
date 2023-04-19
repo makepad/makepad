@@ -12,15 +12,15 @@ macro_rules!app_main {
         #[cfg(not(any(target_arch = "wasm32", target_os="android")))]
         pub fn app_main() {
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-            let mut cx = Cx::new(Box::new(move | cx, event | {
+            let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(move | cx, event | {
                 if let Event::Construct = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
                 }
                 <AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
-            }));
-            live_design(&mut cx);
-            cx.init_cx_os();
-            cx.event_loop();
+            }))));
+            live_design(&mut *cx.borrow_mut());
+            cx.borrow_mut().init_cx_os();
+            Cx::event_loop(cx);
         }
         
         #[cfg(target_os = "android")]

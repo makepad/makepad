@@ -137,13 +137,14 @@ pub struct App {
     #[rust]
     counter: usize,
 }
-/*
+
 impl App{
-    async fn do_network_request(cx:CxRef, ui:WidgetRef, url:&str)->String{
-        let x = fetch(urL).await;
-        ui.get_label(id!(thing)).set_text(cx.deref().unwrap(), x);
+    async fn do_network_request(_cx:CxRef, ui:WidgetRef, url:&str)->String{
+        //let x = fetch(urL).await;
+        //ui.get_label(id!(thing)).set_text(&mut *cx.borrow_mut(), x);
+        "".to_string()
     }
-}*/
+}
 
 impl AppMain for App{
     
@@ -165,7 +166,7 @@ impl AppMain for App{
         // Get a reference to our button from the frame, and check if one of the actions returned by
         // the frame was a notification that the button was clicked.
         if self.ui.get_button(id!(button1)).clicked(&actions) {
-            
+            //cx.spawn_async(Self::do_network_request(cx.get_ref(), self.ui.clone()))
             // Increment the counter.
             self.counter += 1;
             
