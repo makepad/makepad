@@ -240,6 +240,7 @@ impl Cx {
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
             CocoaEvent::Scroll(e) => {
                 self.call_event_handler(&Event::Scroll(e.into()))
