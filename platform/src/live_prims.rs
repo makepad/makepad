@@ -715,7 +715,10 @@ live_primitive!(
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                        LiveEval::String(v) => {*self = v;}
+                        LiveEval::String(v) => {
+                            self.clear();
+                            self.push_str(v.as_str());                            
+                        }
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
                         }
@@ -748,6 +751,59 @@ live_primitive!(
     }
 );
 
+live_primitive!(
+    Rc<String>,
+    Default::default(),
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Str(v) => {
+                *self = Rc::new(v.to_string());
+                index + 1
+            }
+            LiveValue::String(v) => {
+                *self = v.clone();
+                index + 1
+            }
+            LiveValue::InlineString(v) => {
+                *self = Rc::new(v.as_str().to_string());
+                index + 1
+            }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::String(v) => {*self = v.clone();}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::Array => {
+                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        // lets check our byte size and choose a storage mode appropriately.
+        //let bytes = self.as_bytes();
+        if let Some(inline_str) = InlineString::from_str(&self) {
+            LiveValue::InlineString(inline_str)
+        }
+        else {
+            LiveValue::String(self.clone())
+        }
+    }
+);
+
 impl ToLiveValue for &str{
     fn to_live_value(&self) -> LiveValue {
         // lets check our byte size and choose a storage mode appropriately.
@@ -773,51 +829,36 @@ impl LiveIdToEnum for &[LiveId;1]{
 }*/
 
 #[derive(Debug, Default, Clone)]
-pub struct LiveDependency(String);
+pub struct LiveDependency(Rc<String>);
 
 impl LiveDependency{
-    pub fn into_string(self)->String{self.0}
-    pub fn as_ref(&self)->&str{&self.0}
-    pub fn qualify(cx:&Cx, node:&LiveNode)->Self{
-        if let LiveValue::Dependency(path) = &node.value{
-            let live_registry = cx.live_registry.borrow();
-            if let Some(path) = path.strip_prefix("crate://self/"){
-                let file_id = node.origin.token_id().unwrap().file_id().unwrap();
-                let mut final_path = live_registry.file_id_to_cargo_manifest_path(file_id);
-                final_path.push('/');
-                final_path.push_str(path);
-                return Self(final_path);
-            }
-            else 
-            if let Some(path) = path.strip_prefix("crate://"){
-                let mut split = path.split('/');
-                if let Some(crate_name) = split.next(){
-                    if let Some(mut final_path) = live_registry.crate_name_to_cargo_manifest_path(crate_name){
-                        while let Some(next) = split.next(){
-                            final_path.push('/');
-                            final_path.push_str(next);
-                        }
-                        return Self(final_path);
-                    }
-                }                
-            }
-            else{
-                return Self(path.to_string())
-            }
-        }
-        panic!()
-    }
+    pub fn as_str(&self)->&str{&self.0}
+    pub fn as_ref(&self)->&Rc<String>{&self.0}
 }
+
 
 live_primitive!(
     LiveDependency,
     LiveDependency::default(),
     fn apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Dependency {..} => {
-                *self = LiveDependency::qualify(cx, &nodes[index]);
+            LiveValue::Dependency (dep)=> {
+                *self = Self(dep.clone());
                 index + 1
             }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::String(v) => {*self = Self(v.clone());}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            }
+
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Dependency");
                 nodes.skip_node(index)
@@ -826,7 +867,6 @@ live_primitive!(
     },
     fn to_live_value(&self) -> LiveValue { panic!() }
 );
-
 
 
 live_primitive!(

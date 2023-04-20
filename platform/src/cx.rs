@@ -118,12 +118,17 @@ pub struct Cx {
     pub (crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event) >>,
     
     pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
+
+    pub (crate) self_ref: Option<Rc<RefCell<Cx>>>,
     
     pub debug: Debug,
 
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
 }
+
+#[derive(Clone)]
+pub struct CxRef(pub (crate) Rc<RefCell<Cx>>);
 
 pub struct CxDependency {
     pub data: Option<Result<Vec<u8>, String >>
@@ -261,6 +266,8 @@ impl Cx {
 
             executor: Some(executor),
             spawner,
+            
+            self_ref: None
         }
     }
 }

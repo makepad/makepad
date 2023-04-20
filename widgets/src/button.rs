@@ -29,6 +29,22 @@ live_design!{
     }
     
     Button= {{Button}} {
+        draw_icon:{
+            instance hover: 0.0
+            instance pressed: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.pressed
+                )
+            }
+        }
+        
         draw_bg: {
             instance hover: 0.0
             instance pressed: 0.0
@@ -92,6 +108,7 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         draw_bg: {pressed: 0.0, hover: 0.0}
+                        draw_icon: {pressed: 0.0, hover: 0.0}
                         draw_label: {pressed: 0.0, hover: 0.0}
                     }
                 }
@@ -103,6 +120,7 @@ live_design!{
                     }
                     apply: {
                         draw_bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_icon: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                         draw_label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
@@ -111,6 +129,7 @@ live_design!{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        draw_icon: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                         draw_label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
@@ -157,7 +176,9 @@ impl Widget for Button{
         });
     }
 
-    fn get_walk(&self)->Walk{self.walk}
+    fn get_walk(&self)->Walk{
+        self.walk
+    }
     
     fn redraw(&mut self, cx:&mut Cx){
         self.draw_bg.redraw(cx)
@@ -218,7 +239,7 @@ impl Button {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), &self.text);
-        self.draw_icon.draw_walk(cx, self.icon_walk, None);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_bg.end(cx);
     }
 }

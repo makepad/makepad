@@ -398,7 +398,7 @@ impl LiveHook for Frame {
             }
         }
         // lets load the image resource
-        let image_path = self.image.as_ref();
+        let image_path = self.image.as_str();
         if image_path.len()>0 {
             let mut image_buffer = None;
             match cx.get_dependency(image_path) {
@@ -819,7 +819,7 @@ impl Frame {
             };
             
             if self.show_bg {
-                if self.image.as_ref().len() > 0 {
+                if self.image.as_str().len() > 0 {
                     self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
                 }
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
