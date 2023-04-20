@@ -1,4 +1,5 @@
 use {
+    makepad_futures::{executor, executor::{Executor, Spawner}},
     std::{
         collections::{
             HashMap,
@@ -117,10 +118,13 @@ pub struct Cx {
     pub (crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event) >>,
     
     pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
+
+    pub (crate) self_ref: Option<Rc<RefCell<Cx>>>,
     
     pub debug: Debug,
-    
-    pub (crate) self_ref: Option<Rc<RefCell<Cx>>>
+
+    pub(crate) executor: Option<Executor>,
+    pub(crate) spawner: Spawner,
 }
 
 #[derive(Clone)]
@@ -206,6 +210,8 @@ impl Cx {
             platform: CxOsTexture::default()
         });*/
         
+        let (executor, spawner) = executor::new_executor_and_spawner();
+
         Self {
             cpu_cores: 8,
             
@@ -257,6 +263,9 @@ impl Cx {
             debug: Default::default(),
             
             globals: Default::default(),
+
+            executor: Some(executor),
+            spawner,
             
             self_ref: None
         }
