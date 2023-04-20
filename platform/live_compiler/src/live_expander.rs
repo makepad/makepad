@@ -1,4 +1,5 @@
 use {
+    std::rc::Rc,
     std::collections::HashMap,
     crate::{
         makepad_live_id::*,
@@ -63,6 +64,7 @@ impl<'a> LiveExpander<'a> {
             let in_value = &in_node.value;
             
             match in_value {
+                
                 LiveValue::Close => {
                     current_parent.pop();
                     in_index += 1;
@@ -199,6 +201,28 @@ impl<'a> LiveExpander<'a> {
             
             // process stacks
             match in_value {
+                LiveValue::Dependency(path)=>{
+                    if let Some(path) = path.strip_prefix("crate://self/"){
+                        let file_id = in_node.origin.token_id().unwrap().file_id().unwrap();
+                        let mut final_path = self.live_registry.file_id_to_cargo_manifest_path(file_id);
+                        final_path.push('/');
+                        final_path.push_str(path);
+                        out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
+                    }
+                    else 
+                    if let Some(path) = path.strip_prefix("crate://"){
+                        let mut split = path.split('/');
+                        if let Some(crate_name) = split.next(){
+                            if let Some(mut final_path) = self.live_registry.crate_name_to_cargo_manifest_path(crate_name){
+                                while let Some(next) = split.next(){
+                                    final_path.push('/');
+                                    final_path.push_str(next);
+                                }
+                                out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
+                            }
+                        }                
+                    }
+                },
                 LiveValue::Clone(clone) => {
                     if let Some(target) = self.live_registry.find_scope_target(*clone, &out_doc.nodes) {
                         match target {

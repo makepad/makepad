@@ -13,6 +13,7 @@ use crate::{
 //use std::io::prelude::*;
 live_design!{
     import makepad_widgets::frame::*
+    import makepad_widgets::button::Button;
     import makepad_example_ironfish::app_desktop::AppDesktop
     import makepad_example_ironfish::app_mobile::AppMobile
     import makepad_widgets::desktop_window::DesktopWindow
@@ -42,13 +43,13 @@ live_design!{
                     <AppDesktop> {}
                 }}
             }
-            /*<DesktopWindow> {
+            <DesktopWindow> {
                 window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
                 pass: {clear_color: #2A}
                 frame: {body = {
                     <AppMobile> {}
                 }}
-            }*/
+            }
             
         }
     }
@@ -208,12 +209,12 @@ impl AppMain for App {
         }
         
         let ui = self.ui.clone();
-        let mut db = DataBindingStore::new();
+        let mut synth_db = DataBindingStore::new();
         let mut actions = ui.handle_widget_event(cx, event);
         
         if let Event::Construct = event {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            db.nodes = ironfish.settings.live_read();
+            synth_db.nodes = ironfish.settings.live_read();
             ui.get_piano(id!(piano)).set_key_focus(cx);
             self.midi_input = cx.midi_input();
             //self.midi_data = cx.midi_output_create_sender();
@@ -300,11 +301,11 @@ impl AppMain for App {
             sequencer.grid_up(cx, &mut actions);
         }
         
-        self.data_bind(db.widgets_to_data(cx, &actions, &ui));
-        self.data_bind(db.data_to_widgets(cx, &actions, &ui));
+        self.data_bind(synth_db.widgets_to_data(cx, &actions, &ui));
+        self.data_bind(synth_db.data_to_widgets(cx, &actions, &ui));
         
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        ironfish.settings.apply_over(cx, &db.nodes);
+        ironfish.settings.apply_over(cx, &synth_db.nodes);
     }
     /*
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
