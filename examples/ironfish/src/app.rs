@@ -40,13 +40,6 @@ live_design!{
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
                 frame: {body = {
-                    button1 = <Button> {
-                draw_icon:{
-                    svg_file:dep("crate://self/resources/Icon_Redo.svg")
-                }
-                icon_walk:{margin:{left:10}, width:16,height:Fit}
-                text: "Click to count"
-            }
                     <AppDesktop> {}
                 }}
             }
@@ -216,12 +209,12 @@ impl AppMain for App {
         }
         
         let ui = self.ui.clone();
-        let mut db = DataBindingStore::new();
+        let mut synth_db = DataBindingStore::new();
         let mut actions = ui.handle_widget_event(cx, event);
         
         if let Event::Construct = event {
             let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-            db.nodes = ironfish.settings.live_read();
+            synth_db.nodes = ironfish.settings.live_read();
             ui.get_piano(id!(piano)).set_key_focus(cx);
             self.midi_input = cx.midi_input();
             //self.midi_data = cx.midi_output_create_sender();
@@ -308,11 +301,11 @@ impl AppMain for App {
             sequencer.grid_up(cx, &mut actions);
         }
         
-        self.data_bind(db.widgets_to_data(cx, &actions, &ui));
-        self.data_bind(db.data_to_widgets(cx, &actions, &ui));
+        self.data_bind(synth_db.widgets_to_data(cx, &actions, &ui));
+        self.data_bind(synth_db.data_to_widgets(cx, &actions, &ui));
         
         let ironfish = self.audio_graph.by_type::<IronFish>().unwrap();
-        ironfish.settings.apply_over(cx, &db.nodes);
+        ironfish.settings.apply_over(cx, &synth_db.nodes);
     }
     /*
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
