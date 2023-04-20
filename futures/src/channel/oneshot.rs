@@ -78,7 +78,7 @@ impl<T> Future for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let channel = self.channel.lock().unwrap();
+        let mut channel = self.channel.lock().unwrap();
         channel.is_complete = true;
         channel.message = None;
     }

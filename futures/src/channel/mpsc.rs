@@ -1,5 +1,5 @@
 use {
-    crate::futures::Stream,
+    crate::Stream,
     std::{
         collections::VecDeque,
         error, fmt,
