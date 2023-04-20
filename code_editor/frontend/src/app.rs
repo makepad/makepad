@@ -7,7 +7,7 @@ live_design! {
     import makepad_widgets::desktop_window::DesktopWindow;
     
     App = {{App}} {
-        ui: <DesktopWindow> {}
+        ui: <DesktopWindow> {frame:{body={user_draw:true}}}
     }
 }
 
@@ -23,28 +23,18 @@ pub struct App {
     app_state: AppState,
 }
 
-impl App {
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        /*
-        if self.ui.begin(cx).is_redrawing() {
-            self.editor.draw(cx);
-            self.ui.end(cx);
-        }
-        */
-    }
-}
-
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::Draw(event) = event {
+            let mut cx = Cx2d::new(cx, event);
+            if self.ui.draw_widget_continue(&mut cx).is_not_done(){
+                self.editor.draw(&mut cx);
+                self.ui.draw_widget(&mut cx);
+            }
+            return
+        }
         self.ui.handle_widget_event(cx, event);
         self.editor.handle_event(cx, event);
-        match event {
-            Event::Draw(event) => {
-                let mut cx = Cx2d::new(cx, event);
-                self.draw(&mut cx)
-            },
-            _ => {}
-        }
     }
 }
 
