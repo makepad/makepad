@@ -23,8 +23,8 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.3.0" }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 
-[target.'cfg(windows)'.dependencies.makepad-futures]
-path = "../libs/futures"
+[target.'cfg(windows)'.dependencies.makepad-futures-legacy]
+path = "../libs/futures_legacy"
 version = "0.3"
 
 [target.'cfg(windows)'.dependencies.makepad-windows]
