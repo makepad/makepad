@@ -1,14 +1,12 @@
-use {
-    crate::task::{Spawn, SpawnError},
-    std::{
-        future::Future,
-        pin::Pin,
-        sync::{
-            mpsc::{Receiver, Sender},
-            Arc, Mutex,
-        },
-        task::Wake
-    }
+use std::{
+    error, fmt,
+    future::Future,
+    pin::Pin,
+    sync::{
+        mpsc::{Receiver, Sender},
+        Arc, Mutex,
+    },
+    task::Wake,
 };
 
 #[derive(Debug)]
@@ -35,8 +33,8 @@ pub struct Spawner {
     task_sender: Sender<Arc<Task>>,
 }
 
-impl Spawn for Spawner {
-    fn spawn(&self, future: impl Future<Output = ()> + 'static) -> Result<(), SpawnError> {
+impl Spawner {
+    pub fn spawn(&self, future: impl Future<Output = ()> + 'static) -> Result<(), SpawnError> {
         if let Err(_) = self.task_sender.send(Arc::new(Task {
             inner: Mutex::new(TaskInner {
                 future: Some(Box::pin(future)),
@@ -49,17 +47,36 @@ impl Spawn for Spawner {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SpawnError {
+    _priv: (),
+}
+
+impl SpawnError {
+    pub fn shutdown() -> Self {
+        Self { _priv: () }
+    }
+}
+
+impl error::Error for SpawnError {}
+
+impl fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "executor is shutdown")
+    }
+}
+
 struct Task {
     inner: Mutex<TaskInner>,
 }
 
 impl Task {
     fn run(self: Arc<Task>) {
-        use std::task::Context;
+        use {std::task::Context, crate::task};
 
         let future = self.inner.lock().unwrap().future.take();
         if let Some(mut future) = future {
-            let waker = super::task::waker(self.clone());
+            let waker = task::waker(self.clone());
             let mut cx = Context::from_waker(&waker);
             if future.as_mut().poll(&mut cx).is_pending() {
                 self.inner.lock().unwrap().future = Some(future);

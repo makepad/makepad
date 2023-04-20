@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 makepad-code-editor-core = { path = "../core" }
+makepad-draw = { path = "../../draw" }
+makepad-futures = { path = "../../futures" }
+makepad-widgets = { path = "../../widgets" }

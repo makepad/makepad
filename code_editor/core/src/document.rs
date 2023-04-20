@@ -1,6 +1,6 @@
 use {
     crate::{Session, Text, WeakPtrEq},
-    makepad_futures::task::Spawn,
+    makepad_futures::executor::Spawner,
     std::{
         cell::RefCell,
         collections::HashSet,
@@ -17,7 +17,7 @@ pub struct Document {
 
 impl Document {
     pub fn new(
-        spawner: &mut impl Spawn,
+        spawner: &mut Spawner,
         load: impl Future<Output = Text> + 'static,
     ) -> Rc<RefCell<Self>> {
         let document = Rc::new(RefCell::new(Self {

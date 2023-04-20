@@ -68,10 +68,16 @@ impl Cx {
             let cx = cx.clone();
             move | cocoa_app,
             event | {
-                let mut cx = cx.borrow_mut();
+                let mut cx_ref = cx.borrow_mut();
                 let mut metal_cx = metal_cx.borrow_mut();
                 let mut metal_windows = metal_windows.borrow_mut();
-                cx.cocoa_event_callback(cocoa_app, event, &mut metal_cx, &mut metal_windows)
+                let event_flow = cx_ref.cocoa_event_callback(cocoa_app, event, &mut metal_cx, &mut metal_windows);
+                let executor = cx_ref.executor.take().unwrap();
+                drop(cx_ref);
+                executor.run_until_stalled();
+                let mut cx_ref = cx.borrow_mut();
+                cx_ref.executor = Some(executor);
+                event_flow
             }
         }));
         // lets set our signal poll timer
