@@ -272,15 +272,15 @@ impl DesktopWindow {
         self.overlay.begin(cx);
         
         //while self.frame.draw(cx).is_ok(){}
-        if self.frame.draw_widget_continue(cx).is_done() {
-            self.end(cx);
-            return ViewRedrawing::no()
-        }
+        //if self.frame.draw_widget_continue(cx).is_done() {
+        //    self.end(cx);
+        //    return ViewRedrawing::no()
+        //}
         ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw_widget_continue(cx).is_not_done() {}
+        //while self.frame.draw_widget_continue(cx).is_not_done() {}
         self.debug_view.draw(cx);
         
         // lets draw our cursor
