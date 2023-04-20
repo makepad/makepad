@@ -1,12 +1,14 @@
-use std::{
-    error, fmt,
-    future::Future,
-    pin::Pin,
-    sync::{
-        mpsc::{Receiver, Sender},
-        Arc, Mutex,
-    },
-    task::Wake,
+use {
+    crate::task::{Spawn, SpawnError},
+    std::{
+        future::Future,
+        pin::Pin,
+        sync::{
+            mpsc::{Receiver, Sender},
+            Arc, Mutex,
+        },
+        task::Wake
+    }
 };
 
 #[derive(Debug)]
@@ -33,30 +35,17 @@ pub struct Spawner {
     task_sender: Sender<Arc<Task>>,
 }
 
-impl Spawner {
-    pub fn spawn(&self, future: impl Future<Output = ()> + 'static) -> Result<(), SpawnError> {
+impl Spawn for Spawner {
+    fn spawn(&self, future: impl Future<Output = ()> + 'static) -> Result<(), SpawnError> {
         if let Err(_) = self.task_sender.send(Arc::new(Task {
             inner: Mutex::new(TaskInner {
                 future: Some(Box::pin(future)),
                 task_sender: self.task_sender.clone(),
             }),
         })) {
-            return Err(SpawnError { _priv: () });
+            return Err(SpawnError::shutdown());
         }
         Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SpawnError {
-    _priv: (),
-}
-
-impl error::Error for SpawnError {}
-
-impl fmt::Display for SpawnError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "spawning on a shut down executor")
     }
 }
 
