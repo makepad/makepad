@@ -69,15 +69,17 @@ live_design!{
                 off = {
                     from: {all: Snap}
                     apply: {
-                        hover: 0.0,
-                        draw_bg: {hover: (hover)}
-                        draw_name: {hover: (hover)}
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
                     }
                 }
                 on = {
                     cursor: Hand
                     from: {all: Snap}
-                    apply: {hover: 1.0},
+                    apply: {
+                        draw_bg: {hover: 1.0}
+                        draw_name: {hover: 1.0}
+                    }
                 }
             }
             
@@ -86,14 +88,16 @@ live_design!{
                 off = {
                     from: {all: Snap}
                     apply: {
-                        selected: 0.0,
-                        draw_bg: {selected: (selected)}
-                        draw_name: {selected: (selected)}
+                        draw_bg: {selected: 0.0,}
+                        draw_name: {selected: 0.0,}
                     }
                 }
                 on = {
                     from: {all: Snap}
-                    apply: {selected: 1.0}
+                    apply: {
+                        draw_bg: {selected: 1.0,}
+                        draw_name: {selected: 1.0,}
+                    }
                 }
             }
         }
