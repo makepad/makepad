@@ -94,7 +94,7 @@ impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         Cx2d::lazy_construct_font_atlas(cx);
         let atlas = cx.get_global::<CxFontsAtlasRc>().clone();
-        self.font_id = Some(atlas.0.borrow_mut().get_font_by_path(cx, self.path.as_ref()));
+        self.font_id = Some(atlas.0.borrow_mut().get_font_by_path(cx, self.path.as_str()));
     }
 }
 

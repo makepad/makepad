@@ -1,10 +1,12 @@
 use {
+    std::rc::Rc,
     crate::{
         makepad_platform::*,
-        icon_atlas::{CxIconAtlas},
-        shader::draw_quad::DrawQuad,
+        view::ManyInstances,
+        geometry::GeometryQuad2D,
+        icon_atlas::{CxIconAtlas, CxIconArgs},
         cx_2d::Cx2d,
-        turtle::{Walk}
+        turtle::{Walk, Size}
     },
 };
 
@@ -18,20 +20,35 @@ live_design!{
         uniform u_curve: float
         
         texture tex: texture2d
-        
+        varying pos: vec2,
         varying tex_coord1: vec2
         varying clipped: vec2
         
-        fn vertex(self) -> vec4 {
-            let ret = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
-             
+        fn clip_and_transform_vertex(self, rect_pos: vec2, rect_size: vec2) -> vec4 {
+            let clipped: vec2 = clamp(
+                self.geom_pos * rect_size + rect_pos,
+                self.draw_clip.xy,
+                self.draw_clip.zw
+            )
+            self.pos = (clipped - rect_pos) / rect_size
+            
             self.tex_coord1 = mix(
                 self.icon_t1.xy,
                 self.icon_t2.xy,
                 self.pos.xy
             )
             
-            return ret
+            // only pass the clipped position forward
+            return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
+                clipped.x,
+                clipped.y,
+                self.draw_depth + self.draw_zbias,
+                1.
+            )))
+        }
+        
+        fn vertex(self) -> vec4 {
+            return self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
         }
         
         fn get_color(self) -> vec4 {
@@ -45,7 +62,6 @@ live_design!{
             // basic hardcoded mipmapping so it stops 'swimming' in VR
             // mipmaps are stored in red/green/blue channel
             let s = sample2d_rt(self.tex, self.tex_coord1.xy).x;
-            //return mix(#f00,#0f0,s);
             s = pow(s, self.u_curve);
             let col = self.get_color(); //color!(white);//get_color();
             return vec4(s * col.rgb * self.u_brightness * col.a, s * col.a);
@@ -58,11 +74,20 @@ live_design!{
 pub struct DrawIcon {
     #[live(1.0)] pub brightness: f32,
     #[live(0.6)] pub curve: f32,
-    #[live(1.0)] pub draw_depth: f32,
-    #[live] pub path: String,
+    #[live(0.5)] pub linearize: f32,
+    
+    #[live] pub svg_file: LiveDependency,
+    #[live] pub svg_path: Rc<String>,
     #[live] pub translate: DVec2,
     #[live(1.0)] pub scale: f64,
-    #[live()] pub draw_super: DrawQuad,
+    
+    #[rust] pub many_instances: Option<ManyInstances>,
+    #[live] pub geometry: GeometryQuad2D,
+    #[calc] pub draw_vars: DrawVars,
+    #[calc] pub rect_pos: Vec2,
+    #[calc] pub rect_size: Vec2,
+    #[calc] pub draw_clip: Vec4,
+    #[live(1.0)] pub draw_depth: f32,
     
     #[live] pub color: Vec4,
     #[calc] pub icon_t1: Vec2,
@@ -70,36 +95,6 @@ pub struct DrawIcon {
 }
 
 impl DrawIcon {
-    
-    pub fn update_abs(&mut self, cx: &mut Cx, rect: Rect) {
-        self.rect_pos = rect.pos.into();
-        self.rect_size = rect.size.into();
-        self.draw_vars.update_rect(cx, rect);
-    }
-
-    pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect, path: Option<&str>) {
-        self.draw_clip = cx.turtle().draw_clip().into();
-        self.rect_pos = rect.pos.into();
-        self.rect_size = rect.size.into();
-        self.draw(cx, path);
-    }
-
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, path: Option<&str>) -> Rect {
-        let rect = cx.walk_turtle(walk);
-        self.draw_clip = cx.turtle().draw_clip().into();
-        self.rect_pos = rect.pos.into();
-        self.rect_size = rect.size.into();
-        self.draw(cx, path);
-        rect
-    }
-    
-    pub fn draw_rel(&mut self, cx: &mut Cx2d, rect: Rect, path: Option<&str>) {
-        let rect = rect.translate(cx.turtle().origin());
-        self.draw_clip = cx.turtle().draw_clip().into();
-        self.rect_pos = rect.pos.into();
-        self.rect_size = rect.size.into();
-        self.draw(cx, path);
-    }
     
     pub fn new_draw_call(&self, cx: &mut Cx2d) {
         cx.new_draw_call(&self.draw_vars);
@@ -124,26 +119,61 @@ impl DrawIcon {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, path: Option<&str>) {
-        // allocate our path on the icon atlas
-        let path = if let Some(path) = path {path} else {&self.path};
-        
-        // lets allocate/fetch our path on the icon atlas
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) {
         let icon_atlas_rc = cx.icon_atlas_rc.clone();
         let mut icon_atlas = icon_atlas_rc.0.borrow_mut();
         let icon_atlas = &mut*icon_atlas;
-        let dpi_factor = cx.current_dpi_factor() as f32;
-        //alright we have an icon atlas. lets look up our subpixel + size + path hash
-        let subpixel_fract = vec2(
-            self.rect_pos.x - (self.rect_pos.x * dpi_factor).floor() / dpi_factor,
-            self.rect_pos.y - (self.rect_pos.y * dpi_factor).floor() / dpi_factor
-        );
-
-        if let Some(tc) = icon_atlas.get_icon_pos(self.translate, self.scale, subpixel_fract, self.rect_size, path){
-            self.icon_t1 = tc.t1;
-            self.icon_t2 = tc.t2;
-            if let Some(mi) = &mut self.draw_super.many_instances {
-                mi.instances.extend_from_slice(self.draw_super.draw_vars.as_slice());
+        if let Some((path_hash, bounds)) = icon_atlas.get_icon_bounds(cx, &self.svg_path, self.svg_file.as_ref()) {
+            let width_is_fit = walk.width.is_fit();
+            let height_is_fit = walk.height.is_fit();
+            let peek_rect = cx.peek_walk_turtle(walk);
+            let mut scale = 1.0;
+            if width_is_fit {
+                if !height_is_fit {
+                    scale = peek_rect.size.y / bounds.size.y
+                };
+                walk.width = Size::Fixed(bounds.size.x * self.scale * scale);
+            }
+            if height_is_fit {
+                if !width_is_fit {
+                    scale = peek_rect.size.x / bounds.size.x
+                };
+                walk.height = Size::Fixed(bounds.size.y * self.scale * scale);
+            }
+            if !width_is_fit && !height_is_fit {
+                scale = (peek_rect.size.y / bounds.size.y).min(peek_rect.size.x / bounds.size.x);
+            }
+            let rect = cx.walk_turtle(walk);
+            
+            let dpi_factor = cx.current_dpi_factor();
+            
+            // we should snap the subpixel to 8x8 steps
+            let dpi_pos = rect.pos * dpi_factor;
+            let snapped_pos = dpi_pos.floor();
+            let snapped_size = (rect.size * dpi_factor).ceil() + dvec2(1.0, 1.0);
+            let subpixel = dvec2(
+                ((dpi_pos.x - snapped_pos.x) * 8.0).floor() / 8.0,
+                ((dpi_pos.y - snapped_pos.y) * 8.0).floor() / 8.0
+            );
+            // ok now we need to snap our rect to real pixels
+            let slot = icon_atlas.get_icon_slot(CxIconArgs {
+                linearize: self.linearize as f64,
+                size: snapped_size,
+                scale: self.scale * scale * dpi_factor,
+                translate: self.translate - bounds.pos,
+                subpixel: subpixel 
+            }, path_hash);
+            
+            self.draw_clip = cx.turtle().draw_clip().into();
+            // lets snap the pos/size to actual pixels
+            self.rect_pos = (snapped_pos / dpi_factor).into();
+            self.rect_size = (snapped_size / dpi_factor).into();
+            
+            self.icon_t1 = slot.t1;
+            self.icon_t2 = slot.t2;
+            
+            if let Some(mi) = &mut self.many_instances {
+                mi.instances.extend_from_slice(self.draw_vars.as_slice());
             }
             else if self.draw_vars.can_instance() {
                 self.update_draw_call_vars(icon_atlas);
