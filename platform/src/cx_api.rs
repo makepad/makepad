@@ -1,4 +1,5 @@
 use {
+    makepad_futures::executor::Spawner,
     std::{
         any::{TypeId, Any},
     },
@@ -356,6 +357,10 @@ impl Cx {
             self.set_global(T::default());
         }
         self.get_global::<T>()
+    }
+
+    pub fn spawner(&self) -> &Spawner {
+        &self.spawner
     }
 }
 

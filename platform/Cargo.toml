@@ -10,6 +10,8 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "wxHZD_56sR__1P12uohe4SoyRR8="
 
 [dependencies]
+makepad-futures = { path = "../futures" }
+
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.3.0" }
 
 [target.wasm32-unknown-unknown.dependencies]
@@ -23,8 +25,8 @@ makepad-objc-sys = { path = "../libs/objc-sys", version = "0.3.0" }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 
-[target.'cfg(windows)'.dependencies.makepad-futures]
-path = "../libs/futures"
+[target.'cfg(windows)'.dependencies.makepad-futures-legacy]
+path = "../libs/futures_legacy"
 version = "0.3"
 
 [target.'cfg(windows)'.dependencies.makepad-windows]

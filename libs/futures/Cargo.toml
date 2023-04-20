@@ -1,7 +1,0 @@
-[package]
-name = "makepad-futures"
-version = "0.3.0"
-edition = "2021"
-
-#[dev-dependencies]
-#futures-timer = "3.0.2"
