@@ -131,8 +131,9 @@ live_design!{
         walk: {width: Fill, height: Fit}
     }
     
-    FillerY = <Frame> {
-        walk: {width: Fit, height: Fill}
+    FillerY = <Box> {
+        walk: {width: Fit, height: 10}
+        draw_bg: { color: #f00 }
     }
     
     ElementBox = <Frame> {
@@ -884,7 +885,7 @@ live_design!{
         <ChordPiano> {}
             
         <Frame> {
-            layout: {flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS)}, spacing: 10}
+            layout: { flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS)}, spacing: 10 }
             walk: {width: Fill, height: Fit}
             
             <Box> {
@@ -900,6 +901,7 @@ live_design!{
             <Frame> {
                 layout: {flow: Down}
                 walk: {width: Fill, height: Fill}
+                draw_bg: {color: #f00}
                 
                 crushamount = <FishSlider> {
                     label: "Crush"
@@ -985,8 +987,8 @@ live_design!{
     }
     
     PresetListEntry = <Frame> {
-        layout: {flow: Down, padding: {top: 0, right: 5, bottom: 5, left: 5}, align: {x: 0.5, y: 0.5}}
-        walk: { width: Fill, height: Fit}
+        layout: {flow: Down, padding: {top: 0, right: 5, bottom: 2.5, left: 5}, align: {x: 0.5, y: 0.5}}
+        walk: { width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS) }}
 
         <Frame> {
             layout: {flow: Right, align: {x: 0.5, y: 0.5}}
@@ -1068,9 +1070,9 @@ live_design!{
     
     PresetList = <ScrollY> {
         
-        walk: {width: Fill, height: Fill, margin: {top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS)}}
+        walk: {width: Fill, height: Fill, margin: {top: 5.0, bottom: 5.0}}
         layout: {flow: Down, align: {x: 0.5, y: 0.0},}
-        
+
         <PresetListEntry> {}
         <DividerY> {}
         <PresetListEntry> {}
@@ -1099,7 +1101,7 @@ live_design!{
 
     PresetListFavs = <ScrollY> {
         
-        walk: {width: Fill, height: Fill, margin: {top: (SPACING_OS / 2), right: (SPACING_OS), bottom: (SPACING_OS / 2), left: (SPACING_OS)}}
+        walk: {width: Fill, height: Fill, margin: {top: 5.0, bottom: 5.0}}
         layout: {flow: Down, align: {x: 0.5, y: 0.0},}
         
         <PresetListEntry> {}
@@ -1195,6 +1197,7 @@ live_design!{
                         icon_walk: { width:30, height:Fit }
                         text: "Sequence"
                         layout: {flow: Down, spacing: 5.0 }
+                        state: {selected = {default: on}},
                     }
                     // tab1 = <FishTab> {
                     //     walk: {width: Fill}
