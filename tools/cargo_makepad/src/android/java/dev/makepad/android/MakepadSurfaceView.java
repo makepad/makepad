@@ -118,7 +118,12 @@ KeyEvent.Callback
 
     @Override
     public void onGlobalLayout() {
-        if (this.getRootWindowInsets().isVisible(WindowInsets.Type.ime())) {
+        WindowInsets insets = this.getRootWindowInsets();
+        if (insets == null) {
+            return;
+        }
+
+        if (insets.isVisible(WindowInsets.Type.ime())) {
             Rect r = new Rect();
             this.getWindowVisibleDisplayFrame(r);
             int screenHeight = this.getRootView().getHeight();
