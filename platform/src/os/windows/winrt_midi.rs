@@ -1,7 +1,7 @@
 use {
     std::sync::{Arc, Mutex},
     std::sync::mpsc,
-    makepad_futures::executor,
+    makepad_futures_legacy::executor,
     crate::{
         thread::Signal,
         makepad_live_id::{LiveId},

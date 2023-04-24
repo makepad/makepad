@@ -33,6 +33,8 @@ pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
 
+pub mod swipe_list;
+
 //#[cfg(ide_widgets)]
 pub mod list_box;
 //#[cfg(ide_widgets)]
@@ -68,6 +70,7 @@ pub use crate::{
     check_box::*,
     drop_down::*,
     radio_button::*,
+    swipe_list::*,
     text_input::{TextInput},
     link_label::{LinkLabel},
     desktop_window::{DesktopWindow},
