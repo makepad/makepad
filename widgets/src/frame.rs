@@ -501,31 +501,31 @@ impl FrameRef {
     }*/
     
     pub fn set_visible(&self, visible: bool) {
-        if let Some(mut inner) = self.inner_mut() {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.visible = visible
         }
     }
     
     pub fn set_texture(&self, slot: usize, texture: &Texture) {
-        if let Some(mut inner) = self.inner_mut() {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.draw_bg.set_texture(slot, texture);
         }
     }
     
     pub fn set_uniform(&self, cx: &Cx, uniform: &[LiveId], value: &[f32]) {
-        if let Some(mut inner) = self.inner_mut() {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.draw_bg.set_uniform(cx, uniform, value);
         }
     }
     
     pub fn set_scroll_pos(&self, cx: &mut Cx, v: DVec2) {
-        if let Some(mut inner) = self.inner_mut() {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.set_scroll_pos(cx, v)
         }
     }
     
     pub fn area(&self) -> Area {
-        if let Some(inner) = self.inner() {
+        if let Some(inner) = self.borrow_mut() {
             inner.area
         }
         else {
@@ -534,7 +534,7 @@ impl FrameRef {
     }
     
     pub fn child_count(&self) -> usize {
-        if let Some(inner) = self.inner() {
+        if let Some(inner) = self.borrow_mut() {
             inner.draw_order.len()
         }
         else {

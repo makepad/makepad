@@ -123,6 +123,7 @@ pub struct Cx {
     
     pub debug: Debug,
 
+    #[allow(dead_code)]
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
 }

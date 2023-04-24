@@ -162,7 +162,7 @@ pub struct DisplayAudioRef(WidgetRef);
 
 impl DisplayAudioRef {
     pub fn process_buffer(&self, cx: &mut Cx, chan: Option<usize>, voice: usize, buffer: &AudioBuffer) {
-        if let Some(mut inner) = self.inner_mut() {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.process_buffer(cx, chan, voice, buffer);
         }
     }
