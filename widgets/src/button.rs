@@ -263,7 +263,7 @@ pub struct ButtonSet(WidgetSet);
 impl ButtonSet{
     pub fn clicked(&self, actions: &WidgetActions)->bool{
         for button in self.iter(){
-            if ButtonRef(button).clicked(actions){
+            if button.clicked(actions){
                 return true
             }
         }

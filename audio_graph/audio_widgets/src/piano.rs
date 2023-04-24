@@ -483,13 +483,13 @@ impl PianoRef {
     }
     
     pub fn set_note(&self, cx: &mut Cx, is_on: bool, note_number: u8) {
-        if let Some(mut inner) = self.inner_mut() {
+        if let Some(mut inner) = self.borrow_mut() {
             inner.set_note(cx, is_on, note_number)
         }
     }
     
     pub fn set_key_focus(&self, cx: &mut Cx) {
-        if let Some(inner) = self.inner_mut() {
+        if let Some(inner) = self.borrow_mut() {
             inner.set_key_focus(cx)
         }
     }
