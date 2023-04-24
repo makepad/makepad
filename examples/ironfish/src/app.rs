@@ -262,6 +262,14 @@ impl AppMain for App {
             oscillators.osc1,
             oscillators.osc2,
         ));
+
+        ui.get_radio_button_set(ids!(
+            filter_modes.tab1,
+            filter_modes.tab2,
+        )).selected_to_visible(cx, &ui, &actions, ids!(
+            preset_pages.tab1_frame,
+            preset_pages.tab2_frame,
+        ));
         
         ui.get_radio_button_set(ids!(
             mobile_modes.tab1,
