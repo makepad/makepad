@@ -166,12 +166,12 @@ pub struct SlidesViewRef(WidgetRef);
 
 impl SlidesViewRef {
     pub fn next_slide(&self, cx:&mut Cx){
-        if let Some(mut inner) = self.inner_mut(){
+        if let Some(mut inner) = self.borrow_mut(){
             inner.next_slide(cx);
         }
     }
     pub fn prev_slide(&self, cx:&mut Cx){
-        if let Some(mut inner) = self.inner_mut(){
+        if let Some(mut inner) = self.borrow_mut(){
             inner.prev_slide(cx);
         }
     }

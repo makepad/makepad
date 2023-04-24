@@ -257,7 +257,7 @@ pub struct RadioButtonRef(WidgetRef);
 
 impl RadioButtonRef{
     fn unselect(&self, cx:&mut Cx){
-        if let Some(mut inner) = self.inner_mut(){
+        if let Some(mut inner) = self.borrow_mut(){
             inner.animate_state(cx, id!(selected.off));
         }
     }

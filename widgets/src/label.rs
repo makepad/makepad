@@ -59,7 +59,7 @@ pub struct LabelRef(WidgetRef);
 
 impl LabelRef{
     pub fn set_text(&self, text:&str){
-        if let Some(mut inner) = self.inner_mut(){
+        if let Some(mut inner) = self.borrow_mut(){
             inner.text.clear();
             inner.text.push_str(text);
         }

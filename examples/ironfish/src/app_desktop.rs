@@ -2071,7 +2071,6 @@ live_design!{
         <PresetListEntry> {}
         <PresetListEntry> {}
         <PresetListEntry> {}
-        
     }
     
     PresetSaver = <Frame> {

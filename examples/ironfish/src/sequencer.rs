@@ -286,8 +286,6 @@ impl Widget for Sequencer {
         self.area.redraw(cx);
     }
     
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-    
     fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
         self.handle_event_with(cx, event, &mut | cx, action | {
@@ -334,7 +332,7 @@ pub struct SequencerRef(WidgetRef);
 impl SequencerRef {
     
     pub fn clear_grid(&self, cx: &mut Cx, actions: &mut WidgetActions) {
-        if let Some(mut inner) = self.inner_mut() {
+        if let Some(mut inner) = self.borrow_mut() {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {*step = 0};
             inner.set_steps(cx, &steps);
@@ -343,7 +341,7 @@ impl SequencerRef {
     }
     
     pub fn grid_down(&self, cx: &mut Cx, actions: &mut WidgetActions) {
-        if let Some(mut inner) = self.inner_mut() {
+        if let Some(mut inner) = self.borrow_mut() {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {
                 let mut modstep = *step << 1;
@@ -356,7 +354,7 @@ impl SequencerRef {
     }
     
     pub fn grid_up(&self, cx: &mut Cx, actions: &mut WidgetActions) {
-        if let Some(mut inner) = self.inner_mut() {
+        if let Some(mut inner) = self.borrow_mut() {
             let mut steps = inner.get_steps(cx);
             for step in &mut steps {
                 let mut modstep = *step >> 1;
