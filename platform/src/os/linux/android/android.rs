@@ -27,7 +27,7 @@ use {
         },
         window::CxWindowPool,
         pass::CxPassParent,
-        cx::{Cx, OsType, AndroidParams},
+        cx::{Cx, OsType, AndroidInitParams},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
@@ -42,11 +42,12 @@ extern "C" {
 impl Cx {
     
     /// Called when EGL is initialized.
-    pub fn from_java_on_init(&mut self, params: AndroidParams, to_java: AndroidToJava) {
+    pub fn from_java_on_init(&mut self, params: AndroidInitParams, to_java: AndroidToJava) {
         // lets load dependencies here.
         self.android_load_dependencies(&to_java);
         
-        self.os_type = OsType::Android(params);
+        self.os_type = OsType::Android(params.extract_android_params());
+        self.os.dpi_factor = params.density;
         self.gpu_info.performance = GpuPerformance::Tier1;
         self.call_event_handler(&Event::Construct);
     } 
