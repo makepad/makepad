@@ -709,3 +709,14 @@ impl TextInput {
     }
 }
 
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct TextInputRef(WidgetRef);
+
+impl TextInputRef {
+    pub fn set_text(&self, text:&str){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.text.clear();
+            inner.text.push_str(text);
+        }
+    }
+}
