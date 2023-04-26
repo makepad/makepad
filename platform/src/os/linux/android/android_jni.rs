@@ -2,13 +2,13 @@
 
 use {
     self::super::{
-        jni_sys::{jclass, jsize, jint, jlong, jstring, jobject, JNIEnv, JNI_ABORT},
+        jni_sys::{jclass, jsize, jint, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
     },
     crate::{
         area::Area,
         makepad_math::*,
         event::*,
-        cx::{Cx, AndroidParams},
+        cx::{Cx, AndroidInitParams},
     },
     std::{
         cell::Cell,
@@ -247,23 +247,20 @@ unsafe fn java_byte_array_to_vec(env: *mut JNIEnv, byte_array: jobject) -> Vec<u
     out_bytes
 }
 
-
-pub struct AndroidInitParams {
-    pub cache_path: String,
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onInit(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
     cache_path: jstring,
+    density: jfloat,
     callback: jobject,
 ) {
     crate::makepad_error_log::init_panic_hook();
     (*(cx as *mut Cx)).from_java_on_init(
-        AndroidParams {
+        AndroidInitParams {
             cache_path: jstring_to_string(env, cache_path),
+            density: density as f64,
         },
         AndroidToJava {
             env,
