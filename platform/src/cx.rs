@@ -134,10 +134,20 @@ pub struct CxRef(pub (crate) Rc<RefCell<Cx>>);
 pub struct CxDependency {
     pub data: Option<Result<Vec<u8>, String >>
 }
-
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
     pub cache_path: String,
+}
+
+pub struct AndroidInitParams {
+    pub cache_path: String,
+    pub density: f64,
+}
+
+impl AndroidInitParams {
+    pub fn extract_android_params(&self) -> AndroidParams {
+        AndroidParams{cache_path: self.cache_path.clone()}
+    }
 }
 
 #[derive(Clone, Debug)]
