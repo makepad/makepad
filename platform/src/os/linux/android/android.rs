@@ -408,18 +408,18 @@ impl Cx {
     fn panning_adjust_for_text_ime(&mut self, android_ime_height: i32) {
         self.os.keyboard_visible = true;
 
-        let size = self.os.display_size / self.os.dpi_factor;
-        let screen_height = cmp::max(size.x as i32, size.y as i32);
+        let screen_height = (self.os.display_size.y / self.os.dpi_factor) as i32;
         let vertical_offset = self.os.keyboard_trigger_position.y as i32;
-        let ime_height = android_ime_height / self.os.dpi_factor as i32;
+        let ime_height = (android_ime_height as f64 / self.os.dpi_factor) as i32;
 
         // Make sure there is some room between the software keyword and the text input or widget that triggered
         // the TextIME event
-        let vertical_space = ime_height / 5;
+        let vertical_space = ime_height / 3;
 
         let should_be_panned = vertical_offset > screen_height - ime_height;
         if should_be_panned {
-            self.os.keyboard_panning_offset = vertical_offset - (screen_height - ime_height) + vertical_space;
+            let panning_offset = vertical_offset - (screen_height - ime_height) + vertical_space;
+            self.os.keyboard_panning_offset = (panning_offset as f64 * self.os.dpi_factor) as i32;
         } else {
             self.os.keyboard_panning_offset = 0;
         }
