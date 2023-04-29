@@ -12,7 +12,9 @@ live_design!{
     import makepad_widgets::check_box::CheckBox;
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::radio_button::RadioButton;
-
+    import makepad_widgets::swipe_list::SwipeList;
+    import makepad_widgets::swipe_list::SwipeListEntry;
+    
     import makepad_example_ironfish::sequencer::Sequencer;
     import makepad_audio_widgets::display_audio::DisplayAudio;
     import makepad_audio_widgets::piano::Piano;
@@ -26,13 +28,13 @@ live_design!{
     SSPACING_2 = (SSPACING_1 * 2)
     SSPACING_3 = (SSPACING_1 * 3)
     SSPACING_4 = (SSPACING_1 * 4)
-
+    
     SPACING_0 = {top: (SSPACING_0), right: (SSPACING_0), bottom: (SSPACING_0), left: (SSPACING_0)}
     SPACING_1 = {top: (SSPACING_1), right: (SSPACING_1), bottom: (SSPACING_1), left: (SSPACING_1)}
     SPACING_2 = {top: (SSPACING_2), right: (SSPACING_2), bottom: (SSPACING_2), left: (SSPACING_2)}
     SPACING_3 = {top: (SSPACING_3), right: (SSPACING_3), bottom: (SSPACING_3), left: (SSPACING_3)}
     SPACING_4 = {top: (SSPACING_4), right: (SSPACING_4), bottom: (SSPACING_4), left: (SSPACING_4)}
-
+    
     COLOR_CLEAR = #x3;
     
     COLOR_PLAYARROW_INNER = #xFFFDDDFF;
@@ -66,17 +68,17 @@ live_design!{
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
-
+    
     H2_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
-
+    
     H3_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H3),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
-
+    
     ICO_ARP = dep("crate://self/resources/icons/Icon_Arp.svg")
     ICO_BROWSE = dep("crate://self/resources/icons/Icon_Browse.svg")
     ICO_DOWN = dep("crate://self/resources/icons/Icon_Down.svg")
@@ -106,7 +108,7 @@ live_design!{
     ICO_SHARE = dep("crate://self/resources/icons/Icon_Share.svg")
     ICO_UP = dep("crate://self/resources/icons/Icon_Up.svg")
     
-
+    
     // WIDGETS
     
     DividerX = <Frame> {
@@ -117,7 +119,7 @@ live_design!{
             draw_bg: {color: (COLOR_UP_2)}
         }
     }
-
+    
     DividerY = <Frame> {
         walk: {width: Fill, height: Fit, margin: {top: (SPACING_BASE_PADDING), right: (SPACING_BASE_PADDING), bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
         layout: {flow: Down}
@@ -133,7 +135,7 @@ live_design!{
     
     FillerY = <Box> {
         walk: {width: Fit, height: 10}
-        draw_bg: { color: #f00 }
+        draw_bg: {color: #f00}
     }
     
     ElementBox = <Frame> {
@@ -157,7 +159,7 @@ live_design!{
             color_selected: (COLOR_UP_8),
             color_unselected: (COLOR_UP_6),
             color_unselected_hover: (COLOR_UP_6),
-            text_style:<H2_TEXT_BOLD>{}
+            text_style: <H2_TEXT_BOLD> {}
         }
     }
     
@@ -166,7 +168,7 @@ live_design!{
         layout: {padding: {top: (SPACING_BASE_PADDING), right: 18.0, bottom: (SPACING_BASE_PADDING), left: (SPACING_BASE_PADDING)}}
         
         draw_label: {
-            text_style: <H2_TEXT_BOLD>{},
+            text_style: <H2_TEXT_BOLD> {},
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -214,9 +216,9 @@ live_design!{
         }
         
         draw_label: {
-            text_style: <H2_TEXT_BOLD>{}
+            text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
-                return mix( (COLOR_UP_6), (COLOR_UP_6), self.pressed )
+                return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
             }
         }
         
@@ -248,40 +250,40 @@ live_design!{
     }
     
     IconLabelButton = <Button> {
-            draw_icon: {
-                svg_file: (ICO_REDO)
-                fn get_color(self) -> vec4 {
-                    return mix(
-                        mix(
-                            (COLOR_UP_6),
-                            (COLOR_UP_7),
-                            self.hover
-                        ),
-                        (COLOR_UP_3),
-                        self.pressed
-                    )
-                }
-            }
-            layout: { align: {x: 0.5, y: 0.5 }}
-            icon_walk:{margin:{left:10}, width:16,height:Fit}
-            label: "Click"
-            draw_bg: {
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.box(
-                        1.,
-                        1.,
-                        self.rect_size.x - 2.0,
-                        self.rect_size.y - 2.0,
-                        2.0
-                    )
-                    
-                    sdf.fill((COLOR_UP_OFF));
-                    
-                    return sdf.result
-                }
+        draw_icon: {
+            svg_file: (ICO_REDO)
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        (COLOR_UP_6),
+                        (COLOR_UP_7),
+                        self.hover
+                    ),
+                    (COLOR_UP_3),
+                    self.pressed
+                )
             }
         }
+        layout: {align: {x: 0.5, y: 0.5}}
+        icon_walk: {margin: {left: 10}, width: 16, height: Fit}
+        label: "Click"
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    2.0
+                )
+                
+                sdf.fill((COLOR_UP_OFF));
+                
+                return sdf.result
+            }
+        }
+    }
     //     draw_icon:{
     //         // instance hover: 0.0
     //         // instance pressed: 0.0
@@ -296,47 +298,47 @@ live_design!{
     // }
     
     IconButton = <Button> {
-            draw_icon: {
-                svg_file: (ICO_REDO)
-                fn get_color(self) -> vec4 {
-                    return mix(
-                        mix(
-                            (COLOR_UP_6),
-                            (COLOR_UP_7),
-                            self.hover
-                        ),
-                        (COLOR_UP_3),
-                        self.pressed
-                    )
-                }
-            }
-            icon_walk: {margin: {left:0.0}, width:16, height:Fit}
-            label: ""
-            draw_bg: {
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.box(
-                        1.,
-                        1.,
-                        self.rect_size.x - 2.0,
-                        self.rect_size.y - 2.0,
-                        2.0
-                    )
-                    
-                    sdf.fill((COLOR_UP_OFF));
-                    
-                    return sdf.result
-                }
+        draw_icon: {
+            svg_file: (ICO_REDO)
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        (COLOR_UP_6),
+                        (COLOR_UP_7),
+                        self.hover
+                    ),
+                    (COLOR_UP_3),
+                    self.pressed
+                )
             }
         }
-
-
+        icon_walk: {margin: {left: 0.0}, width: 16, height: Fit}
+        label: ""
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    2.0
+                )
+                
+                sdf.fill((COLOR_UP_OFF));
+                
+                return sdf.result
+            }
+        }
+    }
+    
+    
     FishSlider = <Slider> {
         walk: {
             height: 36,
         }
         label: "Change Me"
-        label_text: {text_style: <H2_TEXT_BOLD>{}, color: (COLOR_UP_6)}
+        label_text: {text_style: <H2_TEXT_BOLD> {}, color: (COLOR_UP_6)}
         text_input: {
             cursor_margin_bottom: 3.0,
             cursor_margin_top: 4.0,
@@ -434,7 +436,7 @@ live_design!{
                 }
             }
             draw_label: {
-                text_style: <H2_TEXT_BOLD>{},
+                text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_6)
             }
         }
@@ -446,7 +448,7 @@ live_design!{
             walk: {width: Fit}
             draw_label: {
                 color: (COLOR_UP_6)
-                text_style: <H2_TEXT_BOLD>{},
+                text_style: <H2_TEXT_BOLD> {},
             }
         }
         dropdown = <FishDropDown> {
@@ -455,9 +457,9 @@ live_design!{
     }
     
     PlayPause = <InstrumentCheckbox> {
-        walk: { width: Fit, height: Fit, margin: {top: 10, right: 0, bottom: 0, left: 0}}
-        layout: { align: {x: 0.0, y: 0.5} }
-        draw_bg: { color: (COLOR_UP_OFF)}
+        walk: {width: Fit, height: Fit, margin: {top: 10, right: 0, bottom: 0, left: 0}}
+        layout: {align: {x: 0.0, y: 0.5}}
+        draw_bg: {color: (COLOR_UP_OFF)}
         checkbox = {
             walk: {width: 20, height: 20}
             label: ""
@@ -489,11 +491,11 @@ live_design!{
     }
     
     FishToggle = <ElementBox> {
-        layout: { padding: <SPACING_0> {} }
+        layout: {padding: <SPACING_0> {}}
         checkbox = <CheckBox> {
-            layout: { padding: { top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23 } }
+            layout: {padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: 23}}
             label: "CutOff1"
-            label_walk: { margin: {left: 45.0, top: 8, bottom: 8, right: 10} }
+            label_walk: {margin: {left: 45.0, top: 8, bottom: 8, right: 10}}
             state: {
                 selected = {
                     default: off
@@ -519,10 +521,10 @@ live_design!{
                     let left = sz + 1.;
                     let c = vec2(left + sz, self.rect_size.y * 0.5);
                     sdf.box(left, c.y - sz, sz * 3.0, sz * 2.0, 0.5 * sz);
-
-                    sdf.stroke_keep( (COLOR_UP_3), 1.25 )
-
-                    sdf.fill( (COLOR_UP_OFF))
+                    
+                    sdf.stroke_keep((COLOR_UP_3), 1.25)
+                    
+                    sdf.fill((COLOR_UP_OFF))
                     let isz = sz * 0.65;
                     sdf.circle(left + sz + self.selected * sz, c.y - 0.5, isz);
                     sdf.circle(left + sz + self.selected * sz, c.y - 0.5, 0.425 * isz);
@@ -534,7 +536,7 @@ live_design!{
                 }
             }
             draw_label: {
-                text_style: <H2_TEXT_BOLD>{},
+                text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_5)
             }
         }
@@ -544,16 +546,16 @@ live_design!{
         draw_check: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-
+                
                 let left = 1;
                 let sz = self.rect_size.x / 2;
                 let c = vec2(sz, sz);
-
+                
                 let csz = 4.0;
                 sdf.circle(csz, csz, csz);
                 sdf.circle(csz * 3, csz, csz);
                 sdf.union();
-
+                
                 let squeeze = sz * 0.025;
                 let top_offset = 0.6;
                 // let top_offset = 0.6;
@@ -564,27 +566,27 @@ live_design!{
                 sdf.close_path();
                 
                 sdf.fill_keep(mix(#141414, #888, self.selected))
-
+                
                 return sdf.result
             }
         }
         draw_label: {
-            text_style: <H2_TEXT_BOLD>{},
+            text_style: <H2_TEXT_BOLD> {},
             color: (COLOR_UP_6)
         }
     }
-
-
+    
+    
     SequencerControls = <Frame> {
         layout: {flow: Down, padding: 0, spacing: 0.0, align: {x: 0.0, y: 0.5}}
         walk: {width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS)}}
-
+        
         <Frame> {
             walk: {width: Fill, height: Fit, margin: 0.0}
             layout: {align: {x: 0.0, y: 0.5}, spacing: (SPACING_CONTROLS), padding: 0.0}
-
+            
             playpause = <PlayPause> {}
-
+            
             speed = <TextSlider> {
                 walk: {width: 110, height: 35, margin: 0.0}
                 draw_bg: {color: (COLOR_UP_OFF)}
@@ -598,33 +600,33 @@ live_design!{
             <FillerX> {}
             
             share = <IconButton> {
-                draw_icon: { svg_file: (ICO_SHARE) }
+                draw_icon: {svg_file: (ICO_SHARE)}
                 walk: {margin: 5.0}
                 layout: {padding: 0}
             }
             platformtoggle = <IconButton> {
-                draw_icon: { svg_file: (ICO_PLAT_DESKTOP) }
+                draw_icon: {svg_file: (ICO_PLAT_DESKTOP)}
                 walk: {margin: 5.0}
                 layout: {padding: 0}
             }
-
+            
         }
-
+        
         <Frame> {
             walk: {width: Fill, height: Fit, margin: 0.0}
             layout: {align: {x: 0.0, y: 0.5}, spacing: 0.0, padding: 0.0}
-
+            
             arp = <FishToggle> {
-                walk: { margin: 0.0 }
-                layout: { padding: <SPACING_0> {} }
+                walk: {margin: 0.0}
+                layout: {padding: <SPACING_0> {}}
                 checkbox = {
                     label: "Arp"
-                    layout: { padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_0)}}
-                    walk: { margin: <SPACING_0> {} }
+                    layout: {padding: {top: (SSPACING_0), right: (SSPACING_1), bottom: (SSPACING_0), left: (SSPACING_0)}}
+                    walk: {margin: <SPACING_0> {}}
                 }
                 walk: {width: Fit, height: Fit, margin: <SPACING_0> {}}
             }
-
+            
             rootnote = <InstrumentDropdown> {
                 walk: {height: Fit, width: Fit, margin: 0}
                 layout: {align: {x: 0.0, y: 0.5}, padding: 0}
@@ -635,7 +637,7 @@ live_design!{
                     values: [A, Asharp, B, C, Csharp, D, Dsharp, E, F, Fsharp, G, Gsharp]
                 }
             }
-
+            
             scaletype = <InstrumentDropdown> {
                 walk: {height: Fit, width: Fit}
                 layout: {align: {x: 0.0, y: 0.5}}
@@ -646,13 +648,13 @@ live_design!{
                     values: [Minor, Major, Dorian, Pentatonic]
                 }
             }
-                
+            
             <FillerX> {}
-
-            grid_up = <IconButton> { draw_icon: { svg_file: (ICO_UP) }, icon_walk: {height: 7.5, width: Fit}, walk: { margin: {right: 0.0, left: 20.0}}, layout: {padding: 0.0} }
-            grid_down = <IconButton> { draw_icon: { svg_file: (ICO_DOWN) }, icon_walk: {height: 7.5, width: Fit}, walk: { margin: {right: 0.0, left: 20.0}}, layout: {padding: 0.0} }
-            clear_grid = <IconButton> { draw_icon: { svg_file: (ICO_SEQ_SWEEP) }, walk: {margin: {right: 0.0, left: 20.0}}, layout: {padding: 0.0} }
-
+            
+            grid_up = <IconButton> {draw_icon: {svg_file: (ICO_UP)}, icon_walk: {height: 7.5, width: Fit}, walk: {margin: {right: 0.0, left: 20.0}}, layout: {padding: 0.0}}
+            grid_down = <IconButton> {draw_icon: {svg_file: (ICO_DOWN)}, icon_walk: {height: 7.5, width: Fit}, walk: {margin: {right: 0.0, left: 20.0}}, layout: {padding: 0.0}}
+            clear_grid = <IconButton> {draw_icon: {svg_file: (ICO_SEQ_SWEEP)}, walk: {margin: {right: 0.0, left: 20.0}}, layout: {padding: 0.0}}
+            
         }
         
     }
@@ -675,7 +677,8 @@ live_design!{
                                 (COLOR_UP_OFF),
                                 (COLOR_UP_5),
                                 self.active
-                            ), 1.5
+                            ),
+                            1.5
                         );
                         // sdf.glow_keep(
                         //     mix(
@@ -717,10 +720,10 @@ live_design!{
         PresetNavigation = <Frame> {
             walk: {width: Fill, height: Fit}
             layout: {flow: Right, align: {x: 0.0, y: 0.5}}
-
+            
             <IconButton> {
-                draw_icon: { svg_file: (ICO_PREV) }
-                icon_walk: { width:10, height:Fit }
+                draw_icon: {svg_file: (ICO_PREV)}
+                icon_walk: {width: 10, height: Fit}
             }
             
             <Frame> {}
@@ -741,20 +744,20 @@ live_design!{
             <Frame> {}
             
             <IconButton> {
-                draw_icon: { svg_file: (ICO_NEXT) }
-                icon_walk: { width:10, height:Fit }
+                draw_icon: {svg_file: (ICO_NEXT)}
+                icon_walk: {width: 10, height: Fit}
             }
         }
     }
     
     ChordButtonA = <Button> {
         walk: {width: Fill, height: Fill, margin: 2.5}
-        layout: { align: {x: 0.5, y: 0.5}, padding: 0.0 }
+        layout: {align: {x: 0.5, y: 0.5}, padding: 0.0}
         
         draw_label: {
-            text_style: <H2_TEXT_BOLD>{}
+            text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
-                return mix( (COLOR_UP_6), (COLOR_UP_6), self.pressed )
+                return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
             }
         }
         
@@ -789,15 +792,15 @@ live_design!{
         }
         
     }
-
+    
     ChordButtonB = <Button> {
         walk: {width: Fill, height: Fill, margin: {top: 2.5, right: 0.0, bottom: 2.5, left: 0}}
-        layout: { align: {x: 0.5, y: 0.5}, padding: 0.0 }
+        layout: {align: {x: 0.5, y: 0.5}, padding: 0.0}
         
         draw_label: {
-            text_style: <H2_TEXT_BOLD>{}
+            text_style: <H2_TEXT_BOLD> {}
             fn get_color(self) -> vec4 {
-                return mix( (COLOR_UP_6), (COLOR_UP_6), self.pressed )
+                return mix((COLOR_UP_6), (COLOR_UP_6), self.pressed)
             }
         }
         
@@ -845,7 +848,7 @@ live_design!{
         label = <Label> {
             walk: {width: 40, height: Fill, margin: 5.0}
             draw_label: {
-                text_style: <H3_TEXT_REGULAR>{},
+                text_style: <H3_TEXT_REGULAR> {},
                 color: (COLOR_UP_6)
             }
             label: "change me"
@@ -868,24 +871,24 @@ live_design!{
     ChordPiano = <Frame> {
         layout: {flow: Down, spacing: (SPACING_CONTROLS), padding: {left: (SPACING_OS), right: (SPACING_OS)}}
         
-        <ChordStrip> { label= { label: "Em" } }
-        <ChordStrip> { label= { label: "Am" } }
-        <ChordStrip> { label= { label: "Dm" } }
-        <ChordStrip> { label= { label: "G" } }
-        <ChordStrip> { label= { label: "C" } }
-        <ChordStrip> { label= { label: "F" } }
-        <ChordStrip> { label= { label: "Bb" } }
-        <ChordStrip> { label= { label: "Bdim" } }
+        <ChordStrip> {label = {label: "Em"}}
+        <ChordStrip> {label = {label: "Am"}}
+        <ChordStrip> {label = {label: "Dm"}}
+        <ChordStrip> {label = {label: "G"}}
+        <ChordStrip> {label = {label: "C"}}
+        <ChordStrip> {label = {label: "F"}}
+        <ChordStrip> {label = {label: "Bb"}}
+        <ChordStrip> {label = {label: "Bdim"}}
     }
     
     ModePlay = <Frame> {
-        layout: {flow: Down, spacing: (SPACING_CONTROLS) }
+        layout: {flow: Down, spacing: (SPACING_CONTROLS)}
         walk: {width: Fill, height: Fill, margin: {top: 20}}
         
         <ChordPiano> {}
-            
+        
         <Frame> {
-            layout: { flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS)}, spacing: 10 }
+            layout: {flow: Right, padding: {top: (SPACING_CONTROLS), right: (SPACING_OS), bottom: (SPACING_OS), left: (SPACING_OS)}, spacing: 10}
             walk: {width: Fill, height: Fit}
             
             <Box> {
@@ -923,7 +926,7 @@ live_design!{
                         label: "Mix"
                     }
                 }
-
+                
                 <FillerY> {}
                 
                 delaysend = <FishSlider> {
@@ -936,7 +939,7 @@ live_design!{
                 }
                 
                 <FillerY> {}
-
+                
                 porta = <FishSlider> {
                     label: "Portamento",
                     slider = {
@@ -975,59 +978,63 @@ live_design!{
                 sdf.line_to(c.x + szs + offset, c.y - szs + offset);
                 
                 sdf.stroke_keep(mix(#fff0, (COLOR_DOWN_FULL), self.selected), 1.75);
-
+                
                 
                 return sdf.result
             }
         }
         draw_label: {
-            text_style: <H2_TEXT_BOLD>{},
+            text_style: <H2_TEXT_BOLD> {},
             color: (COLOR_UP_6)
         }
     }
     
-    PresetListEntry = <Frame> {
+    PresetListEntry = <SwipeListEntry> {
         layout: {flow: Down, padding: {top: 0, right: 5, bottom: 2.5, left: 5}, align: {x: 0.5, y: 0.5}}
-        walk: { width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS) }}
-
-        <Frame> {
-            layout: {flow: Right, align: {x: 0.5, y: 0.5}}
-            walk: { width: Fill, height: Fit}
-
-            label = <Button> {
-                walk: { width: Fill, height: Fill, margin: {top: 5} }
-                layout: {align: {x: 0.0, y: 0.5}, padding: { left: 5 }}
-                draw_label: {
-                    fn get_color(self) -> vec4 {
-                        return mix( (COLOR_UP_6), (COLOR_UP_5), self.pressed )
+        walk: {width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS)}}
+        
+        center: <Frame> {
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fit}
+            <Frame> {
+                layout: {flow: Right, align: {x: 0.5, y: 0.5}}
+                walk: {width: Fill, height: Fit}
+                
+                label = <Button> {
+                    walk: {width: Fill, height: Fill, margin: {top: 5}}
+                    layout: {align: {x: 0.0, y: 0.5}, padding: {left: 5}}
+                    draw_label: {
+                        fn get_color(self) -> vec4 {
+                            return mix((COLOR_UP_6), (COLOR_UP_5), self.pressed)
+                        }
+                        text_style: <H2_TEXT_REGULAR> {},
                     }
-                    text_style: <H2_TEXT_REGULAR>{},
+                    label: "Preset Name"
+                    draw_bg: {
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            return sdf.result
+                        }
+                    }
                 }
-                label: "Preset Name"
-                draw_bg: {
-                    fn pixel(self) -> vec4 {
-                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        return sdf.result
-                    }
+                
+                <Box> {
+                    walk: {width: Fit, height: Fit}
+                    
+                    layout: {align: {x: 0.0, y: 0.5}}
+                    // presetfavorite = <PresetFavorite> {
+                    //     walk: {width: 30, height: 30, margin: {top: 15} }
+                    //     label: " "
+                    // }
+                    
+                    <IconButton> {draw_icon: {svg_file: (ICO_FAV)}}
+                    
+                    share = <IconButton> {draw_icon: {svg_file: (ICO_SHARE)}}
+                    
                 }
             }
-
-            <Box> {
-                walk: {width: Fit, height: Fit}
-
-                layout: {align: {x: 0.0, y: 0.5}}
-                // presetfavorite = <PresetFavorite> {
-                //     walk: {width: 30, height: 30, margin: {top: 15} }
-                //     label: " "
-                // }
-
-                <IconButton> { draw_icon: { svg_file: (ICO_FAV) } }
-
-                share = <IconButton> { draw_icon: { svg_file: (ICO_SHARE) } }
-
-            }
+            <DividerY> {}
         }
-
     }
     
     PaginationButton = <FishButton> {
@@ -1068,48 +1075,15 @@ live_design!{
         <PaginationButton> {label: "…"}
     }
     
-    PresetList = <ScrollY> {
+    PresetList = <SwipeList> {
         
-        walk: {width: Fill, height: Fill, margin: {top: 5.0, bottom: 5.0}}
-        layout: {flow: Down, align: {x: 0.5, y: 0.0},}
-
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        
+        Entry = <PresetListEntry> {}
     }
-
+    
     PresetListFavs = <ScrollY> {
         
         walk: {width: Fill, height: Fill, margin: {top: 5.0, bottom: 5.0}}
         layout: {flow: Down, align: {x: 0.5, y: 0.0},}
-        
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        <DividerY> {}
-        <PresetListEntry> {}
-        
     }
     
     ModePresetmanager = <Box> {
@@ -1130,7 +1104,7 @@ live_design!{
                     layout: {align: {x: 0.0, y: 0.5}}
                     text: "Search"
                     draw_label: {
-                        text_style:<H2_TEXT_BOLD>{font_size: (FONT_SIZE_H1)}
+                        text_style: <H2_TEXT_BOLD> {font_size: (FONT_SIZE_H1)}
                     }
                 }
                 filter_modes = <Frame> {
@@ -1153,8 +1127,8 @@ live_design!{
             
         }
         preset_pages = <Frame> {
-            tab1_frame = <PresetList> {}
-            tab2_frame = <PresetListFavs> { visible:false }
+            preset_list = <PresetList> {}
+            tab2_frame = <PresetListFavs> {visible: false}
         }
         
         // <Pagination> {}
@@ -1175,15 +1149,15 @@ live_design!{
                 draw_bg: {color: (COLOR_DOWN_1)}
             }
             
-            <SequencerControls> { }
-
+            <SequencerControls> {}
+            
             application_pages = <Frame> {
-                walk: { margin: 0.0 }
-                layout: { padding: 0.0 }
-
+                walk: {margin: 0.0}
+                layout: {padding: 0.0}
+                
                 tab1_frame = <ModeSequencer> {}
-                tab2_frame = <ModePlay> {visible:false} // TODO: enable again
-                tab3_frame = <ModePresetmanager> {visible:false} // TODO: enable again
+                tab2_frame = <ModePlay> {visible: false} // TODO: enable again
+                tab3_frame = <ModePresetmanager> {visible: false} // TODO: enable again
             }
             
             mobile_menu = <Box> {
@@ -1193,10 +1167,10 @@ live_design!{
                 
                 mobile_modes = <Frame> {
                     tab1 = <FishTab> {
-                        draw_icon: { svg_file: (ICO_SEQ) }
-                        icon_walk: { width:30, height:Fit }
+                        draw_icon: {svg_file: (ICO_SEQ)}
+                        icon_walk: {width: 30, height: Fit}
                         label: "Sequence"
-                        layout: {flow: Down, spacing: 5.0 }
+                        layout: {flow: Down, spacing: 5.0}
                         state: {selected = {default: on}},
                     }
                     tab2 = <FishTab> {

@@ -244,6 +244,13 @@ impl Button {
 pub struct ButtonRef(WidgetRef); 
 
 impl ButtonRef {
+    pub fn set_label(&self, text:&str){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.label.clear();
+            inner.label.push_str(text);
+        }
+    }
+    
     pub fn clicked(&self, actions:&WidgetActions) -> bool {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let ButtonAction::Click = item.action() {

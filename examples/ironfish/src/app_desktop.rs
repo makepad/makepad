@@ -2138,7 +2138,7 @@ live_design!{
         
         <PresetSaver> {}
         <PresetHeader> {}
-        <PresetList> {}
+        preset_list = <PresetList> {}
         <Pagination> {}
     }
     
