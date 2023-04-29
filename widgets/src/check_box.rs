@@ -8,6 +8,7 @@ use {
 
 live_design!{
     import makepad_draw::shader::std::*;
+    
     DrawCheckBox = {{DrawCheckBox}} {
         uniform size: 7.0;
         fn pixel(self) -> vec4 {
@@ -55,33 +56,50 @@ live_design!{
             return sdf.result
         }
     }
-
-    DrawLabelText= {{DrawLabelText}} {
-        instance selected: 0.0
-        text_style: {
-            font: {
-                //path: d"resources/IBMPlexSans-SemiBold.ttf"
-            }
-            font_size: 11.0
-        }
-        fn get_color(self) -> vec4 {
-            return mix(
-                mix(
-                    #fff6,
-                    #fff6,
-                    self.hover
-                ),
-                #fff6,
-                self.selected
-            )
-        }
-    }
-    
     
     CheckBox = {{CheckBox}} {
+        
         draw_label: {
-            color: #9
+            color: #9,
+            instance focus: 0.0
+            instance selected: 0.0
+            instance hover: 0.0
+            text_style: {
+                font: {
+                    //path: d"resources/IBMPlexSans-SemiBold.ttf"
+                }
+                font_size: 11.0
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #fff6,
+                        #fff6,
+                        self.hover
+                    ),
+                    #fff6,
+                    self.selected
+                )
+            }
         }
+        
+        draw_icon:{
+            instance focus: 0.0
+            instance hover: 0.0
+            instance selected: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.selected
+                )
+            }
+        }
+        
         walk: {
             width: Fit,
             height: Fit
@@ -106,29 +124,35 @@ live_design!{
                     from: {all: Forward {duration: 0.15}}
                     apply: {
                         draw_check: {hover: 0.0}
-                        draw_label: {pressed: 0.0, hover: 0.0}
+                        draw_label: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         draw_check: {hover: 1.0}
-                        draw_label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        draw_label: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
                     }
                 }
             }
             focus = {
                 default: off
                 off = {
-                    from: {all: Forward {duration: 0.0}}
+                    from: {all: Snap}
                     apply: {
                         draw_check: {focus: 0.0}
+                        draw_label: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
                         draw_check: {focus: 1.0}
+                        draw_label: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
                     }
                 }
             }
@@ -139,6 +163,7 @@ live_design!{
                     apply: {
                         draw_check: {selected: 0.0},
                         draw_label: {selected: 0.0},
+                        draw_icon: {selected: 0.0},
                     }
                  }
                 on = {
@@ -147,6 +172,7 @@ live_design!{
                     apply: {
                         draw_check: {selected: 1.0}
                         draw_label: {selected: 1.0}
+                        draw_icon: {selected: 1.0},
                     }
                 }
             }
@@ -175,16 +201,20 @@ pub enum CheckType {
 #[derive(Live, LiveHook)]
 #[live_design_with{widget_factory!(cx, CheckBox)}]
 pub struct CheckBox {
-    draw_check: DrawCheckBox,
     
     walk: Walk,
-    
+    icon_walk: Walk,
+
     layout: Layout,
     state: State,
     
     label_walk: Walk,
     label_align: Align,
-    draw_label: DrawLabelText,
+    
+    draw_check: DrawCheckBox,
+    draw_label: DrawText,
+    draw_icon: DrawIcon,
+
     label: String,
     
     bind: String,
@@ -239,6 +269,7 @@ impl CheckBox {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_check.begin(cx, walk, self.layout);
         self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_check.end(cx);
     }
 }

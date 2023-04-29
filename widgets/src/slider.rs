@@ -292,7 +292,7 @@ impl Slider {
         self.draw_slider.slide_pos = self.value as f32;
         self.draw_slider.begin(cx, walk, self.layout);
         
-        if let Some(dw) = cx.defer_walk(self.label_walk) {
+        if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.get_walk());
             self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);

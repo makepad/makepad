@@ -14,8 +14,8 @@ live_design!{
 
         uniform size: 7.0;
 
-        instance color_active: #00000000
-        instance color_inactive: #x99EEFF
+        uniform color_active: #00000000
+        uniform color_inactive: #x99EEFF
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -53,9 +53,11 @@ live_design!{
             instance hover: 0.0
             instance focus: 0.0
             instance selected: 0.0
-            instance color_unselected: #x00000088
-            instance color_unselected_hover: #x000000CC
-            instance color_selected: #xFFFFFF66
+            
+            uniform color_unselected: #x00000088
+            uniform color_unselected_hover: #x000000CC
+            uniform color_selected: #xFFFFFF66
+            
             color: #9
             text_style: {
                 font: {
@@ -171,7 +173,10 @@ pub enum RadioType {
 #[live_design_with{widget_factory!(cx, RadioButton)}]
 pub struct RadioButton {
     draw_radio: DrawRadioButton,
+    draw_icon: DrawIcon,
+    draw_label: DrawText,
     
+    icon_walk: Walk,
     walk: Walk,
     
     value: LiveValue,
@@ -181,7 +186,6 @@ pub struct RadioButton {
     
     label_walk: Walk,
     label_align: Align,
-    draw_label: DrawText,
     label: String,
     
     bind: String,
@@ -227,6 +231,7 @@ impl RadioButton {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_radio.begin(cx, walk, self.layout);
         self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_radio.end(cx);
     }
 }

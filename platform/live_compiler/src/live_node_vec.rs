@@ -674,7 +674,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
             let pt = match node.origin.prop_type() {
                 LivePropType::Field => ":",
                 LivePropType::Instance => "=",
-                LivePropType::Template => "=?",
+                //LivePropType::Template => "=?",
                 LivePropType::Nameless => "??"
             };
             match &node.value {

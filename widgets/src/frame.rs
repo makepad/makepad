@@ -19,7 +19,7 @@ live_design!{
     Solid = <Frame> {show_bg: true, draw_bg: {
         fn get_color(self) -> vec4 {
             return self.color
-        }
+        } 
         
         fn pixel(self) -> vec4 {
             return Pal::premul(self.get_color())
@@ -332,8 +332,7 @@ live_design!{
             fill: Image
         }
     }
-    
-    UserDraw = <Frame> {user_draw: true}
+  
     ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
     ScrollY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
@@ -351,13 +350,13 @@ pub struct Frame { // draw info per UI element
     pub walk: Walk,
     
     image: LiveDependency,
-    image_texture: Texture,
+    image_texture: Option<Texture>,
     image_scale: f64,
     
     use_cache: bool,
     has_view: bool,
     #[live(true)] visible: bool,
-    user_draw: bool,
+    /*user_draw: bool,*/
     
     #[live(false)] no_signal_events: bool,
     
@@ -375,7 +374,7 @@ pub struct Frame { // draw info per UI element
     #[rust] texture_cache: Option<FrameTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] templates: ComponentMap<LiveId, (LivePtr, usize)>,
+    /*#[rust] templates: ComponentMap<LiveId, (LivePtr, usize)>,*/
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>
 }
@@ -438,17 +437,27 @@ impl LiveHook for Frame {
                 }
             }
             if let Some(mut image_buffer) = image_buffer.take() {
-                self.image_texture.set_desc(cx, TextureDesc {
-                    format: TextureFormat::ImageBGRA,
-                    width: Some(image_buffer.width),
-                    height: Some(image_buffer.height),
-                });
-                self.image_texture.swap_image_u32(cx, &mut image_buffer.data);
+                if self.image_texture.is_none(){
+                    self.image_texture = Some(Texture::new(cx));
+                }
+                if let Some(image_texture) = &mut self.image_texture{
+                    image_texture.set_desc(cx, TextureDesc {
+                        format: TextureFormat::ImageBGRA,
+                        width: Some(image_buffer.width),
+                        height: Some(image_buffer.height),
+                    });
+                    image_texture.swap_image_u32(cx, &mut image_buffer.data);
+                }
             }
         }
     }
     
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        //! TODO
+        // NOTE FOR LIVE RELOAD
+        // the id is always unique
+        // Draw order is never cleared.
+        
         let id = nodes[index].id;
         match from {
             ApplyFrom::Animate | ApplyFrom::ApplyOver => {
@@ -459,15 +468,15 @@ impl LiveHook for Frame {
                     nodes.skip_node(index)
                 }
             }
-            ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
-                if !self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
+            ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
+                /*if !self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
                     // lets store a pointer into our templates.
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                     self.templates.insert(id, (live_ptr, self.draw_order.len()));
                     nodes.skip_node(index)
                 }
-                else if nodes[index].origin.has_prop_type(LivePropType::Instance)
-                    || self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
+                else */if nodes[index].origin.has_prop_type(LivePropType::Instance)
+                    /*|| self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) */{
                     self.draw_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
                         .apply(cx, from, index, nodes);
@@ -611,7 +620,7 @@ impl Widget for Frame {
             child.redraw(cx);
         }
     }
-    
+    /*
     fn create_child(
         &mut self,
         cx: &mut Cx,
@@ -668,7 +677,7 @@ impl Widget for Frame {
         
         self.children.get_mut(&new_id).unwrap().clone()
     }
-    
+    */
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         match cached {
             WidgetCache::Yes | WidgetCache::Clear => {
@@ -715,7 +724,7 @@ impl Widget for Frame {
             }
         }
     }
-    
+    /*
     fn find_template(&self, id: &[LiveId; 1]) -> Option<LivePtr> {
         if let Some((live_ptr, _)) = self.templates.get(&id[0]) {
             Some(*live_ptr)
@@ -723,12 +732,12 @@ impl Widget for Frame {
         else {
             None
         }
-    }
+    }*/
 }
 
 #[derive(Clone)]
 enum DrawState {
-    Drawing(usize),
+    Drawing(usize, bool),
     DeferWalk(usize)
 }
 
@@ -762,11 +771,13 @@ impl Frame {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        if !self.visible {
-            return WidgetDraw::done()
-        }
         // the beginning state
-        if self.draw_state.begin(cx, DrawState::Drawing(0)) {
+        if self.draw_state.begin(cx, DrawState::Drawing(0, false)) {
+            if !self.visible {
+                self.draw_state.end();
+                return WidgetDraw::done()
+            }
+            
             self.defer_walks.clear();
             
             if self.has_view {
@@ -819,39 +830,35 @@ impl Frame {
             };
             
             if self.show_bg {
-                if self.image.as_str().len() > 0 {
-                    self.draw_bg.draw_vars.set_texture(0, &self.image_texture);
+                if let Some(image_texture) = &self.image_texture{
+                    self.draw_bg.draw_vars.set_texture(0, image_texture);
                 }
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
             }
-            else if cx.inside_pass() {
+            else {
                 cx.begin_turtle(walk, self.layout.with_scroll(scroll));
-            }
-            
-            if self.user_draw {
-                
-                return WidgetDraw::not_done(WidgetRef::empty())
             }
         }
         
-        while let Some(DrawState::Drawing(step)) = self.draw_state.get() {
+        while let Some(DrawState::Drawing(step, resume)) = self.draw_state.get() {
             if step < self.draw_order.len() {
                 let id = self.draw_order[step];
                 if let Some(child) = self.children.get_mut(&id) {
-                    if !cx.inside_pass() {
-                        child.draw_walk_widget(cx, Walk::default()) ?;
-                    }
-                    else if child.is_visible(){
+                    if child.is_visible(){
                         let walk = child.get_walk();
-                        if let Some(fw) = cx.defer_walk(walk) {
+                        if resume{
+                            child.draw_walk_widget(cx, walk) ?;
+                        }
+                        else if let Some(fw) = cx.defer_walk(walk) {
                             self.defer_walks.push((id, fw));
                         }
                         else {
+                            self.draw_state.set(DrawState::Drawing(step, true));
                             child.draw_walk_widget(cx, walk) ?;
                         }
                     }
                 }
-                self.draw_state.set(DrawState::Drawing(step + 1));
+                self.draw_state.set(DrawState::Drawing(step + 1, false));
             }
             else {
                 self.draw_state.set(DrawState::DeferWalk(0));
@@ -860,7 +867,7 @@ impl Frame {
         
         while let Some(DrawState::DeferWalk(step)) = self.draw_state.get() {
             if step < self.defer_walks.len() {
-                let (id, dw) = &self.defer_walks[step];
+                let (id, dw) = &mut self.defer_walks[step];
                 if let Some(child) = self.children.get_mut(&id) {
                     let walk = dw.resolve(cx);
                     child.draw_walk_widget(cx, walk) ?;
@@ -879,7 +886,7 @@ impl Frame {
                     self.draw_bg.end(cx);
                     self.area = self.draw_bg.area();
                 }
-                else if cx.inside_pass() {
+                else{
                     cx.end_turtle_with_area(&mut self.area);
                 };
                 
@@ -910,7 +917,6 @@ impl Frame {
                     }
                 }
                 self.draw_state.end();
-                break;
             }
         }
         WidgetDraw::done()
