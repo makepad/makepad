@@ -213,7 +213,6 @@ impl SwipeList {
             });
             return Some(entry)
         }
-        log!("GET DRAWABLE");
         None
     }
     
@@ -263,10 +262,6 @@ impl Widget for SwipeList {
     fn get_walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        /*    self.begin(cx, walk);
-            self.end(cx);
-        return WidgetDraw::done();*/
-        // alright so in non-design mode we return our hook
         if self.draw_state.begin(cx, ListDrawState::Hook) {
             self.begin(cx, walk);
             return WidgetDraw::hook_above()
