@@ -1,9 +1,6 @@
 pub mod os;
 
 #[macro_use]
-extern crate num_derive;
-
-#[macro_use]
 mod live_prims;
 
 #[macro_use]

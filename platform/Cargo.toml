@@ -13,8 +13,6 @@ metadata.makepad-auto-version = "wxHZD_56sR__1P12uohe4SoyRR8="
 makepad-futures = { path = "../libs/futures" }
 
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.3.0" }
-num-traits = "0.2"
-num-derive = "0.3"
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "0.3.0" }
