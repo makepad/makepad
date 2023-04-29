@@ -68,14 +68,14 @@ pub trait Widget: LiveApply {
         true
     }
     
-    fn draw_widget_continue(&mut self, cx: &mut Cx2d) -> WidgetDraw {
+    fn draw_widget_hook(&mut self, cx: &mut Cx2d) -> WidgetDraw {
         self.draw_walk_widget(cx, self.get_walk())
     }
     
     fn draw_widget(&mut self, cx: &mut Cx2d) {
-        while self.draw_widget_continue(cx).is_not_done() {};
+        while self.draw_widget_hook(cx).is_hook() {};
     }
-    
+    /*
     fn create_child(
         &mut self,
         _cx: &mut Cx,
@@ -89,7 +89,7 @@ pub trait Widget: LiveApply {
     
     fn find_template(&self, _id: &[LiveId; 1]) -> Option<LivePtr> {
         None
-    }
+    }*/
     
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
 }
@@ -105,10 +105,11 @@ pub enum CreateAt {
 
 pub trait WidgetDrawApi {
     fn done() -> WidgetDraw {Result::Ok(())}
-    fn not_done(arg: WidgetRef) -> WidgetDraw {Result::Err(arg)}
+    fn hook(arg: WidgetRef) -> WidgetDraw {Result::Err(arg)}
+    fn hook_above() -> WidgetDraw {Result::Err(WidgetRef::empty())}
     fn is_done(&self) -> bool;
-    fn is_not_done(&self) -> bool;
-    fn into_widget(self) -> Option<WidgetRef>;
+    fn is_hook(&self) -> bool;
+    fn hook_widget(self) -> Option<WidgetRef>;
 }
 
 impl WidgetDrawApi for WidgetDraw {
@@ -118,13 +119,13 @@ impl WidgetDrawApi for WidgetDraw {
             Result::Err(_) => false
         }
     }
-    fn is_not_done(&self) -> bool {
+    fn is_hook(&self) -> bool {
         match *self {
             Result::Ok(_) => false,
             Result::Err(_) => true
         }
     }
-    fn into_widget(self) -> Option<WidgetRef> {
+    fn hook_widget(self) -> Option<WidgetRef> {
         match self {
             Result::Ok(_) => None,
             Result::Err(nd) => Some(nd)
@@ -373,7 +374,7 @@ impl WidgetRef {
     pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
         Self (Rc::new(RefCell::new(Some(widget))))
     }
-    
+    /*
     pub fn create_child(
         &self,
         cx: &mut Cx,
@@ -389,7 +390,7 @@ impl WidgetRef {
         else {
             WidgetRef::empty()
         }
-    }
+    }*/
     
     pub fn handle_widget_event_with(&self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
@@ -448,7 +449,7 @@ impl WidgetRef {
         }
         WidgetSet::default()
     }
-
+/*
     pub fn find_template(&self, id: &[LiveId; 1]) -> Option<LivePtr> {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.find_template(id)
@@ -456,16 +457,16 @@ impl WidgetRef {
         else {
             None
         }
-    }
+    }*/
     
     pub fn draw_walk_widget(&self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             let ret = inner.draw_walk_widget(cx, walk);
-            if let Some(nd) = ret.into_widget() {
+            if let Some(nd) = ret.hook_widget() {
                 if nd.is_empty() {
-                    return WidgetDraw::not_done(self.clone())
+                    return WidgetDraw::hook(self.clone())
                 }
-                return WidgetDraw::not_done(nd);
+                return WidgetDraw::hook(nd);
             }
         }
         WidgetDraw::done()
@@ -499,9 +500,9 @@ impl WidgetRef {
         }
     }
     
-    pub fn draw_widget_continue(&self, cx: &mut Cx2d) -> WidgetDraw {
+    pub fn draw_widget_hook(&self, cx: &mut Cx2d) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.draw_widget_continue(cx)
+            return inner.draw_widget_hook(cx)
         }
         WidgetDraw::done()
     }

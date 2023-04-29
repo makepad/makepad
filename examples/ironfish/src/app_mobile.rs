@@ -264,7 +264,7 @@ live_design!{
             }
             layout: { align: {x: 0.5, y: 0.5 }}
             icon_walk:{margin:{left:10}, width:16,height:Fit}
-            text: "Click"
+            label: "Click"
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -311,7 +311,7 @@ live_design!{
                 }
             }
             icon_walk: {margin: {left:0.0}, width:16, height:Fit}
-            text: ""
+            label: ""
             draw_bg: {
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -734,7 +734,7 @@ live_design!{
                         text_style: {font_size: (FONT_SIZE_H1)},
                         color: (COLOR_UP_6)
                     }
-                    text: "Preset Name"
+                    label: "Preset Name"
                 }
             }
             
@@ -848,7 +848,7 @@ live_design!{
                 text_style: <H3_TEXT_REGULAR>{},
                 color: (COLOR_UP_6)
             }
-            text: "change me"
+            label: "change me"
         }
         
         <ChordButtonA> {}
@@ -868,14 +868,14 @@ live_design!{
     ChordPiano = <Frame> {
         layout: {flow: Down, spacing: (SPACING_CONTROLS), padding: {left: (SPACING_OS), right: (SPACING_OS)}}
         
-        <ChordStrip> { label= { text: "Em" } }
-        <ChordStrip> { label= { text: "Am" } }
-        <ChordStrip> { label= { text: "Dm" } }
-        <ChordStrip> { label= { text: "G" } }
-        <ChordStrip> { label= { text: "C" } }
-        <ChordStrip> { label= { text: "F" } }
-        <ChordStrip> { label= { text: "Bb" } }
-        <ChordStrip> { label= { text: "Bdim" } }
+        <ChordStrip> { label= { label: "Em" } }
+        <ChordStrip> { label= { label: "Am" } }
+        <ChordStrip> { label= { label: "Dm" } }
+        <ChordStrip> { label= { label: "G" } }
+        <ChordStrip> { label= { label: "C" } }
+        <ChordStrip> { label= { label: "F" } }
+        <ChordStrip> { label= { label: "Bb" } }
+        <ChordStrip> { label= { label: "Bdim" } }
     }
     
     ModePlay = <Frame> {
@@ -1003,7 +1003,7 @@ live_design!{
                     }
                     text_style: <H2_TEXT_REGULAR>{},
                 }
-                text: "Preset Name"
+                label: "Preset Name"
                 draw_bg: {
                     fn pixel(self) -> vec4 {
                         let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -1031,7 +1031,7 @@ live_design!{
     }
     
     PaginationButton = <FishButton> {
-        text: "1"
+        label: "1"
         walk: {width: 40, height: 40, margin: {top: 20}}
         draw_label: {text_style: {font_size: (FONT_SIZE_H2)}}
         
@@ -1059,13 +1059,13 @@ live_design!{
         walk: {width: Fill, height: Fit, margin: {bottom: (SPACING_OS)}}
         layout: {flow: Right, align: {x: 0.5, y: 0.0}, spacing: 10}
         
-        <PaginationButton> {text: "…"}
-        <PaginationButton> {text: "3"}
-        <PaginationButton> {text: "4"}
-        <PaginationButton> {text: "5"}
-        <PaginationButton> {text: "6"}
-        <PaginationButton> {text: "7"}
-        <PaginationButton> {text: "…"}
+        <PaginationButton> {label: "…"}
+        <PaginationButton> {label: "3"}
+        <PaginationButton> {label: "4"}
+        <PaginationButton> {label: "5"}
+        <PaginationButton> {label: "6"}
+        <PaginationButton> {label: "7"}
+        <PaginationButton> {label: "…"}
     }
     
     PresetList = <ScrollY> {
@@ -1192,20 +1192,13 @@ live_design!{
                 draw_bg: {color: (COLOR_DOWN_2)}
                 
                 mobile_modes = <Frame> {
-                    tab1 = <IconLabelButton> {
+                    tab1 = <FishTab> {
                         draw_icon: { svg_file: (ICO_SEQ) }
                         icon_walk: { width:30, height:Fit }
-                        text: "Sequence"
+                        label: "Sequence"
                         layout: {flow: Down, spacing: 5.0 }
                         state: {selected = {default: on}},
                     }
-                    // tab1 = <FishTab> {
-                    //     walk: {width: Fill}
-                    //     layout: {align: {x: 0.5, y: 0.5}}
-                    //     label: "Sequence",
-                    //     state: {selected = {default: on}},
-                    //     draw_label: {color_selected: (COLOR_UP_8)}
-                    // }
                     tab2 = <FishTab> {
                         walk: {width: Fill}
                         layout: {align: {x: 0.5, y: 0.5}}

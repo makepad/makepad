@@ -31,7 +31,7 @@ live_design!{
                 caption_label = <Frame> {
                     walk: {width: Fill, height: Fill}
                     layout: {align: {x: 0.5, y: 0.5}},
-                    <Label> {text: "Makepad", walk: {margin: {left: 100}}}
+                    <Label> {label: "Makepad", walk: {margin: {left: 100}}}
                 }
                 windows_buttons = <Frame> {
                     visible: false,
@@ -271,11 +271,6 @@ impl DesktopWindow {
         
         self.overlay.begin(cx);
         
-        //while self.frame.draw(cx).is_ok(){}
-        //if self.frame.draw_widget_continue(cx).is_done() {
-        //    self.end(cx);
-        //    return ViewRedrawing::no()
-        //}
         ViewRedrawing::yes()
     }
     
@@ -340,11 +335,10 @@ impl Widget for DesktopWindow{
         }
         
         if let Some(DrawState::Drawing) = self.draw_state.get(){
-            self.frame.draw_widget_continue(cx)?;
+            self.frame.draw_widget_hook(cx)?;
             self.draw_state.end();
+            self.end(cx);
         }        
-
-        self.end(cx);
         
         WidgetDraw::done()
     }

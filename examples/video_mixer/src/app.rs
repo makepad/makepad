@@ -106,26 +106,26 @@ live_design!{
                     image: d"crate://self/rust_meetup_slide.png",
                     walk: {width: 1920, height: 1080}
                 }
-                <Slide> {title = {text: "Intro"}, <SlideBody> {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
-                <Slide> {title = {text: "Recording Talks"}, <SlideBody> {text: "Not as easy as you think"}}
-                <Slide> {title = {text: "What do you need"}, <SlideBody> {text: "- Multiple microphones\n- Audio Mixing ability\n- Video mixing\n- Speaker camera\n- Event slide"}}
+                <Slide> {title = {label: "Intro"}, <SlideBody> {label: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
+                <Slide> {title = {label: "Recording Talks"}, <SlideBody> {label: "Not as easy as you think"}}
+                <Slide> {title = {label: "What do you need"}, <SlideBody> {label: "- Multiple microphones\n- Audio Mixing ability\n- Video mixing\n- Speaker camera\n- Event slide"}}
                 <Image> {
                     image: d"crate://self/camera_gear.png",
                     walk: {width: 1920, height: 1080}
                 }
-                <Slide> {title = {text: "So much gear"}, <SlideBody> {text: "- What if we use software instead"}}
-                <Slide> {title = {text: "We can replace"}, <SlideBody> {text: "- Expensive camera: cheap android\n- Audio mixer: laptop\n- Video mixer: laptop\n- Audio Mixer: Midi BLE controller"}}
-                <Slide> {title = {text: "The software"}, <SlideBody> {text: "- Android app video send\n- Macos Audio+Video+Midi+Rendering"}}
-                <Slide> {title = {text: "Remote Camera:"}, <SlideBody> {text: "- Android: Endless buildsystem wrangling\n- Gradle, Java, Android Studio, NDK, Linker, APK"}}
-                <Slide> {title = {text: "Simple Rust on Android"}, <SlideBody> {text: "- Strip out Gradle/Android Studio\n- Repackage all buildtooling\n#cargo makepad android toolchain-install\n#cargo makepad android run makepad-example-video-sender"}}
-                <Slide> {title = {text: "Remote camera: Solved"}, <SlideBody> {text: ""}network_video2 = <VideoFrameRound> {
+                <Slide> {title = {label: "So much gear"}, <SlideBody> {label: "- What if we use software instead"}}
+                <Slide> {title = {label: "We can replace"}, <SlideBody> {label: "- Expensive camera: cheap android\n- Audio mixer: laptop\n- Video mixer: laptop\n- Audio Mixer: Midi BLE controller"}}
+                <Slide> {title = {label: "The software"}, <SlideBody> {label: "- Android app video send\n- Macos Audio+Video+Midi+Rendering"}}
+                <Slide> {title = {label: "Remote Camera:"}, <SlideBody> {label: "- Android: Endless buildsystem wrangling\n- Gradle, Java, Android Studio, NDK, Linker, APK"}}
+                <Slide> {title = {label: "Simple Rust on Android"}, <SlideBody> {label: "- Strip out Gradle/Android Studio\n- Repackage all buildtooling\n#cargo makepad android toolchain-install\n#cargo makepad android run makepad-example-video-sender"}}
+                <Slide> {title = {label: "Remote camera: Solved"}, <SlideBody> {label: ""}network_video2 = <VideoFrameRound> {
                     walk: {width: 640, height: 480}
                 }}
                 
-                <Slide> {title = {text: "Video mixer"}, <SlideBody> {text: "- Mixing inputs\n- Connect to network camera\n- Audio mixing"}}
-                <Slide> {title = {text: "Makepad APIs"}, <SlideBody> {text: "- Windowing\n- Graphics\n- UI Components\n- Audio in/out\n- Midi in/out\n- Video In"}}
-                <Slide> {title = {text: "Nice deadline"}, <SlideBody> {text: "- 22 platform apis in 10 weeks"}}
-                <Slide> {title = {text: "Audio Inputs"}, <SlideBody> {}
+                <Slide> {title = {label: "Video mixer"}, <SlideBody> {label: "- Mixing inputs\n- Connect to network camera\n- Audio mixing"}}
+                <Slide> {title = {label: "Makepad APIs"}, <SlideBody> {label: "- Windowing\n- Graphics\n- UI Components\n- Audio in/out\n- Midi in/out\n- Video In"}}
+                <Slide> {title = {label: "Nice deadline"}, <SlideBody> {label: "- 22 platform apis in 10 weeks"}}
+                <Slide> {title = {label: "Audio Inputs"}, <SlideBody> {}
                     <Box> {
                         walk:{height:Fit}
                         draw_bg:{color:#5}
@@ -135,7 +135,7 @@ live_design!{
                         chan8 = <DisplayChannel> {}
                     }
                 }
-                <Slide> {title = {text: "DSL for styling"}, <SlideBody> {text: "- Almost not crap to do"}}
+                <Slide> {title = {label: "DSL for styling"}, <SlideBody> {label: "- Almost not crap to do"}}
                 <Image> {
                     image: d"crate://self/dsl_view.png",
                     walk: {width: 1920, height: 1080}
@@ -157,7 +157,7 @@ live_design!{
                     layout: {align: {y: 0.0}, spacing: 5, padding: 10}
                     
                 }
-                <Slide> {title = {text: "Thank you"}, <SlideBody> {text: "- github.com/makepad/makepad\n- twitter: @rikarends"}}
+                <Slide> {title = {label: "Thank you"}, <SlideBody> {label: "- github.com/makepad/makepad\n- twitter: @rikarends"}}
             }
         }
     }

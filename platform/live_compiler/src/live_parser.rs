@@ -855,12 +855,12 @@ impl<'a> LiveParser<'a> {
             LivePropType::Field
         }
         else if self.accept_token(LiveToken::Punct(live_id!(=))){
-            if self.accept_token(LiveToken::Punct(live_id!( ?))) {
+            /*if self.accept_token(LiveToken::Punct(live_id!( ?))) {
                 LivePropType::Template
             }
-            else{
+            else{*/
                 LivePropType::Instance
-            }
+            //}
         }
         else{
             return Err(self.error(format!("Unexpected assign_type, expected = or :"), live_error_origin!()))

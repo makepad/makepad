@@ -355,6 +355,9 @@ impl DrawText {
        
         //cx.debug.rect_r(Rect{pos:dvec2(1.0,2.0), size:dvec2(200.0,300.0)});
         let mut walk_x = pos.x;
+        if walk_x.is_infinite() || walk_x.is_nan(){
+            return
+        }
         //let mut char_offset = char_offset;
         
         let cxfont = fonts_atlas.fonts[font_id].as_mut().unwrap();
