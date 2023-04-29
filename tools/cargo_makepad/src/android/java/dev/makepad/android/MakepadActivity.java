@@ -3,10 +3,18 @@ import android.Manifest;
 
 import android.os.Bundle;
 import android.app.Activity;
+import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
-import android.widget.LinearLayout;
-import android.widget.RelativeLayout;
+import android.view.inputmethod.InputMethodManager;
+import android.view.MenuInflater;
+import android.view.ContextMenu;
+import android.view.ContextMenu.ContextMenuInfo;
+import android.view.MenuItem;
 import android.content.Context;
+import android.content.ClipData;
+import android.content.ClipDescription;
+import android.content.ClipboardManager;
 import android.util.Log;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
@@ -39,6 +47,7 @@ import android.bluetooth.BluetoothDevice;
 
 public class MakepadActivity extends Activity implements 
 MidiManager.OnDeviceOpenedListener,
+View.OnCreateContextMenuListener,
 Makepad.Callback{
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -64,8 +73,15 @@ Makepad.Callback{
     protected void onStart() {
         super.onStart();
         mView = new MakepadSurfaceView(this, mCx);
+
+        // This is a requirement to have access to the IME (soft keyword)
+        mView.setFocusable(true);
+        mView.setFocusableInTouchMode(true);
+
         setContentView(mView);
         Makepad.onNewGL(mCx, this);
+
+        registerForContextMenu(mView);
     }
 
     @Override
@@ -112,7 +128,7 @@ Makepad.Callback{
 
     public void scheduleRedraw() {
         mView.invalidate();
-    }    
+    }
 
     public String[] getAudioDevices(long flag){
         try{
@@ -226,8 +242,93 @@ Makepad.Callback{
         mView.swapBuffers();
     }
 
+    public void showTextIME() {
+        if (mView.requestFocus()) {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            imm.showSoftInput(mView, 0);
+        } else {
+            Log.e("Makepad", "can not display software keyboard (IME)");
+        }
+    }
+
+    public void hideTextIME() {
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        imm.hideSoftInputFromWindow(mView.getWindowToken(), 0);
+    }
+
+    public void showClipboardActions(String selected) {
+        mSelectedContent = selected;
+        mView.showContextMenu();
+    }
+
+    @Override
+    public void onCreateContextMenu(ContextMenu menu, View v, ContextMenuInfo menuInfo) {
+        super.onCreateContextMenu(menu, v, menuInfo);
+
+        MenuInflater inflater = getMenuInflater();
+        inflater.inflate(R.menu.context_menu, menu);
+
+        MenuItem copyItem = menu.findItem(R.id.menu_copy);
+        MenuItem cutItem = menu.findItem(R.id.menu_cut);
+        if (mSelectedContent == null || mSelectedContent.isEmpty()) {
+            copyItem.setVisible(false);
+            cutItem.setVisible(false);
+        } else {
+            copyItem.setVisible(true);
+            cutItem.setVisible(true);
+        }
+
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        MenuItem pasteItem = menu.findItem(R.id.menu_paste);
+        if (!(clipboard.hasPrimaryClip())) {
+            pasteItem.setVisible(false);
+        } else if (
+            clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) ||
+            clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML)
+        ) {
+            pasteItem.setVisible(true);
+        } else {
+            pasteItem.setVisible(false);
+        }
+    }
+
+    @Override
+    public boolean onContextItemSelected(MenuItem item) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        ClipData clip;
+        switch (item.getItemId()) {
+            case R.id.menu_copy:
+                clip = ClipData.newPlainText("Makepad", mSelectedContent);
+                clipboard.setPrimaryClip(clip);
+
+                // Will emit the internal Makepad TextCopy event, just in case
+                // widget developers want to do something else
+                Makepad.copyToClipboard(mCx, (Makepad.Callback)mView.getContext());
+                return true;
+            case R.id.menu_paste:
+                if (clipboard.hasPrimaryClip()) {
+                    ClipData.Item cb_item = clipboard.getPrimaryClip().getItemAt(0);
+                    String text = cb_item.getText().toString();
+
+                    // Will emit TextInput event with the was_paste flag in true
+                    Makepad.pasteFromClipboard(mCx, text, (Makepad.Callback)mView.getContext());
+                }
+                return true;
+            case R.id.menu_cut:
+                clip = ClipData.newPlainText("Makepad", mSelectedContent);
+                clipboard.setPrimaryClip(clip);
+
+                // Will emit TextCut event so Makepad widgets can strip the selected content
+                Makepad.cutToClipboard(mCx, (Makepad.Callback)mView.getContext());
+                return true;
+            default:
+                return super.onContextItemSelected(item);
+        }
+    }
+
     Handler mHandler;
     HashMap<Long, Runnable> mRunnables;
     MakepadSurfaceView mView;
     long mCx;
+    String mSelectedContent;
 }
