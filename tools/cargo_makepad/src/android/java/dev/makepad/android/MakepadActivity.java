@@ -54,11 +54,10 @@ Makepad.Callback{
         mHandler = new Handler(Looper.getMainLooper());
         mRunnables = new HashMap<Long, Runnable>();
 
-        String apk_path = this.getCacheDir().getAbsolutePath();
         String cache_path = this.getCacheDir().getAbsolutePath();
+        float density = getResources().getDisplayMetrics().density;
 
-        Makepad.onInit(mCx, cache_path, this);
-        //Makepad.onNewGL(mCx, this);
+        Makepad.onInit(mCx, cache_path, density, this);
     }
 
     @Override
