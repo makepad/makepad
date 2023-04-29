@@ -8,27 +8,30 @@ use {
 live_design!{
     import makepad_draw::shader::std::*;
     
-    DrawLabelText= {{DrawLabelText}} {
-        text_style: {
-            font: {
-                //path: d"resources/IBMPlexSans-SemiBold.ttf"
-            }
-            font_size: 11.0
-        }
-        fn get_color(self) -> vec4 {
-            return mix(
-                mix(
-                    #9,
-                    #c,
-                    self.hover
-                ),
-                #9,
-                self.pressed
-            )
-        }
-    }
     
     Button= {{Button}} {
+        draw_label: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            text_style: {
+                font: {
+                    //path: d"resources/IBMPlexSans-SemiBold.ttf"
+                }
+                font_size: 11.0
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.pressed
+                )
+            }
+        }
+        
         draw_icon:{
             instance hover: 0.0
             instance pressed: 0.0
@@ -154,13 +157,13 @@ pub struct Button {
     state: State,
     
     draw_bg: DrawQuad,
-    draw_label: DrawLabelText,
+    draw_label: DrawText,
     draw_icon: DrawIcon,
     icon_walk: Walk,
     walk: Walk,
     
     layout: Layout,
-    text: String
+    label: String
 }
 
 impl Widget for Button{
@@ -188,13 +191,6 @@ impl Widget for Button{
         let _ = self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
-}
-
-#[derive(Live, LiveHook)]#[repr(C)]
-struct DrawLabelText {
-    draw_super: DrawText,
-    hover: f32,
-    pressed: f32,
 }
 
 impl Button {
@@ -238,7 +234,7 @@ impl Button {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), &self.text);
+        self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), &self.label);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_bg.end(cx);
     }

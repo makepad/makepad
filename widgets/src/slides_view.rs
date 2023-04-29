@@ -20,7 +20,7 @@ live_design!{
                 font_size: 35
             }
         }
-        text: ""
+        label: ""
     }
     
     Slide = <Box> {
@@ -34,7 +34,7 @@ live_design!{
                     font_size: 64
                 }
             }
-            text: "SlideTitle"
+            label: "SlideTitle"
         }
     }
     
@@ -155,7 +155,7 @@ impl SlidesView {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        while self.frame.draw_walk_widget(cx, walk).is_not_done() {
+        while self.frame.draw_walk_widget(cx, walk).is_hook() {
         }
     }
 }

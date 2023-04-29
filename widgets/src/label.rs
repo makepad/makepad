@@ -30,7 +30,7 @@ pub struct Label {
     align: Align,
 
     //margin: Margin,
-    text: String,
+    label: String,
 }
 
 impl Widget for Label {
@@ -43,7 +43,7 @@ impl Widget for Label {
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
-        let lines = self.text.split("\\n");
+        let lines = self.label.split("\\n");
         for line in lines{
             // lets debugdraw the cliprect
             
@@ -60,8 +60,8 @@ pub struct LabelRef(WidgetRef);
 impl LabelRef{
     pub fn set_text(&self, text:&str){
         if let Some(mut inner) = self.borrow_mut(){
-            inner.text.clear();
-            inner.text.push_str(text);
+            inner.label.clear();
+            inner.label.push_str(text);
         }
     }
 }
