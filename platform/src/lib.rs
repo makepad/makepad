@@ -1,6 +1,9 @@
 pub mod os;
 
 #[macro_use]
+extern crate num_derive;
+
+#[macro_use]
 mod live_prims;
 
 #[macro_use]
@@ -49,7 +52,7 @@ pub use makepad_wasm_bridge;
 pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
-pub use makepad_windows as windows_crate; 
+pub use makepad_windows as windows_crate;
  
 pub use {
     makepad_shader_compiler,

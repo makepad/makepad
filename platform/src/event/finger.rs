@@ -491,8 +491,15 @@ pub struct FingerUpEvent {
 }
 
 impl FingerUpEvent {
+    pub fn mod_shift(&self) -> bool {self.modifiers.shift}
+
     pub fn was_tap(&self) -> bool {
         self.time - self.capture_time < TAP_COUNT_TIME &&
+        (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
+    }
+
+    pub fn was_long_press(&self) -> bool {
+        self.time - self.capture_time >= TAP_COUNT_TIME &&
         (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
     }
 }
@@ -610,6 +617,11 @@ impl Event {
             Event::TextCopy(tc) => {
                 if cx.keyboard.has_key_focus(area) {
                     return Hit::TextCopy(tc.clone());
+                }
+            },
+            Event::TextCut => {
+                if cx.keyboard.has_key_focus(area) {
+                    return Hit::TextCut;
                 }
             },
             Event::Scroll(e) => {

@@ -1,4 +1,5 @@
 pub mod android;
+pub mod android_util;
 pub mod android_media;
 pub mod aaudio_sys;
 pub mod android_audio;
