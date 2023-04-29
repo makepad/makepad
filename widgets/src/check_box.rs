@@ -315,3 +315,12 @@ impl Widget for CheckBox {
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct CheckBoxRef(WidgetRef);
+
+impl CheckBoxRef {
+    pub fn set_label_text(&self, text:&str){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.label.clear();
+            inner.label.push_str(text);
+        }
+    }
+}
