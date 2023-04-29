@@ -215,7 +215,6 @@ impl AppMain for App {
                 // draw the preset lists
                 if let Some(mut list) = preset_lists.pick(next).borrow_mut() {
                     for i in 0..10 {
-                        log!("HERE!");
                         if let Some(item) = list.get_drawable(cx, LiveId(i as u64).into(), live_id!(Entry)) {
                             item.get_button(id!(label)).set_label(&format!("Button id {i}"));
                             item.draw_widget(cx);
