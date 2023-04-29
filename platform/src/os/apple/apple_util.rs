@@ -319,7 +319,7 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
             KeyCode::KeyG => "g",
             KeyCode::KeyH => "h",
             KeyCode::KeyJ => "j",
-            KeyCode::KeyK => "l",
+            KeyCode::KeyK => "k",
             KeyCode::KeyL => "l",
             KeyCode::Semicolon => ";",
             KeyCode::Quote => "'",

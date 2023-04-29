@@ -17,11 +17,13 @@ pub struct CxKeyboard {
     pub (crate) key_focus: Area,
     #[allow(dead_code)]
     pub (crate) keys_down: Vec<KeyEvent>,
+    pub (crate) text_ime_dismissed: bool
 }
 
 impl CxKeyboard {
     
     pub fn set_key_focus(&mut self, focus_area: Area) {
+        self.text_ime_dismissed = false;
         self.next_key_focus = focus_area;
     }
     
@@ -31,6 +33,14 @@ impl CxKeyboard {
     
     pub fn has_key_focus(&self, focus_area: Area) -> bool {
         self.key_focus == focus_area
+    }
+
+    pub fn set_text_ime_dismissed(&mut self) {
+        self.text_ime_dismissed = true;
+    }
+
+    pub fn reset_text_ime_dismissed(&mut self) {
+        self.text_ime_dismissed = false;
     }
     
     pub (crate) fn update_area(&mut self, old_area: Area, new_area: Area) {

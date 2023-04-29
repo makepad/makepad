@@ -1,6 +1,7 @@
 package dev.makepad.android;
 
 import android.view.MotionEvent;
+import android.view.KeyEvent;
 
 public class Makepad {
     interface Callback {
@@ -11,6 +12,9 @@ public class Makepad {
         byte[] readAsset(String path);
         String[] getAudioDevices(long flag);
         void openAllMidiDevices(long delay);
+        void showTextIME();
+        void hideTextIME();
+        void showClipboardActions(String selected);
     }
 
     static {
@@ -27,6 +31,12 @@ public class Makepad {
     static native void onResize(long cx, int width, int height, Callback callback);
     static native void onDraw(long cx, Callback callback);
     static native void onTouch(long cx, MotionEvent event, Callback callback);
+    static native void onKeyDown(long cx, KeyEvent event, Callback callback);
     static native void onTimeout(long cx, long id, Callback callback);
     static native void onMidiDeviceOpened(long cx, String name, Object midi_device, Callback callback);
+    static native void onHideTextIME(long cx, Callback callback);
+    static native void onResizeTextIME(long cx, int ime_height, Callback callback);
+    static native void copyToClipboard(long cx, Callback callback);
+    static native void pasteFromClipboard(long cx, String content, Callback callback);
+    static native void cutToClipboard(long cx, Callback callback);
 }
