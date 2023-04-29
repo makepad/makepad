@@ -460,6 +460,7 @@ impl TextInput {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocusLost(_) => {
                 self.animate_state(cx, id!(focus.off));
+                cx.hide_text_ime();
                 dispatch_action(cx, TextInputAction::Return(self.text.clone()));
                 dispatch_action(cx, TextInputAction::KeyFocusLost);
             }
@@ -497,11 +498,19 @@ impl TextInput {
                 self.undo_id += 1;
                 *ce.response.borrow_mut() = Some(self.selected_text())
             }
+            Hit::TextCut => {
+                self.undo_id += 1;
+                if self.cursor_head != self.cursor_tail {
+                    self.create_undo(UndoGroup::Cut(self.undo_id));
+                    self.change(cx, "", dispatch_action);
+                }
+            }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::Tab => {
                     // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
                 }
                 KeyCode::ReturnKey => {
+                    cx.hide_text_ime();
                     dispatch_action(cx, TextInputAction::Return(self.text.clone()));
                 },
                 KeyCode::Escape => {
@@ -589,10 +598,6 @@ impl TextInput {
                 if let Some(pos) = self.draw_label.closest_offset(cx, fe.abs) {
                     //log!("{} {}", pos, fe.abs);
                     let pos = pos.min(self.text.chars().count());
-                    self.cursor_head = pos;
-                    if !fe.mod_shift() {
-                        self.cursor_tail = self.cursor_head;
-                    }
                     if fe.tap_count == 2 {
                         // lets select the word.
                         self.select_word(pos);
@@ -606,6 +611,17 @@ impl TextInput {
             },
             Hit::FingerUp(fe) => {
                 self.double_tap_start = None;
+                if let Some(pos) = self.draw_label.closest_offset(cx, fe.abs) {
+                    let pos = pos.min(self.text.chars().count());
+                    if !fe.mod_shift() && fe.tap_count == 1 && fe.was_tap() {
+                        self.cursor_head = pos;
+                        self.cursor_tail = self.cursor_head;
+                        self.draw_bg.redraw(cx);
+                    }
+                }
+                if fe.was_long_press() {
+                    cx.show_clipboard_actions(self.selected_text());
+                }
                 if fe.is_over && fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
@@ -628,8 +644,16 @@ impl TextInput {
                         }
                         self.draw_bg.redraw(cx);
                     }
-                    else if fe.tap_count == 1 && pos != self.cursor_head {
-                        self.cursor_head = pos;
+                    else if fe.tap_count == 1 {
+                        if let Some(pos_start) = self.draw_label.closest_offset(cx, fe.abs_start) {
+                            let pos_start = pos_start.min(self.text.chars().count());
+
+                            self.cursor_head = pos_start;
+                            self.cursor_tail = self.cursor_head;
+                        }
+                        if pos != self.cursor_head {
+                            self.cursor_head = pos;
+                        }
                         self.draw_bg.redraw(cx);
                     }
                 }

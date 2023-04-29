@@ -1,4 +1,6 @@
 use {
+    std::rc::Rc,
+    std::cell::{RefCell},
     std::ffi::CString,
     std::os::raw::{c_char, c_void},
     std::time::Instant,
@@ -6,11 +8,13 @@ use {
         android_media::CxAndroidMedia,
         jni_sys::jobject,
         android_jni::{AndroidToJava},
+        android_util::*,
     },
     self::super::super::{
         gl_sys,
         //libc_sys,
     },
+    core::cmp,
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
@@ -20,6 +24,10 @@ use {
             TouchUpdateEvent,
             WindowGeomChangeEvent,
             TimerEvent,
+            TextInputEvent,
+            TextCopyEvent,
+            KeyEvent,
+            KeyModifiers,
             WebSocket,
             WebSocketAutoReconnect,
             Event,
@@ -33,6 +41,15 @@ use {
         pass::{PassClearColor, PassClearDepth, PassId},
     }
 };
+
+use num_traits::FromPrimitive;
+
+// Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
+const ANDROID_META_CTRL_MASK: i32 = 28672;
+// Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_SHIFT_MASK
+const ANDROID_META_SHIFT_MASK: i32 = 193;
+// Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_ALT_MASK
+const ANDROID_META_ALT_MASK: i32 = 50;
 
 #[link(name = "EGL")]
 extern "C" {
@@ -184,6 +201,10 @@ impl Cx {
     pub fn from_java_on_touch(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
         let time = self.os.time_now();
         for touch in &mut touches {
+            // When the software keyboard shifted the UI in the vertical axis,
+            //we need to make the math here to keep touch events positions synchronized.
+            if self.os.keyboard_visible { touch.abs.y += self.os.keyboard_panning_offset as f64 };
+
             touch.abs /= self.os.dpi_factor;
         }
         self.fingers.process_touch_update_start(time, &touches);
@@ -199,6 +220,56 @@ impl Cx {
         let e = if let Event::TouchUpdate(e) = e {e}else {panic!()};
         self.fingers.process_touch_update_end(&e.touches);
         self.after_every_event(&to_java);
+    }
+
+    /// Called when a touch event happened on the software keyword
+    pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
+        let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
+        let e: Event;
+
+        match characters {
+            Some(input) => {
+                e = Event::TextInput(
+                    TextInputEvent {
+                        input: input,
+                        replace_last: false,
+                        was_paste: false,
+                    }
+                );
+                self.call_event_handler(&e);
+                self.after_every_event(&to_java);
+            }
+            None =>
+                if let Some(native_keycode) = AndroidKeyCode::from_i32(key_code_val) {
+                    let control = meta_state & ANDROID_META_CTRL_MASK != 0;
+                    let alt = meta_state & ANDROID_META_ALT_MASK != 0;
+
+                    let is_shortcut = control || alt;
+                    let input_str = native_keycode.to_string(shift);
+
+                    if input_str.is_some() && !is_shortcut {
+                        let input = input_str.unwrap().to_string();
+                        e = Event::TextInput(
+                            TextInputEvent {
+                                input: input,
+                                replace_last: false,
+                                was_paste: false,
+                            }
+                        )
+                    } else {
+                        e = Event::KeyDown(
+                            KeyEvent {
+                                key_code: AndroidKeyCode::to_makepad_key_code(key_code_val),
+                                is_repeat: false,
+                                modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
+                                time: self.os.time_now()
+                            }
+                        )
+                    }
+                    self.call_event_handler(&e);
+                    self.after_every_event(&to_java);
+                }
+        }
     }
     
     /// Called when a timeout expired.
@@ -226,21 +297,62 @@ impl Cx {
     pub fn from_java_on_midi_device_opened(&mut self, name: String, midi_device: jobject, to_java: AndroidToJava) {
         self.os.media.android_midi().lock().unwrap().midi_device_opened(name, midi_device, &to_java);
     }
-    
+
+    pub fn from_java_on_hide_text_ime(&mut self, to_java: AndroidToJava) {
+        self.text_ime_was_dismissed();
+        self.redraw_all();
+        self.after_every_event(&to_java);
+    }
+
+    pub fn from_java_on_resize_text_ime(&mut self, ime_height: i32, to_java: AndroidToJava) {
+        self.os.keyboard_visible = true;
+        self.panning_adjust_for_text_ime(ime_height);
+        self.redraw_all();
+        self.after_every_event(&to_java);
+    }
+
+    pub fn from_java_copy_to_clipboard(&mut self, to_java: AndroidToJava) {
+        let response = Rc::new(RefCell::new(None));
+        let e = Event::TextCopy(TextCopyEvent {
+            response: response.clone()
+        });
+        self.call_event_handler(&e);
+        self.after_every_event(&to_java);
+    }
+
+    pub fn from_java_paste_from_clipboard(&mut self, content: String, to_java: AndroidToJava) {
+        let e = Event::TextInput(
+            TextInputEvent {
+                input: content,
+                replace_last: false,
+                was_paste: true,
+            }
+        );
+        self.call_event_handler(&e);
+        self.after_every_event(&to_java);
+    }
+
+    pub fn from_java_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
+        let e = Event::TextCut;
+        self.call_event_handler(&e);
+        self.after_every_event(&to_java);
+    }
+
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
         to_java: &AndroidToJava,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-        
+
         self.setup_render_pass(pass_id, self.os.dpi_factor);
         
         // keep repainting in a loop 
         self.passes[pass_id].paint_dirty = false;
+        let panning_offset = if self.os.keyboard_visible { self.os.keyboard_panning_offset } else { 0 };
         
         unsafe {
-            gl_sys::Viewport(0, 0, self.os.display_size.x as i32, self.os.display_size.y as i32);
+            gl_sys::Viewport(0, panning_offset, self.os.display_size.x as i32, self.os.display_size.y as i32);
         }
         
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -303,6 +415,26 @@ impl Cx {
             }
         }
     }
+
+    fn panning_adjust_for_text_ime(&mut self, android_ime_height: i32) {
+        self.os.keyboard_visible = true;
+
+        let screen_height = (self.os.display_size.y / self.os.dpi_factor) as i32;
+        let vertical_offset = self.os.keyboard_trigger_position.y as i32;
+        let ime_height = (android_ime_height as f64 / self.os.dpi_factor) as i32;
+
+        // Make sure there is some room between the software keyword and the text input or widget that triggered
+        // the TextIME event
+        let vertical_space = ime_height / 3;
+
+        let should_be_panned = vertical_offset > screen_height - ime_height;
+        if should_be_panned {
+            let panning_offset = vertical_offset - (screen_height - ime_height) + vertical_space;
+            self.os.keyboard_panning_offset = (panning_offset as f64 * self.os.dpi_factor) as i32;
+        } else {
+            self.os.keyboard_panning_offset = 0;
+        }
+    }
     
     fn handle_platform_ops(&mut self, to_java: &AndroidToJava) -> EventFlow {
         while let Some(op) = self.platform_ops.pop() {
@@ -332,6 +464,17 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     to_java.cancel_timeout(timer_id as i64);
                     //android_app.stop_timer(timer_id);
+                },
+                CxOsOp::ShowTextIME(area, _pos) => {
+                    self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
+                    to_java.show_text_ime();
+                },
+                CxOsOp::HideTextIME => {
+                    self.os.keyboard_visible = false;
+                    to_java.hide_text_ime();
+                },
+                CxOsOp::ShowClipboardActions(selected) => {
+                    to_java.show_clipboard_actions(selected.as_str());
                 },
                 _ => ()
             }
@@ -367,6 +510,9 @@ impl Default for CxOs {
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             time_start: Instant::now(),
+            keyboard_visible: false,
+            keyboard_trigger_position: DVec2::default(),
+            keyboard_panning_offset: 0,
             media: CxAndroidMedia::default()
         }
     }
@@ -377,6 +523,11 @@ pub struct CxOs {
     pub display_size: DVec2,
     pub dpi_factor: f64,
     pub time_start: Instant,
+
+    pub keyboard_visible: bool,
+    pub keyboard_trigger_position: DVec2,
+    pub keyboard_panning_offset: i32,
+
     pub (crate) media: CxAndroidMedia,
 }
 

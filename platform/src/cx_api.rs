@@ -69,7 +69,8 @@ pub enum CxOsOp {
     StartTimer {timer_id: u64, interval: f64, repeats: bool},
     StopTimer(u64),
     StartDragging(DraggedItem),
-    UpdateMenu(Menu)
+    UpdateMenu(Menu),
+    ShowClipboardActions(String)
 }
 
 impl Cx { 
@@ -111,11 +112,23 @@ impl Cx {
     }
     
     pub fn show_text_ime(&mut self, area: Area, pos: DVec2) {
-        self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
+        if !self.keyboard.text_ime_dismissed {
+            self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
+        }
     }
     
     pub fn hide_text_ime(&mut self) {
+        self.keyboard.reset_text_ime_dismissed();
         self.platform_ops.push(CxOsOp::HideTextIME);
+    }
+
+    pub fn text_ime_was_dismissed(&mut self) {
+        self.keyboard.set_text_ime_dismissed();
+        self.platform_ops.push(CxOsOp::HideTextIME);
+    }
+
+    pub fn show_clipboard_actions(&mut self, selected: String) {
+        self.platform_ops.push(CxOsOp::ShowClipboardActions(selected));
     }
     
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
