@@ -17,6 +17,7 @@ live_design!{
     import makepad_example_ironfish::app_desktop::AppDesktop
     import makepad_example_ironfish::app_mobile::AppMobile
     import makepad_widgets::desktop_window::DesktopWindow
+    import makepad_widgets::multi_window::MultiWindow
     
     import makepad_audio_graph::mixer::Mixer;
     import makepad_audio_graph::instrument::Instrument;
@@ -34,8 +35,7 @@ live_design!{
             }
         }
         
-        ui: <Frame> {
-            no_signal_events: true,
+        ui: <MultiWindow> {
             <DesktopWindow> { 
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
@@ -50,7 +50,6 @@ live_design!{
                     <AppMobile> {}
                 }}
             }
-            
         }
     }
 }
@@ -74,7 +73,7 @@ pub struct SynthPreset{
 
 pub struct App {
     ui: WidgetRef,
-    #[rust] presets: Vec<SynthPreset>,
+    #[rust] _presets: Vec<SynthPreset>,
     audio_graph: AudioGraph,
     #[rust] midi_input: MidiInput,
 }
@@ -210,18 +209,20 @@ impl AppMain for App {
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            while let Some(next) = self.ui.draw_widget_continue(cx).into_widget(){
+            
+            // draw the ui using hooks 
+            while let Some(next) = self.ui.draw_widget_hook(cx).hook_widget(){
+                // draw the preset lists
                 if let Some(mut list) = preset_lists.pick(next).borrow_mut(){
-                    list.begin(cx);
                     for i in 0..10{
-                        if let Some(item) = list.get_drawable(cx, LiveId(i as u64).into(), id!(Variant1)){
+                        if let Some(item) = list.get_drawable(cx, LiveId(i as u64).into(), live_id!(Entry)){
                             item.get_label(id!(label)).set_text("HI");
                             item.draw_widget(cx);
                         }
                     }
-                    list.end(cx);
-                }
+               }
             }
+            
             return
         }
 
@@ -229,8 +230,10 @@ impl AppMain for App {
         let mut synth_db = DataBindingStore::new();
         let mut actions = ui.handle_widget_event(cx, event);
         
+        // handle preset lists events
         for list in preset_lists.iter(){
             for item in list.items_with_actions(&actions).iter(){
+                // check for actions inside the list item
                 if item.get_button(id!(delete)).clicked(&actions){
                     // delete the item in the data
                     list.redraw(cx);

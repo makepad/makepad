@@ -85,12 +85,15 @@ pub enum Size {
     Fit,
 }
 
-#[derive(Clone, Default, Debug)]
-pub struct DeferWalk {
-    defer_index: usize,
-    margin: Margin,
-    other_axis: Size,
-    pos: DVec2
+#[derive(Clone, Debug)]
+pub enum DeferWalk{
+    Unresolved{
+        defer_index: usize,
+        margin: Margin,
+        other_axis: Size,
+        pos: DVec2
+    },
+    Resolved(Walk)
 }
 
 #[derive(Clone, Default, Debug)]
@@ -150,7 +153,7 @@ impl<'a> Cx2d<'a> {
                 turtle.update_width_max(turtle.pos.x, 0.0);
                 turtle.update_height_max(turtle.pos.y, size.y + margin_size.y);
                 turtle.defer_count += 1;
-                Some(DeferWalk {
+                Some(DeferWalk::Unresolved{
                     defer_index,
                     margin: walk.margin,
                     other_axis: walk.height,
@@ -163,7 +166,7 @@ impl<'a> Cx2d<'a> {
                 turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
                 turtle.update_height_max(turtle.pos.y, 0.0);
                 turtle.defer_count += 1;
-                Some(DeferWalk {
+                Some(DeferWalk::Unresolved {
                     defer_index,
                     margin: walk.margin,
                     other_axis: walk.width,
@@ -749,32 +752,41 @@ impl Turtle {
 }
 
 impl DeferWalk {
-    pub fn resolve(&self, cx: &Cx2d) -> Walk {
-        let turtle = cx.turtles.last().unwrap();
-        match turtle.layout.flow {
-            Flow::Right => {
-                let left = turtle.width_left();
-                let part = left / turtle.defer_count as f64;
-                Walk {
-                    abs_pos: Some(self.pos + dvec2(part * self.defer_index as f64, 0.)),
-                    margin: self.margin,
-                    width: Size::Fixed(part),
-                    height: self.other_axis
-                }
-            },
-            Flow::Down => {
-                let left = turtle.height_left();
-                let part = left / turtle.defer_count as f64;
-                Walk {
-                    abs_pos: Some(self.pos + dvec2(0., part * self.defer_index as f64)),
-                    margin: self.margin,
-                    height: Size::Fixed(part),
-                    width: self.other_axis
-                }
+    
+    pub fn resolve(&mut self, cx: &Cx2d) -> Walk {
+        match self{
+            Self::Resolved(walk)=>{*walk},
+            Self::Unresolved{pos, defer_index, margin, other_axis}=>{
+                let turtle = cx.turtles.last().unwrap();
+                let walk = match turtle.layout.flow {
+                    Flow::Right => {
+                        let left = turtle.width_left();
+                        let part = left / turtle.defer_count as f64;
+                        Walk {
+                            abs_pos: Some(*pos + dvec2(part * *defer_index as f64, 0.)),
+                            margin: *margin,
+                            width: Size::Fixed(part),
+                            height: *other_axis
+                        }
+                    },
+                    Flow::Down => {
+                        let left = turtle.height_left();
+                        let part = left / turtle.defer_count as f64;
+                        Walk {
+                            abs_pos: Some(*pos + dvec2(0., part * *defer_index as f64)),
+                            margin: *margin,
+                            height: Size::Fixed(part),
+                            width: *other_axis
+                        }
+                    }
+                    Flow::Overlay => panic!()
+                };
+                *self = DeferWalk::Resolved(walk);
+                walk
             }
-            Flow::Overlay => panic!()
         }
     }
+    
 }
 
 impl Layout {

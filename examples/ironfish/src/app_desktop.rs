@@ -12,6 +12,8 @@ live_design!{
     import makepad_widgets::check_box::CheckBox;
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::radio_button::RadioButton;
+    import makepad_widgets::swipe_list::SwipeList;
+    import makepad_widgets::swipe_list::SwipeListEntry;
 
     import makepad_example_ironfish::sequencer::Sequencer;
     import makepad_audio_widgets::display_audio::DisplayAudio;
@@ -121,7 +123,7 @@ live_design!{
                 text_style: <H2_TEXT_BOLD> {},
                 color: (COLOR_UP_5)
             }
-            text: "replace me!"
+            label: "replace me!"
         }
     }
     
@@ -546,7 +548,7 @@ live_design!{
                 text_style: <H2_TEXT_BOLD>{},
                 color: (COLOR_DOWN_6)
             }
-            text: "replace me!"
+            label: "replace me!"
         }
     }
     
@@ -807,7 +809,7 @@ live_design!{
     }
     
     PaginationButton = <Button> {
-        text: "1"
+        label: "1"
         walk: {width: 30, height: 30, margin: {top: 5}}
         layout: {align: {x: 0.5, y: 0.5}, padding: <SPACING_2> {}}
         
@@ -978,7 +980,7 @@ live_design!{
                     <FishSubTitle> {
                         walk: {width: Fill}
                         label = {
-                            text: "Modulation",
+                            label: "Modulation",
                             draw_label: {color: (COLOR_ENV)},
                         }
                     }
@@ -1034,15 +1036,15 @@ live_design!{
             }
             
             clear_grid = <FishButton> {
-                text: "Clear"
+                label: "Clear"
                 walk: {width: Fit, height: Fit}
             }
             grid_up = <FishButton> {
-                text: "↑"
+                label: "↑"
                 walk: {width: Fit, height: Fit}
             }
             grid_down = <FishButton> {
-                text: "↓"
+                label: "↓"
                 walk: {width: Fit, height: Fit}
             }
         }
@@ -1061,7 +1063,7 @@ live_design!{
                 walk: {margin: <SPACING_0> {}}
                 <FishSubTitle> {
                     label = {
-                        text: "Arp",
+                        label: "Arp",
                         draw_label: {color: (COLOR_DEFAULT)},
                     }
                 }
@@ -1105,7 +1107,7 @@ live_design!{
             walk: {margin: <SPACING_0> {}}
             <FishSubTitle> {
                 label = {
-                    text: "Settings",
+                    label: "Settings",
                     draw_label: {color: (COLOR_DEFAULT)},
                 }
             }
@@ -1137,7 +1139,7 @@ live_design!{
                 title = {
                     walk: {width: Fill}
                     label = {
-                        text: "Sequencer",
+                        label: "Sequencer",
                     },
                     draw_bg: {color: (COLOR_DEFAULT)}
                 }
@@ -1231,7 +1233,7 @@ live_design!{
                 walk: {margin: {top: (SSPACING_0)}}
                 <FishSubTitle> {
                     label = {
-                        text: "Bitcrush",
+                        label: "Bitcrush",
                         draw_label: {color: (COLOR_FX)},
                     }
                 }
@@ -1270,7 +1272,7 @@ live_design!{
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
-                    text: "Delay",
+                    label: "Delay",
                     draw_label: {color: (COLOR_FX)},
                 }
             }
@@ -1335,7 +1337,7 @@ live_design!{
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
-                    text: "Chorus",
+                    label: "Chorus",
                     draw_label: {color: (COLOR_FX)},
                 }
             }
@@ -1415,7 +1417,7 @@ live_design!{
         <SubheaderContainer> {
             <FishSubTitle> {
                 label = {
-                    text: "Reverb",
+                    label: "Reverb",
                     draw_label: {color: (COLOR_FX)},
                 }
             }
@@ -1458,7 +1460,7 @@ live_design!{
                 title = {
                     walk: {width: Fit}
                     label = {
-                        text: "Filter",
+                        label: "Filter",
                     },
                 }
                 
@@ -1586,7 +1588,7 @@ live_design!{
             walk: {width: Fill, height: Fit}
             
             <SubheaderContainer> {
-                <FishSubTitle> {label = {text: "Osc", draw_label: {color: (COLOR_OSC)}, walk: {width: Fit}}}
+                <FishSubTitle> {label = {label: "Osc", draw_label: {color: (COLOR_OSC)}, walk: {width: Fit}}}
                 type = <InstrumentDropdown> {
                     layout: {flow: Down}
                     dropdown = {
@@ -1745,7 +1747,7 @@ live_design!{
             <FishHeader> {
                 title = {
                     label = {
-                        text: "Sound Sources",
+                        label: "Sound Sources",
                     },
                     draw_bg: {color: (COLOR_OSC)}
                 }
@@ -1755,7 +1757,7 @@ live_design!{
                 walk: {margin: {top: (SSPACING_0)}}
                 <FishSubTitle> {
                     label = {
-                        text: "Mixer",
+                        label: "Mixer",
                         draw_label: {color: (COLOR_OSC)},
                     }
                 }
@@ -1796,7 +1798,7 @@ live_design!{
                             text_style: <H2_TEXT_BOLD>{},
                             color: (COLOR_UP_5)
                         }
-                        text: "Preset"
+                        label: "Preset"
                     }
                     
                     <Label> {
@@ -1804,7 +1806,7 @@ live_design!{
                             text_style: <H2_TEXT_NORMAL>{font_size: 18},
                             color: (COLOR_UP_6)
                         }
-                        text: "Wide Strings"
+                        label: "Wide Strings"
                     }
                 }
                 <Frame> {
@@ -1825,14 +1827,14 @@ live_design!{
                 walk: {width: Fill, height: Fit}
                 layout: {spacing: (SSPACING_1)}
                 
-                panic = <FishButton> {text: "Panic"}
-                platformtoggle = <FishButton> {text: "Mobile"}
-                presets = <FishButton> {text: "Browse", walk: {width: Fit}}
-                <FishButton> {text: "←"}
-                <FishButton> {text: "→"}
+                panic = <FishButton> {label: "Panic"}
+                platformtoggle = <FishButton> {label: "Mobile"}
+                presets = <FishButton> {label: "Browse", walk: {width: Fit}}
+                <FishButton> {label: "←"}
+                <FishButton> {label: "→"}
                 <FillerH> {}
-                undo = <FishButton> {text: "Undo"}
-                redo = <FishButton> {text: "Redo"}
+                undo = <FishButton> {label: "Undo"}
+                redo = <FishButton> {label: "Redo"}
             }
             
         }
@@ -1853,13 +1855,13 @@ live_design!{
         walk: {width: Fill, height: Fit, margin: <SPACING_3> {}}
         layout: {flow: Right, align: {x: 0.5, y: 0.0}, spacing: 0}
         
-        <PaginationButton> {text: "<"}
-        <PaginationButton> {text: "4"}
-        <PaginationButton> {text: "5"}
-        <PaginationButton> {text: "6"}
-        <PaginationButton> {text: "7"}
-        <PaginationButton> {text: "8"}
-        <PaginationButton> {text: ">"}
+        <PaginationButton> {label: "<"}
+        <PaginationButton> {label: "4"}
+        <PaginationButton> {label: "5"}
+        <PaginationButton> {label: "6"}
+        <PaginationButton> {label: "7"}
+        <PaginationButton> {label: "8"}
+        <PaginationButton> {label: ">"}
     }
     
     
@@ -1874,7 +1876,7 @@ live_design!{
             <FishHeader> {
                 title = {
                     label = {
-                        text: "Envelopes",
+                        label: "Envelopes",
                     },
                     draw_bg: {color: (COLOR_ENV)}
                 }
@@ -1884,7 +1886,7 @@ live_design!{
                 walk: {margin: {top: (SSPACING_0)}}
                 <FishSubTitle> {
                     label = {
-                        text: "Volume",
+                        label: "Volume",
                         draw_label: {color: (COLOR_ENV)},
                     }
                 }
@@ -1911,7 +1913,7 @@ live_design!{
             <FishHeader> {
                 title = {
                     label = {
-                        text: "Effects",
+                        label: "Effects",
                     },
                     draw_bg: {color: (COLOR_FX)}
                 }
@@ -1924,12 +1926,36 @@ live_design!{
             <DelayFXPanel> {}
         }
     }
+
     
-    PresetListEntry = <Box> {
+    PresetHeader = <Frame> {
+        walk: {width: Fill, height: Fit, margin: {top: 0, right: (SSPACING_4), bottom: 0, left: (SSPACING_4)}}
+        layout: {flow: Down, spacing: (SSPACING_2), padding: 0}
+        
+        <SubheaderContainer> {
+            <FishSubTitle> {
+                walk: {width: Fill}
+                label = {
+                    label: "Browse",
+                    draw_label: {color: (COLOR_UP_6)}
+                }
+            }
+            
+            <FillerH> {}
+            <CheckboxTextual> {label: "Synth", walk: {width: Fit}}
+            <CheckboxTextual> {label: "Seq", walk: {width: Fit}}
+            <CheckboxTextual> {label: "Fav", walk: {width: Fit}}
+        }
+        
+        <FishInput> {}
+        
+    }
+        
+    PresetListEntry = <SwipeListEntry> {
         layout: {flow: Down, padding: {top: 0, right: 5, bottom: 5, left: 5}}
         walk: {width: Fill, height: Fit}
         
-        <Frame> {
+        center: <Frame> {
             layout: {flow: Right, align: {x: 0.0, y: 0.5}}
             walk: {width: Fill, height: Fit}
             
@@ -1953,7 +1979,7 @@ live_design!{
                         return sdf.result
                     }
                 }
-                text: "Preset Name"
+                label: "Preset Name"
             }
             
             <Box> {
@@ -2010,7 +2036,7 @@ live_design!{
                             return sdf.result
                         }
                     }
-                    text: "→"
+                    label: "→"
                     walk: {width: Fit, height: Fit}
                     draw_label: {text_style: {font_size: (FONT_SIZE_H2)}}
                 }
@@ -2018,57 +2044,14 @@ live_design!{
             }
         }
         
-        <Divider> {
+        /*<Divider> {
             walk: {margin: {top: (SSPACING_1), right: (SSPACING_0), bottom: (SSPACING_0)}}
-        }
+        }*/
     }
     
-    PresetHeader = <Frame> {
-        walk: {width: Fill, height: Fit, margin: {top: 0, right: (SSPACING_4), bottom: 0, left: (SSPACING_4)}}
-        layout: {flow: Down, spacing: (SSPACING_2), padding: 0}
-        
-        <SubheaderContainer> {
-            <FishSubTitle> {
-                walk: {width: Fill}
-                label = {
-                    text: "Browse",
-                    draw_label: {color: (COLOR_UP_6)}
-                }
-            }
-            
-            <FillerH> {}
-            <CheckboxTextual> {label: "Synth", walk: {width: Fit}}
-            <CheckboxTextual> {label: "Seq", walk: {width: Fit}}
-            <CheckboxTextual> {label: "Fav", walk: {width: Fit}}
+    PresetList = <SwipeList> {
+        Entry = <PresetListEntry>{
         }
-        
-        <FishInput> {}
-        
-    }
-    
-    PresetList = <ScrollY> {
-        walk: {width: Fill, height: Fill}
-        layout: {flow: Down, padding: 10, spacing: 2}
-        
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
-        <PresetListEntry> {}
     }
     
     PresetSaver = <Frame> {
@@ -2079,7 +2062,7 @@ live_design!{
         <FishHeader> {
             title = {
                 label = {
-                    text: "Presets",
+                    label: "Presets",
                     draw_label: {
                         color: (COLOR_UP_6)
                     }
@@ -2093,7 +2076,7 @@ live_design!{
             <FishSubTitle> {
                 walk: {width: Fill}
                 label = {
-                    text: "Save",
+                    label: "Save",
                     draw_label: {color: (COLOR_UP_6)}
                 }
             }
@@ -2117,23 +2100,23 @@ live_design!{
                 layout: {padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: (SSPACING_2)}}
                 <Label> {
                     walk: {margin: {right: 2.5}}
-                    text: "Overwrite preset?"
+                    label: "Overwrite preset?"
                     draw_label: {
                         color: (COLOR_UP_5)
                     }
                 }
                 <FillerH> {}
-                confirm = <TextButton> {text: "Yes"}
+                confirm = <TextButton> {label: "Yes"}
                 <Label> {
-                    text: " · "
+                    label: " · "
                     draw_label: {
                         color: (COLOR_UP_5)
                     }
                 }
-                cancel = <TextButton> {text: "No"}
+                cancel = <TextButton> {label: "No"}
             }
             
-            save = <FishButton> {text: "Save", walk: {width: Fill}}
+            save = <FishButton> {label: "Save", walk: {width: Fill}}
         }
     }
     
@@ -2161,10 +2144,11 @@ live_design!{
     
     AppDesktop = <Frame> {
         design_mode: false
-        // walk: {width: Fill, height: Fill}
+        layout:{flow:Right}
+        walk: {width: Fill, height: Fill}
         // layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
         
-            <Presets> {}
+        <Presets> {}
         
         <Frame> {
             walk: {width: Fill, height: Fill}

@@ -228,7 +228,7 @@ impl fmt::Debug for LiveNodeOrigin {
 pub enum LivePropType {
     Field = 0,
     Instance = 1,
-    Template = 2,
+    //Template = 2,
     Nameless = 3
 }
 
@@ -329,7 +329,7 @@ impl LivePropType {
         match val {
             0 => Self::Field,
             1 => Self::Instance,
-            2 => Self::Template,
+            //2 => Self::Template,
             _ => Self::Nameless
         }
     }
