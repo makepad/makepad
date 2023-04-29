@@ -13,19 +13,19 @@ live_design!{
     import makepad_widgets::theme::*;
     
     SwipeListEntry = {{SwipeListEntry}} {
-        layout:{
+        layout: {
             flow: Overlay
         }
         walk: {
             height: 60,
-            widht: Fill
+            width: Fill
         }
     }
     
     SwipeList = {{SwipeList}} {
         walk: {
             margin: {top: 3, right: 10, bottom: 3, left: 10},
-            width: 80
+            width: Fill
             height: 400
         }
         layout: {flow: Down, padding: 10, spacing: 2}
@@ -67,15 +67,15 @@ impl Widget for SwipeListEntry {
             cx.begin_turtle(walk, self.layout);
         }
         if let Some(EntryDrawState::LeftDrawer) = self.draw_state.get() {
-            self.left_drawer.draw_widget_hook(cx)?;
+            self.left_drawer.draw_widget_hook(cx) ?;
             self.draw_state.set(EntryDrawState::RightDrawer);
         }
         if let Some(EntryDrawState::RightDrawer) = self.draw_state.get() {
-            self.right_drawer.draw_widget_hook(cx)?;
+            self.right_drawer.draw_widget_hook(cx) ?;
             self.draw_state.set(EntryDrawState::Center);
         }
         if let Some(EntryDrawState::Center) = self.draw_state.get() {
-            self.center.draw_widget_hook(cx)?;
+            self.center.draw_widget_hook(cx) ?;
             cx.end_turtle();
             self.draw_state.end();
         }
@@ -88,16 +88,16 @@ impl Widget for SwipeListEntry {
         self.right_drawer.handle_widget_event_with(cx, event, dispatch_action);
     }
     
-    fn redraw(&mut self, cx:&mut Cx){
+    fn redraw(&mut self, cx: &mut Cx) {
         self.left_drawer.redraw(cx);
         self.center.redraw(cx);
         self.right_drawer.redraw(cx);
     }
     
-    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results:&mut WidgetSet) {
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         self.left_drawer.find_widgets(path, cached, results);
-        self.center.find_widgets(path, cached, results);
         self.right_drawer.find_widgets(path, cached, results);
+        self.center.find_widgets(path, cached, results);
     }
 }
 
@@ -110,7 +110,7 @@ pub struct SwipeList {
     scroll_bars: ScrollBars,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] entries: ComponentMap<(SwipeListEntryId,LiveId), SwipeListEntryRef>,
+    #[rust] entries: ComponentMap<(SwipeListEntryId, LiveId), SwipeListEntry>,
 }
 
 impl LiveHook for SwipeList {
@@ -119,12 +119,12 @@ impl LiveHook for SwipeList {
         let id = nodes[index].id;
         match from {
             ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
-                if nodes[index].origin.has_prop_type(LivePropType::Instance){
+                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                     self.templates.insert(id, live_ptr);
                     // lets apply this thing over all our childnodes with that template
-                    for ((_, templ_id), node) in self.entries.iter_mut(){
-                        if *templ_id == id{
+                    for ((_, templ_id), node) in self.entries.iter_mut() {
+                        if *templ_id == id {
                             node.apply(cx, from, index, nodes);
                         }
                     }
@@ -145,7 +145,7 @@ pub enum SwipeListAction {
 }
 
 impl SwipeListEntry {
-   
+    
     pub fn handle_event_with(
         &mut self,
         _cx: &mut Cx,
@@ -197,16 +197,23 @@ impl SwipeListEntry {
 
 impl SwipeList {
     
-    pub fn begin(&mut self, cx:&mut Cx2d, walk:Walk){
+    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.scroll_bars.begin(cx, walk, self.layout);
     }
-
-    pub fn end(&mut self, cx:&mut Cx2d){
+    
+    pub fn end(&mut self, cx: &mut Cx2d) {
         self.scroll_bars.end(cx);
+        self.entries.retain_visible();
     }
     
-    pub fn get_drawable(&mut self, _cx:&mut Cx2d, _entry_id: SwipeListEntryId, _template:LiveId)->Option<&mut SwipeListEntry>{
-        
+    pub fn get_drawable(&mut self, cx: &mut Cx2d, entry_id: SwipeListEntryId, template: LiveId) -> Option<&mut SwipeListEntry> {
+        if let Some(ptr) = self.templates.get(&template) {
+            let entry = self.entries.get_or_insert(cx, (entry_id, template), | cx | {
+                SwipeListEntry::new_from_ptr(cx, Some(*ptr))
+            });
+            return Some(entry)
+        }
+        log!("GET DRAWABLE");
         None
     }
     
@@ -217,11 +224,8 @@ impl SwipeList {
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, SwipeListAction),
     ) {
-        /*
-        for button in self.buttons.values_mut() {
-            button.handle_event_with(cx, event, self.area, dispatch_action);
-        }
-        */
+        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
+        
         match event.hits(cx, self.area) {
             Hit::KeyFocus(_) => {
             }
@@ -239,11 +243,18 @@ enum ListDrawState {
 
 impl Widget for SwipeList {
     fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
+        for entry in self.entries.values_mut() {
+            entry.redraw(cx);
+        }
     }
     
     fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
+        
+        for entry in self.entries.values_mut() {
+            entry.handle_widget_event_with(cx, event, dispatch_action);
+        }
+        
         self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
@@ -272,7 +283,7 @@ impl Widget for SwipeList {
 pub struct SwipeListRef(WidgetRef);
 
 impl SwipeListRef {
-    pub fn items_with_actions(&self, _actions:&WidgetActions)->SwipeListEntrySet{
+    pub fn items_with_actions(&self, _actions: &WidgetActions) -> SwipeListEntrySet {
         // find items with container set to our uid
         // and return those
         Default::default()

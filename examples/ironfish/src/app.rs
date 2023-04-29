@@ -36,7 +36,7 @@ live_design!{
         }
         
         ui: <MultiWindow> {
-            <DesktopWindow> { 
+            <DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
                 frame: {body = {
@@ -55,7 +55,7 @@ live_design!{
 }
 app_main!(App);
 
-pub struct SynthPreset{
+pub struct SynthPreset {
     pub id: LiveId,
     pub name: String,
     pub fav: bool,
@@ -204,37 +204,38 @@ impl App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-
+        
         let preset_lists = self.ui.get_swipe_list_set(ids!(preset_list));
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             
-            // draw the ui using hooks 
-            while let Some(next) = self.ui.draw_widget_hook(cx).hook_widget(){
+            // draw the ui using hooks
+            while let Some(next) = self.ui.draw_widget_hook(cx).hook_widget() {
                 // draw the preset lists
-                if let Some(mut list) = preset_lists.pick(next).borrow_mut(){
-                    for i in 0..10{
-                        if let Some(item) = list.get_drawable(cx, LiveId(i as u64).into(), live_id!(Entry)){
-                            item.get_label(id!(label)).set_text("HI");
+                if let Some(mut list) = preset_lists.pick(next).borrow_mut() {
+                    for i in 0..10 {
+                        log!("HERE!");
+                        if let Some(item) = list.get_drawable(cx, LiveId(i as u64).into(), live_id!(Entry)) {
+                            item.get_button(id!(label)).set_label(&format!("Button id {i}"));
                             item.draw_widget(cx);
                         }
                     }
-               }
+                }
             }
             
             return
         }
-
+        
         let ui = self.ui.clone();
         let mut synth_db = DataBindingStore::new();
         let mut actions = ui.handle_widget_event(cx, event);
         
         // handle preset lists events
-        for list in preset_lists.iter(){
-            for item in list.items_with_actions(&actions).iter(){
+        for list in preset_lists.iter() {
+            for item in list.items_with_actions(&actions).iter() {
                 // check for actions inside the list item
-                if item.get_button(id!(delete)).clicked(&actions){
+                if item.get_button(id!(delete)).clicked(&actions) {
                     // delete the item in the data
                     list.redraw(cx);
                 }
@@ -265,7 +266,7 @@ impl AppMain for App {
             oscillators.osc1,
             oscillators.osc2,
         ));
-
+        
         ui.get_radio_button_set(ids!(
             filter_modes.tab1,
             filter_modes.tab2,
