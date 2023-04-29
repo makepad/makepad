@@ -1,8 +1,7 @@
 use crate::event::KeyCode;
-use num_traits::FromPrimitive;
 
 // Extracted from https://android.googlesource.com/platform/frameworks/base/+/95c1165/core/java/android/view/KeyEvent.java
-#[derive(Debug, FromPrimitive)]
+#[derive(Debug)]
 pub(crate) enum AndroidKeyCode {
     Unknown = 0,
     SoftLeft = 1,
