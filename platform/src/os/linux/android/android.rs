@@ -39,6 +39,17 @@ extern "C" {
     fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
 }
 
+pub struct AndroidInitParams {
+    pub cache_path: String,
+    pub density: f64,
+}
+
+impl AndroidInitParams {
+    pub fn extract_android_params(&self) -> AndroidParams {
+        AndroidParams{cache_path: self.cache_path.clone()}
+    }
+}
+
 impl Cx {
     
     /// Called when EGL is initialized.
