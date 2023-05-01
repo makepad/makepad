@@ -201,51 +201,51 @@ pub struct CodeEditorImpl {
     #[rust] zoom_anim_center: Option<Position>,
     #[rust] zoom_last_pos: Option<DVec2>,
     
-    pub scroll_bars: ScrollBars,
+    #[live] pub scroll_bars: ScrollBars,
     
-    pub zoom_out: f64,
-    pub max_zoom_out: f64,
+    #[live] pub zoom_out: f64,
+    #[live] pub max_zoom_out: f64,
     
-    padding_top: f64,
+    #[live] padding_top: f64,
     
-    state: State,
+    #[live] state: State,
     
-    selection_quad: DrawSelection,
-    code_text: DrawText,
-    caret_quad: DrawColor,
-    line_num_quad: DrawColor,
-    line_num_text: DrawText,
-    indent_line_quad: DrawIndentLine,
-    msg_line_quad: DrawMsgLine,
+    #[live] selection_quad: DrawSelection,
+    #[live] code_text: DrawText,
+    #[live] caret_quad: DrawColor,
+    #[live] line_num_quad: DrawColor,
+    #[live] line_num_text: DrawText,
+    #[live] indent_line_quad: DrawIndentLine,
+    #[live] msg_line_quad: DrawMsgLine,
     
-    text_color_linenum: Vec4,
-    text_color_linenum_current: Vec4,
-    text_color_indent_line: Vec4,
+    #[live] text_color_linenum: Vec4,
+    #[live] text_color_linenum_current: Vec4,
+    #[live] text_color_indent_line: Vec4,
     
-    current_line_quad: DrawColor,
+    #[live] current_line_quad: DrawColor,
     
-    draw_scroll_shadow: DrawScrollShadow,
+    #[live] draw_scroll_shadow: DrawScrollShadow,
     
     #[rust] pub line_num_width: f64,
-    caret_blink_timeout: f64,
+    #[live] caret_blink_timeout: f64,
     
 }
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSelection {
-    draw_super: DrawQuad,
-    prev_x: f32,
-    prev_w: f32,
-    next_x: f32,
-    next_w: f32
+    #[live] draw_super: DrawQuad,
+    #[live] prev_x: f32,
+    #[live] prev_w: f32,
+    #[live] next_x: f32,
+    #[live] next_w: f32
 }
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawIndentLine {
-    draw_super: DrawQuad,
-    indent_id: f32
+    #[live] draw_super: DrawQuad,
+    #[live] indent_id: f32
 }
 
 #[derive(Live, LiveHook)]

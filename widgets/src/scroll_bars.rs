@@ -12,10 +12,10 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct ScrollBars {
-    show_scroll_x: bool,
-    show_scroll_y: bool,
-    scroll_bar_x: ScrollBar,
-    scroll_bar_y: ScrollBar,
+    #[live] show_scroll_x: bool,
+    #[live] show_scroll_y: bool,
+    #[live] scroll_bar_x: ScrollBar,
+    #[live] scroll_bar_y: ScrollBar,
     #[rust] nav_scroll_index: Option<NavScrollIndex>,
     #[rust] scroll: DVec2,
     #[rust] area: Area,

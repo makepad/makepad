@@ -126,12 +126,10 @@ live_design!{
 }
 
 #[derive(Live)]
-#[live_design_with{widget_factory!(cx, DesktopButton)}]
 pub struct DesktopButton {
-    state: State,
-    walk: Walk,
-    #[alias(button_type, draw_bg.button_type)]
-    pub draw_bg: DrawDesktopButton,
+    #[live] state: State,
+    #[live] walk: Walk,
+    #[live] draw_bg: DrawDesktopButton,
 }
 
 impl Widget for DesktopButton{
@@ -173,13 +171,17 @@ pub enum DesktopButtonType {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawDesktopButton {
-    draw_super: DrawQuad,
-    hover: f32,
-    pressed: f32,
-    button_type: DesktopButtonType
+    #[live] draw_super: DrawQuad,
+    #[live] hover: f32,
+    #[live] pressed: f32,
+    #[live] button_type: DesktopButtonType
 }
 
 impl LiveHook for DesktopButton {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, DesktopButton)
+    }
+    
     fn after_new_from_doc(&mut self, _cx: &mut Cx) {
         let (w, h) = match self.draw_bg.button_type {
             DesktopButtonType::WindowsMin

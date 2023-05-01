@@ -55,7 +55,7 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct LinkLabel {
-    button: Button
+    #[live] button: Button
 }
 
 impl LinkLabel {

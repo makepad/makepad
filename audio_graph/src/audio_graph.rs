@@ -33,7 +33,7 @@ pub enum AudioGraphAction<'a> {
 
 #[derive(Live)]
 pub struct AudioGraph {
-    root: AudioComponentRef,
+    #[live] root: AudioComponentRef,
     #[rust] from_ui: FromUISender<FromUI>,
     #[rust] to_ui: ToUIReceiver<ToUIDisplayMsg>,
 }

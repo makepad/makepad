@@ -99,52 +99,51 @@ live_design!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawBgQuad {
-    draw_super: DrawQuad,
-    is_even: f32,
-    selected: f32,
-    hover: f32,
+    #[live] draw_super: DrawQuad,
+    #[live] is_even: f32,
+    #[live] selected: f32,
+    #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawName {
-    draw_super: DrawText,
-    is_even: f32,
-    selected: f32,
-    hover: f32,
+    #[live] draw_super: DrawText,
+    #[live] is_even: f32,
+    #[live] selected: f32,
+    #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct ListBoxItem {
     
-    draw_bg: DrawBgQuad,
-    draw_name: DrawName,
+    #[live] draw_bg: DrawBgQuad,
+    #[live] draw_name: DrawName,
     
-    layout: Layout,
-    state: State,
+    #[live] layout: Layout,
+    #[live] state: State,
     
-    indent_width: f64,
-    icon_walk: Walk,
+    #[live] indent_width: f64,
+    #[live] icon_walk: Walk,
     
-    min_drag_distance: f64,
-    opened: f32,
-    hover: f32,
-    selected: f32,
+    #[live] min_drag_distance: f64,
+    #[live] opened: f32,
+    #[live] hover: f32,
+    #[live] selected: f32,
 }
 
 #[derive(Live)]
-#[live_design_with{widget_factory!(cx, ListBox)}]
 pub struct ListBox {
-    scroll_bars: ScrollBars,
-    list_item: Option<LivePtr>,
+    #[live] scroll_bars: ScrollBars,
+    #[live] list_item: Option<LivePtr>,
     
-    draw_filler: DrawBgQuad,
-    layout: Layout,
-    node_height: f64,
-    multi_select: bool,
+    #[live] draw_filler: DrawBgQuad,
+    #[live] layout: Layout,
+    #[live] node_height: f64,
+    #[live] multi_select: bool,
     
-    walk: Walk,
+    #[live] walk: Walk,
     
-    items: Vec<String>,
+    #[live] items: Vec<String>,
     
     #[rust] selected_item_ids: HashSet<ListBoxItemId>,
     
@@ -154,6 +153,10 @@ pub struct ListBox {
 }
 
 impl LiveHook for ListBox {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, ListBox)
+    }
+
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(list_item).as_field()) {
             for (_, item) in self.list_items.iter_mut() {

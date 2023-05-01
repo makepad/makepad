@@ -20,7 +20,7 @@ enum FromUI {}
 #[derive(Live, LiveHook)]
 #[live_design_with(audio_component!(BasicSynth))]
 struct BasicSynth {
-    prop:f64,
+    #[live] prop:f64,
     #[rust] from_ui: FromUISender<FromUI>,
 //    #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
 }

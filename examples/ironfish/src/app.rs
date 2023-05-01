@@ -22,6 +22,7 @@ live_design!{
     import makepad_audio_graph::mixer::Mixer;
     import makepad_audio_graph::instrument::Instrument;
     import makepad_synth_ironfish::ironfish::IronFish;
+    import makepad_widgets::designer::Designer;
     
     // APP
     //ui: <AppMobile> {}
@@ -39,14 +40,22 @@ live_design!{
             <DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
-                frame: {body = {
+                frame: {block_signal_event: true; body = {
                     <AppDesktop> {}
+                }}
+            }
+            <DesktopWindow> {
+                window: {position: vec2(0, 400), inner_size: vec2(800, 800)},
+                pass: {clear_color: #2A}
+                frame: {block_signal_event: true; body = {
+                    layout: {padding: {top: 30}},
+                    <Designer> {}
                 }}
             }
             <DesktopWindow> {
                 window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
                 pass: {clear_color: #2A}
-                frame: {body = {
+                frame: {block_signal_event: true; body = {
                     <AppMobile> {}
                 }}
             }
@@ -62,26 +71,21 @@ pub struct SynthPreset {
 }
 
 #[derive(Live)]
-#[live_design_with {
-    crate::makepad_audio_widgets::live_design(cx);
-    crate::makepad_audio_graph::live_design(cx);
-    crate::makepad_synth_ironfish::live_design(cx);
-    crate::sequencer::live_design(cx);
-    crate::app_desktop::live_design(cx);
-    crate::app_mobile::live_design(cx);
-}]
-
 pub struct App {
-    ui: WidgetRef,
+    #[live] ui: WidgetRef,
     #[rust] _presets: Vec<SynthPreset>,
-    audio_graph: AudioGraph,
+    #[live] audio_graph: AudioGraph,
     #[rust] midi_input: MidiInput,
 }
 
 impl LiveHook for App {
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> Option<usize> {
-        //_nodes.debug_print(0,100);
-        None
+    fn before_live_design(cx: &mut Cx) {
+        crate::makepad_audio_widgets::live_design(cx);
+        crate::makepad_audio_graph::live_design(cx);
+        crate::makepad_synth_ironfish::live_design(cx);
+        crate::sequencer::live_design(cx);
+        crate::app_desktop::live_design(cx);
+        crate::app_mobile::live_design(cx);
     }
 }
 
@@ -209,23 +213,20 @@ impl AppMain for App {
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            
             // draw the ui using hooks
             while let Some(next) = self.ui.draw_widget_hook(cx).hook_widget() {
                 // draw the preset lists
                 if let Some(mut list) = preset_lists.pick(next).borrow_mut() {
                     for i in 0..10 {
-                        if let Some(item) = list.get_drawable(cx, LiveId(i as u64).into(), live_id!(Entry)) {
+                        if let Some(item) = list.get_entry(cx, LiveId(i as u64).into(), live_id!(Entry)) {
                             item.get_button(id!(label)).set_label(&format!("Button id {i}"));
                             item.draw_widget(cx);
                         }
                     }
                 }
             }
-            
             return
         }
-        
         let ui = self.ui.clone();
         let mut synth_db = DataBindingStore::new();
         let mut actions = ui.handle_widget_event(cx, event);

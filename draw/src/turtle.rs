@@ -8,13 +8,13 @@ use {
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
 #[live_ignore]
 pub struct Layout {
-    pub scroll: DVec2,
+    #[live] pub scroll: DVec2,
     #[live(true)] pub clip_x: bool,
     #[live(true)] pub clip_y: bool,
-    pub padding: Padding,
-    pub align: Align,
-    pub flow: Flow,
-    pub spacing: f64
+    #[live] pub padding: Padding,
+    #[live] pub align: Align,
+    #[live] pub flow: Flow,
+    #[live] pub spacing: f64
 }
 
 impl Default for Layout{
@@ -34,26 +34,26 @@ impl Default for Layout{
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
 #[live_ignore]
 pub struct Walk {
-    pub abs_pos: Option<DVec2>,
-    pub margin: Margin,
-    pub width: Size,
-    pub height: Size,
+    #[live] pub abs_pos: Option<DVec2>,
+    #[live] pub margin: Margin,
+    #[live] pub width: Size,
+    #[live] pub height: Size,
 }
 
 #[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
 #[live_ignore]
 pub struct Align {
-    pub x: f64,
-    pub y: f64
+    #[live] pub x: f64,
+    #[live] pub y: f64
 }
 
 #[derive(Clone, Copy, Default, Debug, Live)]
 #[live_ignore]
 pub struct Padding {
-    pub left: f64,
-    pub top: f64,
-    pub right: f64,
-    pub bottom: f64
+    #[live] pub left: f64,
+    #[live] pub top: f64,
+    #[live] pub right: f64,
+    #[live] pub bottom: f64
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
@@ -965,7 +965,7 @@ impl Padding {
 }
 
 impl LiveHook for Padding {
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         if let Some(v) = nodes[index].value.as_float(){
             *self = Self {left: v, top: v, right: v, bottom: v};
             Some(index + 1)
@@ -982,7 +982,7 @@ impl Default for Flow {
 
 
 impl LiveHook for Size {
-    fn before_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+    fn skip_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match &nodes[index].value {
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {

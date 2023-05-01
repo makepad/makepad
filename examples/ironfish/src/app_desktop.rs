@@ -2143,7 +2143,6 @@ live_design!{
     }
     
     AppDesktop = <Frame> {
-        design_mode: false
         layout:{flow:Right}
         walk: {width: Fill, height: Fill}
         // layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}

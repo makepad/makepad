@@ -190,37 +190,37 @@ pub enum UndoGroup {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawLabel {
-    draw_super: DrawText,
-    is_empty: f32,
+    #[live] draw_super: DrawText,
+    #[live] is_empty: f32,
 }
 
 
 #[derive(Live)]
-#[live_design_with{widget_factory!(cx, TextInput)}]
 pub struct TextInput {
-    state: State,
-    
-    draw_bg: DrawColor,
-    draw_select: DrawQuad,
-    draw_cursor: DrawQuad,
-    draw_label: DrawLabel,
-    
-    walk: Walk,
-    align: Align,
-    layout: Layout,
-    
-    cursor_size: f64,
-    cursor_margin_bottom: f64,
-    cursor_margin_top: f64,
-    select_pad_edges: f64,
-    empty_message: String,
-    numeric_only: bool,
-    
-    pub read_only: bool,
-    
-    label_walk: Walk,
-    
-    pub text: String,
+    #[live] state: State,
+
+    #[live] draw_bg: DrawColor,
+    #[live] draw_select: DrawQuad,
+    #[live] draw_cursor: DrawQuad,
+    #[live] draw_label: DrawLabel,
+
+    #[live] walk: Walk,
+    #[live] align: Align,
+    #[live] layout: Layout,
+
+    #[live] cursor_size: f64,
+    #[live] cursor_margin_bottom: f64,
+    #[live] cursor_margin_top: f64,
+    #[live] select_pad_edges: f64,
+    #[live] empty_message: String,
+    #[live] numeric_only: bool,
+
+    #[live] pub read_only: bool,
+
+    #[live] label_walk: Walk,
+
+    #[live] pub text: String,
+
     #[rust] double_tap_start: Option<(usize, usize)>,
     #[rust] undo_id: u64,
     #[rust] last_undo: Option<UndoItem>,
@@ -230,10 +230,9 @@ pub struct TextInput {
     #[rust] cursor_head: usize
 }
 
-impl LiveHook for TextInput {
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> Option<usize> {
-        //nodes.debug_print(index,100);
-        None
+impl LiveHook for TextInput{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,TextInput)
     }
 }
 
