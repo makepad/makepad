@@ -181,7 +181,7 @@ impl Widget for Splitter {
             self.begin(cx, walk);
         }
         if let Some(DrawState::DrawA) = self.draw_state.get() {
-            self.a.draw_widget_hook(cx) ?;
+            self.a.draw_widget(cx) ?;
             self.draw_state.set(DrawState::DrawSplit);
         }
         if let Some(DrawState::DrawSplit) = self.draw_state.get() {
@@ -189,7 +189,7 @@ impl Widget for Splitter {
             self.draw_state.set(DrawState::DrawB)
         }
         if let Some(DrawState::DrawB) = self.draw_state.get() {
-            self.b.draw_widget_hook(cx) ?;
+            self.b.draw_widget(cx) ?;
             self.end(cx);
             self.draw_state.end();
         }

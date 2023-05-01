@@ -157,7 +157,7 @@ impl AppMain for App{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Draw(event) = event {
             // This is a draw event, so create a draw context and use that to draw our application.
-            return self.ui.draw_widget(&mut Cx2d::new(cx, event));
+            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
         }
         
         // Forward the event to the frame. In this case, handle_event returns a list of actions.
