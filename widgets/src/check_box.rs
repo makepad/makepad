@@ -191,6 +191,7 @@ pub struct DrawCheckBox {
 }
 
 #[derive(Live, LiveHook)]
+#[live_ignore]
 #[repr(u32)]
 pub enum CheckType {
     #[pick] Check = shader_enum(1),
