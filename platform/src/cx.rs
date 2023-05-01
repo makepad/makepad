@@ -137,6 +137,7 @@ pub struct CxDependency {
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
     pub cache_path: String,
+    pub density: f64
 }
 
 #[derive(Clone, Debug)]

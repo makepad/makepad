@@ -57,27 +57,29 @@ live_design!{
     }
     
     App = {{App}} {
-        window: {ui: {inner_view = {
+        ui: <DesktopWindow>{inner_view = {
             show_bg:true 
             draw_bg:{color:#00f}
             video_input1 = <VideoFrame> {
             }
-        }}}
-        
+        }}
     }
 }
 app_main!(App);
 
 
-#[derive(Live, LiveHook)]
-#[live_design_with{
-    crate::makepad_audio_widgets::live_design(cx);
-}]      
+#[derive(Live)]
 pub struct App {
-    window: DesktopWindow,
-    video_input1: Texture,
+    #[live] ui: WidgetRef,
+    #[live] video_input1: Texture,
     #[rust] send_video_buffer: Arc<Mutex<Option<VideoBuffer>>>,
     #[rust] video_recv: ToUIReceiver<VideoBuffer>,
+}
+
+impl LiveHook for App {
+    fn before_live_design(cx: &mut Cx) {
+        crate::makepad_audio_widgets::live_design(cx);
+    }
 }
 
 #[derive(SerBin, DeBin)]
@@ -106,6 +108,7 @@ pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u
 impl AppMain for App{
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let _actions = self.ui.handle_widget_event(cx, event);
         match event {
             Event::Signal => {
                 if let Ok(mut vfb) = self.video_recv.try_recv_flush() {
@@ -134,7 +137,7 @@ impl AppMain for App{
                     }
                     
                     for v in [
-                        self.window.ui.get_frame(id!(video_input1)),
+                        self.ui.get_frame(id!(video_input1)),
                     ] {
                         v.set_texture(0, &self.video_input1);
                         v.set_uniform(cx, id!(image_size), &image_size);
@@ -144,7 +147,7 @@ impl AppMain for App{
                 }
             }
             Event::Draw(event) => {
-                return self.draw(&mut Cx2d::new(cx, event));
+                return self.ui.draw_widget(&mut Cx2d::new(cx, event));
             }
             Event::Construct => {
                 self.start_inputs(cx);
@@ -157,7 +160,6 @@ impl AppMain for App{
             _ => ()
         }
         
-        self.window.handle_event(cx, event);
     }    
 }
 
@@ -224,12 +226,5 @@ impl App {
                 });
             } 
         });
-    }
-    
-    
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx).is_redrawing() {
-            self.window.end(cx);
-        }
     }
 }

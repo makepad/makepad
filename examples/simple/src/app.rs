@@ -119,27 +119,30 @@ app_main!(App);
 // The #[derive(Live, LiveHook)] attribute implements a bunch of traits for this struct that enable
 // it to interact with the Makepad runtime. Among other things, this enables the Makepad runtime to
 // initialize the struct from a DSL object.
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 // This function is used to register any DSL code that you depend on.
 // called automatically by the code we generated with the call to the macro `main_app` above.
-#[live_design_with {
-    crate::makepad_widgets::live_design(cx);
-}]
+
 pub struct App {
     // A chromeless window for our application. Used to contain our frame widget.
     // A frame widget. Used to contain our button and label.
-    ui: WidgetRef,
+    #[live] ui: WidgetRef,
     
     // The value for our counter.
     //
     // The #[rust] attribute here is used to indicate that this field should *not* be initialized
     // from a DSL object, even when a corresponding property exists.
-    #[rust]
-    counter: usize,
+    #[rust] counter: usize,
+}
+
+impl LiveHook for App {
+    fn before_live_design(cx: &mut Cx) {
+        crate::makepad_widgets::live_design(cx);
+    }
 }
 
 impl App{
-    async fn do_network_request(_cx:CxRef, ui:WidgetRef, url:&str)->String{
+    async fn _do_network_request(_cx:CxRef, _ui:WidgetRef, _url:&str)->String{
         //let x = fetch(urL).await;
         //ui.get_label(id!(thing)).set_text(&mut *cx.borrow_mut(), x);
         "".to_string()
@@ -154,8 +157,7 @@ impl AppMain for App{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Draw(event) = event {
             // This is a draw event, so create a draw context and use that to draw our application.
-            let mut draw_cx = Cx2d::new(cx, event);
-            return self.ui.draw_widget(&mut draw_cx);
+            return self.ui.draw_widget(&mut Cx2d::new(cx, event));
         }
         
         // Forward the event to the frame. In this case, handle_event returns a list of actions.
@@ -173,7 +175,7 @@ impl AppMain for App{
             // Get a reference to our label from the frame, update its text, and schedule a redraw
             // for it.
             let label = self.ui.get_label(id!(label1));
-            label.set_text(&format!("Counter: {}", self.counter));
+            label.set_label(&format!("Counter: {}", self.counter));
             label.redraw(cx);
         }
     }

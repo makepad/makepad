@@ -134,7 +134,7 @@ pub struct NumberBox {
     #[live] label: DrawLabel,
 
     #[live] layout: Layout,
-    #[live] state: State,
+    #[state] state: State,
     
     #[live] label_align: Align,
 }
@@ -153,7 +153,7 @@ impl Widget for NumberGrid {
         self.scroll_bars.redraw(cx)
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         let _ = self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
@@ -176,6 +176,14 @@ pub struct NumberGrid {
 impl LiveHook for NumberGrid{
     fn before_live_design(cx:&mut Cx){
         register_widget!(cx, NumberGrid)
+    }
+    
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        for number_box in self.number_boxes.values_mut() {
+            if let Some(index) = nodes.child_by_name(index, live_id!(number_box).as_field()) {
+                number_box.apply(cx, from, index, nodes);
+            }
+        }
     }
 }
 
@@ -225,16 +233,6 @@ pub enum NumberBoxAction {
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct NumberBoxId(pub LiveId);
-
-impl LiveHook for NumberGrid {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        for number_box in self.number_boxes.values_mut() {
-            if let Some(index) = nodes.child_by_name(index, live_id!(number_box).as_field()) {
-                number_box.apply(cx, from, index, nodes);
-            }
-        }
-    }
-}
 
 fn random_bit(seed:&mut u32)->u32{
     *seed = seed.overflowing_add((seed.overflowing_mul(*seed)).0 | 5).0;
