@@ -252,7 +252,7 @@ pub struct FileTreeNode {
     #[live] draw_name: DrawNameText,
     #[live] layout: Layout,
     
-    #[live] state: State,
+    #[state] state: State,
     
     #[live] indent_width: f64,
     

@@ -389,6 +389,7 @@ pub struct LiveTypeField {
 pub enum LiveFieldKind {
     Calc,
     Deref,
+    State,
     Live,
     LiveOption
 }
