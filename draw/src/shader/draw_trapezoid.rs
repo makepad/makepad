@@ -113,7 +113,7 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 #[repr(C)]
 pub struct DrawTrapezoidVector {
     #[rust] pub trapezoidator: Trapezoidator,
@@ -122,5 +122,14 @@ pub struct DrawTrapezoidVector {
     #[calc] pub a_xs: Vec2,
     #[calc] pub a_ys: Vec4,
     #[calc] pub chan: f32,
+}
+
+impl LiveHook for DrawTrapezoidVector{
+    fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]){
+        self.draw_vars.before_apply_init_shader(cx, apply_from, index, nodes, &self.geometry);
+    }
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        self.draw_vars.after_apply_update_self(cx, apply_from, index, nodes, &self.geometry);
+    }
 }
 
