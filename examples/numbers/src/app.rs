@@ -2,9 +2,11 @@ use makepad_widgets::*;
 
 live_design!{
     import makepad_widgets::frame::*;
+    import makepad_widgets::desktop_window::DesktopWindow
+
     registry Widget::*;
     App= {{App}} {
-        ui:{
+        ui:<DesktopWindow>{
             <ScrollY>{
                 draw_bg:{color:#5, shape:Solid}
                 <NumberGrid>{
@@ -29,24 +31,11 @@ impl LiveHook for App {
 
 impl AppMain for App{
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::Draw(event) = event {
-            return self.draw(&mut Cx2d::new(cx, event));
+       if let Event::Draw(event) = event {
+            // This is a draw event, so create a draw context and use that to draw our application.
+            return self.ui.draw_widget(&mut Cx2d::new(cx, event));
         }
 
-        self.window.handle_event(cx, event);
-    }
-}
-
-impl App {  
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx).is_not_redrawing() {
-            return;
-        }
-        
-        while self.ui.draw(cx).is_not_done(){}
-        
-        self.ui.redraw(cx);
-        
-        self.window.end(cx);
+        self.ui.handle_widget_event(cx, event);
     }
 }

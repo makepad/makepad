@@ -8,13 +8,12 @@ use {
         android_media::CxAndroidMedia,
         jni_sys::jobject,
         android_jni::{AndroidToJava},
-        android_util::*,
+        android_keycodes::android_to_makepad_key_code,
     },
     self::super::super::{
         gl_sys,
         //libc_sys,
     },
-    core::cmp,
     crate::{
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
@@ -35,14 +34,12 @@ use {
         },
         window::CxWindowPool,
         pass::CxPassParent,
-        cx::{Cx, OsType, AndroidInitParams},
+        cx::{Cx, OsType, AndroidParams},
         gpu_info::GpuPerformance,
         os::cx_native::EventFlow,
         pass::{PassClearColor, PassClearDepth, PassId},
     }
 };
-
-use num_traits::FromPrimitive;
 
 // Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
 const ANDROID_META_CTRL_MASK: i32 = 28672;
@@ -56,26 +53,15 @@ extern "C" {
     fn eglGetProcAddress(procname: *const c_char) -> *mut c_void;
 }
 
-pub struct AndroidInitParams {
-    pub cache_path: String,
-    pub density: f64,
-}
-
-impl AndroidInitParams {
-    pub fn extract_android_params(&self) -> AndroidParams {
-        AndroidParams{cache_path: self.cache_path.clone()}
-    }
-}
-
 impl Cx {
     
     /// Called when EGL is initialized.
-    pub fn from_java_on_init(&mut self, params: AndroidInitParams, to_java: AndroidToJava) {
+    pub fn from_java_on_init(&mut self, params: AndroidParams, to_java: AndroidToJava) {
         // lets load dependencies here.
         self.android_load_dependencies(&to_java);
         
-        self.os_type = OsType::Android(params.extract_android_params());
         self.os.dpi_factor = params.density;
+        self.os_type = OsType::Android(params);
         self.gpu_info.performance = GpuPerformance::Tier1;
         self.call_event_handler(&Event::Construct);
     } 
@@ -224,7 +210,7 @@ impl Cx {
 
     /// Called when a touch event happened on the software keyword
     pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
-        let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
+        //let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
         let e: Event;
 
         match characters {
@@ -239,16 +225,16 @@ impl Cx {
                 self.call_event_handler(&e);
                 self.after_every_event(&to_java);
             }
-            None =>
-                if let Some(native_keycode) = AndroidKeyCode::from_i32(key_code_val) {
+            None => {
+                let key_code =  android_to_makepad_key_code(key_code_val);
+                if !key_code.is_unknown(){
                     let control = meta_state & ANDROID_META_CTRL_MASK != 0;
                     let alt = meta_state & ANDROID_META_ALT_MASK != 0;
-
+                    let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
                     let is_shortcut = control || alt;
-                    let input_str = native_keycode.to_string(shift);
-
-                    if input_str.is_some() && !is_shortcut {
-                        let input = input_str.unwrap().to_string();
+                    let ch = key_code.to_char(shift);
+                    if ch.is_some() && !is_shortcut {
+                        let input = ch.unwrap().to_string();
                         e = Event::TextInput(
                             TextInputEvent {
                                 input: input,
@@ -259,7 +245,7 @@ impl Cx {
                     } else {
                         e = Event::KeyDown(
                             KeyEvent {
-                                key_code: AndroidKeyCode::to_makepad_key_code(key_code_val),
+                                key_code,
                                 is_repeat: false,
                                 modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
                                 time: self.os.time_now()
@@ -269,6 +255,7 @@ impl Cx {
                     self.call_event_handler(&e);
                     self.after_every_event(&to_java);
                 }
+            }
         }
     }
     
