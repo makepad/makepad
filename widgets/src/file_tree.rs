@@ -211,7 +211,7 @@ live_design!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawBgQuad {
-    #[live] draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
     #[live] is_even: f32,
     #[live] scale: f32,
     #[live] is_folder: f32,
@@ -223,7 +223,7 @@ struct DrawBgQuad {
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawNameText {
-    #[live] draw_super: DrawText,
+    #[deref] draw_super: DrawText,
     #[live] is_even: f32,
     #[live] scale: f32,
     #[live] is_folder: f32,
@@ -235,7 +235,7 @@ struct DrawNameText {
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawIconQuad {
-    #[live] draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
     #[live] is_even: f32,
     #[live] scale: f32,
     #[live] is_folder: f32,

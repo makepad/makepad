@@ -154,7 +154,7 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawRadioButton {
-    #[live] draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
     #[live] radio_type: RadioType,
     #[live] hover: f32,
     #[live] focus: f32,

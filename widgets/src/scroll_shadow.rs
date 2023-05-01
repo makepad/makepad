@@ -29,7 +29,7 @@ live_design!{
 #[repr(C)]
 pub struct DrawScrollShadow {
     #[live] shadow_size: f32,
-    #[live] draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
     #[live] shadow_is_top: f32,
     #[live] scroll: f32,
 }

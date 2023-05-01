@@ -388,6 +388,7 @@ pub struct LiveTypeField {
 #[derive(Copy, Clone, Debug)]
 pub enum LiveFieldKind {
     Calc,
+    Deref,
     Live,
     LiveOption
 }
