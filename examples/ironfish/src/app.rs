@@ -40,24 +40,21 @@ live_design!{
             <DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
-                frame: {block_signal_event: true; body = {
-                    <AppDesktop> {}
-                }}
+                block_signal_event: true; 
+                <AppDesktop> {}
             }
             <DesktopWindow> {
                 window: {position: vec2(0, 400), inner_size: vec2(800, 800)},
                 pass: {clear_color: #2A}
-                frame: {block_signal_event: true; body = {
-                    layout: {padding: {top: 30}},
-                    <Designer> {}
-                }}
+                block_signal_event: true;
+                layout: {padding: {top: 30}},
+                <Designer> {}
             }
             <DesktopWindow> {
                 window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
                 pass: {clear_color: #2A}
-                frame: {block_signal_event: true; body = {
-                    <AppMobile> {}
-                }}
+                block_signal_event: true; 
+                <AppMobile> {}
             }
         }
     }
