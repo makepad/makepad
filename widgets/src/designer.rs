@@ -1,6 +1,7 @@
 use crate::{
     makepad_draw::*,
     file_tree::*,
+    frame::Frame,
     widget::*,
 };
 
@@ -12,7 +13,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     
     Designer = {{Designer}} {
-        ui: <Frame>{
+        //ui: <Frame>{
             layout: {flow: Right},
             <Splitter>{
                 align: FromStart(200),
@@ -22,13 +23,13 @@ live_design!{
                 },
                 b:<Solid>{draw_bg:{color:#4}},
             }
-        }
+        //}
     }
 }
 
 #[derive(Live)]
 pub struct Designer {
-    #[live] ui: WidgetRef,
+    #[deref] ui: Frame,
 }
 
 impl LiveHook for Designer {

@@ -7,7 +7,7 @@ use {
         live_ptr::{LiveFileId, LivePtr, LiveFileGeneration},
         live_error::{LiveError},
         live_document::{LiveOriginal, LiveExpanded},
-        live_node::{LiveValue, LiveNode, LiveIdAsProp, LivePropType},
+        live_node::{LiveValue, LiveNode, LiveIdAsProp, LiveFieldKind, LivePropType},
         live_node_vec::{LiveNodeSliceApi, LiveNodeVecApi},
         live_registry::{LiveRegistry, LiveScopeTarget},
     }
@@ -285,9 +285,11 @@ impl<'a> LiveExpander<'a> {
                     let mut live_type_info = self.live_registry.live_type_infos.get(live_type).unwrap();
                     
                     let mut has_deref_hop = false;
-                    while let Some(field) = live_type_info.fields.iter().find( | f | f.id == live_id!(draw_super)) {
-                        has_deref_hop = true;
-                        live_type_info = &field.live_type_info;
+                    if let Some(field) = live_type_info.fields.iter().find( | f | f.live_field_kind == LiveFieldKind::Deref) {
+                        if !field.live_type_info.live_ignore{
+                            has_deref_hop = true;
+                            live_type_info = &field.live_type_info;
+                        }
                     }
                     if has_deref_hop {
                         // ok so we need the lti of the deref hop and clone all children

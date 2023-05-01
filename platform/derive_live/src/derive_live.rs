@@ -166,9 +166,16 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("        _=> self.apply_value_unknown(cx, apply_from, index, nodes)");
         }
         tb.add("            }");
-        tb.add("        } else {self.apply_value_instance(cx, apply_from, index, nodes)}");
+        tb.add("        } else {");
+             
+        if let Some(deref_field) = deref_field {
+            tb.add("        self.").ident(&deref_field.name).add(".apply_value_instance(cx, apply_from, index, nodes)");
+        }
+        else{
+            tb.add("        self.apply_value_instance(cx, apply_from, index, nodes)");
+        }
+        tb.add("        }");
         tb.add("    }");
-        
         tb.add("}");
 
         tb.add("impl").stream(generic.clone());
@@ -180,6 +187,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("    self.").ident(&deref_field.name).add(".deref_before_apply(cx, apply_from, index, nodes);");
         }
         tb.add("    }");
+
         tb.add("    fn deref_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
         tb.add("        self.after_apply(cx, apply_from, index, nodes);");
 
@@ -212,6 +220,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("                    index += 1;");
         tb.add("                    break;");
         tb.add("                }");
+   
         if state_field.is_some() { // apply the default states
             tb.add("            if nodes[index].id == live_id!(state){state_index = Some(index);}");
         }
