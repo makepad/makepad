@@ -61,21 +61,21 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawRoundCorner {
-    draw_super: DrawQuad,
-    border_radius: f32,
-    flip: Vec2,
+    #[live] draw_super: DrawQuad,
+    #[live] border_radius: f32,
+    #[live] flip: Vec2,
 }
 
 #[derive(Live)]
 pub struct Dock {
-    layout: Layout,
-    overlay_view: View,
-    round_corner: DrawRoundCorner,
-    padding_fill: DrawColor,
-    border_size: f64,
-    drag_quad: DrawColor,
-    tab_bar: Option<LivePtr>,
-    splitter: Option<LivePtr>,
+    #[live] layout: Layout,
+    #[live] overlay_view: View,
+    #[live] round_corner: DrawRoundCorner,
+    #[live] padding_fill: DrawColor,
+    #[live] border_size: f64,
+    #[live] drag_quad: DrawColor,
+    #[live] tab_bar: Option<LivePtr>,
+    #[live] splitter: Option<LivePtr>,
     #[rust] area: Area,
     #[rust] panels: ComponentMap<PanelId, Panel>,
     #[rust] panel_id_stack: Vec<PanelId>,

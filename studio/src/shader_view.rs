@@ -75,12 +75,12 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct ShaderView {
-    bg_quad: DrawQuad,
+    #[live] bg_quad: DrawQuad,
     
-    size: DVec2,
-    pad: DVec2,
+    #[live] size: DVec2,
+    #[live] pad: DVec2,
 
-    state: State
+    #[live] state: State
 }
 
 

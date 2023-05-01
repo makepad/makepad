@@ -28,7 +28,7 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct LogView {
-    log_list: LogList
+    #[live] log_list: LogList
 }
 
 pub enum LogViewAction {

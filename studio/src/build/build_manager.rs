@@ -85,8 +85,8 @@ pub struct BuildClientWrap {
 
 #[derive(Live, LiveHook)]
 pub struct BuildManager {
-    path: String,
-    recompile_timeout: f64,
+    #[live] path: String,
+    #[live] recompile_timeout: f64,
     #[rust] recompile_timer: Timer,
 }
 

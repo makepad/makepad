@@ -29,16 +29,16 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawRect {
-    draw_super: DrawQuad,
-    color: Vec4,
+    #[live] draw_super: DrawQuad,
+    #[live] color: Vec4,
 }
 
 
 #[derive(Live, LiveHook)]
 pub struct DebugView {
-    view: View,
-    rect: DrawRect,
-    label: DrawText
+    #[live] view: View,
+    #[live] rect: DrawRect,
+    #[live] label: DrawText
 }
 
 impl DebugView {

@@ -31,13 +31,12 @@ use crate::derive_live_registry::*;
 //mod colorhex;
 
 #[proc_macro_derive(Live, attributes(
-    alias,
     calc,
     live,
     rust,
     pick,
     state,
-    live_design_with,
+    deref,
     live_ignore,
     live_debug
 ))]

@@ -20,17 +20,22 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_with(widget_factory!(cx,Label))]
+#[derive(Live)]
 pub struct Label {
-    draw_label: DrawText,
-    walk: Walk,
+    #[live] draw_label: DrawText,
+    #[live] walk: Walk,
     
-//  overflow: Overflow,
-    align: Align,
+//  #[live] overflow: Overflow,
+    #[live] align: Align,
 
     //margin: Margin,
-    label: String,
+    #[live] label: String,
+}
+
+impl LiveHook for Label{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,Label)
+    }
 }
 
 impl Widget for Label {

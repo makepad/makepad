@@ -47,15 +47,14 @@ live_design!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawWave {
-    draw_super: DrawQuad,
+    #[live] draw_super: DrawQuad,
 }
 
 #[derive(Live)]
-#[live_design_with{widget_factory!(cx, DisplayAudio)}]
 pub struct DisplayAudio {
-    walk: Walk,
-    draw_wave: DrawWave,
-    wave_texture: Texture,
+    #[live] walk: Walk,
+    #[live] draw_wave: DrawWave,
+    #[live] wave_texture: Texture,
     #[rust] data_offset: [usize; 32],
     #[rust([0; 32])] active: [usize; 32],
 }
@@ -94,6 +93,10 @@ const WAVE_SIZE_X: usize = 1024;
 const WAVE_SIZE_Y: usize = 16;
 
 impl LiveHook for DisplayAudio {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, DisplayAudio)
+    }
+    
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.wave_texture.set_desc(cx, TextureDesc {
             format: TextureFormat::ImageBGRA,

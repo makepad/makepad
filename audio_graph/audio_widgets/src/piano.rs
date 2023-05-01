@@ -120,25 +120,24 @@ live_design!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawKey {
-    draw_super: DrawQuad,
-    is_black: f32,
-    pressed: f32,
-    focussed: f32,
-    hover: f32,
+    #[live] draw_super: DrawQuad,
+    #[live] is_black: f32,
+    #[live] pressed: f32,
+    #[live] focussed: f32,
+    #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct PianoKey {
-    draw_key: DrawKey,
-    state: State,
+    #[live] draw_key: DrawKey,
+    #[live] state: State,
 }
 
 #[derive(Live)]
-#[live_design_with{widget_factory!(cx, Piano)}]
 pub struct Piano {
     #[rust] area: Area,
-    walk: Walk,
-    piano_key: Option<LivePtr>,
+    #[live] walk: Walk,
+    #[live] piano_key: Option<LivePtr>,
     
     #[rust([0; 20])]
     keyboard_keys_down: [u8; 20],
@@ -149,14 +148,18 @@ pub struct Piano {
     #[rust(100)]
     keyboard_velocity: u8,
     
-    black_size: Vec2,
-    white_size: Vec2,
+    #[live] black_size: Vec2,
+    #[live] white_size: Vec2,
     
     #[rust] white_keys: ComponentMap<PianoKeyId, PianoKey>,
     #[rust] black_keys: ComponentMap<PianoKeyId, PianoKey>,
 }
 
 impl LiveHook for Piano {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, Piano)
+    }
+    
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
             if let Some(index) = nodes.child_by_name(index, live_id!(piano_key).as_field()) {

@@ -235,7 +235,7 @@ impl<'a> Try for AudioResult<'a> {
 }*/
 
 #[macro_export]
-macro_rules!audio_component {
+macro_rules!register_audio_component {
     ($cx:ident, $ ty: ident) => {
         {
             struct Factory();

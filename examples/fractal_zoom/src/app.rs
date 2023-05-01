@@ -27,17 +27,11 @@ pub struct App {
     ui: WidgetRef,
 }
 
-impl App {
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        while self.ui.draw_widget(cx).is_not_done() {};
-    }
-}
-
 impl AppMain for App {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Draw(event) = event {
-            return self.draw(&mut Cx2d::new(cx, event));
+            self.ui.draw_widget(&mut Cx2d::new(cx, event));
         }
         
         self.ui.handle_widget_event(cx, event);

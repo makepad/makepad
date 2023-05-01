@@ -10,7 +10,7 @@ use crate::{
 };
 
 live_design!{
-    import crate::theme::*;
+    import makepad_widgets::theme::*;
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
     import makepad_widgets::label::Label;
@@ -36,19 +36,19 @@ live_design!{
                 windows_buttons = <Frame> {
                     visible: false,
                     walk: {width: Fit, height: Fit}
-                    min = <DesktopButton> {button_type: WindowsMin}
-                    max = <DesktopButton> {button_type: WindowsMax}
-                    close = <DesktopButton> {button_type: WindowsClose}
+                    min = <DesktopButton> {draw_bg:{button_type: WindowsMin}}
+                    max = <DesktopButton> {draw_bg:{button_type: WindowsMax}}
+                    close = <DesktopButton> {draw_bg:{button_type: WindowsClose}}
                 }
                 web_fullscreen = <Frame> {
                     visible: false,
                     walk: {width: Fit, height: Fit}
-                    fullscreen = <DesktopButton> {button_type: Fullscreen}
+                    fullscreen = <DesktopButton> {draw_bg:{button_type: Fullscreen}}
                 }
                 web_xr = <Frame> {
                     visible: false,
                     walk: {width: Fit, height: Fit}
-                    xr_on = <DesktopButton> {button_type: XRMode}
+                    xr_on = <DesktopButton> {draw_bg:{button_type: XRMode}}
                 }
             }
             body = <Frame> {}
@@ -87,27 +87,24 @@ live_design!{
 }
 
 #[derive(Live)]
-#[live_design_with{
-    widget_factory!(cx, DesktopWindow)
-}]
 pub struct DesktopWindow {
     #[rust] pub caption_size: DVec2,
-    last_mouse_pos: DVec2,
-    mouse_cursor_size: DVec2,
+    #[live] last_mouse_pos: DVec2,
+    #[live] mouse_cursor_size: DVec2,
     
-    cursor_view: View,
-    draw_cursor: DrawQuad,
+    #[live] cursor_view: View,
+    #[live] draw_cursor: DrawQuad,
     
-    debug_view: DebugView,
-    nav_control: NavControl,
-    window: Window,
-    overlay: Overlay,
-    main_view: View,
-    pass: Pass,
-    depth_texture: Texture,
+    #[live] debug_view: DebugView,
+    #[live] nav_control: NavControl,
+    #[live] window: Window,
+    #[live] overlay: Overlay,
+    #[live] main_view: View,
+    #[live] pass: Pass,
+    #[live] depth_texture: Texture,
     
     
-    pub frame: WidgetRef,
+    #[live] pub frame: WidgetRef,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![
@@ -116,7 +113,7 @@ pub struct DesktopWindow {
         ]),
     ]))]
     
-    _default_menu: Menu,
+    #[live] _default_menu: Menu,
     
     #[rust] pub last_menu: Option<Menu>,
     
@@ -131,6 +128,10 @@ enum DrawState {
 }
 
 impl LiveHook for DesktopWindow {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, DesktopWindow)
+    }
+
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));

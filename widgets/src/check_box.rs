@@ -183,11 +183,11 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawCheckBox {
-    draw_super: DrawQuad,
-    check_type: CheckType,
-    hover: f32,
-    focus: f32,
-    selected: f32
+    #[live] draw_super: DrawQuad,
+    #[live] check_type: CheckType,
+    #[live] hover: f32,
+    #[live] focus: f32,
+    #[live] selected: f32
 }
 
 #[derive(Live, LiveHook)]
@@ -198,26 +198,31 @@ pub enum CheckType {
     Toggle = shader_enum(3),
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_with{widget_factory!(cx, CheckBox)}]
+#[derive(Live)]
 pub struct CheckBox {
     
-    walk: Walk,
-    icon_walk: Walk,
+    #[live] walk: Walk,
+    #[live] icon_walk: Walk,
 
-    layout: Layout,
-    state: State,
+    #[live] layout: Layout,
+    #[live] state: State,
     
-    label_walk: Walk,
-    label_align: Align,
+    #[live] label_walk: Walk,
+    #[live] label_align: Align,
     
-    draw_check: DrawCheckBox,
-    draw_label: DrawText,
-    draw_icon: DrawIcon,
+    #[live] draw_check: DrawCheckBox,
+    #[live] draw_label: DrawText,
+    #[live] draw_icon: DrawIcon,
 
-    label: String,
+    #[live] label: String,
     
-    bind: String,
+    #[live] bind: String,
+}
+
+impl LiveHook for CheckBox{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,CheckBox)
+    }
 }
 
 #[derive(Clone, WidgetAction)]
@@ -228,9 +233,9 @@ pub enum CheckBoxAction {
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawLabelText {
-    draw_super: DrawText,
-    hover: f32,
-    pressed: f32,
+    #[live] draw_super: DrawText,
+    #[live] hover: f32,
+    #[live] pressed: f32,
 }
 
 impl CheckBox {

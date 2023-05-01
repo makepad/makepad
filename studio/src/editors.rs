@@ -97,7 +97,7 @@ impl From<TabId> for EditorViewId {
 pub struct Editors {
     #[rust] editor_views: ComponentMap<EditorViewId, EditorView>,
     
-    rust_editor: Option<LivePtr>,
+    #[live] rust_editor: Option<LivePtr>,
 }
 
 impl LiveHook for Editors {

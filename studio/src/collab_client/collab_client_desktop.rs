@@ -21,8 +21,8 @@ live_design!{
 
 #[derive(Live)]
 pub struct CollabClient {
-    bind: Option<String>,
-    path: String,
+    #[live] bind: Option<String>,
+    #[live] path: String,
     #[rust] inner: Option<CollabClientInner>
 }
 
