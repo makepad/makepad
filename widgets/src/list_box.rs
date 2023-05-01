@@ -120,7 +120,7 @@ pub struct ListBoxItem {
     #[live] draw_name: DrawName,
     
     #[live] layout: Layout,
-    #[live] state: State,
+    #[state] state: State,
     
     #[live] indent_width: f64,
     #[live] icon_walk: Walk,

@@ -197,7 +197,7 @@ pub struct DrawLabel {
 
 #[derive(Live)]
 pub struct TextInput {
-    #[live] state: State,
+    #[state] state: State,
 
     #[live] draw_bg: DrawColor,
     #[live] draw_select: DrawQuad,

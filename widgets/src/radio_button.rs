@@ -181,7 +181,7 @@ pub struct RadioButton {
     #[live] value: LiveValue,
     
     #[live] layout: Layout,
-    #[live] state: State,
+    #[state] state: State,
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,
