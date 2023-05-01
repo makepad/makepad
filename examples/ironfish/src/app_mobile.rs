@@ -264,9 +264,9 @@ live_design!{
                 )
             }
         }
-        layout: {align: {x: 0.5, y: 0.5}}
-        icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-        label: "Click"
+        layout: { align: {x: 0.5, y: 0.5 }}
+        icon_walk:{margin:{left:10}, width:16,height:Fit}
+        text: "Click"
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -284,6 +284,7 @@ live_design!{
             }
         }
     }
+
     //     draw_icon:{
     //         // instance hover: 0.0
     //         // instance pressed: 0.0
@@ -600,14 +601,17 @@ live_design!{
             <FillerX> {}
             
             share = <IconButton> {
-                draw_icon: {svg_file: (ICO_SHARE)}
-                walk: {margin: 5.0}
-                layout: {padding: 0}
+                draw_icon: {
+                    svg_file: (ICO_SHARE),
+                }
+                icon_walk: { height: 14.0, width: Fit }
+                walk: {margin: {top: 5.0, right: -7.5, bottom: 5.0, left: 0.0 }}
+                layout: {padding: 10.0}
             }
             platformtoggle = <IconButton> {
-                draw_icon: {svg_file: (ICO_PLAT_DESKTOP)}
-                walk: {margin: 5.0}
-                layout: {padding: 0}
+                draw_icon: { svg_file: (ICO_PLAT_DESKTOP) }
+                walk: {margin: { top: 0.0, right: -5, bottom: 0, left: 0 }}
+                layout: {padding: 10.0}
             }
             
         }
@@ -639,7 +643,7 @@ live_design!{
             }
             
             scaletype = <InstrumentDropdown> {
-                walk: {height: Fit, width: Fit}
+                walk: {height: Fit, width: 90.0}
                 layout: {align: {x: 0.0, y: 0.5}}
                 draw_bg: {color: (COLOR_UP_OFF)}
                 dropdown = {
@@ -651,9 +655,9 @@ live_design!{
             
             <FillerX> {}
             
-            grid_up = <IconButton> {draw_icon: {svg_file: (ICO_UP)}, icon_walk: {height: 7.5, width: Fit}, walk: {margin: {right: 0.0, left: 20.0}}, layout: {padding: 0.0}}
-            grid_down = <IconButton> {draw_icon: {svg_file: (ICO_DOWN)}, icon_walk: {height: 7.5, width: Fit}, walk: {margin: {right: 0.0, left: 20.0}}, layout: {padding: 0.0}}
-            clear_grid = <IconButton> {draw_icon: {svg_file: (ICO_SEQ_SWEEP)}, walk: {margin: {right: 0.0, left: 20.0}}, layout: {padding: 0.0}}
+            grid_up = <IconButton> { draw_icon: { svg_file: (ICO_UP) }, icon_walk: {height: 7.5, width: Fit}, walk: { margin: 0.0 }, layout: {padding: 10.0} }
+            grid_down = <IconButton> { draw_icon: { svg_file: (ICO_DOWN) }, icon_walk: {height: 7.5, width: Fit}, walk: { margin: 0.0 }, layout: {padding: 10.0} }
+            clear_grid = <IconButton> { draw_icon: { svg_file: (ICO_SEQ_SWEEP) }, walk: { margin: { top: 0.0, right: -5, bottom: 0.0, left: 0.0 } }, layout: {padding: 10.0 } }
             
         }
         
@@ -991,23 +995,23 @@ live_design!{
     
     PresetListEntry = <SwipeListEntry> {
         layout: {flow: Down, padding: {top: 0, right: 5, bottom: 2.5, left: 5}, align: {x: 0.5, y: 0.5}}
-        walk: {width: Fill, height: Fit, margin: {top: 0.0, right: (SPACING_OS), bottom: 0.0, left: (SPACING_OS)}}
+        walk: { width: Fill, height: Fit, margin: 0.0 }
         
         center: <Frame> {
             layout: {flow: Down}
             walk: {width: Fill, height: Fit}
             <Frame> {
                 layout: {flow: Right, align: {x: 0.5, y: 0.5}}
-                walk: {width: Fill, height: Fit}
+                walk: { width: Fill, height: Fit}
                 
                 label = <Button> {
-                    walk: {width: Fill, height: Fill, margin: {top: 5}}
-                    layout: {align: {x: 0.0, y: 0.5}, padding: {left: 5}}
+                    walk: { width: Fill, height: Fill, margin: {top: 5} }
+                    layout: {align: {x: 0.0, y: 0.5}, padding: { left: 5 }}
                     draw_label: {
                         fn get_color(self) -> vec4 {
-                            return mix((COLOR_UP_6), (COLOR_UP_5), self.pressed)
+                            return mix( (COLOR_UP_6), (COLOR_UP_5), self.pressed )
                         }
-                        text_style: <H2_TEXT_REGULAR> {},
+                        text_style: <H2_TEXT_REGULAR>{},
                     }
                     label: "Preset Name"
                     draw_bg: {
@@ -1027,9 +1031,41 @@ live_design!{
                     //     label: " "
                     // }
                     
-                    <IconButton> {draw_icon: {svg_file: (ICO_FAV)}}
+                <IconButton> {
+                    draw_icon: {
+                        svg_file: (ICO_FAV),
+                        fn get_color(self) -> vec4 {
+                            return mix(
+                                mix(
+                                    (COLOR_UP_4),
+                                    (COLOR_UP_6),
+                                    self.hover
+                                ),
+                                (COLOR_UP_3),
+                                self.pressed
+                            )
+                        }
+                    },
+                    icon_walk: {height: 11.0, width: Fit}
+            }
                     
-                    share = <IconButton> {draw_icon: {svg_file: (ICO_SHARE)}}
+                share = <IconButton> {
+                    draw_icon: {
+                        svg_file: (ICO_SHARE),
+                        fn get_color(self) -> vec4 {
+                            return mix(
+                                mix(
+                                    (COLOR_UP_4),
+                                    (COLOR_UP_6),
+                                    self.hover
+                                ),
+                                (COLOR_UP_3),
+                                self.pressed
+                            )
+                        }
+                    },
+                    icon_walk: {height: 12.5, width: Fit}
+                }
                     
                 }
             }
@@ -1076,7 +1112,7 @@ live_design!{
     }
     
     PresetList = <SwipeList> {
-        
+        walk: {height: Fill}
         Entry = <PresetListEntry> {}
     }
     
