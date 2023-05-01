@@ -395,16 +395,15 @@ impl FractalSpace {
 
 
 #[derive(Live)]
-#[live_design_with{widget_factory!(cx, Mandelbrot)}]
 pub struct Mandelbrot {
     // DSL accessible
-    draw_tile: DrawTile,
-    max_iter: usize,
+    #[live] draw_tile: DrawTile,
+    #[live] max_iter: usize,
     
     // thew view container that contains our mandelbrot UI
     #[rust] view_area: Area,
     
-    walk: Walk,
+    #[live] walk: Walk,
     // prepending #[rust] makes derive(Live) ignore these fields
     // and they dont get DSL accessors
     #[rust] next_frame: NextFrame,
@@ -415,15 +414,13 @@ pub struct Mandelbrot {
     
     // this bool flips wether or not you were zooming in or out
     // used to decide tile generation strategy
-    #[rust(true)]
-    is_zoom_in: bool,
+    #[rust(true)] is_zoom_in: bool,
     
     // default fractal space for looking at a mandelbrot
     #[rust(FractalSpace::new(dvec2(-0.5, 0.0), 0.5))]
-    space: FractalSpace,
+    #[live] space: FractalSpace,
     
-    #[rust]
-    had_first_draw: bool,
+    #[rust]had_first_draw: bool,
     
     // the tilecache holding all the tiles
     #[rust(TileCache::new(cx))]
@@ -434,6 +431,10 @@ pub struct Mandelbrot {
 }
 
 impl LiveHook for Mandelbrot {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, Mandelbrot)
+    }
+    
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         // starts the animation cycle on startup
         self.next_frame = cx.new_next_frame();
