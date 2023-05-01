@@ -2,8 +2,8 @@ use std::sync::{Arc};
 
 use {
     crate::{
-        makepad_audio_widgets::display_audio::*,
         makepad_draw::makepad_image_formats,
+        makepad_audio_widgets::display_audio::*,
         makepad_widgets::*,
         makepad_widgets::slides_view::*,
         makepad_platform::midi::*,
@@ -24,8 +24,9 @@ live_design!{
     import makepad_widgets::frame::*;
     import makepad_widgets::slides_view::*;
     import makepad_draw::shader::std::*;
-    
-    registry Widget::*;
+
+    import makepad_widgets::desktop_window::DesktopWindow
+    import makepad_widgets::multi_window::MultiWindow
     
     VideoFrame = <Frame> {
         show_bg: true,
@@ -125,16 +126,14 @@ live_design!{
                 <Slide> {title = {label: "Video mixer"}, <SlideBody> {label: "- Mixing inputs\n- Connect to network camera\n- Audio mixing"}}
                 <Slide> {title = {label: "Makepad APIs"}, <SlideBody> {label: "- Windowing\n- Graphics\n- UI Components\n- Audio in/out\n- Midi in/out\n- Video In"}}
                 <Slide> {title = {label: "Nice deadline"}, <SlideBody> {label: "- 22 platform apis in 10 weeks"}}
-                <Slide> {title = {label: "Audio Inputs"}, <SlideBody> {}
-                    <Box> {
-                        walk:{height:Fit}
-                        draw_bg:{color:#5}
-                        chan5 = <DisplayChannel> {}
-                        chan6 = <DisplayChannel> {}
-                        chan7 = <DisplayChannel> {}
-                        chan8 = <DisplayChannel> {}
-                    }
-                }
+                <Slide> {title = {label: "Audio Inputs"}, <SlideBody> {} <Box> {
+                    walk: {height: Fit}
+                    draw_bg: {color: #5}
+                    chan5 = <DisplayChannel> {}
+                    chan6 = <DisplayChannel> {}
+                    chan7 = <DisplayChannel> {}
+                    chan8 = <DisplayChannel> {}
+                }}
                 <Slide> {title = {label: "DSL for styling"}, <SlideBody> {label: "- Almost not crap to do"}}
                 <Image> {
                     image: d"crate://self/dsl_view.png",
@@ -165,42 +164,44 @@ live_design!{
         mixer: {
             channel: [2.0, 2.0, 2.0, 2.0]
         }
-        window1: {
-            window: {inner_size: vec2(960, 540), dpi_override: 1.0, position: vec2(0, 0)},
-            ui: {
-                inner_view = {
-                    <MainSlides> {
-                        <Frame> {
-                            network_video = <VideoFrameRound> {
-                                walk: {width: 320, height: 240}
+        ui: <MultiWindow> {
+            window1 = <DesktopWindow> {
+                window: {inner_size: vec2(960, 540), dpi_override: 1.0, position: vec2(0, 0)},
+                ui: {
+                    inner_view = {
+                        <MainSlides> {
+                            <Frame> {
+                                network_video = <VideoFrameRound> {
+                                    walk: {width: 320, height: 240}
+                                }
+                                layout: {align: {y: 1.0}, spacing: 5, padding: 10}
+                                chan1 = <DisplayChannel> {}
+                                chan2 = <DisplayChannel> {}
+                                chan3 = <DisplayChannel> {}
+                                chan4 = <DisplayChannel> {}
                             }
-                            layout: {align: {y: 1.0}, spacing: 5, padding: 10}
-                            chan1 = <DisplayChannel> {}
-                            chan2 = <DisplayChannel> {}
-                            chan3 = <DisplayChannel> {}
-                            chan4 = <DisplayChannel> {}
                         }
                     }
                 }
             }
-        }
-        window2: {
-            window: {inner_size: vec2(960, 540), position: vec2(0, 540), dpi_override: 1.0},
-            ui: {inner_view = {
-                <MainSlides> {
-                    
-                    network_video = <VideoFrameRound> {
-                        draw_bg: {alpha: 0.9},
-                        walk: {width: 320, height: 240, margin: {bottom: 50, right: 50}}
+            window2 = <DesktopWindow> {
+                window: {inner_size: vec2(960, 540), position: vec2(0, 540), dpi_override: 1.0},
+                ui: {inner_view = {
+                    <MainSlides> {
+                        
+                        network_video = <VideoFrameRound> {
+                            draw_bg: {alpha: 0.9},
+                            walk: {width: 320, height: 240, margin: {bottom: 50, right: 50}}
+                        }
                     }
-                }
-            }}
-        }
-        window3: {
-            window: {inner_size: vec2(400, 300)},
-            ui: {inner_view = {
-                <MainSlides> {}
-            }}
+                }}
+            }
+            window3 = <DesktopWindow> {
+                window: {inner_size: vec2(400, 300)},
+                ui: {inner_view = {
+                    <MainSlides> {}
+                }}
+            }
         }
     }
 }
@@ -208,27 +209,27 @@ app_main!(App);
 
 #[derive(Live, LiveAtomic, LiveHook)]
 pub struct AudioMixer {
-    channel: [f32a; 4],
-    gain: [f32a; 4]
+    #[live] channel: [f32a; 4],
+    #[live] gain: [f32a; 4]
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_with {
-    crate::makepad_audio_widgets::live_design(cx);
-}]
-
+#[derive(Live)]
 pub struct App {
-    window1: DesktopWindow,
-    window2: DesktopWindow,
-    window3: DesktopWindow,
-    video_input1: Texture,
-    video_network: Texture,
-    mixer: Arc<AudioMixer>,
+    #[live] ui: WidgetRef,
+    #[live] video_input1: Texture,
+    #[live] video_network: Texture,
+    #[live] mixer: Arc<AudioMixer>,
     #[rust] restart_network: Signal,
     #[rust(cx.midi_input())] midi_input: MidiInput,
     #[rust] network_recv: ToUIReceiver<makepad_image_formats::ImageBuffer>,
     #[rust] video_recv: ToUIReceiver<VideoBuffer>,
     #[rust] audio_recv: ToUIReceiver<(usize, AudioBuffer)>,
+}
+
+impl LiveHook for App {
+    fn before_live_design(cx: &mut Cx) {
+        crate::makepad_audio_widgets::live_design(cx);
+    }
 }
 
 pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut [u8]) -> bool {
@@ -346,18 +347,6 @@ impl App {
             let _ = video_sender.send(img.to_buffer());
         })
     }
-    
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window1.begin(cx).is_redrawing() {
-            self.window1.end(cx);
-        }
-        if self.window2.begin(cx).is_redrawing() {
-            self.window2.end(cx);
-        }
-        if self.window3.begin(cx).is_redrawing() {
-            self.window3.end(cx);
-        }
-    }
 }
 
 impl AppMain for App {
@@ -373,19 +362,11 @@ impl AppMain for App {
                     self.video_network.swap_image_u32(cx, &mut nw_image.data);
                     let image_size = [nw_image.width as f32, nw_image.height as f32];
                     
-                    for v in [
-                        self.window1.ui.get_frame(id!(network_video)),
-                        self.window2.ui.get_frame(id!(network_video)),
-                        self.window3.ui.get_frame(id!(network_video)),
-                        self.window1.ui.get_frame(id!(network_video2)),
-                        self.window2.ui.get_frame(id!(network_video2)),
-                        self.window3.ui.get_frame(id!(network_video2)),
-                    ] {
-                        v.set_texture(0, &self.video_network);
-                        v.set_uniform(cx, id!(image_size), &image_size);
-                        v.set_uniform(cx, id!(is_rgb), &[1.0]);
-                        v.redraw(cx);
-                    }
+                    let v = self.ui.get_frame_set(ids!(network_video, network_video2));
+                    v.set_texture(0, &self.video_network);
+                    v.set_uniform(cx, id!(image_size), &image_size);
+                    v.set_uniform(cx, id!(is_rgb), &[1.0]);
+                    v.redraw(cx);
                 }
                 while let Some((_, data)) = self.midi_input.receive() {
                     match data.decode() {
@@ -402,34 +383,20 @@ impl AppMain for App {
                             if cc.param == 20 {
                                 let val = cc.value as f32 / 127.0;
                                 log!("{}", val);
-                                for v in [
-                                    self.window1.ui.get_frame(id!(warp_image)),
-                                    self.window2.ui.get_frame(id!(warp_image)),
-                                    self.window3.ui.get_frame(id!(warp_image)),
-                                ] {
-                                    v.set_uniform(cx, id!(warp), &[val]);
-                                }
+                                
+                                let v = self.ui.get_frame_set(ids!(warp_image));
+                                v.set_uniform(cx, id!(warp), &[val]);
                             };
                             if cc.param == 28 && cc.value == 127 {
                                 self.restart_network.set();
                             }
                             if cc.param == 62 && cc.value == 127 {
-                                for v in [
-                                    self.window1.ui.get_slides_view(id!(slides_view)),
-                                    self.window2.ui.get_slides_view(id!(slides_view)),
-                                    self.window3.ui.get_slides_view(id!(slides_view)),
-                                ] {
-                                    v.prev_slide(cx);
-                                }
+                                let v = self.ui.get_slides_view_set(ids!(slides_view));
+                                v.prev_slide(cx);
                             }
                             if cc.param == 81 && cc.value == 127 {
-                                for v in [
-                                    self.window1.ui.get_slides_view(id!(slides_view)),
-                                    self.window2.ui.get_slides_view(id!(slides_view)),
-                                    self.window3.ui.get_slides_view(id!(slides_view)),
-                                ] {
-                                    v.next_slide(cx);
-                                }
+                                let v = self.ui.get_slides_view_set(ids!(slides_view));
+                                v.next_slide(cx);
                             }
                         }
                         _ => ()
@@ -438,16 +405,16 @@ impl AppMain for App {
                 // lets receive the audio buffers
                 while let Ok((input, audio)) = self.audio_recv.try_recv() {
                     if input == 0 {
-                        self.window1.ui.get_display_audio(id!(chan1.disp)).process_buffer(cx, Some(0), 0, &audio);
-                        self.window1.ui.get_display_audio(id!(chan2.disp)).process_buffer(cx, Some(1), 0, &audio);
-                        self.window1.ui.get_display_audio(id!(chan5.disp)).process_buffer(cx, Some(0), 0, &audio);
-                        self.window1.ui.get_display_audio(id!(chan6.disp)).process_buffer(cx, Some(1), 0, &audio);
+                        self.ui.get_display_audio(id!(chan1.disp)).process_buffer(cx, Some(0), 0, &audio);
+                        self.ui.get_display_audio(id!(chan2.disp)).process_buffer(cx, Some(1), 0, &audio);
+                        self.ui.get_display_audio(id!(chan5.disp)).process_buffer(cx, Some(0), 0, &audio);
+                        self.ui.get_display_audio(id!(chan6.disp)).process_buffer(cx, Some(1), 0, &audio);
                     }
                     if input == 1 {
-                        self.window1.ui.get_display_audio(id!(chan3.disp)).process_buffer(cx, Some(0), 0, &audio);
-                        self.window1.ui.get_display_audio(id!(chan4.disp)).process_buffer(cx, Some(1), 0, &audio);
-                        self.window1.ui.get_display_audio(id!(chan7.disp)).process_buffer(cx, Some(0), 0, &audio);
-                        self.window1.ui.get_display_audio(id!(chan8.disp)).process_buffer(cx, Some(1), 0, &audio);
+                        self.ui.get_display_audio(id!(chan3.disp)).process_buffer(cx, Some(0), 0, &audio);
+                        self.ui.get_display_audio(id!(chan4.disp)).process_buffer(cx, Some(1), 0, &audio);
+                        self.ui.get_display_audio(id!(chan7.disp)).process_buffer(cx, Some(0), 0, &audio);
+                        self.ui.get_display_audio(id!(chan8.disp)).process_buffer(cx, Some(1), 0, &audio);
                     }
                 }
                 if let Ok(mut vfb) = self.video_recv.try_recv_flush() {
@@ -461,11 +428,7 @@ impl AppMain for App {
                     }
                     let image_size = [vfb.format.width as f32, vfb.format.height as f32];
                     
-                    for v in [
-                        self.window1.ui.get_frame(id!(video_input1)),
-                        self.window2.ui.get_frame(id!(video_input1)),
-                        self.window3.ui.get_frame(id!(video_input1))
-                    ] {
+                    for v in self.ui.get_frame_set(ids!(video_input1)).iter() {
                         v.set_texture(0, &self.video_input1);
                         v.set_uniform(cx, id!(image_size), &image_size);
                         v.set_uniform(cx, id!(is_rgb), &[0.0]);
@@ -474,7 +437,7 @@ impl AppMain for App {
                 }
             }
             Event::Draw(event) => {
-                return self.draw(&mut Cx2d::new(cx, event));
+                return self.ui.draw_widget(&mut Cx2d::new(cx, event));
             }
             Event::Construct => {
                 self.start_inputs(cx);
@@ -498,10 +461,6 @@ impl AppMain for App {
             }
             _ => ()
         }
-        
-        self.window1.handle_event(cx, event);
-        self.window2.handle_event(cx, event);
-        self.window3.handle_event(cx, event);
     }
     
 }
