@@ -50,11 +50,11 @@ pub struct DrawTile {
     // the shader compiler allows a form of inheritance where you
     // define a 'draw_super' field, which projects all values in the chain
     // onto the 'self' property in the shader. This is useful to partially reuse shadercode.
-    draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
     // max iterations of the mandelbrot fractal
-    max_iter: f32,
+    #[live] max_iter: f32,
     // a value that cycles the color in the palette (0..1)
-    color_cycle: f32
+    #[live] color_cycle: f32
 }
 
 // basic plain f64 loop, not called in SIMD mode.

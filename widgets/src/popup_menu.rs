@@ -151,14 +151,14 @@ live_design!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawBg {
-    #[live] draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
     #[live] selected: f32,
     #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawName {
-    #[live] draw_super: DrawText,
+    #[deref] draw_super: DrawText,
     #[live] selected: f32,
     #[live] hover: f32,
 }

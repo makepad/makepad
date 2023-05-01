@@ -151,7 +151,7 @@ pub struct DrawText {
     #[live(1.0)] pub font_scale: f64,
     #[live(1.0)] pub draw_depth: f32,
     
-    #[calc] pub draw_vars: DrawVars,
+    #[deref] pub draw_vars: DrawVars,
     // these values are all generated
     #[live] pub color: Vec4,
     #[calc] pub font_t1: Vec2,
