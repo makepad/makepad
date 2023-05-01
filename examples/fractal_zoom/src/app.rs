@@ -18,13 +18,16 @@ live_design!{
 }
 app_main!(App);
 
-#[derive(Live, LiveHook)]
-#[live_design_with {
-    crate::makepad_widgets::live_design(cx);
-    crate::mandelbrot::live_design(cx);
-}]
+#[derive(Live)]
 pub struct App {
-    ui: WidgetRef,
+    #[live] ui: WidgetRef,
+}
+
+impl LiveHook for App {
+    fn before_live_design(cx: &mut Cx) {
+        crate::makepad_widgets::live_design(cx);
+        crate::mandelbrot::live_design(cx);
+    }
 }
 
 impl AppMain for App {
