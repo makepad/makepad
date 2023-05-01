@@ -140,7 +140,7 @@ pub struct TextGeom {
     pub ellip_pt: Option<(usize, f64, usize)>
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 #[repr(C)]
 pub struct DrawText {
     #[rust] pub many_instances: Option<ManyInstances>,
@@ -163,6 +163,15 @@ pub struct DrawText {
     #[calc] pub delta: Vec2,
     #[calc] pub font_size: f32,
     #[calc] pub advance: f32,
+}
+
+impl LiveHook for DrawText{
+    fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]){
+        self.draw_vars.before_apply_init_shader(cx, apply_from, index, nodes, &self.geometry);
+    }
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        self.draw_vars.after_apply_update_self(cx, apply_from, index, nodes, &self.geometry);
+    }
 }
 
 impl DrawText {
