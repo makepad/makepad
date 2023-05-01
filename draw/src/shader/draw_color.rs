@@ -16,6 +16,6 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawColor {
-    #[live()] pub draw_super: DrawQuad,
-    #[live()] pub color: Vec4
+    #[deref] pub draw_super: DrawQuad,
+    #[live] pub color: Vec4
 }

@@ -183,7 +183,7 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawCheckBox {
-    #[live] draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
     #[live] check_type: CheckType,
     #[live] hover: f32,
     #[live] focus: f32,
@@ -233,7 +233,7 @@ pub enum CheckBoxAction {
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawLabelText {
-    #[live] draw_super: DrawText,
+    #[deref] draw_super: DrawText,
     #[live] hover: f32,
     #[live] pressed: f32,
 }

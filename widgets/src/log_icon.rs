@@ -72,7 +72,7 @@ live_design!{
 
 #[derive(Live, LiveHook)]#[repr(C)]
 pub struct DrawLogIconQuad {
-    #[live] draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
     #[live] selected: f32,
     #[live] hover: f32,
     #[live] pub icon_type: LogIconType

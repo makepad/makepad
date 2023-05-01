@@ -61,7 +61,7 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawRoundCorner {
-    #[live] draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
     #[live] border_radius: f32,
     #[live] flip: Vec2,
 }

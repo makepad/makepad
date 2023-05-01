@@ -190,7 +190,7 @@ pub enum UndoGroup {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawLabel {
-    #[live] draw_super: DrawText,
+    #[deref] draw_super: DrawText,
     #[live] is_empty: f32,
 }
 
