@@ -89,7 +89,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                }");
             tb.add("            }");
             tb.add("            ApplyFrom::StateInit=>{"); // someone is calling state init on a state, means we need to find it
-            tb.add("                if let Some(live_ptr) = self.state.live_ptr {");
+            tb.add("                if let Some(live_ptr) = self.").ident(&state_field.name).add(".live_ptr {");
             tb.add("                    let live_registry_rc = cx.live_registry.clone();");
             tb.add("                    let live_registry = live_registry_rc.borrow();");
             tb.add("                    if live_registry.generation_valid(live_ptr) {");
