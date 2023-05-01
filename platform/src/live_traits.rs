@@ -114,35 +114,6 @@ pub trait LiveApply {
     fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
     }
-/*
-    fn handle_live_edit_event(&mut self, cx: &mut Cx, event: &Event, id: LiveId) {
-        match event {
-            Event::LiveEdit(live_edit_event) => {
-                match live_edit_event {
-                    LiveEditEvent::ReparseDocument => {
-                        cx.flush_draw_shaders();
-                        // ok so main_module needs a reload.
-                        let live_registry_rc = cx.live_registry.clone();
-                        let live_registry = live_registry_rc.borrow();
-                        if let Some(file_id) = live_registry.main_module {
-                            let file = live_registry.file_id_to_file(file_id);
-                            if let Some(index) = file.expanded.nodes.child_by_name(0, id.as_instance()) {
-                                self.apply(cx, ApplyFrom::UpdateFromDoc {file_id}, index, &file.expanded.nodes);
-                            }
-                        }
-                        cx.redraw_all();
-                    }
-                    LiveEditEvent::Mutation {tokens, apply, live_ptrs} => {
-                        cx.update_shader_tables_with_live_edit(&tokens, &live_ptrs);
-                        if let Some(index) = apply.child_by_name(0, id.as_instance()) {
-                            self.apply(cx, ApplyFrom::LiveEdit, index, &apply);
-                        }
-                    }
-                }
-            }
-            _ => ()
-        }
-    }*/
 }
 
 pub trait LiveRead{
