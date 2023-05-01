@@ -75,7 +75,7 @@ impl Widget for MultiWindow {
         self.draw_state.begin(cx, DrawState::Window(0));
         while let Some(DrawState::Window(step)) = self.draw_state.get() {
             if let Some(window) = self.windows.values_mut().nth(step){
-                window.draw_widget_hook(cx)?; 
+                window.draw_widget(cx)?; 
                 self.draw_state.set(DrawState::Window(step+1));
             }
             else{

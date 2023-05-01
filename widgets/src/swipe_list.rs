@@ -67,15 +67,15 @@ impl Widget for SwipeListEntry {
             cx.begin_turtle(walk, self.layout);
         }
         if let Some(EntryDrawState::LeftDrawer) = self.draw_state.get() {
-            self.left_drawer.draw_widget_hook(cx) ?;
+            self.left_drawer.draw_widget(cx) ?;
             self.draw_state.set(EntryDrawState::RightDrawer);
         }
         if let Some(EntryDrawState::RightDrawer) = self.draw_state.get() {
-            self.right_drawer.draw_widget_hook(cx) ?;
+            self.right_drawer.draw_widget(cx) ?;
             self.draw_state.set(EntryDrawState::Center);
         }
         if let Some(EntryDrawState::Center) = self.draw_state.get() {
-            self.center.draw_widget_hook(cx) ?;
+            self.center.draw_widget(cx) ?;
             cx.end_turtle();
             self.draw_state.end();
         }
