@@ -56,7 +56,7 @@ impl Widget for Designer{
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
         let outline = self.ui.get_file_tree(id!(outline));
-        while let Some(next) = self.ui.draw_widget_hook(cx).hook_widget() {
+        while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
             if let Some(mut outline) = outline.pick(next).borrow_mut() {
                 //outline.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
                 if outline.begin_folder(cx, live_id!(root).into(), "ROOT").is_ok(){

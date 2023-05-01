@@ -334,7 +334,7 @@ impl Widget for DesktopWindow{
         }
         
         if let Some(DrawState::Drawing) = self.draw_state.get(){
-            self.frame.draw_widget_hook(cx)?;
+            self.frame.draw_widget(cx)?;
             self.draw_state.end();
             self.end(cx);
         }        
