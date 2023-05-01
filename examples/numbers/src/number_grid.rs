@@ -162,18 +162,21 @@ impl Widget for NumberGrid {
 }
 
 #[derive(Live)]
-#[live_design_with{
-    widget_factory!(cx, NumberGrid)
-}]
 pub struct NumberGrid {
-    scroll_bars: ScrollBars,
-    walk: Walk,
-    layout: Layout,
-    seed: u32,
-    fast_path: bool,
-    number_box: Option<LivePtr>,
-    regen_animate: bool,
+    #[live] scroll_bars: ScrollBars,
+    #[live] walk: Walk,
+    #[live] layout: Layout,
+    #[live] seed: u32,
+    #[live] fast_path: bool,
+    #[live] number_box: Option<LivePtr>,
+    #[live] regen_animate: bool,
     #[rust] number_boxes: ComponentMap<NumberBoxId, NumberBox>,
+}
+
+impl LiveHook for NumberGrid{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, NumberGrid)
+    }
 }
 
 impl NumberBox {

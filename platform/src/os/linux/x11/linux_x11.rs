@@ -265,6 +265,8 @@ impl Cx {
                         window.xlib_window.restore();
                     }
                 },
+                CxOsOp::ShowClipboardActions(_) =>{
+                }
                 CxOsOp::FullscreenWindow(_window_id) => {
                     todo!()
                 },

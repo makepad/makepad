@@ -362,7 +362,8 @@ impl Cx {
                 CxOsOp::HideTextIME => {
                     self.os.from_wasm(FromWasmHideTextIME {});
                 },
-                
+                CxOsOp::ShowClipboardActions(_) =>{
+                }
                 CxOsOp::SetCursor(cursor) => {
                     self.os.from_wasm(FromWasmSetMouseCursor::new(cursor));
                 },
