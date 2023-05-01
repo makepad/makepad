@@ -114,55 +114,55 @@ live_design!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawBgQuad {
-    draw_super: DrawQuad,
-    is_even: f32,
-    selected: f32,
-    hover: f32,
-    opened: f32,
+    #[live] draw_super: DrawQuad,
+    #[live] is_even: f32,
+    #[live] selected: f32,
+    #[live] hover: f32,
+    #[live] opened: f32,
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawNameText {
-    draw_super: DrawText,
-    is_even: f32,
-    selected: f32,
-    hover: f32,
-    opened: f32,
+    #[live] draw_super: DrawText,
+    #[live] is_even: f32,
+    #[live] selected: f32,
+    #[live] hover: f32,
+    #[live] opened: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct LogListNode {
-    draw_bg: DrawBgQuad,
-    draw_icon: DrawLogIconQuad,
-    draw_name: DrawNameText,
-    layout: Layout,
+    #[live] draw_bg: DrawBgQuad,
+    #[live] draw_icon: DrawLogIconQuad,
+    #[live] draw_name: DrawNameText,
+    #[live] layout: Layout,
     
-    state: State,
+    #[live] state: State,
     
-    indent_width: f64,
+    #[live] indent_width: f64,
     
-    fold_button: FoldButton,
-    link_label: LinkLabel,
+    #[live] fold_button: FoldButton,
+    #[live] link_label: LinkLabel,
     
-    icon_walk: Walk,
-    name_walk: Walk,
-    min_drag_distance: f64,
+    #[live] icon_walk: Walk,
+    #[live] name_walk: Walk,
+    #[live] min_drag_distance: f64,
     
-    opened: f32,
-    hover: f32,
-    selected: f32,
+    #[live] opened: f32,
+    #[live] hover: f32,
+    #[live] selected: f32,
 }
 
 #[derive(Live)]
 pub struct LogList {
-    scroll_bars: ScrollBars,
-    fold_node: Option<LivePtr>,
+    #[live] scroll_bars: ScrollBars,
+    #[live] fold_node: Option<LivePtr>,
     
-    filler_quad: DrawBgQuad,
-    layout: Layout,
-    node_height: f64,
+    #[live] filler_quad: DrawBgQuad,
+    #[live] layout: Layout,
+    #[live] node_height: f64,
     
-    draw_scroll_shadow: DrawScrollShadow,
+    #[live] draw_scroll_shadow: DrawScrollShadow,
     
     #[rust] selected_node_ids: HashSet<LogListNodeId>,
     #[rust] open_nodes: HashSet<LogListNodeId>,

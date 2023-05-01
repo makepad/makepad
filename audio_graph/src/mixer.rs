@@ -4,7 +4,7 @@ use {
         makepad_platform::thread::*,
         makepad_platform::audio::*,
         makepad_platform::midi::*,
-        audio_component,
+        register_audio_component,
         audio_traits::*
     },
 };
@@ -18,15 +18,16 @@ live_design!{
 enum FromUI {}
 
 #[derive(Live)]
-#[live_design_with{
-    audio_component!(cx, Mixer)
-}]
 struct Mixer {
     #[rust] inputs: ComponentMap<LiveId, AudioComponentRef>,
     #[rust] from_ui: FromUISender<FromUI>,
 }
 
 impl LiveHook for Mixer {
+    fn before_live_design(cx:&mut Cx){
+        register_audio_component!(cx, Mixer)
+    }
+
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         self.inputs.get_or_insert(cx, nodes[index].id, | cx | {AudioComponentRef::new(cx)})
             .apply(cx, from, index, nodes)

@@ -119,15 +119,15 @@ pub struct TouchUpdateEvent {
 #[derive(Clone, Copy, Default, Debug, Live)]
 #[live_ignore]
 pub struct Margin {
-    pub left: f64,
-    pub top: f64,
-    pub right: f64,
-    pub bottom: f64
+    #[live] pub left: f64,
+    #[live] pub top: f64,
+    #[live] pub right: f64,
+    #[live] pub bottom: f64
 }
 
 
 impl LiveHook for Margin {
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         if let Some(v) = nodes[index].value.as_float() {
             *self = Self {left: v, top: v, right: v, bottom: v};
             Some(index + 1)

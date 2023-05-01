@@ -22,6 +22,7 @@ pub mod fold_header;
 pub mod fold_button;
 pub mod hook_widget;
 pub mod multi_window;
+pub mod designer;
 //#[cfg(ide_widgets)]
 pub mod dock;
 //#[cfg(ide_widgets)]
@@ -99,7 +100,6 @@ pub use crate::{
 
 pub fn live_design(cx: &mut Cx) {
     makepad_draw::live_design(cx);
-
     crate::debug_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
@@ -124,6 +124,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::drop_down::live_design(cx);
     crate::swipe_list::live_design(cx);
     crate::multi_window::live_design(cx);
+    crate::designer::live_design(cx);
     //#[cfg(ide_widgets)]{
         crate::log_list::live_design(cx);
         crate::log_icon::live_design(cx);

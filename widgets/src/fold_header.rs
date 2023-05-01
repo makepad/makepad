@@ -42,19 +42,24 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_with{widget_factory!(cx, FoldHeader)}]
+#[derive(Live)]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] rect_size: f64,
     #[rust] area: Area,
-    header: WidgetRef,
-    body: WidgetRef,
-    state: State,
-    opened: f64,
-    layout: Layout,
-    walk: Walk,
-    body_walk: Walk,
+    #[live] header: WidgetRef,
+    #[live] body: WidgetRef,
+    #[live] state: State,
+    #[live] opened: f64,
+    #[live] layout: Layout,
+    #[live] walk: Walk,
+    #[live] body_walk: Walk,
+}
+
+impl LiveHook for FoldHeader{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,FoldHeader)
+    }
 }
 
 #[derive(Clone)]

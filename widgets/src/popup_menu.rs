@@ -151,45 +151,45 @@ live_design!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawBg {
-    draw_super: DrawQuad,
-    selected: f32,
-    hover: f32,
+    #[live] draw_super: DrawQuad,
+    #[live] selected: f32,
+    #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawName {
-    draw_super: DrawText,
-    selected: f32,
-    hover: f32,
+    #[live] draw_super: DrawText,
+    #[live] selected: f32,
+    #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct PopupMenuItem {
     
-    draw_bg: DrawBg,
-    draw_name: DrawName,
+    #[live] draw_bg: DrawBg,
+    #[live] draw_name: DrawName,
     
-    layout: Layout,
-    state: State,
-    walk: Walk,
+    #[live] layout: Layout,
+    #[live] state: State,
+    #[live] walk: Walk,
     
-    indent_width: f32,
-    icon_walk: Walk,
+    #[live] indent_width: f32,
+    #[live] icon_walk: Walk,
     
-    opened: f32,
-    hover: f32,
-    selected: f32,
+    #[live] opened: f32,
+    #[live] hover: f32,
+    #[live] selected: f32,
 }
 
 #[derive(Live)]
 pub struct PopupMenu {
-    view: View,
-    menu_item: Option<LivePtr>,
+    #[live] view: View,
+    #[live] menu_item: Option<LivePtr>,
     
-    draw_bg: DrawQuad,
-    layout: Layout,
-    walk: Walk,
-    items: Vec<String>,
+    #[live] draw_bg: DrawQuad,
+    #[live] layout: Layout,
+    #[live] walk: Walk,
+    #[live] items: Vec<String>,
     #[rust] first_tap: bool,
     #[rust] menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
     #[rust] init_select_item: Option<PopupMenuItemId>,

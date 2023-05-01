@@ -136,30 +136,30 @@ live_design!{
 }
 
 #[derive(Live)]
-#[live_design_with(widget_factory!(cx,DropDown))]
 pub struct DropDown {
-    state: State,
+    #[live] state: State,
     
-    draw_bg: DrawQuad,
-    draw_label: DrawLabelText,
+    #[live] draw_bg: DrawQuad,
+    #[live] draw_label: DrawLabelText,
     
-    walk: Walk,
+    #[live] walk: Walk,
     
-    bind: String,
-    bind_enum: String,
+    #[live] bind: String,
+    #[live] bind_enum: String,
     
-    popup_menu: Option<LivePtr>,
+    #[live] popup_menu: Option<LivePtr>,
     
-    labels: Vec<String>,
-    values: Vec<LiveValue>,
+    #[live] labels: Vec<String>,
+    #[live] values: Vec<LiveValue>,
     
-    popup_shift: DVec2,
+    #[live] popup_shift: DVec2,
     
     #[rust] last_rect: Option<Rect>,
     #[rust] is_open: bool,
-    selected_item: usize,
+   
+    #[live] selected_item: usize,
     
-    layout: Layout,
+    #[live] layout: Layout,
 }
 
 #[derive(Default, Clone)]
@@ -169,13 +169,17 @@ struct PopupMenuGlobal {
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawLabelText {
-    draw_super: DrawText,
-    focus: f32,
-    hover: f32,
-    pressed: f32,
+    #[live] draw_super: DrawText,
+    #[live] focus: f32,
+    #[live] hover: f32,
+    #[live] pressed: f32,
 }
 
 impl LiveHook for DropDown {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, DropDown)
+    }
+    
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.popup_menu.is_none() || !from.is_from_doc() {
             return

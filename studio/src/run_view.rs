@@ -29,7 +29,7 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawApp {
-    draw_super: DrawQuad,
+    #[live] draw_super: DrawQuad,
 }
 
 #[derive(Live)]

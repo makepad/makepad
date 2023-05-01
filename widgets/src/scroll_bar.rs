@@ -89,16 +89,16 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct ScrollBar {
-    draw_bar: DrawScrollBar,
-    pub bar_size: f64,
-    pub min_handle_size: f64, //minimum size of the handle in pixels
-    bar_side_margin: f64,
+    #[live] draw_bar: DrawScrollBar,
+    #[live] pub bar_size: f64,
+    #[live] pub min_handle_size: f64, //minimum size of the handle in pixels
+    #[live] bar_side_margin: f64,
     #[live(Axis::Horizontal)] pub axis: Axis,
     
-    use_vertical_finger_scroll: bool,
-    smoothing: Option<f64>,
+    #[live] use_vertical_finger_scroll: bool,
+    #[live] smoothing: Option<f64>,
     
-    state: State,
+    #[live] state: State,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
@@ -115,10 +115,10 @@ pub struct ScrollBar {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawScrollBar {
-    draw_super: DrawQuad,
-    is_vertical: f32,
-    norm_handle: f32,
-    norm_scroll: f32
+    #[live] draw_super: DrawQuad,
+    #[live] is_vertical: f32,
+    #[live] norm_handle: f32,
+    #[live] norm_scroll: f32
 }
 
 #[derive(Clone, PartialEq, Debug)]

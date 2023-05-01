@@ -149,21 +149,24 @@ pub enum ButtonAction {
     Release
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_with{
-    widget_factory!(cx, Button)
-}]
+#[derive(Live)]
 pub struct Button {
-    state: State,
+    #[live] state: State,
     
-    draw_bg: DrawQuad,
-    draw_label: DrawText,
-    draw_icon: DrawIcon,
-    icon_walk: Walk,
-    walk: Walk,
+    #[live] draw_bg: DrawQuad,
+    #[live] draw_label: DrawText,
+    #[live] draw_icon: DrawIcon,
+    #[live] icon_walk: Walk,
+    #[live] walk: Walk,
     
-    layout: Layout,
-    label: String
+    #[live] layout: Layout,
+    #[live] label: String
+}
+
+impl LiveHook for Button{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, Button)
+    }
 }
 
 impl Widget for Button{

@@ -5,7 +5,7 @@ use {
     std::cell::RefCell,
     std::rc::Rc
 };
-pub use crate::widget_factory;
+pub use crate::register_widget;
 
 #[derive(Clone, Copy)]
 pub enum WidgetCache {
@@ -677,7 +677,7 @@ impl<T: Clone> DrawStateWrap<T> {
 }
 
 #[macro_export]
-macro_rules!widget_factory {
+macro_rules!register_widget {
     ( $cx:ident, $ ty: ty) => {
         {
             struct Factory();

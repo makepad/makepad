@@ -28,10 +28,10 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawScrollShadow {
-    shadow_size: f32,
-    draw_super: DrawQuad,
-    shadow_is_top: f32,
-    scroll: f32,
+    #[live] shadow_size: f32,
+    #[live] draw_super: DrawQuad,
+    #[live] shadow_is_top: f32,
+    #[live] scroll: f32,
 }
 
 impl DrawScrollShadow {

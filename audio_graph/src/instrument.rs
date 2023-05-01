@@ -4,7 +4,7 @@ use {
         makepad_platform::thread::*,
         makepad_platform::audio::*,
         makepad_platform::midi::*,
-        audio_component,
+        register_audio_component,
         audio_traits::*
     },
 };
@@ -18,15 +18,13 @@ live_design!{
 enum FromUI {}
 
 #[derive(Live)]
-#[live_design_with{
-    audio_component!(cx, Instrument)
-}]
 struct Instrument {
     #[rust] step_order: Vec<LiveId>,
     #[rust] steps: ComponentMap<LiveId, AudioComponentRef>,
     
     #[rust] from_ui: FromUISender<FromUI>,
 }
+
 
 struct Step {
     graph_node: Box<dyn AudioGraphNode + Send >,
@@ -81,6 +79,10 @@ impl AudioGraphNode for Node {
 }
 
 impl LiveHook for Instrument {
+    fn before_live_design(cx:&mut Cx){
+        register_audio_component!(cx, Instrument)
+    }
+    
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if from.is_from_doc() {
             self.step_order.push(nodes[index].id);

@@ -24,14 +24,14 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawFocusRect {
-    draw_super: DrawQuad,
+    #[live] draw_super: DrawQuad,
 }
 
 #[derive(Live, LiveHook)]
 pub struct NavControl {
-    view: View,
-    draw_focus: DrawFocusRect,
-    draw_label: DrawText,
+    #[live] view: View,
+    #[live] draw_focus: DrawFocusRect,
+    #[live] draw_label: DrawText,
     #[rust] _recent_focus: Area,
 }
 

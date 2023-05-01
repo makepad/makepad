@@ -79,17 +79,22 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_with{widget_factory!(cx, FoldButton)}]
+#[derive(Live)]
 pub struct FoldButton {
-    state: State,
+    #[live] state: State,
     
-    opened: f32,
+    #[live] opened: f32,
     
-    draw_bg: DrawQuad,
-    abs_size: DVec2,
-    abs_offset: DVec2,
-    walk: Walk,
+    #[live] draw_bg: DrawQuad,
+    #[live] abs_size: DVec2,
+    #[live] abs_offset: DVec2,
+    #[live] walk: Walk,
+}
+
+impl LiveHook for FoldButton{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,FoldButton)
+    }
 }
 
 #[derive(Clone, WidgetAction)]

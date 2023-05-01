@@ -140,37 +140,42 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSlider {
-    draw_super: DrawQuad,
-    slide_pos: f32
+    #[live] draw_super: DrawQuad,
+    #[live] slide_pos: f32
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_with{widget_factory!(cx, Slider)}]
+#[derive(Live)]
 pub struct Slider {
-    draw_slider: DrawSlider,
+    #[live] draw_slider: DrawSlider,
     
-    walk: Walk,
+    #[live] walk: Walk,
     
-    layout: Layout,
-    state: State,
+    #[live] layout: Layout,
+    #[live] state: State,
     
-    label_walk: Walk,
-    label_align: Align,
-    label_text: DrawText,
-    label: String,
+    #[live] label_walk: Walk,
+    #[live] label_align: Align,
+    #[live] label_text: DrawText,
+    #[live] label: String,
     
-    text_input: TextInput,
+    #[live] text_input: TextInput,
     
-    precision: usize,
+    #[live] precision: usize,
     
-    min: f64,
-    max: f64,
-    step: f64,
+    #[live] min: f64,
+    #[live] max: f64,
+    #[live] step: f64,
     
-    bind: String,
+    #[live] bind: String,
     
     #[rust] pub value: f64,
     #[rust] pub dragging: Option<f64>,
+}
+
+impl LiveHook for Slider{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,Slider)
+    }
 }
 
 #[derive(Clone, WidgetAction)]

@@ -43,8 +43,9 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         // alright now. we have a field
         // lets pull out all the alias fields
-        let mut aliases = Vec::new();
+        //let mut aliases = Vec::new();
         for field in &mut fields {
+            /*
             while let Some(index) = field.attrs.iter().position( | attr | attr.name == "alias") {
                 let attr = field.attrs.remove(index);
                 if let Some(args) = &attr.args {
@@ -54,19 +55,22 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                     parser.expect_punct_alone(',') ?;
                     aliases.push((var, parser.eat_level()));
                 }
-            }
+            }*/
             if field.attrs.len() == 1 && field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" {
                 return error_result(&format!("Field {} does not have a live, calc into or rust attribute", field.name));
             }
-            if field.attrs.len() == 0 { // insert a default
-                field.attrs.push(Attribute {name: "live".to_string(), args: None});
+            if field.attrs.len() == 0 { // need field def
+                return error_result("Please annotate the field type with #[rust] for rust-only fields, and #[live] for live DSL mapped fields");
             }
         }
         
-        // special marker fields
+        // special fields for shaders
         let draw_super = fields.iter().find( | field | field.name == "draw_super");
         let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
         let geometry = fields.iter().find( | field | field.name == "geometry");
+        
+        // ok so first can we replace super/vars with a single 'deref' prop?
+        // 
         
         //let animator = fields.iter().find( | field | field.name == "animator");
         let state = fields.iter().find( | field | field.name == "state");
@@ -191,9 +195,9 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
         }
-        for (alias_var, alias_redir) in aliases {
+        /*for (alias_var, alias_redir) in aliases {
             tb.add("            LiveId(").suf_u64(LiveId::from_str(&alias_var).unwrap().0).add(")=>self.").stream(Some(alias_redir)).add(".apply(cx, apply_from, index, nodes),");
-        }
+        }*/
         // Unknown value handling
         if draw_super.is_some() {
             tb.add("            _=> self.draw_super.apply_value(cx, apply_from, index, nodes)");
@@ -249,8 +253,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
         tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
-        
-        tb.add("        let skip_index = self.before_apply(cx, apply_from, start_index, nodes);");
+        tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
         if draw_vars.is_some() {
             tb.add("    self.draw_vars.before_apply(cx, apply_from, start_index, nodes, &self.geometry);");
         }
@@ -260,8 +263,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         if state.is_some() { // apply the default states
             tb.add("    let mut state_index = None;");
         }
-        
-        tb.add("        let index = if let Some(index) = skip_index{index} else {");
+        tb.add("        let index = if let Some(index) = self.skip_apply(cx, apply_from, start_index, nodes){index} else {");
         tb.add("            let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).unwrap().0).add(");");
         tb.add("            if !nodes[start_index].value.is_structy_type(){");
         tb.add("                cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, struct_id);");
@@ -297,7 +299,6 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
         
         tb.add("        self.after_apply_from(cx, apply_from);");
-        
         
         tb.add("        return index;");
         tb.add("    }");
@@ -348,18 +349,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("    }");
         
         tb.add("    fn live_design_with(cx: &mut Cx) {");
-        
-        for attr in main_attribs.iter().filter( | attr | attr.name == "live_design_with") {
-            if attr.args.is_none() {
-                return error_result("live_design_with needs an argument")
-            }
-            tb.stream(attr.args.clone()).add(";");
-            /*
-            tb.add("let cb:Fn(&mut Cx) = (").stream(attr.args.clone()).add(");");
-            tb.add("cb(").stream(attr.args.clone()).add(")(cx);");
-            */
-        }
-        
+        tb.add("<Self as LiveHook>::before_live_design(cx);");
         // we need this here for shader enums to register without hassle
         for field in &fields {
             let attr = &field.attrs[0];
@@ -523,7 +513,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         //tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
         
         tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index:usize, nodes: &[LiveNode]) -> usize {");
-        tb.add("        if let Some(index) = self.before_apply(cx, apply_from, start_index, nodes){");
+        tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
+        tb.add("        if let Some(index) = self.skip_apply(cx, apply_from, start_index, nodes){");
         tb.add("            self.after_apply(cx, apply_from, start_index, nodes);");
         tb.add("            return index");
         tb.add("        }");
