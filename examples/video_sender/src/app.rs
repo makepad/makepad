@@ -147,7 +147,7 @@ impl AppMain for App{
                 }
             }
             Event::Draw(event) => {
-                return self.ui.draw_widget(&mut Cx2d::new(cx, event));
+                return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
             }
             Event::Construct => {
                 self.start_inputs(cx);

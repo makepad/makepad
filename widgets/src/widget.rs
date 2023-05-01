@@ -1,5 +1,6 @@
 use {
     crate::makepad_draw::*,
+    std::fmt::{Formatter,Debug, Error},
     std::collections::BTreeMap,
     std::any::TypeId,
     std::cell::RefCell,
@@ -68,12 +69,12 @@ pub trait Widget: LiveApply {
         true
     }
     
-    fn draw_widget_hook(&mut self, cx: &mut Cx2d) -> WidgetDraw {
+    fn draw_widget(&mut self, cx: &mut Cx2d) -> WidgetDraw {
         self.draw_walk_widget(cx, self.get_walk())
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d) {
-        while self.draw_widget_hook(cx).is_hook() {};
+    fn draw_widget_all(&mut self, cx: &mut Cx2d) {
+        while self.draw_widget(cx).is_hook() {};
     }
     /*
     fn create_child(
@@ -188,6 +189,12 @@ impl Clone for Box<dyn WidgetAction> {
 
 #[derive(Clone, Default)]
 pub struct WidgetRef(Rc<RefCell<Option<Box<dyn Widget >> >>);
+
+impl Debug for WidgetRef{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+        write!(f,"Unwrap error on draw_widget means you need to implement widget hooks")
+    }
+}
 
 #[derive(Clone)]
 pub enum WidgetSet{
@@ -494,15 +501,15 @@ impl WidgetRef {
         true
     }
     
-    pub fn draw_widget(&self, cx: &mut Cx2d)  {
+    pub fn draw_widget_all(&self, cx: &mut Cx2d)  {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.draw_widget(cx)
+            return inner.draw_widget_all(cx)
         }
     }
     
-    pub fn draw_widget_hook(&self, cx: &mut Cx2d) -> WidgetDraw {
+    pub fn draw_widget(&self, cx: &mut Cx2d) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.draw_widget_hook(cx)
+            return inner.draw_widget(cx)
         }
         WidgetDraw::done()
     }
