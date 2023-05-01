@@ -73,6 +73,37 @@ live_design!{
     COLOR_VIZ_2 = (COLOR_DOWN_6)
     COLOR_DIVIDER = (COLOR_DOWN_5)
     
+    ICO_ARP = dep("crate://self/resources/icons/Icon_Arp.svg")
+    ICO_BROWSE = dep("crate://self/resources/icons/Icon_Browse.svg")
+    ICO_DOWN = dep("crate://self/resources/icons/Icon_Down.svg")
+    ICO_FAV = dep("crate://self/resources/icons/Icon_Favorite.svg")
+    ICO_FILTER_BP = dep("crate://self/resources/icons/Icon_Filters_BP.svg")
+    ICO_FILTER_BR = dep("crate://self/resources/icons/Icon_Filters_BR.svg")
+    ICO_FILTER_HP = dep("crate://self/resources/icons/Icon_Filters_HP.svg")
+    ICO_LIVEPLAY = dep("crate://self/resources/icons/Icon_LivePlaying.svg")
+    ICO_NEXT = dep("crate://self/resources/icons/Icon_Next.svg")
+    ICO_OSC_HARMONIC = dep("crate://self/resources/icons/Icon_OSC_Harmonic.svg")
+    ICO_OSC_SAW = dep("crate://self/resources/icons/Icon_OSC_Saw.svg")
+    ICO_OSC_SINE = dep("crate://self/resources/icons/Icon_OSC_Sine.svg")
+    ICO_OSC_SUPERSAW = dep("crate://self/resources/icons/Icon_OSC_Supersaw.svg")
+    ICO_OSC_TRI = dep("crate://self/resources/icons/Icon_OSC_Tri.svg")
+    ICO_PANIC = dep("crate://self/resources/icons/Icon_Panic.svg")
+    ICO_PLAT_MOBILE = dep("crate://self/resources/icons/Icon_Platform_Mobile.svg")
+    ICO_PLAT_DESKTOP = dep("crate://self/resources/icons/Icon_Platform_Desktop.svg")
+    ICO_PLAY = dep("crate://self/resources/icons/Icon_Play.svg")
+    ICO_PRESET = dep("crate://self/resources/icons/Icon_Presets.svg")
+    ICO_PREV = dep("crate://self/resources/icons/Icon_Prev.svg")
+    ICO_REDO = dep("crate://self/resources/icons/Icon_Redo.svg")
+    ICO_SAVE = dep("crate://self/resources/icons/Icon_Save.svg")
+    ICO_SEARCH = dep("crate://self/resources/icons/Icon_Search.svg")
+    ICO_SEQ_SWEEP = dep("crate://self/resources/icons/Icon_Seq_Sweep.svg")
+    ICO_SEQ = dep("crate://self/resources/icons/Icon_Seq.svg")
+    ICO_SETTINGS = dep("crate://self/resources/icons/Icon_Settings.svg")
+    ICO_SHARE = dep("crate://self/resources/icons/Icon_Share.svg")
+    ICO_UNDO = dep("crate://self/resources/icons/Icon_Undo.svg")
+    ICO_UP = dep("crate://self/resources/icons/Icon_Up.svg")
+
+
     // HELPERS
     FillerH = <Frame> {
         walk: {width: Fill}
@@ -241,6 +272,32 @@ live_design!{
         }
     }
     
+    IconButton = <Button> {
+        draw_icon: {
+            svg_file: (ICO_SAVE),
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        (COLOR_UP_5),
+                        (COLOR_UP_6),
+                        self.hover
+                    ),
+                    (COLOR_UP_4),
+                    self.pressed
+                )
+            }
+         }
+        icon_walk: { width: 7.5, height: Fit }
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                return sdf.result
+            }
+        }
+        layout: { padding: 9.0 }
+        label: ""
+    }
+    
     TextButton = <Button> {
         layout: {align: {x: 0.5, y: 0.5}, padding: <SPACING_0> {}}
         walk: {margin: {left: 2.5, right: 2.5}}
@@ -338,9 +395,7 @@ live_design!{
     }
     
     FishSlider = <Slider> {
-        walk: {
-            height: 36,
-        }
+        walk: { height: 36 }
         label: "CutOff1"
         label_text: {text_style:<H2_TEXT_BOLD>{}, color: (COLOR_UP_5)}
         text_input: {
@@ -584,7 +639,6 @@ live_design!{
                 )
             }
         }
-        
         
         label_walk: {margin: {left: 0.0}}
         
@@ -1013,7 +1067,7 @@ live_design!{
         
         <Frame> {
             walk: {height: Fit, width: Fill}
-            layout: {flow: Right, spacing: (SSPACING_1), padding: {bottom: (SSPACING_3), top: (SSPACING_2)}}
+            layout: {flow: Right, spacing: (SSPACING_1), padding: {bottom: (SSPACING_0), top: (SSPACING_0)}, align: {x: 0.0, y: 0.5}}
             
             rootnote = <InstrumentDropdown> {
                 walk: {height: Fit, width: Fit}
@@ -1035,18 +1089,9 @@ live_design!{
                 walk: {width: Fill}
             }
             
-            clear_grid = <FishButton> {
-                label: "Clear"
-                walk: {width: Fit, height: Fit}
-            }
-            grid_up = <FishButton> {
-                label: "↑"
-                walk: {width: Fit, height: Fit}
-            }
-            grid_down = <FishButton> {
-                label: "↓"
-                walk: {width: Fit, height: Fit}
-            }
+            clear_grid = <IconButton> { draw_icon: { svg_file: (ICO_SEQ_SWEEP) } icon_walk: { width: 15.0, height: Fit } }
+            grid_up = <IconButton> { draw_icon: { svg_file: (ICO_UP) } icon_walk: { width: 10.0, height: Fit } }
+            grid_down = <IconButton> { draw_icon: { svg_file: (ICO_DOWN) } icon_walk: { width: 10.0, height: Fit } }
         }
     }
     
@@ -1824,17 +1869,21 @@ live_design!{
             <FillerV> {}
             
             <Frame> {
-                walk: {width: Fill, height: Fit}
+                walk: {width: Fill, height: 30}
                 layout: {spacing: (SSPACING_1)}
                 
-                panic = <FishButton> {label: "Panic"}
-                platformtoggle = <FishButton> {label: "Mobile"}
-                presets = <FishButton> {label: "Browse", walk: {width: Fit}}
-                <FishButton> {label: "←"}
-                <FishButton> {label: "→"}
+                panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 17.5 } }
+                platformtoggle = <IconButton> { draw_icon: { svg_file: (ICO_PLAT_MOBILE) } icon_walk: { width: Fit, height: 17.5 } }
+
+                presets = <IconButton> { draw_icon: { svg_file: (ICO_PRESET) } icon_walk: { width: Fit, height: 17.5 } }
+
+                prev = <IconButton> { draw_icon: { svg_file: (ICO_PREV) } icon_walk: { width: Fit, height: 11.0 }, walk: {margin: {top: 5.0, right: 0.0, bottom: 0.0, left: 0.0}} }
+                next = <IconButton> { draw_icon: { svg_file: (ICO_NEXT) } icon_walk: { width: Fit, height: 11.0 }, walk: {margin: {top: 5.0, right: 0.0, bottom: 0.0, left: 0.0}} }
+                
                 <FillerH> {}
-                undo = <FishButton> {label: "Undo"}
-                redo = <FishButton> {label: "Redo"}
+
+                undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 17.5 } }
+                redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 17.5 } }
             }
             
         }
@@ -1982,7 +2031,7 @@ live_design!{
                 label: "Preset Name"
             }
             
-            <Box> {
+            <Frame> {
                 walk: {width: Fit, height: Fit}
                 
                 presetfavorite = <PresetFavorite> {
@@ -1990,57 +2039,21 @@ live_design!{
                     label: " "
                 }
                 
-                share = <FishButton> {
-                    draw_label: {
-                        text_style: <H2_TEXT_BOLD>{},
-                        fn get_color(self) -> vec4 {
-                            return mix(
-                                mix((COLOR_UP_4), (COLOR_UP_6), self.hover),
-                                (COLOR_UP_4),
-                                self.pressed
-                            )
-                        }
+                share = <IconButton> {
+                draw_icon: {
+                    svg_file: (ICO_SHARE),
+                    fn get_color(self) -> vec4 {
+                        return mix(
+                            mix(
+                                (COLOR_UP_3),
+                                (COLOR_UP_6),
+                                self.hover
+                            ),
+                            (COLOR_UP_3),
+                            self.pressed
+                        )
                     }
-                    
-                    draw_bg: {
-                        instance hover: 0.0
-                        instance pressed: 0.0
-                        
-                        fn pixel(self) -> vec4 {
-                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                            sdf.box(
-                                1.,
-                                1.,
-                                self.rect_size.x - 2.0,
-                                self.rect_size.y - 2.0,
-                                2.0
-                            )
-                            
-                            sdf.stroke_keep(
-                                mix(
-                                    #0000,
-                                    mix((COLOR_DOWN_5), (COLOR_UP_3), pow(self.pos.y, 3)),
-                                    self.pressed
-                                ),
-                                1.
-                            );
-                            
-                            sdf.fill(
-                                mix(
-                                    #FFFFFF00,
-                                    mix((COLOR_DOWN_4), (COLOR_DOWN_4) * 0.1, pow(self.pos.y, 0.3)),
-                                    self.pressed
-                                )
-                            );
-                            
-                            return sdf.result
-                        }
-                    }
-                    label: "→"
-                    walk: {width: Fit, height: Fit}
-                    draw_label: {text_style: {font_size: (FONT_SIZE_H2)}}
-                }
-                
+                } icon_walk: { width: 12.5, height: Fit } }
             }
         }
         
@@ -2050,6 +2063,7 @@ live_design!{
     }
     
     PresetList = <SwipeList> {
+        walk: { height: Fill }
         Entry = <PresetListEntry>{
         }
     }
@@ -2091,10 +2105,21 @@ live_design!{
             walk: {width: Fill, height: Fit}
             layout: {flow: Down, spacing: (SSPACING_2), align: {x: 0.0, y: 0.5}}
             
-            presetname = <FishInput> {
-                text: "Preset Name"
+            <Frame> {
+                walk: {width: Fill, height: Fit}
+                layout: {flow: Right, spacing: (SSPACING_2), align: {x: 0.0, y: 0.0}}
+
+                presetname = <FishInput> {
+                    text: "Preset Name"
+                }
+                
+                save = <IconButton> {
+                    draw_icon: { svg_file: (ICO_SAVE) }
+                    icon_walk: { width: 16, height: Fit }
+                    layout: { padding: {top: 6.0, right: 3.0, bottom: 6.0, left: 0.0} }
+                }
             }
-            
+
             <Frame> {
                 walk: {width: Fill, height: Fit}
                 layout: {padding: {top: (SSPACING_0), right: (SSPACING_2), bottom: (SSPACING_0), left: (SSPACING_2)}}
@@ -2116,7 +2141,6 @@ live_design!{
                 cancel = <TextButton> {label: "No"}
             }
             
-            save = <FishButton> {label: "Save", walk: {width: Fill}}
         }
     }
     
