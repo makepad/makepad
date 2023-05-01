@@ -12,7 +12,7 @@ live_design! {
 
 #[derive(Live, LiveHook)]
 pub struct CodeEditor {
-    draw_text: DrawText,
+    #[live] draw_text: DrawText,
 }
 
 impl CodeEditor {

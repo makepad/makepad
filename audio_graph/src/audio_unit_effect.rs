@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_platform::audio::*,
         makepad_platform::midi::*,
-        audio_component,
+        register_audio_component,
         audio_traits::*,
         makepad_platform::os::apple::audio_unit::*,
         makepad_platform::thread::*,
@@ -25,16 +25,22 @@ enum FromUI {
 }
 
 #[derive(Live)]
-#[live_design_with{
-    audio_component!(cx, AudioUnitEffect)
-}]
 struct AudioUnitEffect {
-    plugin: String,
-    preset_data: String,
-    input: AudioComponentRef,
+    #[live] plugin: String,
+    #[live] preset_data: String,
+    #[live] input: AudioComponentRef,
     #[rust] audio_unit: Option<AudioUnit>,
     #[rust] from_ui: FromUISender<FromUI>,
     #[rust] to_ui: ToUIReceiver<ToUI>,
+}
+
+impl LiveHook for AudioUnitEffect {
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
+        self.load_audio_unit();
+    }
+    fn before_live_design(cx: &mut Cx){
+        register_audio_component!(cx, AudioUnitEffect)
+    }
 }
 
 struct Node {
@@ -69,11 +75,6 @@ impl AudioGraphNode for Node {
     }
 }
 
-impl LiveHook for AudioUnitEffect {
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        self.load_audio_unit();
-    }
-}
 
 impl AudioUnitEffect {
     fn load_audio_unit(&mut self) {

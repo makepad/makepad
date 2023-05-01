@@ -20,14 +20,17 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_with{
-    widget_factory!(cx, HookWidget)
-}]
+#[derive(Live)]
 pub struct HookWidget {
-    walk: Walk,
-    layout: Layout,
-     #[rust] draw_state: DrawStateWrap<DrawState>,
+    #[live] walk: Walk,
+    #[live] layout: Layout,
+    #[rust] draw_state: DrawStateWrap<DrawState>,
+}
+
+impl LiveHook for HookWidget{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,HookWidget)
+    }
 }
 
 #[derive(Clone)]

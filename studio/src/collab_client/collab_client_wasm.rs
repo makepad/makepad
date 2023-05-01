@@ -17,8 +17,8 @@ live_design!{
 
 #[derive(Live)]
 pub struct CollabClient {
-    bind: Option<String>,
-    path: String,
+    #[live] bind: Option<String>,
+    #[live] path: String,
     #[rust] web_socket: Option<WebSocket>,
     #[rust] requests: Rc<RefCell<Vec<CollabRequest >> >,
     #[rust(LiveId::unique())] signal: Signal

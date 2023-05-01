@@ -68,30 +68,30 @@ live_design!{
 
 #[derive(Live)]
 pub struct RustEditor {
-    editor_impl: CodeEditorImpl,
+    #[live] editor_impl: CodeEditorImpl,
     
-    widget_layout: Layout,
-    fold_button: Option<LivePtr>,
+    #[live] widget_layout: Layout,
+    #[live] fold_button: Option<LivePtr>,
     
-    zoom_indent_depth: usize,
+    #[live] zoom_indent_depth: usize,
     
     
-    text_color_color: Vec4,
-    text_color_type_name: Vec4,
-    text_color_comment: Vec4,
-    text_color_lifetime: Vec4,
-    text_color_identifier: Vec4,
-    text_color_macro_identifier: Vec4,
-    text_color_function_identifier: Vec4,
-    text_color_branch_keyword: Vec4,
-    text_color_loop_keyword: Vec4,
-    text_color_other_keyword: Vec4,
-    text_color_bool: Vec4,
-    text_color_number: Vec4,
-    text_color_punctuator: Vec4,
-    text_color_string: Vec4,
-    text_color_whitespace: Vec4,
-    text_color_unknown: Vec4,
+    #[live] text_color_color: Vec4,
+    #[live] text_color_type_name: Vec4,
+    #[live] text_color_comment: Vec4,
+    #[live] text_color_lifetime: Vec4,
+    #[live] text_color_identifier: Vec4,
+    #[live] text_color_macro_identifier: Vec4,
+    #[live] text_color_function_identifier: Vec4,
+    #[live] text_color_branch_keyword: Vec4,
+    #[live] text_color_loop_keyword: Vec4,
+    #[live] text_color_other_keyword: Vec4,
+    #[live] text_color_bool: Vec4,
+    #[live] text_color_number: Vec4,
+    #[live] text_color_punctuator: Vec4,
+    #[live] text_color_string: Vec4,
+    #[live] text_color_whitespace: Vec4,
+    #[live] text_color_unknown: Vec4,
     
     #[rust] lines_layout: LinesLayout,
 }

@@ -17,13 +17,16 @@ live_design!{
 }
 
 #[derive(Live)]
-#[live_design_with {widget_factory!(cx, MultiWindow)}]
 pub struct MultiWindow {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] windows: ComponentMap<LiveId, DesktopWindow>,
 }
 
 impl LiveHook for MultiWindow {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,MultiWindow)
+    }
+    
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
         match from {

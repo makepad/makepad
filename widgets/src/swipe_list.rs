@@ -35,12 +35,12 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct SwipeListEntry {
-    state: State,
-    walk: Walk,
-    left_drawer: WidgetRef,
-    center: WidgetRef,
-    right_drawer: WidgetRef,
-    layout: Layout,
+    #[live] state: State,
+    #[live] walk: Walk,
+    #[live] left_drawer: WidgetRef,
+    #[live] center: WidgetRef,
+    #[live] right_drawer: WidgetRef,
+    #[live] layout: Layout,
     #[rust] draw_state: DrawStateWrap<EntryDrawState>,
 }
 #[derive(Clone)]
@@ -102,18 +102,20 @@ impl Widget for SwipeListEntry {
 }
 
 #[derive(Live)]
-#[live_design_with {widget_factory!(cx, SwipeList)}]
 pub struct SwipeList {
     #[rust] area: Area,
-    walk: Walk,
-    layout: Layout,
-    scroll_bars: ScrollBars,
+    #[live] walk: Walk,
+    #[live] layout: Layout,
+    #[live] scroll_bars: ScrollBars,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] entries: ComponentMap<(SwipeListEntryId, LiveId), SwipeListEntry>,
 }
 
 impl LiveHook for SwipeList {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, SwipeList)
+    }
     // hook the apply flow to collect our templates and apply to instanced childnodes
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
@@ -206,7 +208,7 @@ impl SwipeList {
         self.entries.retain_visible();
     }
     
-    pub fn get_drawable(&mut self, cx: &mut Cx2d, entry_id: SwipeListEntryId, template: LiveId) -> Option<&mut SwipeListEntry> {
+    pub fn get_entry(&mut self, cx: &mut Cx2d, entry_id: SwipeListEntryId, template: LiveId) -> Option<&mut SwipeListEntry> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.entries.get_or_insert(cx, (entry_id, template), | cx | {
                 SwipeListEntry::new_from_ptr(cx, Some(*ptr))
@@ -242,9 +244,7 @@ enum ListDrawState {
 
 impl Widget for SwipeList {
     fn redraw(&mut self, cx: &mut Cx) {
-        for entry in self.entries.values_mut() {
-            entry.redraw(cx);
-        }
+        self.scroll_bars.redraw(cx);
     }
     
     fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {

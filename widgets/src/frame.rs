@@ -339,35 +339,32 @@ live_design!{
 }
 
 #[derive(Live)]
-#[live_design_with {widget_factory!(cx, Frame)}]
 pub struct Frame { // draw info per UI element
-    draw_bg: DrawColor,
+    #[live] draw_bg: DrawColor,
     
     #[live(false)] show_bg: bool,
     
-    pub layout: Layout,
+    #[live] layout: Layout,
     
-    pub walk: Walk,
+    #[live] walk: Walk,
     
-    image: LiveDependency,
-    image_texture: Option<Texture>,
-    image_scale: f64,
+    #[live] image: LiveDependency,
+    #[live] image_texture: Option<Texture>,
+    #[live] image_scale: f64,
     
-    use_cache: bool,
-    has_view: bool,
+    #[live] use_cache: bool,
+    #[live] has_view: bool,
     #[live(true)] visible: bool,
-    /*user_draw: bool,*/
     
-    #[live(false)] no_signal_events: bool,
+    #[live(false)] block_signal_event: bool,
+    #[live] cursor: Option<MouseCursor>,
+    #[live] scroll_bars: Option<LivePtr>,
+    #[live(false)] design_mode: bool,
     
     #[rust] find_cache: HashMap<u64, WidgetSet>,
     
-    cursor: Option<MouseCursor>,
-    scroll_bars: Option<LivePtr>,
-    
     #[rust] scroll_bars_obj: Option<ScrollBars>,
     
-    #[live(false)] design_mode: bool,
     #[rust] view_size: Option<DVec2>,
     #[rust] area: Area,
     #[rust] pub view: Option<View>,
@@ -386,6 +383,9 @@ struct FrameTextureCache {
 }
 
 impl LiveHook for Frame {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, Frame)
+    }
     
     fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if self.has_view && self.view.is_none() {
@@ -559,7 +559,7 @@ impl Widget for Frame {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
-        if self.no_signal_events {
+        if self.block_signal_event {
             if let Event::Signal = event {
                 return
             }

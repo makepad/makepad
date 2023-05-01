@@ -49,15 +49,20 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook)]
-#[live_design_with {widget_factory!(cx, SlidesView)}]
+#[derive(Live)]
 pub struct SlidesView {
-    slide_width: f64,
-    goal_pos: f64,
-    current_pos: f64,
-    anim_speed: f64,
-    frame: FrameRef,
+    #[live] slide_width: f64,
+    #[live] goal_pos: f64,
+    #[live] current_pos: f64,
+    #[live] anim_speed: f64,
+    #[live] frame: FrameRef,
     #[rust] next_frame: NextFrame
+}
+
+impl LiveHook for SlidesView {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, SlidesView)
+    }
 }
 
 #[derive(Clone, WidgetAction)]

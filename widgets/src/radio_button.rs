@@ -154,11 +154,11 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawRadioButton {
-    draw_super: DrawQuad,
-    radio_type: RadioType,
-    hover: f32,
-    focus: f32,
-    selected: f32
+    #[live] draw_super: DrawQuad,
+    #[live] radio_type: RadioType,
+    #[live] hover: f32,
+    #[live] focus: f32,
+    #[live] selected: f32
 }
 
 
@@ -169,26 +169,31 @@ pub enum RadioType {
     Tab = shader_enum(2),
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_with{widget_factory!(cx, RadioButton)}]
+#[derive(Live)]
 pub struct RadioButton {
-    draw_radio: DrawRadioButton,
-    draw_icon: DrawIcon,
-    draw_label: DrawText,
+    #[live] draw_radio: DrawRadioButton,
+    #[live] draw_icon: DrawIcon,
+    #[live] draw_label: DrawText,
     
-    icon_walk: Walk,
-    walk: Walk,
+    #[live] icon_walk: Walk,
+    #[live] walk: Walk,
     
-    value: LiveValue,
+    #[live] value: LiveValue,
     
-    layout: Layout,
-    state: State,
+    #[live] layout: Layout,
+    #[live] state: State,
     
-    label_walk: Walk,
-    label_align: Align,
-    label: String,
+    #[live] label_walk: Walk,
+    #[live] label_align: Align,
+    #[live] label: String,
     
-    bind: String,
+    #[live] bind: String,
+}
+
+impl LiveHook for RadioButton{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,RadioButton)
+    }
 }
 
 #[derive(Clone, WidgetAction)]

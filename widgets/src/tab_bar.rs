@@ -39,12 +39,12 @@ live_design!{
 #[derive(Live)]
 pub struct TabBar {
     
-    scroll_bars: ScrollBars,
-    draw_drag: DrawColor,
-    
-    draw_fill: DrawColor,
-    walk: Walk,
-    tab: Option<LivePtr>,
+    #[live] scroll_bars: ScrollBars,
+    #[live] draw_drag: DrawColor,
+
+    #[live] draw_fill: DrawColor,
+    #[live] walk: Walk,
+    #[live] tab: Option<LivePtr>,
     
     #[rust] view_area: Area,
 

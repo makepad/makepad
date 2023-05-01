@@ -109,7 +109,7 @@ impl Default for LaddFilterCoefficients {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]
 pub struct OscSettings {
-    osc_type: U32A<OscType>,
+    #[live] osc_type: U32A<OscType>,
     #[live(0)] transpose: i64a,
     #[live(0.0)] detune: f32a,
     #[live(0.0)] harmonic: f32a,
@@ -137,7 +137,7 @@ pub struct EnvelopeSettings {
 pub struct LFOSettings {
     #[live(0.2)] rate: f32a,
     #[live(0)] keysync: u32a,
-    waveform: U32A<LFOWave>
+    #[live] waveform: U32A<LFOWave>
 }
 
 #[derive(Copy, Clone)]
@@ -147,7 +147,7 @@ pub struct LFOState{
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct FilterSettings {
-    filter_type: U32A<FilterType>,
+    #[live] filter_type: U32A<FilterType>,
     #[live(0.5)] cutoff: f32a,
     #[live(0.05)] resonance: f32a,
     #[live(0.1)] envelope_amount: f32a,
@@ -187,10 +187,10 @@ pub struct ArpSettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct SequencerSettings {
-    pub steps: [u32a; 16],
+    #[live] pub steps: [u32a; 16],
     
-    scale: U32A<MusicalScale>,
-    rootnote: U32A<RootNote>,
+    #[live] scale: U32A<MusicalScale>,
+    #[live] rootnote: U32A<RootNote>,
     
     #[live(125.0)] bpm: f32a,
     #[live(false)] playing: boola,
@@ -215,22 +215,22 @@ impl SequencerSettings {
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 #[live_ignore]
 pub struct IronFishSettings {
-    supersaw1: SupersawSettings,
-    supersaw2: SupersawSettings,
-    osc1: OscSettings,
-    osc2: OscSettings,
-    subosc: OscSettings,
-    lfo: LFOSettings,
-    filter1: FilterSettings,
-    volume_envelope: EnvelopeSettings,
-    mod_envelope: EnvelopeSettings,
-    touch: TouchSettings,
-    delay: DelaySettings,
-    bitcrush: BitCrushSettings,
-    pub sequencer: SequencerSettings,
-    pub arp: ArpSettings,
-    chorus: ChorusSettings,
-    reverb: ReverbSettings,
+    #[live] supersaw1: SupersawSettings,
+    #[live] supersaw2: SupersawSettings,
+    #[live] osc1: OscSettings,
+    #[live] osc2: OscSettings,
+    #[live] subosc: OscSettings,
+    #[live] lfo: LFOSettings,
+    #[live] filter1: FilterSettings,
+    #[live] volume_envelope: EnvelopeSettings,
+    #[live] mod_envelope: EnvelopeSettings,
+    #[live] touch: TouchSettings,
+    #[live] delay: DelaySettings,
+    #[live] bitcrush: BitCrushSettings,
+    #[live] pub sequencer: SequencerSettings,
+    #[live] pub arp: ArpSettings,
+    #[live] chorus: ChorusSettings,
+    #[live] reverb: ReverbSettings,
     #[live(48000.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
     #[live(0.5)] sub_osc: f32a,
@@ -1896,14 +1896,17 @@ live_design!{
 }
 
 
-#[derive(Live, LiveHook)]
-#[live_design_with{
-    audio_component!(cx, IronFish)
-}]
+#[derive(Live)]
 pub struct IronFish {
-    pub settings: Arc<IronFishSettings>,
+    #[live] pub settings: Arc<IronFishSettings>,
     //#[rust] to_ui: ToUIReceiver<ToUI>,
     //#[rust] from_ui: FromUISender<FromUI>,
+}
+
+impl LiveHook for IronFish{
+    fn before_live_design(cx:&mut Cx){
+        register_audio_component!(cx, IronFish)
+    }
 }
 
 impl AudioGraphNode for IronFishState {

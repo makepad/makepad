@@ -114,21 +114,21 @@ pub struct Tab {
     #[rust] is_selected: bool,
     #[rust] is_dragged: bool,
     
-    draw_bg: DrawQuad,
-    draw_name: DrawText,
-    draw_drag: DrawColor,
+    #[live] draw_bg: DrawQuad,
+    #[live] draw_name: DrawText,
+    #[live] draw_drag: DrawColor,
     
-    state: State,
+    #[live] state: State,
     
-    close_button: TabCloseButton,
+    #[live] close_button: TabCloseButton,
     
     // height: f32,
     
-    hover: f32,
-    selected: f32,
+    #[live] hover: f32,
+    #[live] selected: f32,
 
-    walk: Walk, 
-    layout: Layout,
+    #[live] walk: Walk, 
+    #[live] layout: Layout,
 }
 
 pub enum TabAction {
