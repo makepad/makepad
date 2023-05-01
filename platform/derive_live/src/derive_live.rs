@@ -221,8 +221,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("                    break;");
         tb.add("                }");
    
-        if state_field.is_some() { // apply the default states
-            tb.add("            if nodes[index].id == live_id!(state){state_index = Some(index);}");
+        if let Some(state_field) = state_field { // apply the default states
+            tb.add("            if nodes[index].id == live_id!(.").ident(&state_field.name).add(".){state_index = Some(index);}");
         }
         tb.add("                index = self.apply_value(cx, apply_from, index, nodes);");
         tb.add("            }");

@@ -163,6 +163,7 @@ pub struct DrawRadioButton {
 
 
 #[derive(Live, LiveHook)]
+#[live_ignore]
 #[repr(u32)]
 pub enum RadioType {
     #[pick] Round = shader_enum(1),
