@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 286 286" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <rect id="Icon_Undo" x="0.305" y="0.575" width="284.734" height="284.734" style="fill:none;"/>
+    <g id="Icon_Undo1" serif:id="Icon_Undo">
+        <path d="M100.054,135.844L129.009,161.56L109.641,183.367L52.828,132.91C49.746,130.172 47.966,126.258 47.929,122.136C47.892,118.014 49.602,114.069 52.635,111.277L109.273,59.135L129.028,80.593L118.299,90.47C118.299,90.47 109.395,98.667 100.694,106.677L150.981,106.677C186.7,106.677 215.699,135.676 215.699,171.395C215.699,207.114 186.7,236.113 150.981,236.113L136.397,236.113L136.397,206.947L150.981,206.947C170.602,206.947 186.532,191.017 186.532,171.395C186.532,151.774 170.602,135.844 150.981,135.844L100.054,135.844Z"/>
+    </g>
+</svg>
