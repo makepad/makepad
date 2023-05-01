@@ -209,6 +209,7 @@ pub use {
             LiveDependency,
         },
         live_traits::{
+            LiveHookDeref,
             LiveBody,
             LiveNew,
             LiveApply,

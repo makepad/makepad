@@ -69,7 +69,7 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 #[repr(C)]
 pub struct DrawIcon {
     #[live(1.0)] pub brightness: f32,
@@ -92,6 +92,15 @@ pub struct DrawIcon {
     #[live] pub color: Vec4,
     #[calc] pub icon_t1: Vec2,
     #[calc] pub icon_t2: Vec2,
+}
+
+impl LiveHook for DrawIcon{
+    fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]){
+        self.draw_vars.before_apply_init_shader(cx, apply_from, index, nodes, &self.geometry);
+    }
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        self.draw_vars.after_apply_update_self(cx, apply_from, index, nodes, &self.geometry);
+    }
 }
 
 impl DrawIcon {

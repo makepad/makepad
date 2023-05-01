@@ -35,6 +35,10 @@ pub trait LiveHook {
     fn after_new_before_apply(&mut self, _cx: &mut Cx) {}
 }
 
+pub trait LiveHookDeref {
+    fn deref_before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]){}
+    fn deref_after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]){}
+}
 
 pub trait LiveNew: LiveApply {
     fn new(cx: &mut Cx) -> Self;

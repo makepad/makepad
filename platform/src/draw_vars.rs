@@ -484,7 +484,7 @@ impl DrawVars {
         }
     }
     
-    pub fn before_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn before_apply_init_shader(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         
         let draw_shader_ptr = if let Some(file_id) = from.file_id() {
             let generation = cx.live_registry.borrow().file_id_to_file(file_id).generation;
@@ -583,7 +583,7 @@ impl DrawVars {
         nodes.skip_node(index)
     }
     
-    pub fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn after_apply_update_self(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         // alright. so.if we are ApplyFrom::
         if let ApplyFrom::LiveEdit = from {
             // alright, we might have to update something here.
