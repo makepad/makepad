@@ -83,7 +83,7 @@ pub struct DrawIcon {
     
     #[rust] pub many_instances: Option<ManyInstances>,
     #[live] pub geometry: GeometryQuad2D,
-    #[calc] pub draw_vars: DrawVars,
+    #[deref] pub draw_vars: DrawVars,
     #[calc] pub rect_pos: Vec2,
     #[calc] pub rect_size: Vec2,
     #[calc] pub draw_clip: Vec4,

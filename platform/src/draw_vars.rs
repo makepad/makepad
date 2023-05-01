@@ -99,6 +99,8 @@ pub struct DrawVars {
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 
+impl LiveHookDeref for DrawVars{}
+
 impl LiveNew for DrawVars {
     fn new(_cx: &mut Cx) -> Self {
         Self::default()
@@ -229,18 +231,15 @@ impl DrawVars {
                                 
                                 let mut slots = 0;
                                 for field in &lf.fields {
-                                    if field.id == live_id!(draw_super) {
-                                        recur_expand(live_registry, shader_registry, level + 1, after_draw_vars, field.live_type_info.live_type, draw_shader_def, span);
-                                        continue
-                                    }
-                                    if field.id == live_id!(draw_vars) {
-                                        // assert the thing to be marked correctly
-                                        if let LiveFieldKind::Calc = field.live_field_kind {}
-                                        else {panic!()}
-                                        if field.live_type_info.live_type != LiveType::of::<DrawVars>() {panic!();}
-                                        
-                                        *after_draw_vars = true;
-                                        continue;
+                                    if let LiveFieldKind::Deref = field.live_field_kind {
+                                        if field.live_type_info.live_type != LiveType::of::<DrawVars>() {
+                                            recur_expand(live_registry, shader_registry, level + 1, after_draw_vars, field.live_type_info.live_type, draw_shader_def, span);
+                                            continue
+                                        }
+                                        else{
+                                            *after_draw_vars = true;
+                                            continue
+                                        }
                                     }
                                     if *after_draw_vars {
                                         // lets count sizes

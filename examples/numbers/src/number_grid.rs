@@ -114,29 +114,29 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawBg {
-    draw_super: DrawQuad,
-    last_number: f32,
-    fast_path: f32,
-    number: f32
+    #[deref] draw_super: DrawQuad,
+    #[live] last_number: f32,
+    #[live] fast_path: f32,
+    #[live] number: f32
 }
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawLabel {
-    draw_super: DrawText,
-    last_number: f32,
-    number: f32
+    #[deref] draw_super: DrawText,
+    #[live] last_number: f32,
+    #[live] number: f32
 }
 
 #[derive(Live, LiveHook)]
 pub struct NumberBox {
-    draw_bg: DrawBg,
-    label: DrawLabel,
+    #[live] draw_bg: DrawBg,
+    #[live] label: DrawLabel,
 
-    layout: Layout,
-    state: State,
+    #[live] layout: Layout,
+    #[live] state: State,
     
-    label_align: Align,
+    #[live] label_align: Align,
 }
 
 impl Widget for NumberGrid {
