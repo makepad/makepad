@@ -98,7 +98,7 @@ pub struct ScrollBar {
     #[live] use_vertical_finger_scroll: bool,
     #[live] smoothing: Option<f64>,
     
-    #[live] state: State,
+    #[state] state: State,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,

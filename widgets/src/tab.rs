@@ -118,7 +118,7 @@ pub struct Tab {
     #[live] draw_name: DrawText,
     #[live] draw_drag: DrawColor,
     
-    #[live] state: State,
+    #[state] state: State,
     
     #[live] close_button: TabCloseButton,
     

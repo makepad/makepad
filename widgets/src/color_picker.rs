@@ -125,7 +125,7 @@ pub struct DrawColorWheel {
 pub struct ColorPicker {
     #[live] draw_wheel: DrawColorWheel,
     
-    #[live] state: State,
+    #[state] state: State,
     
     #[rust] pub size: f64,
     #[rust] hue: f32,
