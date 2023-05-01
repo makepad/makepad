@@ -151,7 +151,7 @@ pub enum ButtonAction {
 
 #[derive(Live)]
 pub struct Button {
-    #[live] state: State,
+    #[state] state: State,
     
     #[live] draw_bg: DrawQuad,
     #[live] draw_label: DrawText,

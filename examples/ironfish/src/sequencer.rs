@@ -86,7 +86,7 @@ struct DrawButton {
 #[derive(Live, LiveHook)]
 pub struct SeqButton {
     #[live] draw_button: DrawButton,
-    #[live] state: State,
+    #[state] state: State,
     #[live] x: usize,
     #[live] y: usize
 }

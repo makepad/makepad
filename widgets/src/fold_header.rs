@@ -49,7 +49,7 @@ pub struct FoldHeader {
     #[rust] area: Area,
     #[live] header: WidgetRef,
     #[live] body: WidgetRef,
-    #[live] state: State,
+    #[state] state: State,
     #[live] opened: f64,
     #[live] layout: Layout,
     #[live] walk: Walk,
