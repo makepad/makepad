@@ -266,7 +266,7 @@ pub struct LiveTokenId(u32);
 
 impl fmt::Debug for LiveTokenId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TokenId(token_index:{}, file_id:{})", self.token_index(), self.file_id().unwrap().to_index())
+        write!(f, "TokenId(token_index:{}, file_id:{})", self.token_index(), self.file_id().unwrap_or(LiveFileId::new(0)).to_index())
     }
 }
 

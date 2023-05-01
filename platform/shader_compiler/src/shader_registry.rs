@@ -508,7 +508,7 @@ impl ShaderRegistry {
         
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
 
-        match class_node.value {
+        match &class_node.value {
             LiveValue::Class {live_type, ..} => {
                 
                 ext_self(
@@ -516,7 +516,7 @@ impl ShaderRegistry {
                     self,
                     class_node.origin.token_id().unwrap().into(),
                     DrawShaderQuery::DrawShader,
-                    live_type,
+                    *live_type,
                     &mut draw_shader_def
                 );
                 
@@ -753,10 +753,13 @@ impl ShaderRegistry {
                         let field_a = &draw_shader_def.fields[i];
                         let field_b = &draw_shader_def.fields[j];
                         if field_a.ident == field_b.ident && !field_a.ident.0.is_empty() {
+                            //let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
+                            //doc.nodes.to_string(draw_shader_ptr.index as usize,100)
+                            
                             return Err(LiveError {
                                 origin: live_error_origin!(),
                                 span: field_a.span.into(),
-                                message: format!("Field double declaration  {}", field_b.ident)
+                                message: format!("Field double declaration  {}",field_a.ident)
                             })
                         }
                     }
@@ -796,10 +799,10 @@ impl ShaderRegistry {
                 // ok we have all structs
                 return Ok(())
             }
-            _ => return Err(LiveError {
+            x => return Err(LiveError {
                 origin: live_error_origin!(),
                 span: class_node.origin.token_id().unwrap().into(),
-                message: format!("analyse_draw_shader could not find shader class")
+                message: format!("analyse_draw_shader could not find shader class {:?}", x)
             })
         }
     }
