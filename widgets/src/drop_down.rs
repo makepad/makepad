@@ -137,7 +137,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct DropDown {
-    #[state] state: State,
+    #[state] state: LiveState,
     
     #[live] draw_bg: DrawQuad,
     #[live] draw_label: DrawLabelText,

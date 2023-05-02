@@ -112,7 +112,7 @@ pub struct Splitter {
     #[rust] position: f64,
     #[rust] drag_start_align: Option<SplitterAlign>,
     
-    #[state] state: State,
+    #[state] state: LiveState,
     
     #[live] min_vertical: f64,
     #[live] max_vertical: f64,
