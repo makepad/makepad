@@ -56,13 +56,13 @@ impl LiveHook for Designer {
         let file_id = live_registry.file_name_to_file_id("examples/ironfish/src/app_mobile.rs").unwrap();
         // now we fetch the unexpanded nodes
         // and build a list
-        let file = live_registry.file_id_to_file(file_id);
-        let _nodes = &file.original.nodes;
+        /*let file = live_registry.file_id_to_file(file_id);
+        let nodes = &file.original.nodes;
         // lets run over the file
         let mut index = 1;
         while index < nodes.len(){
-            indes = nodes.skip_nodes(index);
-        }
+            index = nodes.skip_node(index);
+        }*/
     }
 }
 
