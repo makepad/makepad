@@ -62,7 +62,7 @@ live_design!{
     
     FONT_SIZE_H1 = 15.0;
     FONT_SIZE_H2 = 12.0;
-    FONT_SIZE_H3 = 10.0;
+    FONT_SIZE_H3 = 9.0;
     
     H2_TEXT_BOLD = {
         font_size: (FONT_SIZE_H2),
@@ -151,20 +151,6 @@ live_design!{
     FishTab = <RadioButton> {
         walk: {height: Fill, width: Fit}
         layout: {align: {x: 0.0, y: 0.5}}
-        draw_icon: {
-            svg_file: (ICO_REDO)
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        (COLOR_UP_6),
-                        (COLOR_UP_7),
-                        self.hover
-                    ),
-                    (COLOR_UP_3),
-                    self.pressed
-                )
-            }
-        }
         draw_radio: {
             radio_type: Tab,
             color_inactive: (COLOR_UP_OFF),
@@ -173,7 +159,7 @@ live_design!{
             color_selected: (COLOR_UP_FULL),
             color_unselected: (COLOR_UP_6),
             color_unselected_hover: (COLOR_UP_6),
-            text_style: <H2_TEXT_BOLD> {}
+            text_style: <H3_TEXT_REGULAR> {}
         }
     }
     
@@ -1009,21 +995,21 @@ live_design!{
     
     PresetListEntry = <SwipeListEntry> {
         layout: {flow: Down, padding: {top: 0, right: 5, bottom: 2.5, left: 5}, align: {x: 0.5, y: 0.5}}
-        walk: { width: Fill, height: Fit, margin: 0.0 }
+        walk: { width: Fill, height: Fit, margin: 0 }
         
         center: <Frame> {
-            layout: {flow: Down}
-            walk: {width: Fill, height: Fit}
+            layout: {flow: Down, align: {x: 0.5, y: 0.0}, padding: {top: 0, right: 0, bottom: 0, left: 0}}
+            walk: {width: Fill, height: Fit, margin: 0.0}
             <Frame> {
-                layout: {flow: Right, align: {x: 0.5, y: 0.5}}
-                walk: { width: Fill, height: Fit}
+                layout: {flow: Right, align: {x: 0.5, y: 0.0}, padding: 0.0}
+                walk: { width: Fill, height: Fit, margin: {top: 2.5, right: 0, bottom: 7.5, left: 0}}
                 
                 label = <Button> {
                     walk: { width: Fill, height: Fill, margin: {top: 5} }
                     layout: {align: {x: 0.0, y: 0.5}, padding: { left: 5 }}
                     draw_label: {
                         fn get_color(self) -> vec4 {
-                            return mix( (COLOR_UP_6), (COLOR_UP_5), self.pressed )
+                            return mix( (COLOR_UP_5), (COLOR_UP_3), self.pressed )
                         }
                         text_style: <H2_TEXT_REGULAR>{},
                     }
@@ -1083,7 +1069,7 @@ live_design!{
                     
                 }
             }
-            <DividerY> {}
+            <DividerY> {walk: { margin: 0.0}, layout: {padding: 0.0}}
         }
     }
     
@@ -1220,13 +1206,13 @@ live_design!{
                         label: "Sequence"
                         draw_icon: {
                             svg_file: (ICO_SEQ),
-                            // fn get_color(self) -> vec4 {
-                            //     return mix(
-                            //         (COLOR_UP_4),
-                            //         (COLOR_UP_6),
-                            //         self.active
-                            //     )
-                            // }
+                            fn get_color(self) -> vec4 {
+                                return mix(
+                                    #xf00f,
+                                    #x00ff,
+                                    self.selected
+                                )
+                            }
                         }
                         walk: {width: Fill}
                         icon_walk: {width: 30, height: Fit}
