@@ -127,7 +127,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct DesktopButton {
-    #[state] state: State,
+    #[state] state: LiveState,
     #[live] walk: Walk,
     #[live] draw_bg: DrawDesktopButton,
 }

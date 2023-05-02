@@ -63,7 +63,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         if let Some(state_field) = state_field {
             
             tb.add("impl").stream(generic.clone());
-            tb.add("LiveState for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("LiveStateImpl for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             
             tb.add("    fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId;2]) {");
             tb.add("         self.").ident(&state_field.name).add(".animate_to_live(cx, state);");

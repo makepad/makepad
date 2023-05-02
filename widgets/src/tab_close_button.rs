@@ -59,7 +59,7 @@ live_design!{
 #[derive(Live, LiveHook)]
 pub struct TabCloseButton {
     #[live] draw_button: DrawQuad,
-    #[state] state: State,
+    #[state] state: LiveState,
 
     #[live] walk: Walk
 }

@@ -25,6 +25,7 @@ live_design!{
     }
 }
 
+#[allow(dead_code)]
 enum OutlineNode{
     Global{
         name: LiveId,
@@ -39,7 +40,7 @@ enum OutlineNode{
 
 #[derive(Live)]
 pub struct Designer {
-    #[rust] outline: Vec<OutlineNode>,
+    #[rust] _outline: Vec<OutlineNode>,
     #[deref] ui: Frame,
 }
 
@@ -54,7 +55,9 @@ impl LiveHook for Designer {
         let live_registry = live_registry_rc.borrow();
         let file_id = live_registry.file_name_to_file_id("examples/ironfish/src/app_mobile.rs").unwrap();
         // now we fetch the unexpanded nodes
-        // and build 
+        // and build a list
+        let _file = live_registry.file_id_to_file(file_id);
+        
     }
 }
 
