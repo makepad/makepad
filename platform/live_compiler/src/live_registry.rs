@@ -25,7 +25,7 @@ pub struct LiveFile {
     
     pub module_id: LiveModuleId,
     pub(crate) start_pos: TextPos,
-    pub(crate) file_name: String,
+    pub file_name: String,
     pub(crate) cargo_manifest_path: String,
     pub(crate) source: String,
     pub(crate) deps: BTreeSet<LiveModuleId>,
@@ -100,6 +100,15 @@ impl LiveRegistry {
             panic!("ptr_to_node generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
         }
         &doc.expanded.resolve_ptr(live_ptr.index as usize)
+    }
+    
+    pub fn file_name_to_file_id(&self, file_name:&str) -> Option<LiveFileId> {
+        for (index, file) in self.live_files.iter().enumerate(){
+            if file.file_name == file_name{
+                return Some(LiveFileId::new(index))
+            }
+        }
+        None
     }
     
     pub fn file_id_to_file_name(&self, file_id: LiveFileId) -> &str {

@@ -367,11 +367,10 @@ pub struct Frame { // draw info per UI element
     
     #[rust] view_size: Option<DVec2>,
     #[rust] area: Area,
-    #[rust] pub view: Option<View>,
+    #[rust] view: Option<View>,
     #[rust] texture_cache: Option<FrameTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    /*#[rust] templates: ComponentMap<LiveId, (LivePtr, usize)>,*/
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
     #[rust] draw_order: Vec<LiveId>
 }
