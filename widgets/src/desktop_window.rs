@@ -18,41 +18,40 @@ live_design!{
     
     DesktopWindow = {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
-        frame: <Frame>{
+        
+        layout: {
+            flow: Down
+        },
+        caption_bar = <Solid> {
             layout: {
-                flow: Down
+                flow: Right
             },
-            caption_bar = <Solid> {
-                layout: {
-                    flow: Right
-                },
-                draw_bg: {color: (COLOR_BG_APP)}
-                walk: {height: 29},
-                caption_label = <Frame> {
-                    walk: {width: Fill, height: Fill}
-                    layout: {align: {x: 0.5, y: 0.5}},
-                    <Label> {label: "Makepad", walk: {margin: {left: 100}}}
-                }
-                windows_buttons = <Frame> {
-                    visible: false,
-                    walk: {width: Fit, height: Fit}
-                    min = <DesktopButton> {draw_bg:{button_type: WindowsMin}}
-                    max = <DesktopButton> {draw_bg:{button_type: WindowsMax}}
-                    close = <DesktopButton> {draw_bg:{button_type: WindowsClose}}
-                }
-                web_fullscreen = <Frame> {
-                    visible: false,
-                    walk: {width: Fit, height: Fit}
-                    fullscreen = <DesktopButton> {draw_bg:{button_type: Fullscreen}}
-                }
-                web_xr = <Frame> {
-                    visible: false,
-                    walk: {width: Fit, height: Fit}
-                    xr_on = <DesktopButton> {draw_bg:{button_type: XRMode}}
-                }
+            draw_bg: {color: (COLOR_BG_APP)}
+            walk: {height: 29},
+            caption_label = <Frame> {
+                walk: {width: Fill, height: Fill}
+                layout: {align: {x: 0.5, y: 0.5}},
+                <Label> {label: "Makepad", walk: {margin: {left: 100}}}
             }
-            body = <Frame> {}
+            windows_buttons = <Frame> {
+                visible: false,
+                walk: {width: Fit, height: Fit}
+                min = <DesktopButton> {draw_bg:{button_type: WindowsMin}}
+                max = <DesktopButton> {draw_bg:{button_type: WindowsMax}}
+                close = <DesktopButton> {draw_bg:{button_type: WindowsClose}}
+            }
+            web_fullscreen = <Frame> {
+                visible: false,
+                walk: {width: Fit, height: Fit}
+                fullscreen = <DesktopButton> {draw_bg:{button_type: Fullscreen}}
+            }
+            web_xr = <Frame> {
+                visible: false,
+                walk: {width: Fit, height: Fit}
+                xr_on = <DesktopButton> {draw_bg:{button_type: XRMode}}
+            }
         }
+        
         mouse_cursor_size: vec2(20, 20),
         draw_cursor: {
             instance border_width: 1.5
@@ -103,8 +102,7 @@ pub struct DesktopWindow {
     #[live] pass: Pass,
     #[live] depth_texture: Texture,
     
-    
-    #[live] pub frame: WidgetRef,
+    #[deref] pub frame: Frame,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![
@@ -336,7 +334,7 @@ impl Widget for DesktopWindow{
         }
         
         if let Some(DrawState::Drawing) = self.draw_state.get(){
-            self.frame.draw_widget_hook(cx)?;
+            self.frame.draw_widget(cx)?;
             self.draw_state.end();
             self.end(cx);
         }        
