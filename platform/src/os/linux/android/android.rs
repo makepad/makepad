@@ -210,7 +210,6 @@ impl Cx {
 
     /// Called when a touch event happened on the software keyword
     pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
-        //let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
         let e: Event;
 
         match characters {
@@ -226,7 +225,7 @@ impl Cx {
                 self.after_every_event(&to_java);
             }
             None => {
-                let key_code =  android_to_makepad_key_code(key_code_val);
+                let key_code = android_to_makepad_key_code(key_code_val);
                 if !key_code.is_unknown(){
                     let control = meta_state & ANDROID_META_CTRL_MASK != 0;
                     let alt = meta_state & ANDROID_META_ALT_MASK != 0;
