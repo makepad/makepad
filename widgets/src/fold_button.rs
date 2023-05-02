@@ -81,7 +81,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct FoldButton {
-    #[state] state: State,
+    #[state] state: LiveState,
     
     #[live] opened: f32,
     
