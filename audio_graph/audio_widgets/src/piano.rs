@@ -130,7 +130,7 @@ struct DrawKey {
 #[derive(Live, LiveHook)]
 pub struct PianoKey {
     #[live] draw_key: DrawKey,
-    #[state] state: State,
+    #[state] state: LiveState,
 }
 
 #[derive(Live)]

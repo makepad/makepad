@@ -137,7 +137,7 @@ pub struct LogListNode {
     #[live] draw_name: DrawNameText,
     #[live] layout: Layout,
     
-    #[state] state: State,
+    #[state] state: LiveState,
     
     #[live] indent_width: f64,
     
