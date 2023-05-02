@@ -137,7 +137,7 @@ impl DrawIcon {
             let height_is_fit = walk.height.is_fit();
             let peek_rect = cx.peek_walk_turtle(walk);
             let mut scale = 1.0;
-            log!("{:?}", bounds);
+
             if width_is_fit {
                 if !height_is_fit {
                     scale = peek_rect.size.y / bounds.size.y
