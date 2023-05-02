@@ -206,7 +206,7 @@ pub struct CheckBox {
     #[live] icon_walk: Walk,
 
     #[live] layout: Layout,
-    #[state] state: State,
+    #[state] state: LiveState,
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,

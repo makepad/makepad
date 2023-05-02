@@ -78,6 +78,23 @@ live_design!{
             }
         }
         
+        draw_icon:{
+            instance focus: 0.0
+            instance hover: 0.0
+            instance selected: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.selected
+                )
+            }
+        }
+        
         walk: {
             width: Fit,
             height: Fit
@@ -102,6 +119,7 @@ live_design!{
                     apply: {
                         draw_radio: {hover: 0.0}
                         draw_label: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
                     }
                 }
                 on = {
@@ -109,6 +127,7 @@ live_design!{
                     apply: {
                         draw_radio: {hover: 1.0}
                         draw_label: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
                     }
                 }
             }
@@ -119,6 +138,7 @@ live_design!{
                     apply: {
                         draw_radio: {focus: 0.0}
                         draw_label: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
                     }
                 }
                 on = {
@@ -126,6 +146,7 @@ live_design!{
                     apply: {
                         draw_radio: {focus: 1.0}
                         draw_label: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
                     }
                 }
             }
@@ -136,6 +157,7 @@ live_design!{
                     apply: {
                         draw_radio: {selected: 0.0}
                         draw_label: {selected: 0.0}
+                        draw_icon: {selected: 0.0}
                     }
                 }
                 on = {
@@ -144,6 +166,7 @@ live_design!{
                     apply: {
                         draw_radio: {selected: 1.0}
                         draw_label: {selected: 1.0}
+                        draw_icon: {selected: 1.0}
                     }
                 }
             }
@@ -182,7 +205,7 @@ pub struct RadioButton {
     #[live] value: LiveValue,
     
     #[live] layout: Layout,
-    #[state] state: State,
+    #[state] state: LiveState,
     
     #[live] label_walk: Walk,
     #[live] label_align: Align,

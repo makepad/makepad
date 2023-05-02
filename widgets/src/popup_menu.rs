@@ -170,7 +170,7 @@ pub struct PopupMenuItem {
     #[live] draw_name: DrawName,
     
     #[live] layout: Layout,
-    #[state] state: State,
+    #[state] state: LiveState,
     #[live] walk: Walk,
     
     #[live] indent_width: f32,
