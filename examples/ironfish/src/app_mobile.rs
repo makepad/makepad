@@ -151,12 +151,26 @@ live_design!{
     FishTab = <RadioButton> {
         walk: {height: Fill, width: Fit}
         layout: {align: {x: 0.0, y: 0.5}}
+        draw_icon: {
+            svg_file: (ICO_REDO)
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        (COLOR_UP_6),
+                        (COLOR_UP_7),
+                        self.hover
+                    ),
+                    (COLOR_UP_3),
+                    self.pressed
+                )
+            }
+        }
         draw_radio: {
             radio_type: Tab,
             color_inactive: (COLOR_UP_OFF),
         }
         draw_label: {
-            color_selected: (COLOR_UP_8),
+            color_selected: (COLOR_UP_FULL),
             color_unselected: (COLOR_UP_6),
             color_unselected_hover: (COLOR_UP_6),
             text_style: <H2_TEXT_BOLD> {}
@@ -1203,23 +1217,35 @@ live_design!{
                 
                 mobile_modes = <Frame> {
                     tab1 = <FishTab> {
-                        draw_icon: {svg_file: (ICO_SEQ)}
-                        icon_walk: {width: 30, height: Fit}
                         label: "Sequence"
-                        layout: {flow: Down, spacing: 5.0}
+                        draw_icon: {
+                            svg_file: (ICO_SEQ),
+                            // fn get_color(self) -> vec4 {
+                            //     return mix(
+                            //         (COLOR_UP_4),
+                            //         (COLOR_UP_6),
+                            //         self.active
+                            //     )
+                            // }
+                        }
+                        walk: {width: Fill}
+                        icon_walk: {width: 30, height: Fit}
+                        layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
                         state: {selected = {default: on}},
                     }
                     tab2 = <FishTab> {
-                        walk: {width: Fill}
-                        layout: {align: {x: 0.5, y: 0.5}}
                         label: "Play",
-                        draw_label: {color_selected: (COLOR_UP_8)}
+                        draw_icon: {svg_file: (ICO_LIVEPLAY)}
+                        walk: {width: Fill}
+                        icon_walk: {width: 30, height: Fit}
+                        layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
                     }
                     tab3 = <FishTab> {
-                        walk: {width: Fill}
-                        layout: {align: {x: 0.5, y: 0.5}}
                         label: "Presets",
-                        draw_label: {color_selected: (COLOR_UP_8)}
+                        draw_icon: {svg_file: (ICO_PRESET)}
+                        walk: {width: Fill}
+                        icon_walk: {width: 30, height: Fit}
+                        layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
                     }
                 }
             }
