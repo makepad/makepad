@@ -79,7 +79,7 @@ pub struct CxIconAtlasAlloc {
     pub todo: Vec<CxIconEntryHash>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CxIconArgs {
     pub linearize: f64,
     pub size: DVec2,
@@ -291,6 +291,7 @@ impl DrawTrapezoidVector {
             //log_str(&format!("Serializing char {} {} {} {}", glyphtc.tx1 , cx.fonts_atlas.texture_size.x ,todo.subpixel_x_fract ,atlas_page.dpi_factor));
             let trapezoidate = self.trapezoidator.trapezoidate(
                 path.map({
+                    //log!("{:?} {:?}", entry.args, entry.pos);
                     move | cmd | {
                         let cmd = cmd.transform(
                             &AffineTransformation::identity()
