@@ -135,6 +135,7 @@ live_design!{
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         draw_radio: {selected: 0.0}
+                        draw_icon: {selected: 0.0}
                         draw_label: {selected: 0.0}
                     }
                 }
@@ -143,6 +144,7 @@ live_design!{
                     from: {all: Forward {duration: 0.0}}
                     apply: {
                         draw_radio: {selected: 1.0}
+                        draw_icon: {selected: 1.0}
                         draw_label: {selected: 1.0}
                     }
                 }
@@ -236,8 +238,8 @@ impl RadioButton {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_radio.begin(cx, walk, self.layout);
-        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
         self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
         self.draw_radio.end(cx);
     }
 }
