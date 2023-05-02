@@ -2,7 +2,6 @@
 #![allow(dead_code)]
 use {
     std::cell::{Cell},
-    std::ops::Deref,
     crate::{
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_compiler::{
@@ -18,7 +17,6 @@ use {
         },
         live_traits::{LiveNew, LiveHook, LiveHookDeref, LiveApplyValue, LiveApply, ApplyFrom},
         makepad_derive_live::*,
-        makepad_error_log::*,
         makepad_math::*,
         makepad_live_id::{FromLiveId, live_id, live_id_num},
         event::{
@@ -705,11 +703,11 @@ impl Event {
                         }
                         TouchState::Move => {
                             let tap_count = cx.fingers.get_tap_count();
-                            let hover_last = cx.fingers.get_hover_area(digit_id);
+                            //let hover_last = cx.fingers.get_hover_area(digit_id);
                             let rect = area.get_clipped_rect(&cx);
                             
                             if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
-                                let handled_area = t.handled.get();
+                                //let handled_area = t.handled.get();
                                 if !options.sweep_area.is_empty() {
                                     if capture.switch_capture.is_none()
                                         && Margin::rect_contains_with_margin(&rect, t.abs, &options.margin) {
@@ -801,7 +799,7 @@ impl Event {
                     };
                     
                     if let Some(capture) = cx.fingers.get_digit_capture(digit_id) {
-                        let handled_area = e.handled.get();
+                        //let handled_area = e.handled.get();
                         if !options.sweep_area.is_empty() {
                             if capture.switch_capture.is_none()
                                 && Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
@@ -906,7 +904,7 @@ impl Event {
                     }
                     else {
                         if handled_area.is_empty() && Margin::rect_contains_with_margin(&rect, e.abs, &options.margin) {
-                            let any_captured = cx.fingers.get_digit_for_captured_area(area);
+                            //let any_captured = cx.fingers.get_digit_for_captured_area(area);
                             cx.fingers.new_hover_area(digit_id, area);
                             e.handled.set(area);
                             return Hit::FingerHoverIn(fhe)

@@ -34,13 +34,10 @@ pub struct LiveBody {
 }
 
 #[cfg(not(lines))]
-use std::sync::atomic::{AtomicBool,Ordering};
-#[cfg(not(lines))]
-pub (crate) static LINE_NR_ONCE: AtomicBool = AtomicBool::new(false);
-#[cfg(not(lines))]
-const LINE_NR_ERROR: &'static str = "\n#############################################\n\nMakepad needs the nightly only proc_macro_span feature for accurate line information in errors\nTo install nightly use rustup:\n\nrustup install nightly\n\nPlease build your makepad application in this way on Unix:\n\nMAKEPAD=lines cargo +nightly build yourapp_etc\n\nAnd on Windows:\n\nset MAKEPAD=lines&cargo +nightly build yourapp_etc'\n\n#############################################\n";
-#[cfg(not(lines))]
 fn line_nr_error_once(){
+    use std::sync::atomic::{AtomicBool,Ordering};
+    static LINE_NR_ONCE: AtomicBool = AtomicBool::new(false);
+    const LINE_NR_ERROR: &'static str = "\n#############################################\n\nMakepad needs the nightly only proc_macro_span feature for accurate line information in errors\nTo install nightly use rustup:\n\nrustup install nightly\n\nPlease build your makepad application in this way on Unix:\n\nMAKEPAD=lines cargo +nightly build yourapp_etc\n\nAnd on Windows:\n\nset MAKEPAD=lines&cargo +nightly build yourapp_etc'\n\n#############################################\n";
     if !LINE_NR_ONCE.load(Ordering::SeqCst) {
         LINE_NR_ONCE.store(true,Ordering::SeqCst);
         error!("{}", LINE_NR_ERROR);
