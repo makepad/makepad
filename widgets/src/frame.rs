@@ -19,7 +19,7 @@ live_design!{
     Solid = <Frame> {show_bg: true, draw_bg: {
         fn get_color(self) -> vec4 {
             return self.color
-        } 
+        }
         
         fn pixel(self) -> vec4 {
             return Pal::premul(self.get_color())
@@ -332,7 +332,7 @@ live_design!{
             fill: Image
         }
     }
-  
+    
     ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
     ScrollY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
@@ -383,7 +383,7 @@ struct FrameTextureCache {
 }
 
 impl LiveHook for Frame {
-    fn before_live_design(cx:&mut Cx){
+    fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, Frame)
     }
     
@@ -437,10 +437,10 @@ impl LiveHook for Frame {
                 }
             }
             if let Some(mut image_buffer) = image_buffer.take() {
-                if self.image_texture.is_none(){
+                if self.image_texture.is_none() {
                     self.image_texture = Some(Texture::new(cx));
                 }
-                if let Some(image_texture) = &mut self.image_texture{
+                if let Some(image_texture) = &mut self.image_texture {
                     image_texture.set_desc(cx, TextureDesc {
                         format: TextureFormat::ImageBGRA,
                         width: Some(image_buffer.width),
@@ -476,7 +476,7 @@ impl LiveHook for Frame {
                     nodes.skip_node(index)
                 }
                 else */if nodes[index].origin.has_prop_type(LivePropType::Instance)
-                    /*|| self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) */{
+                /*|| self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) */ {
                     self.draw_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
                         .apply(cx, from, index, nodes);
@@ -495,6 +495,10 @@ impl LiveHook for Frame {
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct FrameRef(WidgetRef);
+
+
+#[derive(Clone, WidgetSet)]
+pub struct FrameSet(WidgetSet);
 
 impl FrameRef {
     /*
@@ -548,6 +552,32 @@ impl FrameRef {
         }
         else {
             0
+        }
+    }
+}
+
+impl FrameSet {
+    pub fn set_visible(&self, visible: bool) {
+        for item in self.iter() {
+            item.set_visible(visible)
+        }
+    }
+    
+    pub fn set_texture(&self, slot: usize, texture: &Texture) {
+        for item in self.iter() {
+            item.set_texture(slot, texture)
+        }
+    }
+    
+    pub fn set_uniform(&self, cx: &Cx, uniform: &[LiveId], value: &[f32]) {
+        for item in self.iter() {
+            item.set_uniform(cx, uniform, value)
+        }
+    }
+    
+    pub fn redraw(&self, cx: &mut Cx) {
+        for item in self.iter() {
+            item.redraw(cx);
         }
     }
 }
@@ -830,7 +860,7 @@ impl Frame {
             };
             
             if self.show_bg {
-                if let Some(image_texture) = &self.image_texture{
+                if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
                 }
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
@@ -844,9 +874,9 @@ impl Frame {
             if step < self.draw_order.len() {
                 let id = self.draw_order[step];
                 if let Some(child) = self.children.get_mut(&id) {
-                    if child.is_visible(){
+                    if child.is_visible() {
                         let walk = child.get_walk();
-                        if resume{
+                        if resume {
                             child.draw_walk_widget(cx, walk) ?;
                         }
                         else if let Some(fw) = cx.defer_walk(walk) {
@@ -886,7 +916,7 @@ impl Frame {
                     self.draw_bg.end(cx);
                     self.area = self.draw_bg.area();
                 }
-                else{
+                else {
                     cx.end_turtle_with_area(&mut self.area);
                 };
                 

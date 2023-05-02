@@ -180,5 +180,21 @@ impl SlidesViewRef {
             inner.prev_slide(cx);
         }
     }
-    
 }
+
+#[derive(Clone,  WidgetSet)]
+pub struct SlidesViewSet(WidgetSet);
+
+impl SlidesViewSet {
+    pub fn next_slide(&self, cx:&mut Cx){
+        for item in self.iter() {
+            item.next_slide(cx);
+        }
+    }
+    pub fn prev_slide(&self, cx:&mut Cx){
+        for item in self.iter() {
+            item.prev_slide(cx);
+        }
+    }
+}
+
