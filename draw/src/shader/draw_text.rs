@@ -12,7 +12,7 @@ use {
 
 live_design!{
     
-    DrawText= {{DrawText}} {
+    DrawText = {{DrawText}} {
         //debug: true;
         wrapping: None
         text_style: {
@@ -165,8 +165,8 @@ pub struct DrawText {
     #[calc] pub advance: f32,
 }
 
-impl LiveHook for DrawText{
-    fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]){
+impl LiveHook for DrawText {
+    fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         self.draw_vars.before_apply_init_shader(cx, apply_from, index, nodes, &self.geometry);
     }
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
@@ -245,7 +245,7 @@ impl DrawText {
         let mut walk_x = pos.x;
         
         let cxfont = fonts_atlas.fonts[font_id].as_mut().unwrap();
-        let dpi_factor = cx.current_dpi_factor(); 
+        let dpi_factor = cx.current_dpi_factor();
         
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.text_style.font_size);
         
@@ -361,10 +361,10 @@ impl DrawText {
         if !in_many {
             self.begin_many_instances_internal(cx, fonts_atlas);
         }
-       
+        
         //cx.debug.rect_r(Rect{pos:dvec2(1.0,2.0), size:dvec2(200.0,300.0)});
         let mut walk_x = pos.x;
-        if walk_x.is_infinite() || walk_x.is_nan(){
+        if walk_x.is_infinite() || walk_x.is_nan() {
             return
         }
         //let mut char_offset = char_offset;
@@ -405,16 +405,13 @@ impl DrawText {
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             // scale and snap it
-            //let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
-            //let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
-            
             // only use a subpixel id for small fonts
             let subpixel_id = if self.text_style.font_size>32.0 {
                 0
             }
             else { // subtle 64 index subpixel id
                 ((subpixel_y_fract * dpi_factor * 7.0) as usize) << 3 |
-                (subpixel_x_fract * dpi_factor* 7.0) as usize
+                (subpixel_x_fract * dpi_factor * 7.0) as usize
             };
             
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
