@@ -8,11 +8,9 @@ live_design!{
     import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
     App = {{App}} {
         ui: <DesktopWindow> {
-            frame: {body = {
-                <Mandelbrot> {
-                    walk: {width: Fill, height: Fill}
-                }
-            }}
+            <Mandelbrot> {
+                walk: {width: Fill, height: Fill}
+            }
         }
     }
 }
@@ -34,7 +32,7 @@ impl AppMain for App {
     
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Draw(event) = event {
-            self.ui.draw_widget(&mut Cx2d::new(cx, event));
+            self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
         }
         
         self.ui.handle_widget_event(cx, event);

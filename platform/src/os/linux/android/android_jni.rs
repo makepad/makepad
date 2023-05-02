@@ -8,7 +8,7 @@ use {
         area::Area,
         makepad_math::*,
         event::*,
-        cx::{Cx, AndroidInitParams},
+        cx::{Cx, AndroidParams},
     },
     std::{
         cell::Cell,
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onInit(
 ) {
     crate::makepad_error_log::init_panic_hook();
     (*(cx as *mut Cx)).from_java_on_init(
-        AndroidInitParams {
+        AndroidParams {
             cache_path: jstring_to_string(env, cache_path),
             density: density as f64,
         },
