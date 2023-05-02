@@ -3,7 +3,7 @@ use crate::{
     debug_view::DebugView,
     makepad_draw::*,
     nav_control::NavControl,
-    window_menu::*,
+   // window_menu::*,
     button::*,
     widget::*,
     frame::*,
@@ -87,7 +87,7 @@ live_design!{
 
 #[derive(Live)]
 pub struct DesktopWindow {
-    #[rust] pub caption_size: DVec2,
+    #[rust] caption_size: DVec2,
     #[live] last_mouse_pos: DVec2,
     #[live] mouse_cursor_size: DVec2,
     
@@ -102,18 +102,18 @@ pub struct DesktopWindow {
     #[live] pass: Pass,
     #[live] depth_texture: Texture,
     
-    #[deref] pub frame: Frame,
+    #[deref] frame: Frame,
     
-    #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
-    #[rust(Menu::main(vec![
+   // #[rust(WindowMenu::new(cx))] _window_menu: WindowMenu,
+    /*#[rust(Menu::main(vec![
         Menu::sub("App", vec![
             //Menu::item("Quit App", Cx::command_quit()),
         ]),
-    ]))]
+    ]))]*/
     
-    #[live] _default_menu: Menu,
+    //#[live] _default_menu: Menu,
     
-    #[rust] pub last_menu: Option<Menu>,
+    //#[rust] last_menu: Option<Menu>,
     
     // testing
     #[rust] draw_state: DrawStateWrap<DrawState>,

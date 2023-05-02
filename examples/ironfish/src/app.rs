@@ -244,7 +244,6 @@ impl AppMain for App {
             synth_db.nodes = ironfish.settings.live_read();
             ui.get_piano(id!(piano)).set_key_focus(cx);
             self.midi_input = cx.midi_input();
-            //self.midi_data = cx.midi_output_create_sender();
         }
         
         if let Event::MidiPorts(ports) = event {
@@ -252,7 +251,6 @@ impl AppMain for App {
         }
         
         if let Event::AudioDevices(devices) = event {
-            //log!("{}", devices);
             cx.use_audio_outputs(&devices.default_output());
         }
         

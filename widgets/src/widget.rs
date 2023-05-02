@@ -62,7 +62,7 @@ pub trait Widget: LiveApply {
     fn data_to_widget(&mut self, _cx: &mut Cx, _nodes:&[LiveNode], _path: &[LiveId]){}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw;
-    fn get_walk(&self) -> Walk;
+    fn get_walk(&self)->Walk{Walk::default()}
     fn redraw(&mut self, _cx: &mut Cx);
     
     fn is_visible(&self)->bool{
