@@ -137,6 +137,7 @@ impl DrawIcon {
             let height_is_fit = walk.height.is_fit();
             let peek_rect = cx.peek_walk_turtle(walk);
             let mut scale = 1.0;
+            log!("{:?}", bounds);
             if width_is_fit {
                 if !height_is_fit {
                     scale = peek_rect.size.y / bounds.size.y
@@ -153,7 +154,10 @@ impl DrawIcon {
                 scale = (peek_rect.size.y / bounds.size.y).min(peek_rect.size.x / bounds.size.x);
             }
             let rect = cx.walk_turtle(walk);
-            
+            if rect.is_nan(){
+                return
+            }
+
             let dpi_factor = cx.current_dpi_factor();
             
             // we should snap the subpixel to 8x8 steps
@@ -164,6 +168,7 @@ impl DrawIcon {
                 ((dpi_pos.x - snapped_pos.x) * 8.0).floor() / 8.0,
                 ((dpi_pos.y - snapped_pos.y) * 8.0).floor() / 8.0
             );
+            
             // ok now we need to snap our rect to real pixels
             let slot = icon_atlas.get_icon_slot(CxIconArgs {
                 linearize: self.linearize as f64,
@@ -173,6 +178,7 @@ impl DrawIcon {
                 subpixel: subpixel 
             }, path_hash);
             
+
             self.draw_clip = cx.turtle().draw_clip().into();
             // lets snap the pos/size to actual pixels
             self.rect_pos = (snapped_pos / dpi_factor).into();
