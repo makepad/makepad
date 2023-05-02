@@ -40,24 +40,21 @@ live_design!{
             <DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000)},
                 pass: {clear_color: #2A}
-                frame: {block_signal_event: true; body = {
-                    <AppDesktop> {}
-                }}
+                block_signal_event: true; 
+                <AppDesktop> {}
             }
             <DesktopWindow> {
                 window: {position: vec2(0, 400), inner_size: vec2(800, 800)},
                 pass: {clear_color: #2A}
-                frame: {block_signal_event: true; body = {
-                    layout: {padding: {top: 30}},
-                    <Designer> {}
-                }}
+                block_signal_event: true;
+                layout: {padding: {top: 30}},
+                <Designer> {}
             }
             <DesktopWindow> {
                 window: {position: vec2(0, 0), inner_size: vec2(400, 800)},
                 pass: {clear_color: #2A}
-                frame: {block_signal_event: true; body = {
-                    <AppMobile> {}
-                }}
+                block_signal_event: true; 
+                <AppMobile> {}
             }
         }
     }
@@ -214,13 +211,13 @@ impl AppMain for App {
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             // draw the ui using hooks
-            while let Some(next) = self.ui.draw_widget_hook(cx).hook_widget() {
+            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                 // draw the preset lists
                 if let Some(mut list) = preset_lists.pick(next).borrow_mut() {
                     for i in 0..10 {
                         if let Some(item) = list.get_entry(cx, LiveId(i as u64).into(), live_id!(Entry)) {
                             item.get_button(id!(label)).set_label(&format!("Button id {i}"));
-                            item.draw_widget(cx);
+                            item.draw_widget_all(cx);
                         }
                     }
                 }

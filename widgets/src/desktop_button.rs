@@ -158,6 +158,7 @@ impl Widget for DesktopButton{
 }
 
 #[derive(Live, LiveHook)]
+#[live_ignore]
 #[repr(u32)]
 pub enum DesktopButtonType {
     WindowsMin = shader_enum(1),
