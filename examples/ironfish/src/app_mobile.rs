@@ -161,7 +161,7 @@ live_design!{
                         self.hover
                     ),
                     (COLOR_UP_3),
-                    self.pressed
+                    self.selected
                 )
             }
         }
