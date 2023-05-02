@@ -13,44 +13,57 @@ live_design!{
     import makepad_draw::shader::std::*;
     
     Designer = {{Designer}} {
-        ui: <Frame>{
-            layout: {flow: Right},
-            <Splitter>{
-                align: FromStart(200),
-                a:<Frame>{
-                    outline = <FileTree>{
-                    }
-                },
-                b:<Solid>{draw_bg:{color:#4}},
-            }
+        layout: {flow: Right},
+        <Splitter> {
+            align: FromStart(200),
+            a: <Frame> {
+                outline = <FileTree> {
+                }
+            },
+            b: <Solid> {draw_bg: {color: #4}},
         }
+    }
+}
+
+enum OutlineNode{
+    Global{
+        name: LiveId,
+        ptr: LivePtr
+    },
+    Component{
+        name: LiveId,
+        ptr: LivePtr,
+        children: Vec<OutlineNode>
     }
 }
 
 #[derive(Live)]
 pub struct Designer {
-    #[live] ui: Frame,
+    #[rust] outline: Vec<OutlineNode>,
+    #[deref] ui: Frame,
 }
 
 impl LiveHook for Designer {
-    fn before_live_design(cx:&mut Cx){
+    fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, Designer)
+    }
+    
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        // lets take the doc we need (app_mobile for instance)
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        let file_id = live_registry.file_name_to_file_id("examples/ironfish/src/app_mobile.rs").unwrap();
+        // now we fetch the unexpanded nodes
+        // and build 
     }
 }
 
-impl Widget for Designer{
-   fn handle_widget_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
+impl Widget for Designer {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let _actions = self.ui.handle_widget_event(cx, event);
     }
-
-    fn get_walk(&self)->Walk{Walk::default()}
     
-    fn redraw(&mut self, cx:&mut Cx){
+    fn redraw(&mut self, cx: &mut Cx) {
         self.ui.redraw(cx)
     }
     
@@ -58,16 +71,9 @@ impl Widget for Designer{
         let outline = self.ui.get_file_tree(id!(outline));
         while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
             if let Some(mut outline) = outline.pick(next).borrow_mut() {
-                //outline.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
-                if outline.begin_folder(cx, live_id!(root).into(), "ROOT").is_ok(){
-                    for i in 0..10{
+                if outline.begin_folder(cx, live_id!(root).into(), "ROOT").is_ok() {
+                    for i in 0..10 {
                         outline.file(cx, LiveId(i as u64).into(), &format!("FILE {i}"))
-                    }
-                    outline.end_folder();
-                }
-                if outline.begin_folder(cx, live_id!(root2).into(), "ROOT2").is_ok(){
-                    for i in 0..10{
-                        outline.file(cx, LiveId(80+i as u64).into(), &format!("FILE {i}"))
                     }
                     outline.end_folder();
                 }
