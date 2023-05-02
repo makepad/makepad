@@ -35,7 +35,7 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct SwipeListEntry {
-    #[live] state: State,
+    #[live] state: LiveState,
     #[live] walk: Walk,
     #[live] left_drawer: WidgetRef,
     #[live] center: WidgetRef,
