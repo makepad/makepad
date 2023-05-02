@@ -59,10 +59,10 @@ impl LiveHook for Designer {
         let file = live_registry.file_id_to_file(file_id);
         let _nodes = &file.original.nodes;
         // lets run over the file
-        //let mut index = 1;
-        //while index < nodes.len(){
-            
-        //}
+        let mut index = 1;
+        while index < nodes.len(){
+            indes = nodes.skip_nodes(index);
+        }
     }
 }
 
