@@ -32,6 +32,9 @@ impl LiveHook for MultiWindow {
         match from {
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
                 if nodes[index].origin.has_prop_type(LivePropType::Instance) {
+                    if cx.os_type().is_single_window() && id != live_id!(mobile){
+                        return nodes.skip_node(index);
+                    }
                     return self.windows.get_or_insert(cx, id, | cx | {DesktopWindow::new(cx)})
                         .apply(cx, from, index, nodes);
                 }
@@ -73,7 +76,18 @@ impl Widget for MultiWindow {
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, _walk: Walk) -> WidgetDraw {
         self.draw_state.begin(cx, DrawState::Window(0));
+        if cx.os_type().is_single_window(){
+            if let Some(DrawState::Window(_)) = self.draw_state.get(){
+                if let Some(window) = self.windows.get_mut(&live_id!(mobile)){
+                    window.draw_widget(cx)?; 
+                    self.draw_state.end();
+                }
+            }
+            return WidgetDraw::done()
+        }
+        
         while let Some(DrawState::Window(step)) = self.draw_state.get() {
+            
             if let Some(window) = self.windows.values_mut().nth(step){
                 window.draw_widget(cx)?; 
                 self.draw_state.set(DrawState::Window(step+1));
