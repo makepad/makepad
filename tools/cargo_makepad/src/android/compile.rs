@@ -69,8 +69,8 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     }; 
       
     // main names used in the process
-    let underscore_target = target.replace("-", "_"); 
-    let java_url = format!("dev.{underscore_target}.makepad");
+    let underscore_target = target.replace("-", "_");
+    let java_url = format!("dev.makepad.{underscore_target}");
     let app_label = format!("{underscore_target}");
 
     // alright lets do the rust stuff.
@@ -132,7 +132,6 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     let java_class = out_dir.join(&java_path).join("MakepadApp.class");
     write_text(&java_file, &main_java)?;
 
-    //println!("Creating R class");
     let java_home = sdk_dir.join("openjdk");
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dst_unaligned_apk = out_dir.join(format!("{underscore_target}.unaligned.apk"));
@@ -141,9 +140,8 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     let _ = rm(&dst_unaligned_apk);
     let _ = rm(&dst_apk);
     
-    println!("Compiling APK File");   
+    println!("Compiling APK & R.java files");
                 
-    //println!("Compiling Java menu");    
     shell_env(
          &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
@@ -160,9 +158,9 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             "-M",
             &manifest_file.to_str().unwrap(),
             "-J",
-            &cargo_manifest_dir.join("src/android/java").to_str().unwrap(),
+            &tmp_dir.to_str().unwrap(),
             "--custom-package",
-            &java_url,
+            "dev.makepad.android",
             &out_dir.to_str().unwrap(),
         ]
     ) ?;
@@ -170,6 +168,10 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     // lets build the APK
 
     //println!("Compiling Java");
+    let makepad_package_path = "dev/makepad/android";
+    let r_class_path = tmp_dir.join(&makepad_package_path).join("R.java");
+    let makepad_java_classes_dir = &cargo_manifest_dir.join("src/android/java/").join(&makepad_package_path);
+
     shell_env(
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
@@ -180,15 +182,17 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             "-Xlint:deprecation",
             "-d", 
             &out_dir.to_str().unwrap(),
-            &cargo_manifest_dir.join("src/android/java/dev/makepad/android/R.java").to_str().unwrap(),
-            &cargo_manifest_dir.join("src/android/java/dev/makepad/android/Makepad.java").to_str().unwrap(),
-            &cargo_manifest_dir.join("src/android/java/dev/makepad/android/MakepadActivity.java").to_str().unwrap(),
-            &cargo_manifest_dir.join("src/android/java/dev/makepad/android/MakepadSurfaceView.java").to_str().unwrap(),
+            &r_class_path.to_str().unwrap(),
+            &makepad_java_classes_dir.join("Makepad.java").to_str().unwrap(),
+            &makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap(),
+            &makepad_java_classes_dir.join("MakepadSurfaceView.java").to_str().unwrap(),
             &java_file.to_str().unwrap()
         ]   
     ) ?; 
 
     //println!("Building dex file");
+    let compiled_java_classes_dir = out_dir.join(&makepad_package_path);
+
     shell_env_cap( 
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
@@ -201,10 +205,10 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
             "--output",
             &out_dir.to_str().unwrap(),
-            &out_dir.join("dev/makepad/android/Makepad.class").to_str().unwrap(),
-            &out_dir.join("dev/makepad/android/MakepadActivity.class").to_str().unwrap(),
-            &out_dir.join("dev/makepad/android/MakepadSurfaceView.class").to_str().unwrap(),
-            &out_dir.join("dev/makepad/android/Makepad$Callback.class").to_str().unwrap(),
+            &compiled_java_classes_dir.join("Makepad.class").to_str().unwrap(),
+            &compiled_java_classes_dir.join("MakepadActivity.class").to_str().unwrap(),
+            &compiled_java_classes_dir.join("MakepadSurfaceView.class").to_str().unwrap(),
+            &compiled_java_classes_dir.join("Makepad$Callback.class").to_str().unwrap(),
             &java_class.to_str().unwrap(),
         ]
     ) ?;
