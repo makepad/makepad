@@ -110,6 +110,7 @@ impl LiveApply for Window {
                 }
                 live_id!(dpi_override) => {
                     let v:f64 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
+                    //log!("DPI OVERRIDE {}", v);
                     cx.windows[self.window_id()].dpi_override = Some(v);
                 }
                 _ => {

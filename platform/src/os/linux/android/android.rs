@@ -137,9 +137,10 @@ impl Cx {
         let window_id = CxWindowPool::id_zero();
         let window = &mut self.windows[window_id];
         let old_geom = window.window_geom.clone();
-        let size = self.os.display_size / self.os.dpi_factor;
+        let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+        let size = self.os.display_size / dpi_factor;
         window.window_geom = WindowGeom {
-            dpi_factor: self.os.dpi_factor,
+            dpi_factor,
             can_fullscreen: false,
             xr_is_presenting: false,
             is_fullscreen: true,
@@ -186,12 +187,14 @@ impl Cx {
     /// Called when a touch event happened on the MakepadSurface.
     pub fn from_java_on_touch(&mut self, mut touches: Vec<TouchPoint>, to_java: AndroidToJava) {
         let time = self.os.time_now();
+        let window = &mut self.windows[CxWindowPool::id_zero()];
+        let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
         for touch in &mut touches {
             // When the software keyboard shifted the UI in the vertical axis,
             //we need to make the math here to keep touch events positions synchronized.
             if self.os.keyboard_visible { touch.abs.y += self.os.keyboard_panning_offset as f64 };
 
-            touch.abs /= self.os.dpi_factor;
+            touch.abs /= dpi_factor;
         }
         self.fingers.process_touch_update_start(time, &touches);
         let e = Event::TouchUpdate(
@@ -329,10 +332,11 @@ impl Cx {
         &mut self,
         pass_id: PassId,
         to_java: &AndroidToJava,
+        dpi_factor: f64,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
 
-        self.setup_render_pass(pass_id, self.os.dpi_factor);
+        self.setup_render_pass(pass_id, dpi_factor);
         
         // keep repainting in a loop 
         self.passes[pass_id].paint_dirty = false;
@@ -389,8 +393,9 @@ impl Cx {
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(_window_id) => {
-                    self.draw_pass_to_fullscreen(*pass_id, to_java);
+                CxPassParent::Window(window_id) => {
+                    let window = &self.windows[window_id];
+                    self.draw_pass_to_fullscreen(*pass_id, to_java, window.window_geom.dpi_factor);
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -428,9 +433,10 @@ impl Cx {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
-                    let size = self.os.display_size / self.os.dpi_factor;
+                    let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                    let size = self.os.display_size / dpi_factor;
                     window.window_geom = WindowGeom {
-                        dpi_factor: self.os.dpi_factor,
+                        dpi_factor,
                         can_fullscreen: false,
                         xr_is_presenting: false,
                         is_fullscreen: true,
