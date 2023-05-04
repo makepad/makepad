@@ -302,7 +302,7 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_copy_to_clipboard(&mut self, to_java: AndroidToJava) {
+    pub fn from_java_on_copy_to_clipboard(&mut self, to_java: AndroidToJava) {
         let response = Rc::new(RefCell::new(None));
         let e = Event::TextCopy(TextCopyEvent {
             response: response.clone()
@@ -311,19 +311,21 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_paste_from_clipboard(&mut self, content: String, to_java: AndroidToJava) {
-        let e = Event::TextInput(
-            TextInputEvent {
-                input: content,
-                replace_last: false,
-                was_paste: true,
-            }
-        );
-        self.call_event_handler(&e);
-        self.after_every_event(&to_java);
+    pub fn from_java_on_paste_from_clipboard(&mut self, content: Option<String>, to_java: AndroidToJava) {
+        if let Some(text) = content {
+            let e = Event::TextInput(
+                TextInputEvent {
+                    input: text,
+                    replace_last: false,
+                    was_paste: true,
+                }
+            );
+            self.call_event_handler(&e);
+            self.after_every_event(&to_java);
+        }
     }
 
-    pub fn from_java_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
+    pub fn from_java_on_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
         let e = Event::TextCut;
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
@@ -468,6 +470,12 @@ impl Cx {
                 },
                 CxOsOp::ShowClipboardActions(selected) => {
                     to_java.show_clipboard_actions(selected.as_str());
+                },
+                CxOsOp::CopyToClipboard(selected) => {
+                    to_java.copy_to_clipboard(selected.as_str());
+                },
+                CxOsOp::PasteFromClipboard() => {
+                    to_java.paste_from_clipboard();
                 },
                 _ => ()
             }

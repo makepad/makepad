@@ -15,6 +15,8 @@ public class Makepad {
         void showTextIME();
         void hideTextIME();
         void showClipboardActions(String selected);
+        void copyToClipboard(String selected);
+        void pasteFromClipboard();
     }
 
     static {
@@ -36,7 +38,7 @@ public class Makepad {
     static native void onMidiDeviceOpened(long cx, String name, Object midi_device, Callback callback);
     static native void onHideTextIME(long cx, Callback callback);
     static native void onResizeTextIME(long cx, int ime_height, Callback callback);
-    static native void copyToClipboard(long cx, Callback callback);
-    static native void pasteFromClipboard(long cx, String content, Callback callback);
-    static native void cutToClipboard(long cx, Callback callback);
+    static native void onCopyToClipboard(long cx, Callback callback);
+    static native void onPasteFromClipboard(long cx, String content, Callback callback);
+    static native void onCutToClipboard(long cx, Callback callback);
 }
