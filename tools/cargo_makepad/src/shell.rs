@@ -124,3 +124,41 @@ pub fn cp(source_path: &Path, dest_path: &Path, exec: bool) -> Result<(), String
     Ok(())
 }
 
+pub fn cp_all(source_dir: &Path, dest_dir: &Path, exec: bool) -> Result<(), String> {
+    if !source_dir.is_dir() {
+        return Err(format!("{:?} is not a directory", source_dir));
+    }
+
+    mkdir(dest_dir) ?;
+
+    for entry in fs::read_dir(source_dir).map_err(|_e| format!("Unable to read source directory {:?}", source_dir))? {
+        let entry = entry.map_err(|_e| format!("Unable to process directory entry"))?;
+        let source_path = entry.path();
+        if source_path.is_file() {
+            let dest_path = dest_dir.join(source_path.file_name()
+                .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?);
+
+            cp(&source_path, &dest_path, exec)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn ls(dir: &Path) -> Result<Vec<String>, String> {
+    let mut result = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|_e| format!("Unable to read source directory {:?}", dir))? {
+        let entry = entry.map_err(|_e| format!("Unable to process directory entry"))?;
+        let source_path = entry.path();
+        if source_path.is_file() {
+            let file_name = source_path.file_name()
+                .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?.to_str();
+
+            if !file_name.unwrap().starts_with('.') {
+                result.push(file_name.unwrap().to_string());
+            }
+        }
+    }
+
+    Ok(result)
+}
