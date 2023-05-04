@@ -1,5 +1,6 @@
 use std::{
     path::{Path, PathBuf},
+    collections::HashSet,
 };
 use crate::android::HostOs;
 use crate::shell::*;
@@ -247,28 +248,65 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         &dst_unaligned_apk.to_str().unwrap(),
         "lib/arm64-v8a/libmakepad.so",
     ]) ?;
-    
-    let font_dir = out_dir.join("assets/makepad/makepad_widgets/resources");
-    mkdir(&font_dir) ?;
-    cp(&cwd.join("widgets/resources/IBMPlexSans-Text.ttf"), &font_dir.join("IBMPlexSans-Text.ttf"), false) ?;
-    cp(&cwd.join("widgets/resources/IBMPlexSans-SemiBold.ttf"), &font_dir.join("IBMPlexSans-SemiBold.ttf"), false) ?;
-    cp(&cwd.join("widgets/resources/LiberationMono-Regular.ttf"), &font_dir.join("LiberationMono-Regular.ttf"), false) ?;
-
-    cp(&cwd.join("examples/ironfish/resources/tinrs.png"), &out_dir.join("assets/makepad/resources/tinrs.png"), false) ?;
-    cp(&cwd.join("examples/ironfish/resources/icons/Icon_Arp.svg"), &out_dir.join("assets/makepad/resources/icons/Icon_Arp.svg"), false) ?;
 
     //println!("Adding resources to apk");
-    §(&[], &out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
+
+    let mut dependencies = HashSet::new();
+    if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree"]) {
+        for line in cargo_tree_output.lines().skip(1) {
+            if let Some((name, path)) = extract_dependency_info(line) {
+                let resources_path = Path::new(&path).join("resources");
+                if resources_path.is_dir() {
+                    dependencies.insert((name.replace('-',"_"), resources_path));
+                }
+            }
+        }
+    }
+
+    for (name, resources_path) in dependencies.iter() {
+        let dst_dir = out_dir.join(format!("assets/makepad/{name}/resources"));
+        mkdir(&dst_dir) ?;
+        cp_all(&resources_path, &dst_dir, false) ?;
+    }
+
+    // TODO - This is copying all from /icons but we should discuss which folders we
+    // want to support, or if we want to copy recursively from /resources
+    for (name, resources_path) in dependencies.iter() {
+        if resources_path.join("icons").is_dir() {
+            let dst_dir = out_dir.join(format!("assets/makepad/{name}/resources/icons"));
+            mkdir(&dst_dir) ?;
+            cp_all(&resources_path.join("icons"), &dst_dir, false) ?;
+        }
+    }
+
+    let mut assets_to_add: Vec<String> = Vec::new();
+    for (name, _resources_path) in dependencies.iter() {
+        let dst_dir = out_dir.join(format!("assets/makepad/{name}/resources"));
+        let assets = ls(&dst_dir) ?;
+
+        for a in &assets {
+            assets_to_add.push(format!("assets/makepad/{name}/resources/{a}"));
+        }
+
+        // TODO Check this!
+        if dst_dir.join("icons").is_dir() {
+            let icon_assets = ls(&dst_dir.join("icons")) ?;
+
+            for a in &icon_assets {
+                assets_to_add.push(format!("assets/makepad/{name}/resources/icons/{a}"));
+            }
+        }
+    }
+
+    let mut aapt_args = vec![
         "add",
         &dst_unaligned_apk.to_str().unwrap(),
-        "assets/makepad/makepad_widgets/resources/IBMPlexSans-Text.ttf",
-        "assets/makepad/makepad_widgets/resources/IBMPlexSans-SemiBold.ttf",
-        "assets/makepad/makepad_widgets/resources/LiberationMono-Regular.ttf",
-        "assets/makepad/resources/tinrs.png",
-        "assets/makepad/resources/icons/Icon_Arp.svg",
-    ]) ?;
+    ];
+    for asset in &assets_to_add {
+        aapt_args.push(asset);
+    }
 
-    //println!("Zip align");
+    shell_env_cap(&[], &out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &aapt_args) ?;
 
     //println!("Zip aligning apk");
     shell_env_cap(&[], &out_dir, &sdk_dir.join("android-13/zipalign").to_str().unwrap(), &[
@@ -278,8 +316,9 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
        &dst_unaligned_apk.to_str().unwrap(),
        &dst_apk.to_str().unwrap(),
     ]) ?;
-        
+
     let java_home = sdk_dir.join("openjdk");
+
     //println!("Signing APK");
     shell_env_cap(
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
@@ -386,4 +425,23 @@ pub fn javac(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), St
         &args_out
     ) ?;
     Ok(())
+}
+
+fn extract_dependency_info(line: &str) -> Option<(String, String)> {
+    let dependency_output_start = line.find(|c: char| c.is_alphanumeric())?;
+    let dependency_output = &line[dependency_output_start..];
+
+    let mut tokens = dependency_output.split(' ');
+    if let Some(name) = tokens.next() {
+        for token in tokens.collect::<Vec<&str>>() {
+            if token == "(*)" || token == "(proc-macro)" {
+                continue;
+            }
+            if token.starts_with("(") {
+                let path = token[1..token.len() - 1].to_owned();
+                return Some((name.to_string(), path))
+            }
+        }
+    }
+    None
 }
