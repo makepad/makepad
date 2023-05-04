@@ -538,9 +538,16 @@ impl TextInput {
                 KeyCode::KeyX if ke.modifiers.logo || ke.modifiers.control => {
                     self.undo_id += 1;
                     if self.cursor_head != self.cursor_tail {
+                        cx.copy_to_clipboard(self.selected_text());
                         self.create_undo(UndoGroup::Cut(self.undo_id));
                         self.change(cx, "", dispatch_action);
                     }
+                }
+                KeyCode::KeyC if ke.modifiers.logo || ke.modifiers.control => {
+                    cx.copy_to_clipboard(self.selected_text());
+                }
+                KeyCode::KeyV if ke.modifiers.logo || ke.modifiers.control => {
+                    cx.paste_from_clipboard();
                 }
                 KeyCode::ArrowLeft => {
                     self.undo_id += 1;
