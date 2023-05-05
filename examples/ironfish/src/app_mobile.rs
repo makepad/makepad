@@ -614,6 +614,11 @@ live_design!{
                 layout: {padding: 10.0}
             }
             
+            <Image> {
+                image: dep("crate://self/resources/tinrs_mobile.png"),
+                walk: {width: (178 * 0.175), height: (121 * 0.175), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 } }
+                layout: {padding: 0}
+            }
         }
         
         <Frame> {
@@ -1208,8 +1213,8 @@ live_design!{
                             svg_file: (ICO_SEQ),
                             fn get_color(self) -> vec4 {
                                 return mix(
-                                    #xf00f,
-                                    #x00ff,
+                                    (COLOR_UP_6),
+                                    (COLOR_UP_FULL),
                                     self.selected
                                 )
                             }
@@ -1221,14 +1226,32 @@ live_design!{
                     }
                     tab2 = <FishTab> {
                         label: "Play",
-                        draw_icon: {svg_file: (ICO_LIVEPLAY)}
+                        draw_icon: {
+                            svg_file: (ICO_LIVEPLAY),
+                            fn get_color(self) -> vec4 {
+                                return mix(
+                                    (COLOR_UP_6),
+                                    (COLOR_UP_FULL),
+                                    self.selected
+                                )
+                            }
+                        }
                         walk: {width: Fill}
                         icon_walk: {width: 30, height: Fit}
                         layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
                     }
                     tab3 = <FishTab> {
                         label: "Presets",
-                        draw_icon: {svg_file: (ICO_PRESET)}
+                        draw_icon: {
+                            svg_file: (ICO_PRESET),
+                            fn get_color(self) -> vec4 {
+                                return mix(
+                                    (COLOR_UP_6),
+                                    (COLOR_UP_FULL),
+                                    self.selected
+                                )
+                            }
+                        }
                         walk: {width: Fill}
                         icon_walk: {width: 30, height: Fit}
                         layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
