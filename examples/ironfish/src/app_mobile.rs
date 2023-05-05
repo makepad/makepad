@@ -108,7 +108,6 @@ live_design!{
     ICO_SHARE = dep("crate://self/resources/icons/Icon_Share.svg")
     ICO_UP = dep("crate://self/resources/icons/Icon_Up.svg")
     
-    
     // WIDGETS
     
     DividerX = <Frame> {

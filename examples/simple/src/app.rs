@@ -122,7 +122,6 @@ app_main!(App);
 #[derive(Live)]
 // This function is used to register any DSL code that you depend on.
 // called automatically by the code we generated with the call to the macro `main_app` above.
-
 pub struct App {
     // A chromeless window for our application. Used to contain our frame widget.
     // A frame widget. Used to contain our button and label.
