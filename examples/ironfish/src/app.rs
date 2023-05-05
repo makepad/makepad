@@ -37,8 +37,8 @@ live_design!{
         }
         
         ui: <MultiWindow> {
-            <DesktopWindow> {
-                window: {inner_size: vec2(1280, 1000)},
+            mobile =<DesktopWindow> {
+                window: {inner_size: vec2(1280, 1000), dpi_override:2},
                 pass: {clear_color: #2A}
                 block_signal_event: true; 
                 <AppDesktop> {}
@@ -207,12 +207,9 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
         let preset_lists = self.ui.get_swipe_list_set(ids!(preset_list));
-        
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
-            // draw the ui using hooks
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                // draw the preset lists
                 if let Some(mut list) = preset_lists.pick(next).borrow_mut() {
                     for i in 0..10 {
                         if let Some(item) = list.get_entry(cx, LiveId(i as u64).into(), live_id!(Entry)) {

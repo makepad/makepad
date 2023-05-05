@@ -248,7 +248,8 @@ impl<'a> LiveExpander<'a> {
                                 
                                 out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
-                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
+                                    //*class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
+                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: local_ptr as u32, generation});
                                 }
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
@@ -260,7 +261,8 @@ impl<'a> LiveExpander<'a> {
                                 
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
-                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
+                                    *class_parent = Some(live_ptr);
+                                    //*class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
                                 }
                             }
                         };
