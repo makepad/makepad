@@ -108,6 +108,7 @@ live_design!{
     ICO_SHARE = dep("crate://self/resources/icons/Icon_Share.svg")
     ICO_UP = dep("crate://self/resources/icons/Icon_Up.svg")
     
+    
     // WIDGETS
     
     DividerX = <Frame> {
@@ -584,7 +585,7 @@ live_design!{
         <Frame> {
             walk: {width: Fill, height: Fit, margin: 0.0}
             layout: {align: {x: 0.0, y: 0.5}, spacing: (SPACING_CONTROLS), padding: 0.0}
-            
+
             playpause = <PlayPause> {}
             
             speed = <TextSlider> {
@@ -598,6 +599,12 @@ live_design!{
             }
             
             <FillerX> {}
+
+            <Image> {
+                image: dep("crate://self/resources/tinrs_mobile.png"),
+                walk: {width: (178 * 0.175), height: (121 * 0.175), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 } }
+                layout: {padding: 0}
+            }
             
             share = <IconButton> {
                 draw_icon: {
@@ -613,11 +620,6 @@ live_design!{
                 layout: {padding: 10.0}
             }
             
-            <Image> {
-                image: dep("crate://self/resources/tinrs_mobile.png"),
-                walk: {width: (178 * 0.175), height: (121 * 0.175), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 } }
-                layout: {padding: 0}
-            }
         }
         
         <Frame> {
@@ -1207,6 +1209,7 @@ live_design!{
                 
                 mobile_modes = <Frame> {
                     tab1 = <FishTab> {
+                        state: {selected = {default: on}},
                         label: "Sequence"
                         draw_icon: {
                             svg_file: (ICO_SEQ),
@@ -1219,9 +1222,8 @@ live_design!{
                             }
                         }
                         walk: {width: Fill}
-                        icon_walk: {width: 30, height: Fit}
+                        icon_walk: {width: 27.5, height: Fit}
                         layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
-                        state: {selected = {default: on}},
                     }
                     tab2 = <FishTab> {
                         label: "Play",
@@ -1236,7 +1238,7 @@ live_design!{
                             }
                         }
                         walk: {width: Fill}
-                        icon_walk: {width: 30, height: Fit}
+                        icon_walk: {width: 34, height: Fit}
                         layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
                     }
                     tab3 = <FishTab> {
@@ -1252,7 +1254,7 @@ live_design!{
                             }
                         }
                         walk: {width: Fill}
-                        icon_walk: {width: 30, height: Fit}
+                        icon_walk: {width: 34, height: Fit}
                         layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
                     }
                 }

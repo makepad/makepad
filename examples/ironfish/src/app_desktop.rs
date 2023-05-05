@@ -1826,7 +1826,7 @@ live_design!{
                 walk: {width: Fill, height: 30}
                 layout: {spacing: (SSPACING_1)}
                 
-                panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 17.5 } }
+                panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 15.0 } }
                 platformtoggle = <IconButton> { draw_icon: { svg_file: (ICO_PLAT_MOBILE) } icon_walk: { width: Fit, height: 17.5 } }
 
                 presets = <IconButton> { draw_icon: { svg_file: (ICO_PRESET) } icon_walk: { width: Fit, height: 17.5 } }
@@ -1836,8 +1836,8 @@ live_design!{
                 
                 <FillerH> {}
 
-                undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 17.5 } }
-                redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 17.5 } }
+                undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 15.0 } }
+                redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 15.0 } }
             }
             
         }
