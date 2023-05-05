@@ -120,6 +120,10 @@ impl LiveId {
         (self.0 & 0x8000_0000_0000_0000) == 0 && self.0 != 0
     }
     
+    pub fn is_ident(&self) -> bool {
+        return !self.is_unique()
+    }
+    
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
@@ -197,10 +201,13 @@ impl LiveId {
     }
     
     pub fn as_string<F, R>(&self, f: F) -> R
-    where F: FnOnce(Option<&String>) -> R
+    where F: FnOnce(Option<&str>) -> R
     {
         LiveIdInterner::with( | idmap | {
-            return f(idmap.id_to_string.get(self))
+            match idmap.id_to_string.get(self){
+                Some(v)=>f(Some(&v)),
+                None=>f(None)
+            }
         })
     }
 
