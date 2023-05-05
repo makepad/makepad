@@ -194,6 +194,7 @@ pub trait LiveIdAsProp {
     fn as_field(&self) -> LiveProp;
     fn as_instance(&self) -> LiveProp;
 }
+
 impl LiveIdAsProp for LiveId {
     fn as_field(&self) -> LiveProp {LiveProp(*self, LivePropType::Field)}
     fn as_instance(&self) -> LiveProp {LiveProp(*self, LivePropType::Instance)}
