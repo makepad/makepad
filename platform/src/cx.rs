@@ -174,6 +174,15 @@ pub struct XrCapabilities {
 }
 
 impl OsType {
+    pub fn is_single_window(&self)->bool{
+        match self{
+            OsType::Web(_) => true,
+            OsType::IOS=>true,
+            OsType::Android(_) => true,
+            OsType::LinuxDirect=> true,
+            _=> false
+        }
+    }
     pub fn is_web(&self) -> bool {
         match self {
             OsType::Web(_) => true,
