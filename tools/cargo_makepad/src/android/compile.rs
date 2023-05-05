@@ -135,19 +135,22 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     //println!("Creating R class");
     let java_home = sdk_dir.join("openjdk");
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dst_unzipped_apk = out_dir.join(format!("{underscore_target}.unzipped.apk"));
+    let dst_unaligned_apk = out_dir.join(format!("{underscore_target}.unaligned.apk"));
     let dst_apk = out_dir.join(format!("{underscore_target}.apk"));
 
-    let _ = rm(&dst_unzipped_apk);
+    let _ = rm(&dst_unaligned_apk);
     let _ = rm(&dst_apk);
-
+    
+    println!("Compiling APK File");   
+                
+    //println!("Compiling Java menu");    
     shell_env(
          &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
         &sdk_dir.join("android-13/aapt").to_str().unwrap(),
         &[
             "package",
-            "-v",
+            //"-v",
             "-f",
             "-m",
             "-I",
@@ -159,14 +162,14 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             "-J",
             &cargo_manifest_dir.join("src/android/java").to_str().unwrap(),
             "--custom-package",
-            "dev.makepad.android",
+            &java_url,
             &out_dir.to_str().unwrap(),
         ]
     ) ?;
 
     // lets build the APK
 
-    println!("Compiling APK file");
+    //println!("Compiling Java");
     shell_env(
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
@@ -185,7 +188,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         ]   
     ) ?; 
 
-    // println!("Building dex file");
+    //println!("Building dex file");
     shell_env_cap( 
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
@@ -203,10 +206,10 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             &out_dir.join("dev/makepad/android/MakepadSurfaceView.class").to_str().unwrap(),
             &out_dir.join("dev/makepad/android/Makepad$Callback.class").to_str().unwrap(),
             &java_class.to_str().unwrap(),
-        ] 
+        ]
     ) ?;
     
-    // println!("Creating base apk file");
+    //println!("Creating unaligned apk file");
 
     shell_env(
          &[("JAVA_HOME", &java_home.to_str().unwrap())],
@@ -216,7 +219,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             "package",
             "-f",
             "-F",
-            &dst_unzipped_apk.to_str().unwrap(),
+            &dst_unaligned_apk.to_str().unwrap(),
             "-I",
             &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
             "-M",
@@ -227,7 +230,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         ]
     ) ?;
     
-    //println!("Adding library");
+   //println!("Adding rust library to apk");
      
     mkdir(&out_dir.join("lib/arm64-v8a")) ?;
     
@@ -237,7 +240,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
 
     shell_env_cap(&[], &out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
         "add",
-        &dst_unzipped_apk.to_str().unwrap(),
+        &dst_unaligned_apk.to_str().unwrap(),
         "lib/arm64-v8a/libmakepad.so",
     ]) ?;
     
@@ -248,28 +251,32 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     cp(&cwd.join("widgets/resources/LiberationMono-Regular.ttf"), &font_dir.join("LiberationMono-Regular.ttf"), false) ?;
 
     cp(&cwd.join("examples/ironfish/resources/tinrs.png"), &out_dir.join("assets/makepad/resources/tinrs.png"), false) ?;
+    cp(&cwd.join("examples/ironfish/resources/icons/Icon_Arp.svg"), &out_dir.join("assets/makepad/resources/icons/Icon_Arp.svg"), false) ?;
 
+    //println!("Adding resources to apk");
     shell_env_cap(&[], &out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
         "add",
-        &dst_unzipped_apk.to_str().unwrap(),
+        &dst_unaligned_apk.to_str().unwrap(),
         "assets/makepad/makepad_widgets/resources/IBMPlexSans-Text.ttf",
         "assets/makepad/makepad_widgets/resources/IBMPlexSans-SemiBold.ttf",
         "assets/makepad/makepad_widgets/resources/LiberationMono-Regular.ttf",
         "assets/makepad/resources/tinrs.png",
+        "assets/makepad/resources/icons/Icon_Arp.svg",
     ]) ?;
 
     //println!("Zip align");
 
+    //println!("Zip aligning apk");
     shell_env_cap(&[], &out_dir, &sdk_dir.join("android-13/zipalign").to_str().unwrap(), &[
        "-v",
        "-f",
        "4",
-       &dst_unzipped_apk.to_str().unwrap(),
+       &dst_unaligned_apk.to_str().unwrap(),
        &dst_apk.to_str().unwrap(),
     ]) ?;
         
     let java_home = sdk_dir.join("openjdk");
-
+    //println!("Signing APK");
     shell_env_cap(
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
