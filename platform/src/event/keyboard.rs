@@ -112,6 +112,11 @@ pub struct TextCopyEvent {
     pub response: Rc<RefCell<Option<String>>>
 }
 
+#[derive(Clone, Debug)]
+pub struct TextCutEvent {
+    pub response: Rc<RefCell<Option<String>>>
+}
+
 impl Default for KeyCode {
     fn default() -> Self {KeyCode::Unknown}
 }
