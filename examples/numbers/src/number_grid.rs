@@ -70,14 +70,14 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        label: {hover: 0.0}
+                        draw_label: {hover: 0.0}
                         draw_bg: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        label: {hover: 1.0}
+                        draw_label: {hover: 1.0}
                         draw_bg: {hover: 1.0}
                     }
                 }
@@ -87,14 +87,14 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        label: {focus: 0.0}
+                        draw_label: {focus: 0.0}
                         draw_bg: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        label: {focus: 1.0}
+                        draw_label: {focus: 1.0}
                         draw_bg: {focus: 1.0}
                     }
                 }
