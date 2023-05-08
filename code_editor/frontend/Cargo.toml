@@ -1,0 +1,8 @@
+[package]
+name = "makepad-code-editor-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-code-editor-core = { path = "../core" }
+makepad-widgets = { path = "../../widgets" }

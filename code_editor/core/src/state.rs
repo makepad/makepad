@@ -18,43 +18,43 @@ impl State {
     }
 
     pub fn create_view(&mut self) -> ViewId {
-        let model_id = self.models.insert(Model {
-            view_ids: HashSet::new(),
+        let model = self.models.insert(Model {
+            views: HashSet::new(),
             buf: Buf::new(),
         });
-        let view_id = self.views.insert(RefCell::new(View {
-            model_id,
+        let view = self.views.insert(RefCell::new(View {
+            model,
             sel: Sel::new(),
         }));
-        self.models[model_id].view_ids.insert(view_id);
-        ViewId(view_id)
+        self.models[model].views.insert(view);
+        ViewId(view)
     }
 
-    pub fn destroy_view(&mut self, ViewId(view_id): ViewId) {
-        let model_id = self.views[view_id].borrow().model_id;
-        self.models[model_id].view_ids.remove(&view_id);
-        if self.models[model_id].view_ids.is_empty() {
-            self.models.remove(model_id);
+    pub fn destroy_view(&mut self, ViewId(view): ViewId) {
+        let model = self.views[view].borrow().model;
+        self.models[model].views.remove(&view);
+        if self.models[model].views.is_empty() {
+            self.models.remove(model);
         }
-        self.views.remove(view_id);
+        self.views.remove(view);
     }
 
-    pub fn handle_event(&mut self, ViewId(view_id): ViewId, event: Event) {
-        let model_id = self.views[view_id].borrow().model_id;
-        let sibling_views: Vec<_> = self.models[model_id]
-            .view_ids
+    pub fn handle_event(&mut self, ViewId(view): ViewId, event: Event) {
+        let model = self.views[view].borrow().model;
+        let sibling_views: Vec<_> = self.models[model]
+            .views
             .iter()
-            .filter_map(|&sibling_view_id| {
-                if sibling_view_id == view_id {
+            .filter_map(|&sibling_view| {
+                if sibling_view == view {
                     return None;
                 }
-                Some(self.views[sibling_view_id].borrow_mut())
+                Some(self.views[sibling_view].borrow_mut())
             })
             .collect();
         HandleEventContext {
-            view: self.views[view_id].borrow_mut(),
+            view: self.views[view].borrow_mut(),
             sibling_views,
-            model: &mut self.models[model_id],
+            model: &mut self.models[model],
         }
         .handle_event(event);
     }
@@ -65,7 +65,7 @@ pub struct ViewId(Id<RefCell<View>>);
 
 #[derive(Debug)]
 struct View {
-    model_id: Id<Model>,
+    model: Id<Model>,
     sel: Sel,
 }
 
@@ -82,7 +82,7 @@ impl View {
 
 #[derive(Debug)]
 struct Model {
-    view_ids: HashSet<Id<RefCell<View>>>,
+    views: HashSet<Id<RefCell<View>>>,
     buf: Buf,
 }
 
