@@ -1210,7 +1210,7 @@ live_design!{
                 mobile_modes = <Frame> {
                     tab1 = <FishTab> {
                         state: {selected = {default: on}},
-                        label: "Sequence"
+                        label: "Sequencer"
                         draw_icon: {
                             svg_file: (ICO_SEQ),
                             fn get_color(self) -> vec4 {
@@ -1238,8 +1238,8 @@ live_design!{
                             }
                         }
                         walk: {width: Fill}
-                        icon_walk: {width: 34, height: Fit}
-                        layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
+                        icon_walk: {width: 34, height: Fit, margin: {top: 0.0, right: 0.0, bottom: 5.0, left: 0.0}}
+                        layout: {flow: Down, spacing: 3.0, align: {x: 0.5, y: 0.5}}
                     }
                     tab3 = <FishTab> {
                         label: "Presets",
@@ -1254,7 +1254,7 @@ live_design!{
                             }
                         }
                         walk: {width: Fill}
-                        icon_walk: {width: 34, height: Fit}
+                        icon_walk: {width: 30, height: Fit}
                         layout: {flow: Down, spacing: 5.0, align: {x: 0.5, y: 0.5}}
                     }
                 }
