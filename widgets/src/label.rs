@@ -30,7 +30,7 @@ pub struct Label {
 
     //margin: Margin,
     #[live] label: String,
-}
+} 
 
 impl LiveHook for Label{
     fn before_live_design(cx:&mut Cx){

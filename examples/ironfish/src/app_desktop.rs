@@ -1874,14 +1874,6 @@ live_design!{
                 
                 panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 17.5 } }
                 platformtoggle = <IconButton> { draw_icon: { svg_file: (ICO_PLAT_MOBILE) } icon_walk: { width: Fit, height: 17.5 } }
-
-                presets = <IconButton> { draw_icon: { svg_file: (ICO_PRESET) } icon_walk: { width: Fit, height: 17.5 } }
-
-                prev = <IconButton> { draw_icon: { svg_file: (ICO_PREV) } icon_walk: { width: Fit, height: 11.0 }, walk: {margin: {top: 5.0, right: 0.0, bottom: 0.0, left: 0.0}} }
-                next = <IconButton> { draw_icon: { svg_file: (ICO_NEXT) } icon_walk: { width: Fit, height: 11.0 }, walk: {margin: {top: 5.0, right: 0.0, bottom: 0.0, left: 0.0}} }
-                
-                <FillerH> {}
-
                 undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 17.5 } }
                 redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 17.5 } }
             }
@@ -2007,7 +1999,7 @@ live_design!{
         center: <Frame> {
             layout: {flow: Right, align: {x: 0.0, y: 0.5}}
             walk: {width: Fill, height: Fit}
-            
+
             label = <Button> {
                 walk: {width: Fill, height: Fill}
                 layout: {align: {x: 0.0, y: 0.5}, padding: {left: 5}}
@@ -2063,7 +2055,7 @@ live_design!{
     }
     
     PresetList = <SwipeList> {
-        walk: { height: Fill }
+        walk: { height: Fill, margin: 2.5}
         Entry = <PresetListEntry>{
         }
     }
@@ -2146,7 +2138,7 @@ live_design!{
     
     Presets = <GradientX> {
         walk: {width: 250, height: Fill}
-        layout: {flow: Down, padding: {right: 5}}
+        layout: {flow: Down, padding: {right: 5, top: 15.0, left: 0.0}}
         
         draw_bg: {
             instance dither: 1.0
