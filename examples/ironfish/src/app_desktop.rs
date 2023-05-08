@@ -1826,18 +1826,18 @@ live_design!{
                 walk: {width: Fill, height: 30}
                 layout: {spacing: (SSPACING_1)}
                 
-                panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 15.0 } }
-                platformtoggle = <IconButton> { draw_icon: { svg_file: (ICO_PLAT_MOBILE) } icon_walk: { width: Fit, height: 17.5 } }
 
-                presets = <IconButton> { draw_icon: { svg_file: (ICO_PRESET) } icon_walk: { width: Fit, height: 17.5 } }
+                prev = <IconButton> { draw_icon: { svg_file: (ICO_PREV) } icon_walk: { width: Fit, height: 11.0 }, walk: {margin: {top: 3.25, right: -10.0, bottom: 0.0, left: 0.0}} }
+                presets = <IconButton> { draw_icon: { svg_file: (ICO_PRESET) } icon_walk: { width: Fit, height: 17.5 }, walk: { margin: 0.0 } }
+                next = <IconButton> { draw_icon: { svg_file: (ICO_NEXT) }, icon_walk: { width: Fit, height: 11.0 }, walk: { margin: { top: 3.25, right: 0.0, bottom: 0.0, left: -10.0 } } }
 
-                prev = <IconButton> { draw_icon: { svg_file: (ICO_PREV) } icon_walk: { width: Fit, height: 11.0 }, walk: {margin: {top: 5.0, right: 0.0, bottom: 0.0, left: 0.0}} }
-                next = <IconButton> { draw_icon: { svg_file: (ICO_NEXT) } icon_walk: { width: Fit, height: 11.0 }, walk: {margin: {top: 5.0, right: 0.0, bottom: 0.0, left: 0.0}} }
+                panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 17.0 }, walk: {margin: {left: 5.0, right: -10.0}} }
+                platformtoggle = <IconButton> { draw_icon: { svg_file: (ICO_PLAT_MOBILE) } icon_walk: { width: Fit, height: 18.5 } }
                 
                 <FillerH> {}
 
-                undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 15.0 } }
-                redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 15.0 } }
+                undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 15.0 }, walk: {margin: {top: 3.25, right: -5.0, bottom: 0.0, left: 0.0}} }
+                redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 15.0 }, walk: { margin: { top: 3.25, right: 0.0, bottom: 0.0, left: -5.0 } } }
             }
             
         }
@@ -1951,7 +1951,7 @@ live_design!{
 
             <Frame> {
                 layout: {flow: Right, align: {x: 0.0, y: 0.5}, padding: 0.0 }
-                walk: {width: Fill, height: Fit, margin: 0.0}
+                walk: {width: Fill, height: Fit, margin: { left: 5.0, top: 2.5 }}
                 
                 label = <Button> {
                     walk: {width: Fill, height: Fill}
@@ -2008,7 +2008,7 @@ live_design!{
     }
     
     PresetList = <SwipeList> {
-        walk: { height: Fill }
+        walk: { height: Fill, margin: 2.5}
         Entry = <PresetListEntry>{
         }
     }
