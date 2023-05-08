@@ -16,6 +16,7 @@ live_design!{
     import makepad_draw::shader::std::*
     
     Designer = {{Designer}} {
+        has_view: true,
         layout: {flow: Right},
         container: <Box> {
             draw_bg: {color: #3}
