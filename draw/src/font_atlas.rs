@@ -268,7 +268,7 @@ impl<'a> Cx2d<'a> {
         //let start = Cx::profile_time_ns();
         // we need to start a pass that just uses the texture
         if fonts_atlas.alloc.todo.len()>0 {
-            self.begin_pass(&draw_fonts_atlas.atlas_pass);
+            self.begin_pass(&draw_fonts_atlas.atlas_pass, None);
 
             let texture_size = fonts_atlas.alloc.texture_size;
             draw_fonts_atlas.atlas_pass.set_size(self.cx, texture_size);

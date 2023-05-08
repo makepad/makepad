@@ -74,9 +74,9 @@ pub use crate::{
     drop_down::*,
     radio_button::*,
     swipe_list::*,
-    text_input::{TextInput},
-    link_label::{LinkLabel},
-    desktop_window::{DesktopWindow},
+    text_input::*,
+    link_label::*,
+    desktop_window::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
@@ -125,6 +125,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::swipe_list::live_design(cx);
     crate::multi_window::live_design(cx);
     crate::designer::live_design(cx);
+    crate::hook_widget::live_design(cx);
     //#[cfg(ide_widgets)]{
         crate::log_list::live_design(cx);
         crate::log_icon::live_design(cx);

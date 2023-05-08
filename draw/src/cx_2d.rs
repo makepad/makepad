@@ -3,7 +3,7 @@ use {
         ops::Deref,
         ops::DerefMut
     },
-    crate::{ 
+    crate::{
         makepad_math::DVec2,
         makepad_platform::{
             DrawEvent,
@@ -27,9 +27,9 @@ use {
     }
 };
 
-pub struct PassStackItem{
+pub struct PassStackItem {
     pub pass_id: PassId,
-    dpi_factor: f64, 
+    dpi_factor: f64,
     draw_list_stack_len: usize,
     turtles_len: usize
 }
@@ -52,15 +52,15 @@ pub struct Cx2d<'a> {
 impl<'a> Deref for Cx2d<'a> {type Target = Cx; fn deref(&self) -> &Self::Target {self.cx}}
 impl<'a> DerefMut for Cx2d<'a> {fn deref_mut(&mut self) -> &mut Self::Target {self.cx}}
 
-impl<'a> Drop for Cx2d<'a>{
-    fn drop(&mut self){
+impl<'a> Drop for Cx2d<'a> {
+    fn drop(&mut self) {
         self.draw_font_atlas();
         self.draw_icon_atlas();
     }
 }
 
 impl<'a> Cx2d<'a> {
-
+    
     /*pub fn set_sweep_lock(&mut self, lock:Area){
         *self.overlay_sweep_lock.as_ref().unwrap().borrow_mut() = lock;
     }
@@ -85,7 +85,7 @@ impl<'a> Cx2d<'a> {
             fonts_atlas_rc,
             cx: cx,
             draw_event,
-           // overlay_sweep_lock: None,
+            // overlay_sweep_lock: None,
             pass_stack: Vec::new(),
             draw_list_stack: Vec::new(),
             turtle_walks: Vec::new(),
@@ -100,7 +100,7 @@ impl<'a> Cx2d<'a> {
         self.pass_stack.last().unwrap().dpi_factor
     }
     
-    pub fn inside_pass(&self)->bool{
+    pub fn inside_pass(&self) -> bool {
         self.pass_stack.len()>0
     }
     
@@ -110,31 +110,34 @@ impl<'a> Cx2d<'a> {
         cxpass.parent = CxPassParent::Pass(pass_id);
     }
     
-    pub fn begin_pass(&mut self, pass: &Pass) {
+    pub fn begin_pass(&mut self, pass: &Pass, dpi_override: Option<f64>) {
         let cxpass = &mut self.passes[pass.pass_id()];
         
         cxpass.main_draw_list_id = None;
         
-        let dpi_factor = match cxpass.parent {
-            CxPassParent::Window(window_id) => {
-                self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Size(self.windows[window_id].get_inner_size()));
-                self.get_delegated_dpi_factor(pass.pass_id())
-            }
-            CxPassParent::Pass(pass_id) => {
-                self.passes[pass.pass_id()].pass_rect = self.passes[pass_id].pass_rect.clone();
-                self.get_delegated_dpi_factor(pass_id)
-            }
-            _ => {
-                cxpass.override_dpi_factor = Some(1.0);
-                1.0
+        let dpi_factor = if let Some(dpi_override) = dpi_override {dpi_override}
+        else {
+            match cxpass.parent {
+                CxPassParent::Window(window_id) => {
+                    self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Size(self.windows[window_id].get_inner_size()));
+                    self.get_delegated_dpi_factor(pass.pass_id())
+                }
+                CxPassParent::Pass(pass_id) => {
+                    self.passes[pass.pass_id()].pass_rect = self.passes[pass_id].pass_rect.clone();
+                    self.get_delegated_dpi_factor(pass_id)
+                }
+                _ => {
+                    1.0
+                }
             }
         };
+        self.passes[pass.pass_id()].dpi_factor = Some(dpi_factor);
         
-        self.pass_stack.push(PassStackItem{
-            dpi_factor ,
+        self.pass_stack.push(PassStackItem {
+            dpi_factor,
             draw_list_stack_len: self.draw_list_stack.len(),
-            turtles_len:self.turtles.len(),
-            pass_id:pass.pass_id()
+            turtles_len: self.turtles.len(),
+            pass_id: pass.pass_id()
         });
     }
     
@@ -143,7 +146,7 @@ impl<'a> Cx2d<'a> {
         if stack_item.pass_id != pass.pass_id() {
             panic!();
         }
-
+        
         if self.draw_list_stack.len() != stack_item.draw_list_stack_len {
             panic!("Draw list stack disaligned, forgot an end_view(cx)");
         }
@@ -154,7 +157,7 @@ impl<'a> Cx2d<'a> {
         
     }
     
-    pub fn set_pass_area(&mut self, pass:&Pass, area: Area){
+    pub fn set_pass_area(&mut self, pass: &Pass, area: Area) {
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::Area(area));
     }
     
@@ -162,11 +165,11 @@ impl<'a> Cx2d<'a> {
         self.cx.get_pass_rect(self.pass_stack.last().unwrap().pass_id, self.current_dpi_factor()).unwrap().size
     }
     
-    pub fn view_will_redraw(&self, view: &mut View, walk:Walk) -> bool {
+    pub fn view_will_redraw(&self, view: &mut View, walk: Walk) -> bool {
         // ok so we need to check if our turtle position has changed since last time.
         // if it did, we redraw
         let rect = self.peek_walk_turtle(walk);
-        if view.dirty_check_rect != rect{
+        if view.dirty_check_rect != rect {
             view.dirty_check_rect = rect;
             return true;
         }
