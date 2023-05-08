@@ -346,6 +346,8 @@ live_design!{
     ScrollY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
 }
 
+// maybe we should put an enum on the bools like
+
 #[derive(Live)]
 pub struct Frame { // draw info per UI element
     #[live] draw_bg: DrawColor,
@@ -362,7 +364,9 @@ pub struct Frame { // draw info per UI element
     
     #[live] use_cache: bool,
     #[live] dpi_factor: Option<f64>,
+    
     #[live] has_view: bool,
+    
     #[live(true)] visible: bool,
     
     #[live(false)] block_signal_event: bool,
@@ -375,8 +379,10 @@ pub struct Frame { // draw info per UI element
     #[rust] scroll_bars_obj: Option<Box<ScrollBars>>,
     
     #[rust] view_size: Option<DVec2>,
+    
     #[rust] area: Area,
     #[rust] view: Option<View>,
+    
     #[rust] texture_cache: Option<FrameTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
@@ -658,64 +664,7 @@ impl Widget for Frame {
             child.redraw(cx);
         }
     }
-    /*
-    fn create_child(
-        &mut self,
-        cx: &mut Cx,
-        live_ptr: LivePtr,
-        at: CreateAt,
-        new_id: LiveId,
-        nodes: &[LiveNode]
-    ) -> WidgetRef {
-        if self.design_mode {
-            return WidgetRef::empty()
-        }
-        
-        self.draw_order.retain( | v | *v != new_id);
-        
-        // lets resolve the live ptr to something
-        let mut x = WidgetRef::new_from_ptr(cx, Some(live_ptr));
-        
-        x.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
-        
-        self.children.insert(new_id, x);
-        
-        match at {
-            CreateAt::Template => {
-                if let Some((_, draw_order)) = self.templates.values().find( | l | l.0 == live_ptr) {
-                    self.draw_order.insert(*draw_order, new_id);
-                }
-                else {
-                    self.draw_order.push(new_id);
-                }
-            }
-            CreateAt::Begin => {
-                self.draw_order.insert(0, new_id);
-            }
-            CreateAt::End => {
-                self.draw_order.push(new_id);
-            }
-            CreateAt::After(after_id) => {
-                if let Some(index) = self.draw_order.iter().position( | v | *v == after_id) {
-                    self.draw_order.insert(index + 1, new_id);
-                }
-                else {
-                    self.draw_order.push(new_id);
-                }
-            }
-            CreateAt::Before(before_id) => {
-                if let Some(index) = self.draw_order.iter().position( | v | *v == before_id) {
-                    self.draw_order.insert(index, new_id);
-                }
-                else {
-                    self.draw_order.push(new_id);
-                }
-            }
-        }
-        
-        self.children.get_mut(&new_id).unwrap().clone()
-    }
-    */
+    
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         match cached {
             WidgetCache::Yes | WidgetCache::Clear => {
@@ -762,15 +711,6 @@ impl Widget for Frame {
             }
         }
     }
-    /*
-    fn find_template(&self, id: &[LiveId; 1]) -> Option<LivePtr> {
-        if let Some((live_ptr, _)) = self.templates.get(&id[0]) {
-            Some(*live_ptr)
-        }
-        else {
-            None
-        }
-    }*/
 }
 
 #[derive(Clone)]
@@ -825,10 +765,11 @@ impl Frame {
                     if !cx.view_will_redraw(self.view.as_mut().unwrap(), walk) {
                         if let Some(texture_cache) = &self.texture_cache {
                             self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
-                            let rect = cx.walk_turtle_with_area(&mut self.area, walk);
+                            let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
+                            rect.size *= 2.0 / self.dpi_factor.unwrap_or(1.0);
                             self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
-                            cx.set_pass_area(&texture_cache.pass, self.area);
+                            cx.set_pass_scaled_area(&texture_cache.pass, self.area, 2.0/self.dpi_factor.unwrap_or(1.0));
                         }
                         return WidgetDraw::done()
                     }
@@ -871,10 +812,10 @@ impl Frame {
                 if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
                 }
-                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll));
+                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0/self.dpi_factor.unwrap_or(2.0)));
             }
             else {
-                cx.begin_turtle(walk, self.layout.with_scroll(scroll));
+                cx.begin_turtle(walk, self.layout.with_scroll(scroll).with_scale(2.0/self.dpi_factor.unwrap_or(2.0)));
             }
         }
         
@@ -951,7 +892,7 @@ impl Frame {
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
                         let texture_cache = self.texture_cache.as_mut().unwrap();
-                        cx.set_pass_area(&texture_cache.pass, area);
+                        cx.set_pass_scaled_area(&texture_cache.pass, area, 2.0/self.dpi_factor.unwrap_or(1.0));
                     }
                 }
                 self.draw_state.end();
