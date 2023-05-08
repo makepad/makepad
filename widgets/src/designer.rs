@@ -19,13 +19,13 @@ live_design!{
         layout: {flow: Right},
         container: <Box> {
             draw_bg: {color: #3}
-            walk: {width: Fill, height: 800},
+            walk: {width: Fill, height: 400},
             layout: {flow: Down, spacing: 10, padding:10}
             <Box>{
                 walk: {width: Fill, height: Fit},
                 layout:{padding:5}
                 draw_bg:{color:#5}
-                label = <Label> {label: "HI"}
+                label = <Label> {label: "HI", draw_label:{color:#f}}
             }
             inner = <HookWidget> {}
         }
@@ -36,7 +36,7 @@ live_design!{
                 }
             },
             b: <CachedScrollXY> {
-                //dpi_factor: 0.25
+                dpi_factor: 1.0
                 draw_bg: {color: #4}
                 walk: {width: Fill, height: Fill}
                 layout: {flow: Down},

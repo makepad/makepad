@@ -14,6 +14,7 @@ pub struct Layout {
     #[live] pub padding: Padding,
     #[live] pub align: Align,
     #[live] pub flow: Flow,
+    #[live(1.0)] pub scale: f64,
     #[live] pub spacing: f64
 }
 
@@ -23,6 +24,7 @@ impl Default for Layout{
             scroll: dvec2(0.0,0.0),
             clip_x: true,
             clip_y: true,
+            scale: 1.0,
             padding: Padding::default(),
             align: Align{x:0.0,y:0.0},
             flow: Flow::Right,
@@ -215,8 +217,8 @@ impl<'a> Cx2d<'a> {
                 parent.pos + parent.child_spacing(self.turtle_walks.len())
             };
             
-            let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow);
-            let h = parent.eval_height(walk.height, walk.margin, parent.layout.flow);
+            let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow) * layout.scale;
+            let h = parent.eval_height(walk.height, walk.margin, parent.layout.flow) * layout.scale;
             
             // figure out new clipping rect
             let (x0, x1) = if layout.clip_x {
@@ -237,12 +239,12 @@ impl<'a> Cx2d<'a> {
                 })
             }else {(parent.draw_clip.0.y, parent.draw_clip.1.y)};
             
-            (o - layout.scroll, w, h, (dvec2(x0, y0) + layout.scroll, dvec2(x1, y1)+layout.scroll))
+            (o - layout.scroll, w, h, (dvec2(x0, y0), dvec2(x1, y1)* layout.scale))
         }
         else {
             let o = DVec2 {x: walk.margin.left, y: walk.margin.top};
-            let w = walk.width.fixed_or_nan();
-            let h = walk.height.fixed_or_nan();
+            let w = walk.width.fixed_or_nan() * layout.scale;
+            let h = walk.height.fixed_or_nan() * layout.scale;
             
             (o, w, h, (dvec2(o.x, o.y), dvec2(o.x + w, o.y + h)))
         };
@@ -806,6 +808,11 @@ impl Layout {
     
     pub fn with_scroll(mut self, v: DVec2) -> Self {
         self.scroll = v;
+        self
+    }
+    
+    pub fn with_scale(mut self, s: f64) -> Self {
+        self.scale = s;
         self
     }
     

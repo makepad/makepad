@@ -260,6 +260,7 @@ pub enum PassMatrixMode {
 #[derive(Clone)]
 pub enum CxPassRect {
     Area(Area),
+    ScaledArea(Area,f64),
     Size(DVec2)
 }
 
