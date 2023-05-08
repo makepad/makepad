@@ -90,7 +90,7 @@ live_design!{
                 <Slide> {title = {label: "Visual design"}, 
                     <Frame>{
                         layout:{padding: 30, align:{x:0.5}, spacing: 30}
-                        <AppDesktop> {walk:{width:1100}}
+                        <AppDesktop> {walk:{width:900}}
                         <Designer> {walk:{width:900}}
                     }
                 }
