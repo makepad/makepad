@@ -138,7 +138,7 @@ impl DrawShaderTextureInput{
 
 #[derive(FromWasm)]
 pub struct FromWasmCreateThread {
-    pub closure_ptr: u32,
+    pub context_ptr: u32,
 }
 
 

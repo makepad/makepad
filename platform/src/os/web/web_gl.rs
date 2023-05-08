@@ -182,24 +182,18 @@ impl Cx {
         }*/
     }
     
-    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f64)->DVec2{
+    pub fn setup_render_pass(&mut self, pass_id: PassId)->DVec2{
         self.passes[pass_id].paint_dirty = false;
-        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
-            override_dpi_factor
-        }
-        else {
-            inherit_dpi_factor
-        };
+        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
-        pass_rect.size
+        pass_rect.size 
     }
     
     pub fn draw_pass_to_canvas(
         &mut self,
         pass_id: PassId,
-        dpi_factor: f64
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -223,7 +217,7 @@ impl Cx {
             clear_depth,
         });
         
-        self.setup_render_pass(pass_id, dpi_factor);
+        self.setup_render_pass(pass_id);
         
         self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
         
@@ -238,11 +232,11 @@ impl Cx {
         );
     }
     
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, dpi_factor: f64) {
+    pub fn draw_pass_to_texture(&mut self, pass_id: PassId) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
-        let pass_size = self.setup_render_pass(pass_id, dpi_factor);
-        
+        let pass_size = self.setup_render_pass(pass_id);
+        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         /*
         self.platform.from_wasm(FromWasmBeginRenderTargets {
             pass_id,
