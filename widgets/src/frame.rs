@@ -900,5 +900,9 @@ impl Frame {
         }
         WidgetDraw::done()
     }
+    
+     pub fn child_count(&self) -> usize {
+        self.draw_order.len()
+    }
 }
 

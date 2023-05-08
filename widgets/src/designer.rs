@@ -36,7 +36,7 @@ live_design!{
                 }
             },
             b: <CachedScrollXY> {
-                dpi_factor: 1.0
+                dpi_factor: 1.5
                 draw_bg: {color: #4}
                 walk: {width: Fill, height: Fill}
                 layout: {flow: Down},
