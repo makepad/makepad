@@ -63,7 +63,7 @@ live_design!{
         */
 
         ui: <DesktopWindow> {
-            window: {inner_size: vec2(1280, 1000)},
+            window: {inner_size: vec2(1920, 1080)},
             pass: {clear_color: #2A}
             block_signal_event: true; 
             <SlidesView> {
@@ -71,7 +71,7 @@ live_design!{
                 layout: { padding: 10.0 }
                 <Slide> {
                     walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 100 }
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
                     draw_bg: { color: #x1A, radius: 5.0 }
                     title = {
                         label: "MAKEPAD\nDesigning UI in Rust"},
@@ -87,32 +87,33 @@ live_design!{
                 }
                 <Slide> {title = {label: "Ironfish Desktop"}, 
                     walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 100}
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Box>{
                         draw_bg: { color: #x2A }
-                        walk: { margin: 10.0 }
+                        walk: { margin: 10.0, width: 1600 }
                         layout:{ padding: 0.0 }
                         <AppDesktop> {}
                     }
                 }
                 <Slide> {title = {label: "Ironfish Mobile"}, 
                     walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 100}
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
-                        layout:{padding: 30, align:{x:0.5}}
-                        walk: { margin: { top: 50 }}
-                        <AppMobile> {walk:{width:400, height: 800}}
+                        layout:{padding: 0, align:{x:0.5}}
+                        walk: { margin: { top: 0 }}
+                        <AppMobile> {walk:{width:400, height: Fill}}
                     }
                 }
                 <Slide> {title = {label: "Multi modal"}, 
                     walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 100}
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}, spacing: 20}
-                        <AppMobile> {walk:{width:400, height: 800}}
+
+                        <AppMobile> {walk:{width:400, height: Fill}}
 
                         <Box>{
                             draw_bg: { color: #x2A }
@@ -126,7 +127,7 @@ live_design!{
                 }
                 <Slide> {title = {label: "Visual design"}, 
                     walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 100}
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}, spacing: 20}
