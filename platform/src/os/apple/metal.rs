@@ -247,7 +247,6 @@ impl Cx {
     pub fn draw_pass(
         &mut self,
         pass_id: PassId,
-        dpi_factor: f64,
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) {
@@ -256,6 +255,8 @@ impl Cx {
         let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         
         let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
+        
+        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         
         let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
         
@@ -266,12 +267,13 @@ impl Cx {
             return
         }
         
-        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
+        
+        /*let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
         }
         else {
             dpi_factor
-        };
+        };*/
         
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
