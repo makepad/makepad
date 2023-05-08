@@ -862,56 +862,10 @@ live_design!{
         }
     }
     
-    PaginationButton = <Button> {
-        label: "1"
-        walk: {width: 30, height: 30, margin: {top: 5}}
-        layout: {align: {x: 0.5, y: 0.5}, padding: <SPACING_2> {}}
-        
-        draw_label: {
-            text_style: <H2_TEXT_BOLD>{},
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix((COLOR_UP_4), (COLOR_UP_6), self.hover),
-                    (COLOR_UP_4),
-                    self.pressed
-                )
-            }
-        }
-        
-        draw_bg: {
-            instance pressed: 0.0
-            
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    2.0
-                )
-                
-                sdf.stroke_keep(
-                    mix(
-                        #x00000000,
-                        mix((COLOR_DOWN_5), (COLOR_UP_3), pow(self.pos.y, 4)),
-                        self.pressed
-                    ),
-                    1.0
-                )
-                
-                sdf.fill(mix(
-                    (COLOR_UP_0),
-                    (COLOR_DOWN_3),
-                    self.pressed
-                ));
-                
-                return sdf.result;
-            }
-        }
-    }
-    
     PresetFavorite = <CheckBox> {
+        walk: {height: Fit, width: Fit, margin: 0.0}
+        layout: {padding: 0.0}
+
         draw_check: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -1872,7 +1826,7 @@ live_design!{
                 walk: {width: Fill, height: 30}
                 layout: {spacing: (SSPACING_1)}
                 
-                panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 17.5 } }
+                panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 15.0 } }
                 platformtoggle = <IconButton> { draw_icon: { svg_file: (ICO_PLAT_MOBILE) } icon_walk: { width: Fit, height: 17.5 } }
 
                 presets = <IconButton> { draw_icon: { svg_file: (ICO_PRESET) } icon_walk: { width: Fit, height: 17.5 } }
@@ -1882,8 +1836,8 @@ live_design!{
                 
                 <FillerH> {}
 
-                undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 17.5 } }
-                redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 17.5 } }
+                undo = <IconButton> { draw_icon: { svg_file: (ICO_UNDO) } icon_walk: { width: Fit, height: 15.0 } }
+                redo = <IconButton> { draw_icon: { svg_file: (ICO_REDO) } icon_walk: { width: Fit, height: 15.0 } }
             }
             
         }
@@ -1898,19 +1852,6 @@ live_design!{
         <Arp> {}
         piano = <Piano> {walk: {height: Fit, width: Fill, margin: {top: (SSPACING_0), right: (SSPACING_2); bottom: (SSPACING_3), left: (SSPACING_2)}}}
         <PianoSettings> {}
-    }
-    
-    Pagination = <Frame> {
-        walk: {width: Fill, height: Fit, margin: <SPACING_3> {}}
-        layout: {flow: Right, align: {x: 0.5, y: 0.0}, spacing: 0}
-        
-        <PaginationButton> {label: "<"}
-        <PaginationButton> {label: "4"}
-        <PaginationButton> {label: "5"}
-        <PaginationButton> {label: "6"}
-        <PaginationButton> {label: "7"}
-        <PaginationButton> {label: "8"}
-        <PaginationButton> {label: ">"}
     }
     
     
@@ -2001,65 +1942,69 @@ live_design!{
     }
         
     PresetListEntry = <SwipeListEntry> {
-        layout: {flow: Down, padding: {top: 0, right: 5, bottom: 5, left: 5}}
+        layout: {flow: Down, padding: 0.0}
         walk: {width: Fill, height: Fit}
         
         center: <Frame> {
-            layout: {flow: Right, align: {x: 0.0, y: 0.5}}
+            layout: {flow: Down, padding: 0.0}
             walk: {width: Fill, height: Fit}
-            
-            label = <Button> {
-                walk: {width: Fill, height: Fill}
-                layout: {align: {x: 0.0, y: 0.5}, padding: {left: 5}}
-                draw_label: {
-                    fn get_color(self) -> vec4 {
-                        return mix(
-                            mix((COLOR_UP_5), (COLOR_UP_6), self.hover),
-                            (COLOR_UP_4),
-                            self.pressed
-                        )
-                    }
-                    text_style: <H2_TEXT_NORMAL>{},
-                    color: (COLOR_UP_6)
-                }
-                draw_bg: {
-                    fn pixel(self) -> vec4 {
-                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                        return sdf.result
-                    }
-                }
-                label: "Preset Name"
-            }
-            
+
             <Frame> {
-                walk: {width: Fit, height: Fit}
+                layout: {flow: Right, align: {x: 0.0, y: 0.5}, padding: 0.0 }
+                walk: {width: Fill, height: Fit, margin: 0.0}
                 
-                presetfavorite = <PresetFavorite> {
-                    walk: {width: 30, height: 30, margin: {top: 7.5}}
-                    label: " "
+                label = <Button> {
+                    walk: {width: Fill, height: Fill}
+                    layout: {align: {x: 0.0, y: 0.5}, padding: 0.0}
+                    draw_label: {
+                        fn get_color(self) -> vec4 {
+                            return mix(
+                                mix((COLOR_UP_5), (COLOR_UP_6), self.hover),
+                                (COLOR_UP_4),
+                                self.pressed
+                            )
+                        }
+                        text_style: <H2_TEXT_NORMAL>{},
+                        color: (COLOR_UP_6)
+                    }
+                    draw_bg: {
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            return sdf.result
+                        }
+                    }
+                    label: "Preset Name"
                 }
                 
-                share = <IconButton> {
-                draw_icon: {
-                    svg_file: (ICO_SHARE),
-                    fn get_color(self) -> vec4 {
-                        return mix(
-                            mix(
-                                (COLOR_UP_3),
-                                (COLOR_UP_6),
-                                self.hover
-                            ),
-                            (COLOR_UP_3),
-                            self.pressed
-                        )
+                <Frame> {
+                    walk: {width: Fit, height: Fit, margin: 0.0}
+                    layout: { padding: 0.0 }
+                    
+                    presetfavorite = <PresetFavorite> {
+                        walk: {width: 30.0, height: 30.0, margin: {top: 10.0, right: -10.0, bottom: 0.0, left: 0.0} }
+                        layout: { padding: 0.0 }
+                        label: ""
                     }
-                } icon_walk: { width: 12.5, height: Fit } }
+                    
+                    share = <IconButton> {
+                        walk: { margin: {top: 3.0, right: 0.0, bottom: 0.0, left: 0.0 } }
+                        draw_icon: {
+                            svg_file: (ICO_SHARE),
+                            fn get_color(self) -> vec4 {
+                                return mix(
+                                    mix( (COLOR_UP_3), (COLOR_UP_6), self.hover),
+                                    (COLOR_UP_3),
+                                    self.pressed
+                                )
+                            }
+                        }
+                        icon_walk: { width: 12.5, height: Fit }
+                    }
+                }
             }
+
+            <Divider> { walk: {margin: {top: (SSPACING_1), right: (SSPACING_0), bottom: (SSPACING_0)}} }
         }
-        
-        /*<Divider> {
-            walk: {margin: {top: (SSPACING_1), right: (SSPACING_0), bottom: (SSPACING_0)}}
-        }*/
     }
     
     PresetList = <SwipeList> {
@@ -2163,7 +2108,6 @@ live_design!{
         <PresetSaver> {}
         <PresetHeader> {}
         preset_list = <PresetList> {}
-        <Pagination> {}
     }
     
     AppDesktop = <Frame> {
