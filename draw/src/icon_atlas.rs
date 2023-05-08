@@ -378,7 +378,7 @@ impl<'a> Cx2d<'a> {
         //let start = Cx::profile_time_ns();
         // we need to start a pass that just uses the texture
         if atlas.alloc.todo.len()>0 {
-            self.begin_pass(&draw_atlas.atlas_pass);
+            self.begin_pass(&draw_atlas.atlas_pass, None);
             
             let texture_size = atlas.alloc.texture_size;
             draw_atlas.atlas_pass.set_size(self.cx, texture_size);

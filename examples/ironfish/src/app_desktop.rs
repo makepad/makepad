@@ -134,7 +134,7 @@ live_design!{
         layout: {flow: Down, padding: <SPACING_1> {}, spacing: (SSPACING_1)}
     }
     
-    FishPanelContainer = <CachedFrame> {
+    FishPanelContainer = <Frame> {
         layout: {flow: Down},
         walk: {width: Fill, height: Fit}
     }
