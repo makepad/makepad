@@ -237,7 +237,7 @@ impl<'a> Cx2d<'a> {
                 })
             }else {(parent.draw_clip.0.y, parent.draw_clip.1.y)};
             
-            (o - layout.scroll, w, h, (dvec2(x0, y0), dvec2(x1, y1)))
+            (o - layout.scroll, w, h, (dvec2(x0, y0) + layout.scroll, dvec2(x1, y1)+layout.scroll))
         }
         else {
             let o = DVec2 {x: walk.margin.left, y: walk.margin.top};
