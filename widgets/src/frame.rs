@@ -332,7 +332,15 @@ live_design!{
             fill: Image
         }
     }
-    
+    CachedScrollXY = <CachedFrame>{
+        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
+    }
+    CachedScrollX = <CachedFrame>{
+        scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
+    }
+    CachedScrollY = <CachedFrame>{
+        scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
+    }
     ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
     ScrollX = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}}
     ScrollY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}}
@@ -353,6 +361,7 @@ pub struct Frame { // draw info per UI element
     #[live] image_scale: f64,
     
     #[live] use_cache: bool,
+    #[live] dpi_factor: Option<f64>,
     #[live] has_view: bool,
     #[live(true)] visible: bool,
     
@@ -363,7 +372,7 @@ pub struct Frame { // draw info per UI element
     
     #[rust] find_cache: HashMap<u64, WidgetSet>,
     
-    #[rust] scroll_bars_obj: Option<ScrollBars>,
+    #[rust] scroll_bars_obj: Option<Box<ScrollBars>>,
     
     #[rust] view_size: Option<DVec2>,
     #[rust] area: Area,
@@ -392,7 +401,7 @@ impl LiveHook for Frame {
         }
         if self.scroll_bars.is_some() {
             if self.scroll_bars_obj.is_none() {
-                self.scroll_bars_obj = Some(ScrollBars::new_from_ptr(cx, self.scroll_bars));
+                self.scroll_bars_obj = Some(Box::new(ScrollBars::new_from_ptr(cx, self.scroll_bars)));
             }
         }
         // lets load the image resource
@@ -836,7 +845,7 @@ impl Frame {
                     }
                     let texture_cache = self.texture_cache.as_mut().unwrap();
                     cx.make_child_pass(&texture_cache.pass);
-                    cx.begin_pass(&texture_cache.pass);
+                    cx.begin_pass(&texture_cache.pass, self.dpi_factor);
                     self.view.as_mut().unwrap().begin_always(cx)
                 }
                 else {
