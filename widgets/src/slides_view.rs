@@ -24,6 +24,7 @@ live_design!{
     }
     
     Slide = <Box> {
+        has_view: true,
         draw_bg: {shape: Box, color: #2, radius: 10.0}
         walk: {width: (SLIDE_WIDTH), height: Fill}
         layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
