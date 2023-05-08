@@ -34,7 +34,7 @@ live_design!{
     }
     
     Mandelbrot = {{Mandelbrot}} {
-        max_iter: 3200,
+        max_iter: 256,
     }
 }
 
@@ -376,7 +376,7 @@ impl FractalSpace {
         let fpos1 = self.screen_to_fractal(around);
         self.zoom *= factor;
         if self.zoom < 5e-14f64 { // maximum zoom for f64
-            self.zoom = 5e-14f64
+            self.zoom = 5e-14f64;
         }
         if self.zoom > 2.0 { // don't go too far out
             self.zoom = 2.0;
@@ -596,7 +596,7 @@ impl Mandelbrot {
             }
             
             // animate color cycle
-            self.draw_tile.color_cycle = (ne.time * 0.02).fract() as f32;
+            self.draw_tile.color_cycle = (ne.time * 0.05).fract() as f32;
             // this triggers a draw_walk call and another 'next frame' event
             self.view_area.redraw(cx);
             self.next_frame = cx.new_next_frame();
@@ -627,11 +627,17 @@ impl Mandelbrot {
                         self.is_zoom_in = false;
                     }
                 }*/
-                
+                cx.set_key_focus(self.view_area);
                 self.view_area.redraw(cx);
                 
                 self.next_frame = cx.new_next_frame();
             },
+            Hit::KeyDown(k)=>{
+                if KeyCode::Space == k.key_code{
+                    self.space.zoom = 0.5;
+                    self.space.center = dvec2(-0.5,0.0);
+                }
+            }
             Hit::FingerMove(fe) => {
                 //if fe.digit.index == 0 { // only respond to digit 0
                 self.finger_abs = fe.abs;
