@@ -111,9 +111,9 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             tb.add("}");
             tb.add("impl").ident(&ref_name).add("{");
             
-            tb.add("    pub fn pick(&self, widget:WidgetRef)->").ident(&ref_name).add("{");
-            tb.add("        if self.0 == widget{");
-            tb.add("             ").add(&ref_name).add("(widget)");
+            tb.add("    pub fn has_widget(&self, widget:&WidgetRef)->").ident(&ref_name).add("{");
+            tb.add("        if self.0 == *widget{");
+            tb.add("             ").add(&ref_name).add("(widget.clone())");
             tb.add("        } else {");
             tb.add("             ").add(&ref_name).add("(WidgetRef::default())");
             tb.add("        }");
@@ -234,9 +234,9 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("}");
 
             tb.add("impl ").ident(&set_name).add("{");
-            tb.add("    pub fn pick(&self, widget:WidgetRef)->").ident(&ref_name).add("{");
-            tb.add("        if self.contains(&widget){");
-            tb.add("             ").add(&ref_name).add("(widget)");
+            tb.add("    pub fn has_widget(&self, widget:&WidgetRef)->").ident(&ref_name).add("{");
+            tb.add("        if self.contains(widget){");
+            tb.add("             ").add(&ref_name).add("(widget.clone())");
             tb.add("        } else {");
             tb.add("             ").add(&ref_name).add("(WidgetRef::default())");
             tb.add("        }");
