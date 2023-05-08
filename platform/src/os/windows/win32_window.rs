@@ -500,33 +500,29 @@ impl Win32Window {
                                 }
                             }
                         }
-                        KeyCode::KeyX | KeyCode::KeyC => {
+                        KeyCode::KeyC => {
                             let response = Rc::new(RefCell::new(None));
                             window.do_callback(
-                                Win32Event::TextCopy(TextCopyEvent {
+                                Win32Event::TextCut(TextCutEvent {
                                     response: response.clone()
                                 })
                             );
                             let response = response.borrow();
                             if let Some(response) = response.as_ref() {
-                                // plug it into the windows clipboard
-                                // make utf16 dta
-                                if OpenClipboard(None) == TRUE {
-                                    EmptyClipboard();
-                                    
-                                    let data: Vec<u16> = OsStr::new(response).encode_wide().chain(Some(0).into_iter()).collect();
-                                    
-                                    let h_clipboard_data = GlobalAlloc(GLOBAL_ALLOC_FLAGS(GMEM_DDESHARE), 2 * data.len());
-                                    
-                                    let h_clipboard_ptr = GlobalLock(h_clipboard_data) as *mut u16;
-                                    
-                                    std::ptr::copy_nonoverlapping(data.as_ptr(), h_clipboard_ptr, data.len());
-                                    
-                                    GlobalUnlock(h_clipboard_data);
-                                    SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(h_clipboard_data)).unwrap();
-                                    CloseClipboard();
-                                }
-                            };
+                                copy_to_cliboard(response);
+                            }
+                        },
+                        KeyCode::KeyX => {
+                            let response = Rc::new(RefCell::new(None));
+                            window.do_callback(
+                                Win32Event::TextCut(TextCutEvent {
+                                    response: response.clone()
+                                })
+                            );
+                            let response = response.borrow();
+                            if let Some(response) = response.as_ref() {
+                                copy_to_cliboard(response);
+                            }
                         }
                         _ => ()
                     }
@@ -615,6 +611,26 @@ impl Win32Window {
         // Unwinding into foreign code is undefined behavior. So we catch any panics that occur in our
         // code, and if a panic happens we cancel any future operations.
         //run_catch_panic(-1, || callback_inner(window, msg, wparam, lparam))
+    }
+
+    unsafe fn copy_to_clipboard(text: &String) {
+        // plug it into the windows clipboard
+        // make utf16 dta
+        if OpenClipboard(None) == TRUE {
+            EmptyClipboard();
+
+            let data: Vec<u16> = OsStr::new(text).encode_wide().chain(Some(0).into_iter()).collect();
+
+            let h_clipboard_data = GlobalAlloc(GLOBAL_ALLOC_FLAGS(GMEM_DDESHARE), 2 * data.len());
+
+            let h_clipboard_ptr = GlobalLock(h_clipboard_data) as *mut u16;
+
+            std::ptr::copy_nonoverlapping(data.as_ptr(), h_clipboard_ptr, data.len());
+
+            GlobalUnlock(h_clipboard_data);
+            SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(h_clipboard_data)).unwrap();
+            CloseClipboard();
+        }
     }
     
     pub fn get_mouse_pos_from_lparam(&self, lparam: LPARAM) -> DVec2 {
