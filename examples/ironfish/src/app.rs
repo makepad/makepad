@@ -210,7 +210,7 @@ impl AppMain for App {
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                if let Some(mut list) = preset_lists.pick(next).borrow_mut() {
+                if let Some(mut list) = preset_lists.has_widget(&next).borrow_mut() {
                     for i in 0..10 {
                         if let Some(item) = list.get_entry(cx, LiveId(i as u64).into(), live_id!(Entry)) {
                             item.get_button(id!(label)).set_label(&format!("Button id {i}"));
