@@ -68,9 +68,8 @@ live_design!{
             block_signal_event: true; 
             <SlidesView> {
                 goal_pos: 0.0
-                layout: { padding: 10.0 }
+                
                 <Slide> {
-                    walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
                     layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
                     draw_bg: { color: #x1A, radius: 5.0 }
                     title = {
@@ -86,7 +85,6 @@ live_design!{
                         }
                 }
                 <Slide> {title = {label: "Ironfish Desktop"}, 
-                    walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
                     layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Box>{
@@ -97,7 +95,6 @@ live_design!{
                     }
                 }
                 <Slide> {title = {label: "Ironfish Mobile"}, 
-                    walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
                     layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
@@ -107,7 +104,6 @@ live_design!{
                     }
                 }
                 <Slide> {title = {label: "Multi modal"}, 
-                    walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
                     layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
@@ -126,7 +122,6 @@ live_design!{
                     }
                 }
                 <Slide> {title = {label: "Visual design"}, 
-                    walk: {margin: {top: 0.0, right: 10.0, bottom: 0.0, left: 0.0}}
                     layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
