@@ -475,9 +475,9 @@ pub struct PianoRef(WidgetRef);
 impl PianoRef {
     pub fn notes_played(&self, actions:&WidgetActions) -> Vec<PianoNote> {
         let mut notes = Vec::new();
-        for item in actions {
-            if item.widget_uid == self.widget_uid() {
-                if let PianoAction::Note(note) = item.action() {
+        for action in actions {
+            if action.widget_uid == self.widget_uid() {
+                if let PianoAction::Note(note) = action.action() {
                     notes.push(note)
                 }
             }
@@ -494,6 +494,31 @@ impl PianoRef {
     pub fn set_key_focus(&self, cx: &mut Cx) {
         if let Some(inner) = self.borrow_mut() {
             inner.set_key_focus(cx)
+        }
+    }
+}
+
+#[derive(Clone, WidgetSet)]
+pub struct PianoSet(WidgetSet);
+
+impl PianoSet {
+    pub fn notes_played(&self, actions:&WidgetActions) -> Vec<PianoNote> {
+        let mut notes = Vec::new();
+        for item in self.iter() {
+             for action in actions {
+                if action.widget_uid == item.widget_uid() {
+                    if let PianoAction::Note(note) = action.action() {
+                        notes.push(note)
+                    }
+                }
+            }
+        }
+        notes
+    }
+    
+    pub fn set_note(&self, cx: &mut Cx, is_on: bool, note_number: u8) {
+        for item in self.iter(){
+            item.set_note(cx, is_on, note_number);
         }
     }
 }
