@@ -98,26 +98,26 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        let dpi_factor = metal_window.window_geom.dpi_factor;
+                        //let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);
                         let drawable: ObjcId = unsafe {msg_send![metal_window.ca_layer, nextDrawable]};
                         if drawable == nil {
                             return
                         }
                         if metal_window.is_resizing {
-                            self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::Resizing(drawable));
+                            self.draw_pass(*pass_id, metal_cx, DrawPassMode::Resizing(drawable));
                         }
                         else {
-                            self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::Drawable(drawable));
+                            self.draw_pass(*pass_id, metal_cx, DrawPassMode::Drawable(drawable));
                         }
                     }
                 }
-                CxPassParent::Pass(parent_pass_id) => {
-                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::Texture);
+                CxPassParent::Pass(_) => {
+                    //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
-                    self.draw_pass(*pass_id, 1.0, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(*pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
         }
