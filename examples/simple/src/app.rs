@@ -24,7 +24,7 @@ live_design!{
         // for other widgets. Since the `ui` property on the DSL object `App` corresponds with the
         // `ui` field on the Rust struct `App`, the latter will be initialized from the DSL object
         // here below.
-        ui: <DesktopWindow>{frame: {body = {
+        ui: <DesktopWindow>{
             
             show_bg: true
             // The `layout` property determines how child widgets are laid out within a frame. In
@@ -101,7 +101,7 @@ live_design!{
                 },
                 label: "Counter: 0"
             }
-        }}}
+        }
     }
 }
 
