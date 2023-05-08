@@ -248,6 +248,13 @@ impl Cx {
                     size: (rect.size * dpi).ceil() / dpi
                 })
             }
+            Some(CxPassRect::ScaledArea(area, scale)) => {
+                let rect = area.get_rect(self);
+                Some(Rect{
+                    pos: (rect.pos * dpi).floor() / dpi,
+                    size:  scale * (rect.size * dpi).ceil() / dpi
+                })
+            }
             Some(CxPassRect::Size(size)) => Some(Rect {pos: DVec2::default(), size: (size / dpi).floor() * dpi}),
             None => None
         } 
