@@ -149,7 +149,7 @@ impl Designer {
                 match child {
                     OutlineNode::Global {..} => {}
                     OutlineNode::Component {name, children, uid, class, prop_type, ..} => {
-                        if outline.begin_folder(cx, *uid, &if !name.is_empty(){
+                        if outline.begin_folder(cx, *uid, &if !name.is_unique(){
                             if let LivePropType::Field = prop_type {
                                 format!("{}: <{}>", name, class)
                             }
