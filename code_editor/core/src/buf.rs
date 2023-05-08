@@ -1,0 +1,40 @@
+use crate::{Diff, Hist, Sel, Text};
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Buf {
+    text: Text,
+    diff: Diff,
+    hist: Hist,
+}
+
+impl Buf {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn text(&self) -> &Text {
+        &self.text
+    }
+
+    pub fn apply_diff(&mut self, diff: Diff) {
+        use std::mem;
+
+        self.text.apply_diff(diff.clone());
+        self.diff = mem::take(&mut self.diff).compose(diff);
+    }
+
+    pub fn undo(&mut self) -> Option<(Diff, Sel)> {
+        self.hist.undo(&mut self.text)
+    }
+
+    pub fn redo(&mut self) -> Option<(Diff, Sel)> {
+        self.hist.redo(&mut self.text)
+    }
+
+    pub fn commit(&mut self, sel: Sel) {
+        use std::mem;
+
+        let diff = mem::take(&mut self.diff);
+        self.hist.commit(diff, sel);
+    }
+}
