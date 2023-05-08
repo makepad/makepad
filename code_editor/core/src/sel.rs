@@ -197,10 +197,26 @@ impl Region {
     }
 
     pub fn apply_diff(&mut self, diff: &Diff, local: bool) {
+        use std::cmp::Ordering;
+
         if local {
             self.active.apply_diff(diff, true);
             self.clear();
         } else {
+            match self.active.cmp(&self.inactive) {
+                Ordering::Less => {
+                    self.active.apply_diff(diff, false);
+                    self.inactive.apply_diff(diff, true);
+                }
+                Ordering::Equal => {
+                    self.active.apply_diff(diff, true);
+                    self.inactive = self.active;
+                }
+                Ordering::Greater => {
+                    self.inactive.apply_diff(diff, false);
+                    self.active.apply_diff(diff, true);
+                }
+            }
             self.active.apply_diff(diff, false);
             self.inactive.apply_diff(diff, false);
         }

@@ -19,51 +19,50 @@ impl State {
 
     pub fn create_view(&mut self) -> ViewId {
         let model = self.models.insert(Model {
-            views: HashSet::new(),
-            buf: Buf::new(Text::from(vec![
-                "abc".to_string(),
-                "def".to_string(),
-                "ghi".to_string(),
-            ])),
+            view_ids: HashSet::new(),
+            buf: Buf::new(include_str!("arena.rs").parse().unwrap())
         });
-        let view = self.views.insert(RefCell::new(View {
-            model,
+        let view_id = self.views.insert(RefCell::new(View {
+            model_id: model,
             sel: Sel::new(),
         }));
-        self.models[model].views.insert(view);
-        ViewId(view)
+        self.models[model].view_ids.insert(view_id);
+        ViewId(view_id)
     }
 
-    pub fn destroy_view(&mut self, ViewId(view): ViewId) {
-        let model = self.views[view].borrow().model;
-        self.models[model].views.remove(&view);
-        if self.models[model].views.is_empty() {
-            self.models.remove(model);
+    pub fn destroy_view(&mut self, ViewId(view_id): ViewId) {
+        let model_id = self.views[view_id].borrow().model_id;
+        self.models[model_id].view_ids.remove(&view_id);
+        if self.models[model_id].view_ids.is_empty() {
+            self.models.remove(model_id);
         }
-        self.views.remove(view);
+        self.views.remove(view_id);
     }
 
-    pub fn draw(&self, ViewId(view): ViewId, f: impl FnOnce(&Text)) {
-        let model = self.views[view].borrow().model;
-        f(&self.models[model].buf.text());
+    pub fn draw(&self, ViewId(view_id): ViewId, f: impl FnOnce(&Text, &Sel)) {
+        let model_id = self.views[view_id].borrow().model_id;
+        f(
+            &self.models[model_id].buf.text(),
+            &self.views[view_id].borrow().sel,
+        );
     }
 
-    pub fn handle_event(&mut self, ViewId(view): ViewId, event: Event) {
-        let model = self.views[view].borrow().model;
-        let sibling_views: Vec<_> = self.models[model]
-            .views
+    pub fn handle_event(&mut self, ViewId(view_id): ViewId, event: Event) {
+        let model_id = self.views[view_id].borrow().model_id;
+        let sibling_views: Vec<_> = self.models[model_id]
+            .view_ids
             .iter()
-            .filter_map(|&sibling_view| {
-                if sibling_view == view {
+            .filter_map(|&sibling_view_id| {
+                if sibling_view_id == view_id {
                     return None;
                 }
-                Some(self.views[sibling_view].borrow_mut())
+                Some(self.views[sibling_view_id].borrow_mut())
             })
             .collect();
         HandleEventContext {
-            view: self.views[view].borrow_mut(),
+            view: self.views[view_id].borrow_mut(),
             sibling_views,
-            model: &mut self.models[model],
+            model: &mut self.models[model_id],
         }
         .handle_event(event);
     }
@@ -74,7 +73,7 @@ pub struct ViewId(Id<RefCell<View>>);
 
 #[derive(Debug)]
 struct View {
-    model: Id<Model>,
+    model_id: Id<Model>,
     sel: Sel,
 }
 
@@ -91,7 +90,7 @@ impl View {
 
 #[derive(Debug)]
 struct Model {
-    views: HashSet<Id<RefCell<View>>>,
+    view_ids: HashSet<Id<RefCell<View>>>,
     buf: Buf,
 }
 

@@ -32,12 +32,13 @@ impl AppMain for App {
             while let Some(next) = self.ui.draw_widget(&mut cx).hook_widget() {
                 if next == self.ui.get_widget(id!(editor)) {
                     self.editor
-                        .draw(&mut cx, &self.state.code_editor, self.state.view);
+                        .draw(&mut cx, &self.state.editor, self.state.view);
                 }
             }
             return;
         }
         self.ui.handle_widget_event(cx, event);
+        self.editor.handle_event(cx, event);
     }
 }
 
@@ -49,16 +50,16 @@ impl LiveHook for App {
 }
 
 struct State {
-    code_editor: makepad_code_editor_core::State,
+    editor: makepad_code_editor_core::State,
     view: ViewId,
 }
 
 impl Default for State {
     fn default() -> Self {
-        let mut code_editor = makepad_code_editor_core::State::new();
-        let view = code_editor.create_view();
+        let mut editor = makepad_code_editor_core::State::new();
+        let view = editor.create_view();
         Self {
-            code_editor,
+            editor,
             view,
         }
     }
