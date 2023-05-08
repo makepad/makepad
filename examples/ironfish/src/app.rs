@@ -406,7 +406,7 @@ impl AppMain for App {
             };
         });
         
-        let piano = ui.get_piano(id!(piano));
+        let piano = ui.get_piano_set(ids!(piano));
         
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);
