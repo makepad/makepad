@@ -453,8 +453,9 @@ export class WasmWebBrowser extends WasmBridge {
     // example build command:
     // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
     FromWasmCreateThread(args) {
+        
         let worker = new Worker(
-            '/makepad/platform/src/os/web_browser/web_worker.js',
+            '/makepad/platform/src/os/web/web_worker.js',
             {type: 'module'}
         );
         
@@ -466,7 +467,6 @@ export class WasmWebBrowser extends WasmBridge {
             console.error("FromWasmCreateThread not available, wasm file not compiled with -C link-arg=--export=__stack_pointer");
             return
         }
-        
         worker.postMessage(this.alloc_thread_stack(args.context_ptr));
         
         this.workers.push(worker);
