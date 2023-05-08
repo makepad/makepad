@@ -1,6 +1,6 @@
 use crate::{Diff, Hist, Sel, Text};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Buf {
     text: Text,
     diff: Diff,
@@ -8,8 +8,12 @@ pub struct Buf {
 }
 
 impl Buf {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(text: Text) -> Self {
+        Self {
+            text,
+            diff: Diff::new(),
+            hist: Hist::new(),
+        }
     }
 
     pub fn text(&self) -> &Text {

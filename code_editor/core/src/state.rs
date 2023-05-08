@@ -20,7 +20,11 @@ impl State {
     pub fn create_view(&mut self) -> ViewId {
         let model = self.models.insert(Model {
             views: HashSet::new(),
-            buf: Buf::new(),
+            buf: Buf::new(Text::from(vec![
+                "abc".to_string(),
+                "def".to_string(),
+                "ghi".to_string(),
+            ])),
         });
         let view = self.views.insert(RefCell::new(View {
             model,
@@ -37,6 +41,11 @@ impl State {
             self.models.remove(model);
         }
         self.views.remove(view);
+    }
+
+    pub fn draw(&self, ViewId(view): ViewId, f: impl FnOnce(&Text)) {
+        let model = self.views[view].borrow().model;
+        f(&self.models[model].buf.text());
     }
 
     pub fn handle_event(&mut self, ViewId(view): ViewId, event: Event) {

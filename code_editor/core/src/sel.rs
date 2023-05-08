@@ -50,7 +50,7 @@ impl Sel {
         self.latest = region;
         self.normalize_latest();
     }
-    
+
     pub fn apply_diff(&mut self, diff: &Diff, local: bool) {
         for region in &mut self.earlier {
             region.apply_diff(diff, local);
