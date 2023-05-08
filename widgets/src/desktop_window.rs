@@ -260,7 +260,7 @@ impl DesktopWindow {
             return ViewRedrawing::no()
         }
         
-        cx.begin_pass(&self.pass);
+        cx.begin_pass(&self.pass, None);
         
         self.main_view.begin_always(cx);
         
