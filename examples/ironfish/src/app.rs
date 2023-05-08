@@ -27,6 +27,8 @@ live_design!{
     import makepad_widgets::slides_view::SlideBody;
     import makepad_widgets::slides_view::SlidesView;
     
+    import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
+    import makepad_example_numbers::number_grid::NumberGrid;
     // APP
     //ui: <AppMobile> {}
     App = {{App}} {
@@ -63,17 +65,17 @@ live_design!{
         */
 
         ui: <DesktopWindow> {
-            window: {inner_size: vec2(1920, 1080)},
+            window: {inner_size: vec2(1920, 1080),},
+            
             pass: {clear_color: #2A}
             block_signal_event: true; 
             <SlidesView> {
                 goal_pos: 0.0
                 
                 <Slide> {
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
                     draw_bg: { color: #x1A, radius: 5.0 }
                     title = {
-                        label: "MAKEPAD\nDesigning UI in Rust"},
+                        label: "MAKEPAD\nDesigning modern UI's for Rust"},
                         <SlideBody> {
                             label: "\n \nRik Arends\n"
                             draw_label: {
@@ -85,7 +87,6 @@ live_design!{
                         }
                 }
                 <Slide> {title = {label: "Ironfish Desktop"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Box>{
                         draw_bg: { color: #x2A }
@@ -95,7 +96,6 @@ live_design!{
                     }
                 }
                 <Slide> {title = {label: "Ironfish Mobile"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}}
@@ -104,7 +104,6 @@ live_design!{
                     }
                 }
                 <Slide> {title = {label: "Multi modal"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}, spacing: 20}
@@ -141,6 +140,33 @@ live_design!{
                         } 
                     }
                 }
+                <Slide> {title = {label: "Rust is fast"}, 
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    draw_bg: { color: #x1A, radius: 5.0 }
+                    <Frame>{
+                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        <Box>{
+                            draw_bg: { color: #x2A }
+                            walk: { margin: 0.0}
+                            layout:{ padding: 0.0 }
+                            <Mandelbrot> {walk:{width:Fill, height:Fill}}
+                        }
+                    }
+                }
+
+                <Slide> {title = {label: "Rust is fast"}, 
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    draw_bg: { color: #x1A, radius: 5.0 }
+                    <Frame>{
+                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        <Box>{
+                            draw_bg: { color: #x2A }
+                            walk: { margin: 0.0}
+                            layout:{ padding: 0.0 }
+                            <NumberGrid> {walk:{width:Fill, height:Fill}}
+                        }
+                    }
+                }
             }
         }
     }
@@ -169,6 +195,8 @@ impl LiveHook for App {
         crate::sequencer::live_design(cx);
         crate::app_desktop::live_design(cx);
         crate::app_mobile::live_design(cx);
+        makepad_example_fractal_zoom::mandelbrot::live_design(cx);
+        makepad_example_numbers::number_grid::live_design(cx);
     }
 }
 

@@ -11,6 +11,8 @@ metadata.makepad-auto-version = "HMVEfWglH6ETM-XrlBqp9bOYnlw="
 
 [dependencies]
 makepad-synth-ironfish = { path = "./synth_ironfish", version = "0.3.0" }
+makepad-example-fractal-zoom = { path = "../fractal_zoom", version = "0.3.0" }
+makepad-example-numbers = { path = "../numbers", version = "0.3.0" }
 makepad-audio-widgets = { path = "../../audio_graph/audio_widgets", version = "0.3.0" }
 #makepad-miniz = { path = "../../libs/miniz", version = "0.3.0" }
 #makepad-base64 = { path = "../../libs/base64", version = "0.3.0" }

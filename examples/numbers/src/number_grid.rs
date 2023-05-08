@@ -50,7 +50,7 @@ live_design!{
     DrawLabel= {{DrawLabel}} {
         instance hover: float
         instance focus: float
-
+        
         fn get_color(self) -> vec4 {
             return #fff
         }
@@ -59,7 +59,7 @@ live_design!{
     NumberBox= {{NumberBox}} {
        
        layout:{padding:{left:14,top:1, bottom:1, right:5}}
-       
+        draw_label:{text_style:{font_size: 12}}
         label_align: {
             y: 0.0
         }
@@ -131,10 +131,10 @@ pub struct DrawLabel {
 #[derive(Live, LiveHook)]
 pub struct NumberBox {
     #[live] draw_bg: DrawBg,
-    #[live] label: DrawLabel,
+    #[live] draw_label: DrawLabel,
 
     #[live] layout: Layout,
-    #[state] state: State,
+    #[state] state: LiveState,
     
     #[live] label_align: Align,
 }
@@ -214,11 +214,11 @@ impl NumberBox {
         
         self.draw_bg.last_number = self.draw_bg.number;
         self.draw_bg.number = number;
-        self.label.last_number = self.label.number;
-        self.label.number = number;
+        self.draw_label.last_number = self.draw_label.number;
+        self.draw_label.number = number;
         
         self.draw_bg.begin(cx, Walk::fit().with_abs_pos(pos), self.layout);
-        self.label.draw_walk(cx, Walk::fit(),self.label_align, fmt);
+        self.draw_label.draw_walk(cx, Walk::fit(),self.label_align, fmt);
         self.draw_bg.end(cx);
     }
 }
@@ -258,8 +258,8 @@ impl NumberGrid{
 
         let mut buf = String::new();
 
-        for y in 0..70{
-            for x in 0..35{
+        for y in 0..40{
+            for x in 0..30{
                 let box_id = LiveId(x*100+y).into();
                 let number_box = self.number_boxes.get_or_insert(cx, box_id, | cx | {
                     NumberBox::new_from_ptr(cx, number_box)
@@ -267,7 +267,7 @@ impl NumberGrid{
                 let number = random_f32(&mut self.seed);
                 buf.clear();
                 write!(buf,"{:.3}", number).unwrap();
-                let pos = start_pos + dvec2(x as f64 * 55.0,y as f64*15.0);
+                let pos = start_pos + dvec2(x as f64 * 70.0,y as f64*20.0);
                 number_box.draw_bg.fast_path = if self.fast_path{1.0}else{0.0};
                 number_box.draw_abs(cx, pos, number, &buf);
             }
