@@ -111,13 +111,13 @@ impl<'a> DataBindingMap<'a> {
             if let Some(v) = self.store.nodes.read_field_value(data) {
                 let mut ui_nodes = LiveNodeVec::new();
                 ui_nodes.write_field_value(widget_val[1], map(v.clone()));
-                let mut widget = self.ui.get_widget(widget_val[0]);
-                if !widget.is_empty(){
+                let widgets = self.ui.get_widgets(&[widget_val[0]]);
+                for mut widget in widgets.iter(){
                     widget.apply_over(self.cx, &ui_nodes)
                 }
-                else if self.debug_missing {
+                /*else if self.debug_missing {
                     log!("Databinding apply cannot find widget {:?}", widget_val[0]);
-                }
+                }*/
             }
         }
     }
