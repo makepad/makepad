@@ -26,7 +26,6 @@ onmessage = async function(e) {
         
         wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
         wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
-        
         wasm.exports.wasm_thread_entrypoint(thread_info.context_ptr);
         
         close();

@@ -146,7 +146,7 @@ live_design!{
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}, spacing: 20}
                         <Box>{
-                            draw_bg: { color: #x2A }
+                            draw_bg: { color: #x2A } 
                             walk: { margin: 0.0}
                             layout:{ padding: 0.0 }
                             <Mandelbrot> {walk:{width:Fill, height:Fill}}

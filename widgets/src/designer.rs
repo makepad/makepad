@@ -125,8 +125,13 @@ impl Designer {
     
     fn draw_design(&mut self, cx: &mut Cx2d) {
         // alrigh so. lets draw the designs
+        let mut count = 0;
         for node in &self.outline_nodes {
             if let OutlineNode::Component {ptr, name, class, ..} = node {
+                count += 1;
+                if count > 5{
+                    break;
+                }
                 let container_ptr = self.container;
                 let (widget, container) = self.components.get_or_insert(cx, *ptr, | cx | {
                     (

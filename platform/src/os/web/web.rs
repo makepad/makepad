@@ -301,15 +301,15 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
-                    let dpi_factor = self.os.window_geom.dpi_factor;
-                    self.draw_pass_to_canvas(*pass_id, dpi_factor);
+                    //et dpi_factor = self.os.window_geom.dpi_factor;
+                    self.draw_pass_to_canvas(*pass_id);
                 }
                 CxPassParent::Pass(parent_pass_id) => {
-                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, dpi_factor);
+                    //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    self.draw_pass_to_texture(*pass_id);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, 1.0);
+                    self.draw_pass_to_texture(*pass_id);
                 }
             }
         }    
@@ -466,8 +466,8 @@ impl CxOsApi for Cx {
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
-        let closure_ptr = Box::into_raw(Box::new(closure_box));
-        self.os.from_wasm(FromWasmCreateThread {closure_ptr: closure_ptr as u32});
+        let context_ptr = Box::into_raw(Box::new(closure_box));
+        self.os.from_wasm(FromWasmCreateThread {context_ptr: context_ptr as u32});
     }
     
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket {
