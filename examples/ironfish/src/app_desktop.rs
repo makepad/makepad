@@ -2091,7 +2091,7 @@ live_design!{
     
     Presets = <GradientX> {
         walk: {width: 250, height: Fill}
-        layout: {flow: Down, padding: {right: 5}}
+        layout: {flow: Down, padding: {right: 5, top: 15.0, left: 0.0}}
         
         draw_bg: {
             instance dither: 1.0
