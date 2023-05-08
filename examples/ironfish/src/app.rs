@@ -23,6 +23,9 @@ live_design!{
     import makepad_audio_graph::instrument::Instrument;
     import makepad_synth_ironfish::ironfish::IronFish;
     import makepad_widgets::designer::Designer;
+    import makepad_widgets::slides_view::Slide;
+    import makepad_widgets::slides_view::SlideBody;
+    import makepad_widgets::slides_view::SlidesView;
     
     // APP
     //ui: <AppMobile> {}
@@ -35,7 +38,7 @@ live_design!{
                 }
             }
         }
-        
+        /*
         ui: <MultiWindow> {
             mobile =<DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000), dpi_override:2},
@@ -55,6 +58,42 @@ live_design!{
                 pass: {clear_color: #2A}
                 block_signal_event: true; 
                 <AppMobile> {}
+            }
+        }
+        */
+        ui: <DesktopWindow> {
+            window: {inner_size: vec2(1280, 1000)},
+            pass: {clear_color: #2A}
+            block_signal_event: true; 
+            <SlidesView> {
+                goal_pos: 0.0
+                <Slide> {title = {label: "Makepad: Designing UI in Rust"}, <SlideBody> {label: "Rik Arends\n"}}
+                <Slide> {title = {label: "Ironfish desktop"}, 
+                    <Frame>{
+                        layout:{padding: 30}
+                        <AppDesktop> {}
+                    }
+                }
+                <Slide> {title = {label: "Ironfish mobile"}, 
+                    <Frame>{
+                        layout:{padding: 30, align:{x:0.5}}
+                        <AppMobile> {walk:{width:400}}
+                    }
+                }
+                <Slide> {title = {label: "Multi modal"}, 
+                    <Frame>{
+                        layout:{padding: 30, align:{x:0.5}, spacing: 30}
+                        <AppMobile> {walk:{width:400}}
+                        <AppDesktop> {walk:{width:1200}}
+                    }
+                }
+                <Slide> {title = {label: "Visual design"}, 
+                    <Frame>{
+                        layout:{padding: 30, align:{x:0.5}, spacing: 30}
+                        <AppDesktop> {walk:{width:1100}}
+                        <Designer> {walk:{width:900}}
+                    }
+                }
             }
         }
     }
@@ -277,7 +316,7 @@ impl AppMain for App {
             application_pages.tab3_frame,
         ));
         
-        let display_audio = ui.get_display_audio(id!(display_audio));
+        let display_audio = ui.get_display_audio_set(ids!(display_audio));
         
         let mut buffers = 0;
         self.audio_graph.handle_event_with(cx, event, &mut | cx, action | {
