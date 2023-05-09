@@ -1,4 +1,3 @@
-use std::panic;
 use std::fmt::Write;
 
 #[macro_export]  
@@ -64,7 +63,7 @@ pub fn log_impl(file:&str, line:u32, column_start:u32, column_end:u32, message:&
     }
     println!("{}:{}:{} - {}", file, line, column_start, message);
 }
-
+/*
 pub fn set_panic_hook(){
     pub fn panic_hook(info: &panic::PanicInfo) {
         if let Some(location) = info.location(){
@@ -78,4 +77,4 @@ pub fn set_panic_hook(){
         eprintln!("{:?}", info);
     }
     panic::set_hook(Box::new(panic_hook));
-}
+}*/
