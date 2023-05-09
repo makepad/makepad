@@ -251,6 +251,21 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
 
     //println!("Adding resources to apk");
 
+    let mut assets_to_add: Vec<String> = Vec::new();
+
+    let local_resources_path = cwd.join("resources");
+    if local_resources_path.is_dir() {
+        let dst_dir = out_dir.join(format!("assets/makepad/{app_label}/resources"));
+        mkdir(&dst_dir) ?;
+        cp_all(&local_resources_path, &dst_dir, false) ?;
+
+        let assets = ls(&dst_dir) ?;
+        for path in &assets {
+            let path = path.display();
+            assets_to_add.push(format!("assets/makepad/{app_label}/resources/{path}"));
+        }
+    }
+
     let mut dependencies = HashSet::new();
     if let Ok(cargo_tree_output) = shell_env_cap(&[], &cwd, "cargo", &["tree"]) {
         for line in cargo_tree_output.lines().skip(1) {
@@ -267,18 +282,15 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         let dst_dir = out_dir.join(format!("assets/makepad/{name}/resources"));
         mkdir(&dst_dir) ?;
         cp_all(&resources_path, &dst_dir, false) ?;
-    }
 
-    let mut assets_to_add: Vec<String> = Vec::new();
-    for (name, _resources_path) in dependencies.iter() {
-        let dst_dir = out_dir.join(format!("assets/makepad/{name}/resources"));
         let assets = ls(&dst_dir) ?;
-
         for path in &assets {
             let path = path.display();
             assets_to_add.push(format!("assets/makepad/{name}/resources/{path}"));
         }
     }
+
+    //println!("assets_to_add {:?}", assets_to_add);
 
     let mut aapt_args = vec![
         "add",
