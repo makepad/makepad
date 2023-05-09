@@ -40,12 +40,12 @@ live_design!{
                 }
             }
         }
-         ui: <DesktopWindow> {
+        /* ui: <DesktopWindow> {
             window: {inner_size: vec2(1280, 1000), dpi_override:2},
             pass: {clear_color: #2A}
             block_signal_event: true; 
             <AppDesktop> {}
-        }
+        }*/
         
         /*
         ui: <MultiWindow> {
@@ -70,31 +70,24 @@ live_design!{
             }
         }
         */
-/*
+
         ui: <DesktopWindow> {
             window: {inner_size: vec2(1920, 1080),},
             
             pass: {clear_color: #2A}
             block_signal_event: true; 
             <SlidesView> {
-                goal_pos: 0.0
+                goal_pos: 1.0
                 
                 <Slide> {
-                    draw_bg: { color: #x1A, radius: 5.0 }
-                    title = {
-                        label: "MAKEPAD\nDesigning modern UI's for Rust"},
-                        <SlideBody> {
-                            label: "\n \nRik Arends\n"
-                            draw_label: {
-                                color: #D
-                                text_style: {
-                                    font_size: 35
-                                }
-                            }
-                        }
+                    title = {label: "MAKEPAD\nDesigning modern UI's for Rust"},
+                    <SlideBody> {label: "\nRik Arends\n"}
+                }
+                <Slide> {
+                    title = {label: "A long long time ago"},
+                    <SlideBody> {label: "\nin a galaxy nearby\n\nCloud9 IDE + ACE"}
                 }
                 <Slide> {title = {label: "Ironfish Desktop"}, 
-                    draw_bg: { color: #x1A, radius: 5.0 }
                     <Box>{
                         draw_bg: { color: #x2A }
                         walk: { margin: 10.0, width: 1600 }
@@ -103,7 +96,6 @@ live_design!{
                     }
                 }
                 <Slide> {title = {label: "Ironfish Mobile"}, 
-                    draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}}
                         walk: { margin: { top: 0 }}
@@ -111,7 +103,6 @@ live_design!{
                     }
                 }
                 <Slide> {title = {label: "Multi modal"}, 
-                    draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}, spacing: 20}
 
@@ -129,7 +120,6 @@ live_design!{
                 }
                 <Slide> {title = {label: "Visual design"}, 
                     layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
-                    draw_bg: { color: #x1A, radius: 5.0 }
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}, spacing: 20}
                         <Box>{
@@ -175,7 +165,7 @@ live_design!{
                     }
                 }
             }
-        }*/
+        }
     }
 }
 app_main!(App);

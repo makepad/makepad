@@ -203,7 +203,7 @@ impl OsType {
 
 impl Cx {
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
         crate::makepad_error_log::set_panic_hook();
         // the null texture
         /*let mut textures = CxTexturePool::default();
