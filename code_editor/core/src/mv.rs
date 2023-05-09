@@ -27,7 +27,7 @@ impl<'a> Context<'a> {
     }
 
     pub fn move_up(&self, pos: Pos, column: Option<usize>) -> (Pos, Option<usize>) {
-        if Self::is_at_first_line(pos) {
+        if !Self::is_at_first_line(pos) {
             let (pos, column) = self.move_to_prev_line(pos, column);
             (pos, Some(column))
         } else {

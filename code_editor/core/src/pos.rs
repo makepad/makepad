@@ -31,7 +31,7 @@ impl Pos {
                 },
                 Some(LenOnlyOp::Insert(len)) => {
                     if after {
-                        pos += len;
+                        break pos + len;
                     }
                     op_slot = op_iter.next();
                 }
@@ -83,12 +83,12 @@ impl Sub for Pos {
         if self.line == other.line {
             Len {
                 line: 0,
-                byte: other.byte - self.byte,
+                byte: self.byte - other.byte,
             }
         } else {
             Len {
-                line: other.line - self.line,
-                byte: other.byte,
+                line: self.line - other.line,
+                byte: self.byte,
             }
         }
     }

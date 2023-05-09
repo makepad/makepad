@@ -20,7 +20,7 @@ impl State {
     pub fn create_view(&mut self) -> ViewId {
         let model = self.models.insert(Model {
             view_ids: HashSet::new(),
-            buf: Buf::new(include_str!("arena.rs").parse().unwrap())
+            buf: Buf::new(include_str!("arena.rs").parse().unwrap()),
         });
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,

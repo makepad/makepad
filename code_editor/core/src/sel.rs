@@ -200,7 +200,7 @@ impl Region {
         use std::cmp::Ordering;
 
         if local {
-            self.active.apply_diff(diff, true);
+            self.active = self.active.apply_diff(diff, true);
             self.clear();
         } else {
             match self.active.cmp(&self.inactive) {
