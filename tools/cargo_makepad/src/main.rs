@@ -47,12 +47,12 @@ fn main() {
     /*let test_args = "cargo makepad android expand-sdk";
     let args:Vec<String> = test_args.split(" ").map(|s| s.to_string()).collect();
     let args = &args[2..];*/
-    
     let args:Vec<String> = std::env::args().collect();
+    println!("{:?}", args);
     if args.len()<3{
         return show_help("not enough arguments");
     }
-    let args = &args[1..];
+    let args = &args[2..];
    
     if args.len() == 0{
         return show_help("");

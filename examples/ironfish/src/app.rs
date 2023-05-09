@@ -40,15 +40,15 @@ live_design!{
                 }
             }
         }
-        /* ui: <DesktopWindow> {
+        ui: <DesktopWindow> {
             window: {inner_size: vec2(1280, 1000), dpi_override:2},
             pass: {clear_color: #2A}
             block_signal_event: true; 
             <AppDesktop> {}
-        }*/
+        }
         
-        /*
-        ui: <MultiWindow> {
+        
+        ui= <MultiWindow> {
             mobile =<DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000), dpi_override:2},
                 pass: {clear_color: #2A}
@@ -69,7 +69,6 @@ live_design!{
                 <AppMobile> {}
             }
         }
-        */
 
         ui: <DesktopWindow> {
             window: {inner_size: vec2(1920, 1080),},

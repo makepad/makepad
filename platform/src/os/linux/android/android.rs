@@ -332,11 +332,10 @@ impl Cx {
         &mut self,
         pass_id: PassId,
         to_java: &AndroidToJava,
-        dpi_factor: f64,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
 
-        self.setup_render_pass(pass_id, dpi_factor);
+        self.setup_render_pass(pass_id);
         
         // keep repainting in a loop 
         self.passes[pass_id].paint_dirty = false;
@@ -395,14 +394,14 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     let window = &self.windows[window_id];
-                    self.draw_pass_to_fullscreen(*pass_id, to_java, window.window_geom.dpi_factor);
+                    self.draw_pass_to_fullscreen(*pass_id, to_java);
                 }
                 CxPassParent::Pass(parent_pass_id) => {
-                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, dpi_factor);
+                    //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    self.draw_pass_to_texture(*pass_id);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, 1.0);
+                    self.draw_pass_to_texture(*pass_id);
                 }
             }
         }
