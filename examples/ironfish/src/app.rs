@@ -77,16 +77,65 @@ live_design!{
             pass: {clear_color: #2A}
             block_signal_event: true; 
             <SlidesView> {
-                goal_pos: 1.0
+                goal_pos: 8.0
                 
                 <Slide> {
-                    title = {label: "MAKEPAD\nDesigning modern UI's for Rust"},
-                    <SlideBody> {label: "\nRik Arends\n"}
+                    title = {label: "MAKEPAD\nDesigning modern UIs for Rust"},
+                    <SlideBody> {label: "Rik Arends\n"}
                 }
                 <Slide> {
                     title = {label: "A long long time ago"},
-                    <SlideBody> {label: "\nin a galaxy nearby\n\nCloud9 IDE + ACE"}
+                    <SlideBody> {label: "in a galaxy nearby\nCloud9 IDE + ACE"}
                 }
+                <Slide> {
+                    title = {label: "HTML as an IDE UI? Madness"},
+                    <SlideBody> {label: "Design<>Code was hard\nCould not innovate editing\nToo slow, too hard to control"}
+                }
+                <Slide> {
+                    title = {label: "Let's start over!"},
+                    <SlideBody> {label: "JavaScript and WebGL for UI\nWrite shaders to style UI\nA quick demo"}
+                }
+                <Slide> {
+                    title = {label: "Maybe JavaScript was the problem"},
+                    <SlideBody> {label: "Great livecoding, but...\nChrome crashing tabs after 30 minutes\nToo slow"}
+                }
+                <Slide> {
+                    title = {label: "Rust appears"},
+                    <SlideBody> {label: "Let's try again: Native+Wasm\nMakepad in Rust\nStartup with Eddy and Sebastian"}
+                }
+                <Slide> {title = {label: "Rust is fast: SIMD Mandelbrot"}, 
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    draw_bg: { color: #x1A, radius: 5.0 }
+                    <Frame>{
+                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        <Box>{
+                            draw_bg: { color: #x2A } 
+                            walk: { margin: 0.0}
+                            layout:{ padding: 0.0 }
+                            <Mandelbrot> {walk:{width:Fill, height:Fill}}
+                        }
+                    }
+                }
+
+                <Slide> {title = {label: "Instanced rendering"}, 
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    draw_bg: { color: #x1A, radius: 5.0 }
+                    <Frame>{
+                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        <Box>{
+                            draw_bg: { color: #x2A }
+                            walk: { margin: 0.0}
+                            layout:{ padding: 0.0 }
+                            <NumberGrid> {walk:{width:Fill, height:Fill}}
+                        }
+                    }
+                }
+                
+                <Slide> {
+                    title = {label: "Our goal: unify Coding and UI Design again."},
+                    <SlideBody> {label: "As it was in Visual Basic\nNow with modern design"}
+                }
+
                 <Slide> {title = {label: "Ironfish Desktop"}, 
                     <Box>{
                         draw_bg: { color: #x2A }
@@ -95,6 +144,7 @@ live_design!{
                         <AppDesktop> {}
                     }
                 }
+                
                 <Slide> {title = {label: "Ironfish Mobile"}, 
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}}
@@ -102,6 +152,7 @@ live_design!{
                         <AppMobile> {walk:{width:400, height: Fill}}
                     }
                 }
+                
                 <Slide> {title = {label: "Multi modal"}, 
                     <Frame>{
                         layout:{padding: 0, align:{x:0.5}, spacing: 20}
@@ -118,6 +169,7 @@ live_design!{
                         }
                     }
                 }
+                
                 <Slide> {title = {label: "Visual design"}, 
                     layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
                     <Frame>{
@@ -137,33 +189,27 @@ live_design!{
                         } 
                     }
                 }
-                <Slide> {title = {label: "Rust is fast"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
-                    draw_bg: { color: #x1A, radius: 5.0 }
-                    <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
-                        <Box>{
-                            draw_bg: { color: #x2A } 
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <Mandelbrot> {walk:{width:Fill, height:Fill}}
-                        }
-                    }
+                
+                <Slide> {
+                    title = {label: "Our UI language: Live."},
+                    <SlideBody> {label: "Live editable\nDesign tool manipulates text\nInheritance structure\nRust like module system"}
                 }
-
-                <Slide> {title = {label: "Rust is fast"}, 
-                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
-                    draw_bg: { color: #x1A, radius: 5.0 }
-                    <Frame>{
-                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
-                        <Box>{
-                            draw_bg: { color: #x2A }
-                            walk: { margin: 0.0}
-                            layout:{ padding: 0.0 }
-                            <NumberGrid> {walk:{width:Fill, height:Fill}}
-                        }
-                    }
-                }
+                
+                <Slide> {
+                    title = {label: "These slides are a makepad app"},
+                    <SlideBody> {label: "Show source\n"}
+                    <SlideBody> {label: "Show rust API\n"}
+                }                
+                
+                <Slide> {
+                    title = {label: "Future"},
+                    <SlideBody> {label: "Release of 0.4.0 soon\nWindows, Linux, Mac, Web and Android\ngithub.com/makepad/makepad\ntwitter: @rikarends @makepad"}
+                }                
+                
+                <Slide> {
+                    title = {label: "Compile for android"},
+                    <SlideBody> {label: "Demo"}
+                }                
             }
         }
     }
