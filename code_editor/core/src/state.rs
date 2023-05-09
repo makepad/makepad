@@ -20,7 +20,7 @@ impl State {
     pub fn create_view(&mut self) -> ViewId {
         let model = self.models.insert(Model {
             view_ids: HashSet::new(),
-            buf: Buf::new(include_str!("arena.rs").parse().unwrap()),
+            buf: Buf::new(include_str!("arena.rs").into()),
         });
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,
@@ -161,11 +161,25 @@ impl<'a> HandleEventContext<'a> {
                         region
                     });
             }
+            Key(KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            }) => {
+                let diff = edit::Context {
+                    sel: &self.view.sel
+                }
+                .insert("\n".into());
+                self.model.buf.apply_diff(diff.clone());
+                self.view.apply_diff(&diff, true);
+                for sibling_view in &mut self.sibling_views {
+                    sibling_view.apply_diff(&diff, false);
+                }
+            }
             Text(TextEvent { string }) => {
                 let diff = edit::Context {
                     sel: &self.view.sel,
                 }
-                .insert(string.parse().unwrap());
+                .insert(string.into());
                 self.model.buf.apply_diff(diff.clone());
                 self.view.apply_diff(&diff, true);
                 for sibling_view in &mut self.sibling_views {

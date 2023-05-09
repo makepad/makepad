@@ -1,6 +1,6 @@
 use {
     crate::{Diff, Len, Pos, Range},
-    std::{convert::Infallible, ops::AddAssign, str::FromStr},
+    std::ops::AddAssign,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,11 +143,21 @@ impl From<Vec<String>> for Text {
     }
 }
 
-impl FromStr for Text {
-    type Err = Infallible;
+impl<const N: usize> From<[String; N]> for Text {
+    fn from(lines: [String; N]) -> Self {
+        lines.to_vec().into()
+    }
+}
 
-    fn from_str(string: &str) -> Result<Self, Self::Err> {
-        Ok(string.lines().map(|string| string.into()).collect())
+impl From<&str> for Text {
+    fn from(string: &str) -> Self {
+        string.split("\n").map(|string| string.into()).collect()
+    }
+}
+
+impl From<String> for Text {
+    fn from(string: String) -> Self {
+        string.as_str().into()
     }
 }
 
