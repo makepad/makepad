@@ -37,6 +37,21 @@ live_design!{
             label: "SlideTitle"
         }
     }
+
+    SlideChapter = <Slide> {
+        draw_bg: { color: #xFF5C39, radius: 5.0 }
+        walk: {width: (SLIDE_WIDTH), height: Fill}
+        layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
+        title = <Label> {
+            draw_label: {
+                color: #x181818
+                text_style: {
+                    font_size: 120
+                }
+            }
+            label: "SlideTitle"
+        }
+    }
     
     SlidesView = {{SlidesView}} {
         slide_width: (SLIDE_WIDTH)
