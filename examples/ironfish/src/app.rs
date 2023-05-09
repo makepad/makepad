@@ -89,19 +89,19 @@ live_design!{
                 }
                 <Slide> {
                     title = {label: "HTML as an IDE UI?\nMadness!"},
-                    <SlideBody> {label: "• Integrating design and code was hard\n• Could not innovate editing\n• Too slow, too hard to control"}
+                    <SlideBody> {label: "- Integrating design and code was hard\n- Could not innovate editing\n- Too slow, too hard to control"}
                 }
                 <Slide> {
                     title = {label: "Let's start over!"},
-                    <SlideBody> {label: "• JavaScript and WebGL for UI\n• Write shaders to style UI\n• A quick demo"}
+                    <SlideBody> {label: "- JavaScript and WebGL for UI\n- Write shaders to style UI\n- A quick demo"}
                 }
                 <Slide> {
                     title = {label: "Maybe JavaScript\nwas the problem?"},
-                    <SlideBody> {label: "• Great livecoding, but …\n• Chrome crashing tabs after 30 minutes\n• Too slow"}
+                    <SlideBody> {label: "- Great livecoding, but …\n- Chrome crashing tabs after 30 minutes\n- Too slow"}
                 }
                 <Slide> {
                     title = {label: "Rust appears"},
-                    <SlideBody> {label: "• Let's try again: Native + Wasm\n• Makepad in Rust\n• Startup with Eddy and Sebastian"}
+                    <SlideBody> {label: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
                 }
                 <Slide> {title = {label: "Rust is fast: SIMD Mandelbrot"}, 
                     layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
@@ -192,23 +192,23 @@ live_design!{
                 
                 <Slide> {
                     title = {label: "Our UI language: Live."},
-                    <SlideBody> {label: "• Live editable\n• Design tool manipulates text\n• Inheritance structure\n• Rust-like module system"}
+                    <SlideBody> {label: "- Live editable\n- Design tool manipulates text\n- Inheritance structure\n- Rust-like module system"}
                 }
                 
                 <Slide> {
                     title = {label: "These slides are a Makepad app"},
-                    <SlideBody> {label: "• Show source\n"}
-                    <SlideBody> {label: "• Show Rust API\n"}
+                    <SlideBody> {label: "- Show source\n"}
+                    <SlideBody> {label: "- Show Rust API\n"}
                 }                
                 
                 <Slide> {
                     title = {label: "Future"},
-                    <SlideBody> {label: "• Release of 0.4.0 soon\n• Windows, Linux, Mac, Web and Android\n• github.com/makepad/makepad\n• twitter: @rikarends @makepad"}
+                    <SlideBody> {label: "- Release of 0.4.0 soon\n- Windows, Linux, Mac, Web and Android\n- github.com/makepad/makepad\n- twitter: @rikarends @makepad"}
                 }                
                 
                 <Slide> {
                     title = {label: "Build for Android"},
-                    <SlideBody> {label: "• SDK installer\n• Cargo makepad android\n"}
+                    <SlideBody> {label: "- SDK installer\n- Cargo makepad android\n"}
                 }                
             }
         }
