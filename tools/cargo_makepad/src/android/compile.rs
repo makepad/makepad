@@ -269,32 +269,14 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         cp_all(&resources_path, &dst_dir, false) ?;
     }
 
-    // TODO - This is copying all from /icons but we should discuss which folders we
-    // want to support, or if we want to copy recursively from /resources
-    for (name, resources_path) in dependencies.iter() {
-        if resources_path.join("icons").is_dir() {
-            let dst_dir = out_dir.join(format!("assets/makepad/{name}/resources/icons"));
-            mkdir(&dst_dir) ?;
-            cp_all(&resources_path.join("icons"), &dst_dir, false) ?;
-        }
-    }
-
     let mut assets_to_add: Vec<String> = Vec::new();
     for (name, _resources_path) in dependencies.iter() {
         let dst_dir = out_dir.join(format!("assets/makepad/{name}/resources"));
         let assets = ls(&dst_dir) ?;
 
-        for a in &assets {
-            assets_to_add.push(format!("assets/makepad/{name}/resources/{a}"));
-        }
-
-        // TODO Check this!
-        if dst_dir.join("icons").is_dir() {
-            let icon_assets = ls(&dst_dir.join("icons")) ?;
-
-            for a in &icon_assets {
-                assets_to_add.push(format!("assets/makepad/{name}/resources/icons/{a}"));
-            }
+        for path in &assets {
+            let path = path.display();
+            assets_to_add.push(format!("assets/makepad/{name}/resources/{path}"));
         }
     }
 
