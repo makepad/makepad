@@ -27,6 +27,7 @@ use {
             TextCopyEvent,
             KeyEvent,
             KeyModifiers,
+            KeyCode,
             WebSocket,
             WebSocketAutoReconnect,
             Event,
@@ -213,7 +214,6 @@ impl Cx {
 
     /// Called when a touch event happened on the software keyword
     pub fn from_java_on_key_down(&mut self, key_code_val: i32, characters: Option<String>, meta_state: i32, to_java: AndroidToJava) {
-        //let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
         let e: Event;
 
         match characters {
@@ -229,14 +229,15 @@ impl Cx {
                 self.after_every_event(&to_java);
             }
             None => {
-                let key_code =  android_to_makepad_key_code(key_code_val);
-                if !key_code.is_unknown(){
+                let key_code = android_to_makepad_key_code(key_code_val);
+                if !key_code.is_unknown() {
                     let control = meta_state & ANDROID_META_CTRL_MASK != 0;
                     let alt = meta_state & ANDROID_META_ALT_MASK != 0;
                     let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
-                    let is_shortcut = control || alt;
                     let ch = key_code.to_char(shift);
-                    if ch.is_some() && !is_shortcut {
+                    let is_shortcut = control || alt;
+                    let is_return = key_code == KeyCode::ReturnKey;
+                    if ch.is_some() && !is_shortcut && !is_return {
                         let input = ch.unwrap().to_string();
                         e = Event::TextInput(
                             TextInputEvent {
