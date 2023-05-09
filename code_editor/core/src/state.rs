@@ -78,9 +78,9 @@ struct View {
 }
 
 impl View {
-    fn move_sel(&mut self, text: &Text, mut f: impl FnMut(&mv::Context<'_>, &mut Region)) {
+    fn move_sel(&mut self, text: &Text, mut f: impl FnMut(&mv::Context<'_>, Region) -> Region) {
         let context = mv::Context { text };
-        self.sel.update_all(|region| f(&context, region));
+        self.sel.update_all_regions(|region| f(&context, region));
     }
 
     fn apply_diff(&mut self, diff: &Diff, local: bool) {
@@ -112,10 +112,11 @@ impl<'a> HandleEventContext<'a> {
             }) => {
                 self.view
                     .move_sel(self.model.buf.text(), |context, region| {
-                        region.update(|pos, _| (context.move_left(pos), None));
+                        let mut region = region.apply_move(|pos, _| (context.move_left(pos), None));
                         if !shift {
-                            region.clear();
+                            region = region.clear();
                         }
+                        region
                     });
             }
             Key(KeyEvent {
@@ -124,10 +125,12 @@ impl<'a> HandleEventContext<'a> {
             }) => {
                 self.view
                     .move_sel(self.model.buf.text(), |context, region| {
-                        region.update(|pos, _| (context.move_right(pos), None));
+                        let mut region =
+                            region.apply_move(|pos, _| (context.move_right(pos), None));
                         if !shift {
-                            region.clear();
+                            region = region.clear();
                         }
+                        region
                     });
             }
             Key(KeyEvent {
@@ -136,10 +139,12 @@ impl<'a> HandleEventContext<'a> {
             }) => {
                 self.view
                     .move_sel(self.model.buf.text(), |context, region| {
-                        region.update(|pos, column| context.move_up(pos, column));
+                        let mut region =
+                            region.apply_move(|pos, column| context.move_up(pos, column));
                         if !shift {
-                            region.clear();
+                            region = region.clear();
                         }
+                        region
                     });
             }
             Key(KeyEvent {
@@ -148,10 +153,12 @@ impl<'a> HandleEventContext<'a> {
             }) => {
                 self.view
                     .move_sel(self.model.buf.text(), |context, region| {
-                        region.update(|pos, column| context.move_down(pos, column));
+                        let mut region =
+                            region.apply_move(|pos, column| context.move_down(pos, column));
                         if !shift {
-                            region.clear();
+                            region = region.clear();
                         }
+                        region
                     });
             }
             Text(TextEvent { string }) => {

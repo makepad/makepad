@@ -36,8 +36,8 @@ impl CodeEditor {
                 draw_grapheme: &mut self.draw_grapheme,
                 draw_caret: &mut self.draw_caret,
                 cell_size,
-                active_region: None,
-                regions: sel.iter().peekable(),
+                active_sel_region: None,
+                pending_sel_regions: sel.iter().peekable(),
                 text_pos: Pos::default(),
                 screen_pos: DVec2::default(),
             };
@@ -59,8 +59,8 @@ struct Drawer<'a> {
     draw_grapheme: &'a mut DrawText,
     draw_caret: &'a mut DrawColor,
     cell_size: DVec2,
-    active_region: Option<ActiveSelRegion>,
-    regions: Peekable<sel::Iter<'a>>,
+    active_sel_region: Option<ActiveSelRegion>,
+    pending_sel_regions: Peekable<sel::Iter<'a>>,
     text_pos: Pos,
     screen_pos: DVec2,
 }
@@ -69,46 +69,46 @@ impl<'a> Drawer<'a> {
     fn draw_line(&mut self, cx: &mut Cx2d, line: &str) {
         use makepad_code_editor_core::str::StrExt;
 
-        self.check_region_end(cx);
+        self.check_sel_region_end(cx);
         for grapheme in line.graphemes() {
-            self.check_region_start(cx);
+            self.check_sel_region_start(cx);
             self.draw_grapheme(cx, grapheme);
             self.text_pos.byte += grapheme.len();
             self.screen_pos.x += self.cell_size.x;
-            self.check_region_end(cx);
+            self.check_sel_region_end(cx);
         }
-        self.check_region_start(cx);
+        self.check_sel_region_start(cx);
         self.text_pos.byte = 0;
         self.text_pos.line += 1;
         self.screen_pos.x = 0.0;
         self.screen_pos.y += self.cell_size.y;
     }
 
-    fn check_region_start(&mut self, cx: &mut Cx2d) {
+    fn check_sel_region_start(&mut self, cx: &mut Cx2d) {
         if self
-            .regions
+            .pending_sel_regions
             .peek()
             .map_or(false, |region| region.start() == self.text_pos)
         {
-            let region = self.regions.next().unwrap();
-            if region.active == self.text_pos {
+            let sel_region = self.pending_sel_regions.next().unwrap();
+            if sel_region.active_end == self.text_pos {
                 self.draw_caret(cx);
             }
-            self.active_region = Some(ActiveSelRegion {
-                region,
+            self.active_sel_region = Some(ActiveSelRegion {
+                sel_region,
                 start_x: self.screen_pos.x,
             });
         }
     }
 
-    fn check_region_end(&mut self, cx: &mut Cx2d) {
+    fn check_sel_region_end(&mut self, cx: &mut Cx2d) {
         if self
-            .active_region
+            .active_sel_region
             .as_ref()
-            .map_or(false, |region| region.region.end() == self.text_pos)
+            .map_or(false, |region| region.sel_region.end() == self.text_pos)
         {
-            let region = self.active_region.take().unwrap();
-            if region.region.active == self.text_pos {
+            let active_sel_region = self.active_sel_region.take().unwrap();
+            if active_sel_region.sel_region.active_end == self.text_pos {
                 self.draw_caret(cx);
             }
         }
@@ -134,7 +134,7 @@ impl<'a> Drawer<'a> {
 
 #[derive(Clone, Copy)]
 struct ActiveSelRegion {
-    region: sel::Region,
+    sel_region: sel::Region,
     start_x: f64,
 }
 

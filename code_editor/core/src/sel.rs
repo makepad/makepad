@@ -5,8 +5,8 @@ use {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Sel {
-    latest: Region,
-    earlier: Vec<Region>,
+    latest_region: Region,
+    earlier_regions: Vec<Region>,
 }
 
 impl Sel {
@@ -15,13 +15,13 @@ impl Sel {
     }
 
     pub fn len(&self) -> usize {
-        self.earlier.len() + 1
+        self.earlier_regions.len() + 1
     }
 
     pub fn iter(&self) -> Iter<'_> {
         Iter {
-            latest: Some(&self.latest),
-            earlier: self.earlier.iter().peekable(),
+            latest_region: Some(&self.latest_region),
+            earlier_regions: self.earlier_regions.iter().peekable(),
         }
     }
 
@@ -32,68 +32,73 @@ impl Sel {
         }
     }
 
-    pub fn update_latest(&mut self, mut f: impl FnMut(&mut Region)) {
-        f(&mut self.latest);
-        self.normalize_latest();
+    pub fn update_latest_region(&mut self, mut f: impl FnMut(Region) -> Region) {
+        self.latest_region = f(self.latest_region);
+        self.normalize_latest_region();
     }
 
-    pub fn update_all(&mut self, mut f: impl FnMut(&mut Region)) {
-        for region in &mut self.earlier {
-            f(region);
+    pub fn update_all_regions(&mut self, mut f: impl FnMut(Region) -> Region) {
+        for earlier_region in &mut self.earlier_regions {
+            *earlier_region = f(*earlier_region);
         }
-        self.normalize_earlier();
-        self.update_latest(f);
+        self.normalize_earlier_regions();
+        self.update_latest_region(f);
     }
 
-    pub fn push(&mut self, region: Region) {
-        self.earlier.push(self.latest);
-        self.latest = region;
-        self.normalize_latest();
+    pub fn push_region(&mut self, region: Region) {
+        self.earlier_regions.push(self.latest_region);
+        self.latest_region = region;
+        self.normalize_latest_region();
     }
 
     pub fn apply_diff(&mut self, diff: &Diff, local: bool) {
-        for region in &mut self.earlier {
-            region.apply_diff(diff, local);
+        for earlier_region in &mut self.earlier_regions {
+            *earlier_region = earlier_region.apply_diff(diff, local);
         }
-        self.latest.apply_diff(diff, local);
+        self.latest_region = self.latest_region.apply_diff(diff, local);
     }
 
-    fn normalize_latest(&mut self) {
+    fn normalize_latest_region(&mut self) {
         let mut index = match self
-            .earlier
-            .binary_search_by_key(&self.latest.start(), |region| region.start())
+            .earlier_regions
+            .binary_search_by_key(&self.latest_region.start(), |region| region.start())
         {
             Ok(index) => index,
             Err(index) => index,
         };
         while index > 0 {
             let prev_index = index - 1;
-            if self.latest.merge(self.earlier[prev_index]) {
-                self.earlier.remove(prev_index);
+            if let Some(merged_region) = self.latest_region.merge(self.earlier_regions[prev_index])
+            {
+                self.latest_region = merged_region;
+                self.earlier_regions.remove(prev_index);
                 index = prev_index;
             } else {
                 break;
             }
         }
-        while index < self.earlier.len() {
-            if self.latest.merge(self.earlier[index]) {
-                self.earlier.remove(index);
+        while index < self.earlier_regions.len() {
+            if let Some(merged_region) = self.latest_region.merge(self.earlier_regions[index]) {
+                self.latest_region = merged_region;
+                self.earlier_regions.remove(index);
             } else {
                 break;
             }
         }
     }
 
-    fn normalize_earlier(&mut self) {
-        if self.earlier.is_empty() {
+    fn normalize_earlier_regions(&mut self) {
+        if self.earlier_regions.is_empty() {
             return;
         }
-        self.earlier.sort_by_key(|region| region.start());
-        let mut index = 1;
-        while index < self.earlier.len() {
-            let region = self.earlier[index];
-            if self.earlier[index - 1].merge(region) {
-                self.earlier.remove(index + 1);
+        self.earlier_regions.sort_by_key(|region| region.start());
+        let mut index = 0;
+        while index + 1 < self.earlier_regions.len() {
+            if let Some(merged_region) =
+                self.earlier_regions[index].merge(self.earlier_regions[index + 1])
+            {
+                self.earlier_regions[index] = merged_region;
+                self.earlier_regions.remove(index + 1);
             } else {
                 index += 1;
             }
@@ -103,24 +108,24 @@ impl Sel {
 
 #[derive(Clone, Debug)]
 pub struct Iter<'a> {
-    latest: Option<&'a Region>,
-    earlier: Peekable<slice::Iter<'a, Region>>,
+    latest_region: Option<&'a Region>,
+    earlier_regions: Peekable<slice::Iter<'a, Region>>,
 }
 
 impl<'a> Iterator for Iter<'a> {
     type Item = Region;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match (self.latest, self.earlier.next()) {
+        match (self.latest_region, self.earlier_regions.next()) {
             (Some(region_0), Some(region_1)) => {
                 if region_0.start() <= region_1.start() {
-                    self.latest.take()
+                    self.latest_region.take()
                 } else {
-                    self.earlier.next()
+                    self.earlier_regions.next()
                 }
             }
-            (Some(_), _) => self.latest.take(),
-            (_, Some(_)) => self.earlier.next(),
+            (Some(_), _) => self.latest_region.take(),
+            (_, Some(_)) => self.earlier_regions.next(),
             _ => None,
         }
         .copied()
@@ -129,14 +134,14 @@ impl<'a> Iterator for Iter<'a> {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Region {
-    pub active: Pos,
+    pub active_end: Pos,
     pub column: Option<usize>,
-    pub inactive: Pos,
+    pub inactive_end: Pos,
 }
 
 impl Region {
     pub fn is_empty(self) -> bool {
-        self.active == self.inactive
+        self.active_end == self.inactive_end
     }
 
     pub fn len(self) -> Len {
@@ -144,81 +149,87 @@ impl Region {
     }
 
     pub fn start(self) -> Pos {
-        self.active.min(self.inactive)
+        self.active_end.min(self.inactive_end)
     }
 
     pub fn end(self) -> Pos {
-        self.active.max(self.inactive)
+        self.active_end.max(self.inactive_end)
     }
 
-    pub fn update(&mut self, f: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>)) {
-        let (active, column) = f(self.active, self.column);
-        self.active = active;
-        self.column = column;
+    pub fn apply_move(self, f: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>)) -> Self {
+        let (active_end, column) = f(self.active_end, self.column);
+        Self {
+            active_end,
+            column,
+            ..self
+        }
     }
 
-    pub fn clear(&mut self) {
-        self.inactive = self.active;
+    pub fn clear(self) -> Self {
+        Self {
+            inactive_end: self.active_end,
+            ..self
+        }
     }
 
-    pub fn merge(&mut self, other: Region) -> bool {
+    pub fn merge(self, other: Self) -> Option<Self> {
         use std::{cmp::Ordering, mem};
 
-        let mut first = *self;
+        let mut first = self;
         let mut second = other;
         if first.start() > second.start() {
             mem::swap(&mut first, &mut second);
         }
         match (first.is_empty(), second.is_empty()) {
-            (true, true) if first.active == second.active => true,
-            (false, true) if second.active <= first.end() => true,
-            (true, false) if first.active == second.start() => {
-                *self = other;
-                true
-            }
+            (true, true) if first.active_end == second.active_end => Some(self),
+            (false, true) if second.active_end <= first.end() => Some(self),
+            (true, false) if first.active_end == second.start() => Some(other),
             (false, false) if first.end() > second.start() => {
-                match self.active.cmp(&self.inactive) {
-                    Ordering::Less => {
-                        self.active = self.active.min(other.active);
-                        self.column = self.column.min(other.column);
-                        self.inactive = self.inactive.max(other.inactive);
-                    }
-                    Ordering::Greater => {
-                        self.active = self.active.max(other.active);
-                        self.column = self.column.max(other.column);
-                        self.inactive = self.inactive.min(other.inactive);
-                    }
+                Some(match self.active_end.cmp(&self.inactive_end) {
+                    Ordering::Less => Self {
+                        active_end: self.active_end.min(other.active_end),
+                        column: self.column.min(other.column),
+                        inactive_end: self.inactive_end.max(other.inactive_end),
+                    },
+                    Ordering::Greater => Self {
+                        active_end: self.active_end.max(other.active_end),
+                        column: self.column.max(other.column),
+                        inactive_end: self.inactive_end.min(other.inactive_end),
+                    },
                     Ordering::Equal => unreachable!(),
-                }
-                true
+                })
             }
-            _ => false,
+            _ => None,
         }
     }
 
-    pub fn apply_diff(&mut self, diff: &Diff, local: bool) {
+    pub fn apply_diff(self, diff: &Diff, local: bool) -> Self {
         use std::cmp::Ordering;
 
         if local {
-            self.active = self.active.apply_diff(diff, true);
-            self.clear();
-        } else {
-            match self.active.cmp(&self.inactive) {
-                Ordering::Less => {
-                    self.active.apply_diff(diff, false);
-                    self.inactive.apply_diff(diff, true);
-                }
-                Ordering::Equal => {
-                    self.active.apply_diff(diff, true);
-                    self.inactive = self.active;
-                }
-                Ordering::Greater => {
-                    self.inactive.apply_diff(diff, false);
-                    self.active.apply_diff(diff, true);
-                }
+            Self {
+                active_end: self.active_end.apply_diff(diff, true),
+                ..self
             }
-            self.active.apply_diff(diff, false);
-            self.inactive.apply_diff(diff, false);
+            .clear()
+        } else {
+            match self.active_end.cmp(&self.inactive_end) {
+                Ordering::Less => Self {
+                    active_end: self.active_end.apply_diff(diff, false),
+                    inactive_end: self.inactive_end.apply_diff(diff, true),
+                    ..self
+                },
+                Ordering::Equal => Self {
+                    active_end: self.active_end.apply_diff(diff, true),
+                    ..self
+                }
+                .clear(),
+                Ordering::Greater => Self {
+                    active_end: self.active_end.apply_diff(diff, true),
+                    inactive_end: self.inactive_end.apply_diff(diff, false),
+                    ..self
+                },
+            }
         }
     }
 }

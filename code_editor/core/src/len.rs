@@ -34,7 +34,7 @@ impl Sub for Len {
     type Output = Self;
 
     fn sub(self, other: Self) -> Self {
-        if other.line == 0 {
+        if self.line - other.line == 0 {
             Self {
                 line: 0,
                 byte: self.byte - other.byte,
