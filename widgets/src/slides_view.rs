@@ -15,17 +15,16 @@ live_design!{
     
     SlideBody = <Label> {
         draw_label: {
-            color: #f
+            color: #D
             text_style: {
-                font_size: 45
+                font_size: 35
             }
         }
         label: ""
     }
     
     Slide = <Box> {
-        has_view: true,
-        draw_bg: {shape: Box, color: #2, radius: 10.0}
+        draw_bg: { color: #x1A, radius: 5.0 }
         walk: {width: (SLIDE_WIDTH), height: Fill}
         layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
         title = <Label> {
