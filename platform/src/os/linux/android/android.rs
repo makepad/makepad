@@ -126,7 +126,7 @@ impl Cx {
             }
             else {
                 let message = format!("cannot load dependency {}", path);
-                crate::makepad_error_log::error!("Android asset failed: {}", message);
+                //crate::makepad_error_log::error!("Android asset failed: {}", message);
                 dep.data = Some(Err(message));
             }
         }
@@ -393,11 +393,11 @@ impl Cx {
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(window_id) => {
-                    let window = &self.windows[window_id];
+                CxPassParent::Window(_) => {
+                    //let window = &self.windows[window_id];
                     self.draw_pass_to_fullscreen(*pass_id, to_java);
                 }
-                CxPassParent::Pass(parent_pass_id) => {
+                CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     self.draw_pass_to_texture(*pass_id);
                 },

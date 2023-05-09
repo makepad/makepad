@@ -40,7 +40,7 @@ live_design!{
                 }
             }
         }
-        ui: <DesktopWindow> {
+        ui= <DesktopWindow> {
             window: {inner_size: vec2(1280, 1000), dpi_override:2},
             pass: {clear_color: #2A}
             block_signal_event: true; 
@@ -70,7 +70,7 @@ live_design!{
             }
         }
 
-        ui: <DesktopWindow> {
+        ui:<DesktopWindow> {
             window: {inner_size: vec2(1920, 1080),},
             
             pass: {clear_color: #2A}
@@ -206,8 +206,8 @@ live_design!{
                 }                
                 
                 <Slide> {
-                    title = {label: "Compile for android"},
-                    <SlideBody> {label: "Demo"}
+                    title = {label: "Build for android"},
+                    <SlideBody> {label: "SDK installer\nCargo makepad android\n"}
                 }                
             }
         }
