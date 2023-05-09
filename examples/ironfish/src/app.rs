@@ -24,6 +24,7 @@ live_design!{
     import makepad_synth_ironfish::ironfish::IronFish;
     import makepad_widgets::designer::Designer;
     import makepad_widgets::slides_view::Slide;
+    import makepad_widgets::slides_view::SlideChapter;
     import makepad_widgets::slides_view::SlideBody;
     import makepad_widgets::slides_view::SlidesView;
     
@@ -78,29 +79,29 @@ live_design!{
             <SlidesView> {
                 goal_pos: 8.0
                 
-                <Slide> {
-                    title = {label: "MAKEPAD\nDesigning modern UIs for Rust"},
+                <SlideChapter> {
+                    title = {label: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
                     <SlideBody> {label: "Rik Arends\n"}
                 }
                 <Slide> {
-                    title = {label: "A long long time ago"},
-                    <SlideBody> {label: "in a galaxy nearby\nCloud9 IDE + ACE"}
+                    title = {label: "A long long time ago …"},
+                    <SlideBody> {label: "… in a galaxy nearby Cloud9 IDE & ACE"}
                 }
                 <Slide> {
-                    title = {label: "HTML as an IDE UI? Madness"},
-                    <SlideBody> {label: "Design<>Code was hard\nCould not innovate editing\nToo slow, too hard to control"}
+                    title = {label: "HTML as an IDE UI?\nMadness!"},
+                    <SlideBody> {label: "• Integrating design and code was hard\n• Could not innovate editing\n• Too slow, too hard to control"}
                 }
                 <Slide> {
                     title = {label: "Let's start over!"},
-                    <SlideBody> {label: "JavaScript and WebGL for UI\nWrite shaders to style UI\nA quick demo"}
+                    <SlideBody> {label: "• JavaScript and WebGL for UI\n• Write shaders to style UI\n• A quick demo"}
                 }
                 <Slide> {
-                    title = {label: "Maybe JavaScript was the problem"},
-                    <SlideBody> {label: "Great livecoding, but...\nChrome crashing tabs after 30 minutes\nToo slow"}
+                    title = {label: "Maybe JavaScript\nwas the problem?"},
+                    <SlideBody> {label: "• Great livecoding, but …\n• Chrome crashing tabs after 30 minutes\n• Too slow"}
                 }
                 <Slide> {
                     title = {label: "Rust appears"},
-                    <SlideBody> {label: "Let's try again: Native+Wasm\nMakepad in Rust\nStartup with Eddy and Sebastian"}
+                    <SlideBody> {label: "• Let's try again: Native + Wasm\n• Makepad in Rust\n• Startup with Eddy and Sebastian"}
                 }
                 <Slide> {title = {label: "Rust is fast: SIMD Mandelbrot"}, 
                     layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
@@ -131,8 +132,8 @@ live_design!{
                 }
                 
                 <Slide> {
-                    title = {label: "Our goal: unify Coding and UI Design again."},
-                    <SlideBody> {label: "As it was in Visual Basic\nNow with modern design"}
+                    title = {label: "Our goal:\nUnify coding and UI design again."},
+                    <SlideBody> {label: "As it was in Visual Basic.\nNow with modern design."}
                 }
 
                 <Slide> {title = {label: "Ironfish Desktop"}, 
@@ -191,23 +192,23 @@ live_design!{
                 
                 <Slide> {
                     title = {label: "Our UI language: Live."},
-                    <SlideBody> {label: "Live editable\nDesign tool manipulates text\nInheritance structure\nRust like module system"}
+                    <SlideBody> {label: "• Live editable\n• Design tool manipulates text\n• Inheritance structure\n• Rust-like module system"}
                 }
                 
                 <Slide> {
-                    title = {label: "These slides are a makepad app"},
-                    <SlideBody> {label: "Show source\n"}
-                    <SlideBody> {label: "Show rust API\n"}
+                    title = {label: "These slides are a Makepad app"},
+                    <SlideBody> {label: "• Show source\n"}
+                    <SlideBody> {label: "• Show Rust API\n"}
                 }                
                 
                 <Slide> {
                     title = {label: "Future"},
-                    <SlideBody> {label: "Release of 0.4.0 soon\nWindows, Linux, Mac, Web and Android\ngithub.com/makepad/makepad\ntwitter: @rikarends @makepad"}
+                    <SlideBody> {label: "• Release of 0.4.0 soon\n• Windows, Linux, Mac, Web and Android\n• github.com/makepad/makepad\n• twitter: @rikarends @makepad"}
                 }                
                 
                 <Slide> {
-                    title = {label: "Build for android"},
-                    <SlideBody> {label: "SDK installer\nCargo makepad android\n"}
+                    title = {label: "Build for Android"},
+                    <SlideBody> {label: "• SDK installer\n• Cargo makepad android\n"}
                 }                
             }
         }
