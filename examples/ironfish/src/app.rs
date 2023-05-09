@@ -85,7 +85,7 @@ live_design!{
                 }
                 <Slide> {
                     title = {label: "A long long time ago …"},
-                    <SlideBody> {label: "… in a galaxy nearby Cloud9 IDE & ACE"}
+                    <SlideBody> {label: "… in a galaxy nearby\n   Cloud9 IDE & ACE"}
                 }
                 <Slide> {
                     title = {label: "HTML as an IDE UI?\nMadness!"},
