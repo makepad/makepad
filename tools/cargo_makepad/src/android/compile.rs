@@ -50,31 +50,22 @@ fn main_java(url:&str)->String{
     "#)
 }
 
-pub struct BuildResult{
-    dst_apk: PathBuf,
-    java_url: String,
-}
-
-pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildResult, String> {
+fn get_target_from_args(args: &[String]) -> Result<&str, String> {
     if args.len()<1 {
         return Err("Not enough arguments to build".into());
     }
-    let target = if args[0] == "-p" {
+    if args[0] == "-p" {
         if args.len()<2 { 
             return Err("Not enough arguments to build".into());
         }
-        &args[1]
+        return Ok(&args[1])
     }
     else {
-        &args[0]
-    }; 
-      
-    // main names used in the process
-    let underscore_target = target.replace("-", "_");
-    let java_url = format!("dev.makepad.{underscore_target}");
-    let app_label = format!("{underscore_target}");
+        return Ok(&args[0])
+    };
+}
 
-    // alright lets do the rust stuff.
+fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     
     let linker = match host_os{
@@ -110,7 +101,29 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         "rustup",
         &args_out
     ) ?;
-    
+
+    Ok(())
+}
+
+struct BuildPaths{
+    tmp_dir: PathBuf,
+    out_dir: PathBuf,
+}
+
+struct JavaRootFiles{
+    manifest_file: PathBuf,
+    java_file: PathBuf,
+    java_class: PathBuf,
+}
+
+pub struct BuildResult{
+    dst_apk: PathBuf,
+    java_url: String,
+}
+
+fn prepare_build_dirs(underscore_target: &str) -> Result<BuildPaths, String> {
+    let cwd = std::env::current_dir().unwrap();
+
     let tmp_dir = cwd.join(format!("target/aarch64-linux-android-apk/{underscore_target}/tmp"));
     let out_dir = cwd.join(format!("target/aarch64-linux-android-apk/{underscore_target}/apk"));
     
@@ -119,58 +132,72 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     let _ = rmdir(&out_dir);
     mkdir(&tmp_dir) ?; 
     mkdir(&out_dir) ?;
+
+    Ok(BuildPaths{
+        tmp_dir,
+        out_dir,
+    })
+}
+
+fn generate_root_java_files(build_paths: &BuildPaths, java_url: &str, app_label: &str) -> Result<JavaRootFiles, String> {
     // alright lets go and generate the root java file
     // and the manifest xml
     // then build the dst_apk
     // we'll leave the classname as is
-    let manifest_xml = manifest_xml(&app_label,"MakepadApp",&java_url);
-    let manifest_file = tmp_dir.join("AndroidManifest.xml");
+    let manifest_xml = manifest_xml(&app_label, "MakepadApp", &java_url);
+    let manifest_file = build_paths.tmp_dir.join("AndroidManifest.xml");
     write_text(&manifest_file, &manifest_xml)?;
     
     let main_java = main_java(&java_url);
     let java_path = java_url.replace(".","/");
-    let java_file = tmp_dir.join(&java_path).join("MakepadApp.java");
-    let java_class = out_dir.join(&java_path).join("MakepadApp.class");
+    let java_file = build_paths.tmp_dir.join(&java_path).join("MakepadApp.java");
+    let java_class = build_paths.out_dir.join(&java_path).join("MakepadApp.class");
     write_text(&java_file, &main_java)?;
 
-    let java_home = sdk_dir.join("openjdk");
-    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dst_unaligned_apk = out_dir.join(format!("{underscore_target}.unaligned.apk"));
-    let dst_apk = out_dir.join(format!("{underscore_target}.apk"));
+    Ok(JavaRootFiles{
+        manifest_file,
+        java_file,
+        java_class,
+    })
+}
 
-    let _ = rm(&dst_unaligned_apk);
-    let _ = rm(&dst_apk);
-    
-    println!("Compiling APK & R.java files");
-                
+fn build_r_class(sdk_dir: &Path, build_paths: &BuildPaths, manifest_file: &PathBuf) -> Result<(), String> {
+    let java_home = sdk_dir.join("openjdk");
+    let cwd = std::env::current_dir().unwrap();
+    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+
     shell_env(
-         &[("JAVA_HOME", &java_home.to_str().unwrap())],
-        &cwd,
-        &sdk_dir.join("android-13/aapt").to_str().unwrap(),
-        &[
-            "package",
-            //"-v",
-            "-f",
-            "-m",
-            "-I",
-            &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
-            "-S",
-            &cargo_manifest_dir.join("src/android/res").to_str().unwrap(),
-            "-M",
-            &manifest_file.to_str().unwrap(),
-            "-J",
-            &tmp_dir.to_str().unwrap(),
-            "--custom-package",
-            "dev.makepad.android",
-            &out_dir.to_str().unwrap(),
-        ]
+        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+       &cwd,
+       &sdk_dir.join("android-13/aapt").to_str().unwrap(),
+       &[
+           "package",
+           "-f",
+           "-m",
+           "-I",
+           &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
+           "-S",
+           &cargo_manifest_dir.join("src/android/res").to_str().unwrap(),
+           "-M",
+           &manifest_file.to_str().unwrap(),
+           "-J",
+           &build_paths.tmp_dir.to_str().unwrap(),
+           "--custom-package",
+           "dev.makepad.android",
+           &build_paths.out_dir.to_str().unwrap(),
+       ]
     ) ?;
 
-    // lets build the APK
+    Ok(())
+}
 
-    //println!("Compiling Java");
+fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths, java_file: &PathBuf) -> Result<(), String> {
     let makepad_package_path = "dev/makepad/android";
-    let r_class_path = tmp_dir.join(&makepad_package_path).join("R.java");
+    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let java_home = sdk_dir.join("openjdk");
+    let cwd = std::env::current_dir().unwrap();
+
+    let r_class_path = build_paths.tmp_dir.join(&makepad_package_path).join("R.java");
     let makepad_java_classes_dir = &cargo_manifest_dir.join("src/android/java/").join(&makepad_package_path);
 
     shell_env(
@@ -182,7 +209,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
             "-Xlint:deprecation",
             "-d", 
-            &out_dir.to_str().unwrap(),
+            &build_paths.out_dir.to_str().unwrap(),
             &r_class_path.to_str().unwrap(),
             &makepad_java_classes_dir.join("Makepad.java").to_str().unwrap(),
             &makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap(),
@@ -191,7 +218,14 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         ]   
     ) ?; 
 
-    //println!("Building dex file");
+    Ok(())
+}
+
+fn build_dex(sdk_dir: &Path, out_dir: &PathBuf, java_class: &PathBuf) -> Result<(), String> {
+    let makepad_package_path = "dev/makepad/android";
+    let java_home = sdk_dir.join("openjdk");
+    let cwd = std::env::current_dir().unwrap();
+
     let compiled_java_classes_dir = out_dir.join(&makepad_package_path);
 
     shell_env_cap( 
@@ -213,30 +247,42 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             &java_class.to_str().unwrap(),
         ]
     ) ?;
-    
-    //println!("Creating unaligned apk file");
+
+    Ok(())
+}
+
+fn build_unaligned_apk(sdk_dir: &Path, underscore_target: &str, out_dir: &PathBuf, manifest_file: &PathBuf) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap();
+    let java_home = sdk_dir.join("openjdk");
+    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dst_unaligned_apk = out_dir.join(format!("{underscore_target}.unaligned.apk"));
 
     shell_env(
-         &[("JAVA_HOME", &java_home.to_str().unwrap())],
-        &cwd,
-        &sdk_dir.join("android-13/aapt").to_str().unwrap(),
-        &[
-            "package",
-            "-f",
-            "-F",
-            &dst_unaligned_apk.to_str().unwrap(),
-            "-I",
-            &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
-            "-M",
-            &manifest_file.to_str().unwrap(),
-            "-S",
-            &cargo_manifest_dir.join("src/android/res").to_str().unwrap(),
-            &out_dir.to_str().unwrap(),
-        ]
+        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+       &cwd,
+       &sdk_dir.join("android-13/aapt").to_str().unwrap(),
+       &[
+           "package",
+           "-f",
+           "-F",
+           &dst_unaligned_apk.to_str().unwrap(),
+           "-I",
+           &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
+           "-M",
+           &manifest_file.to_str().unwrap(),
+           "-S",
+           &cargo_manifest_dir.join("src/android/res").to_str().unwrap(),
+           &out_dir.to_str().unwrap(),
+       ]
     ) ?;
-    
-   //println!("Adding rust library to apk");
-     
+
+    Ok(())
+}
+
+fn add_rust_library(sdk_dir: &Path, underscore_target: &str, out_dir: &PathBuf) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap();
+    let dst_unaligned_apk = out_dir.join(format!("{underscore_target}.unaligned.apk"));
+
     mkdir(&out_dir.join("lib/arm64-v8a")) ?;
     
     let src_lib = cwd.join("target/aarch64-linux-android/release/").join(&format!("lib{underscore_target}.so"));
@@ -249,7 +295,13 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         "lib/arm64-v8a/libmakepad.so",
     ]) ?;
 
-    //println!("Adding resources to apk");
+    Ok(())
+}
+
+fn add_resources(sdk_dir: &Path, underscore_target: &str, out_dir: &PathBuf) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap();
+    let dst_unaligned_apk = out_dir.join(format!("{underscore_target}.unaligned.apk"));
+    let app_label = format!("{underscore_target}");
 
     let mut assets_to_add: Vec<String> = Vec::new();
 
@@ -290,8 +342,6 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
         }
     }
 
-    //println!("assets_to_add {:?}", assets_to_add);
-
     let mut aapt_args = vec![
         "add",
         &dst_unaligned_apk.to_str().unwrap(),
@@ -302,7 +352,10 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
 
     shell_env_cap(&[], &out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &aapt_args) ?;
 
-    //println!("Zip aligning apk");
+    Ok(())
+}
+
+fn build_zipaligned_apk(sdk_dir: &Path, dst_unaligned_apk: &Path, dst_apk: &Path, out_dir: &PathBuf) -> Result<(), String> {
     shell_env_cap(&[], &out_dir, &sdk_dir.join("android-13/zipalign").to_str().unwrap(), &[
        "-v",
        "-f",
@@ -311,9 +364,14 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
        &dst_apk.to_str().unwrap(),
     ]) ?;
 
+    Ok(())
+}
+
+fn sign_apk(sdk_dir: &Path, dst_apk: &Path) -> Result<(), String> {
+    let cwd = std::env::current_dir().unwrap();
+    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let java_home = sdk_dir.join("openjdk");
 
-    //println!("Signing APK");
     shell_env_cap(
         &[("JAVA_HOME", &java_home.to_str().unwrap())],
         &cwd,
@@ -332,6 +390,39 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             &dst_apk.to_str().unwrap() 
         ]
     ) ?;
+
+    Ok(())
+}
+
+pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildResult, String> {
+    let target = get_target_from_args(args)?;
+
+    // main names used in the process
+    let underscore_target = target.replace("-", "_");
+    let java_url = format!("dev.makepad.{underscore_target}");
+    let app_label = format!("{underscore_target}");
+
+    rust_build(sdk_dir, host_os, args)?;
+    let build_paths = prepare_build_dirs(&underscore_target)?;
+    let root_java_files = generate_root_java_files(&build_paths, &java_url, &app_label)?;
+
+    let dst_unaligned_apk = build_paths.out_dir.join(format!("{underscore_target}.unaligned.apk"));
+    let dst_apk = build_paths.out_dir.join(format!("{underscore_target}.apk"));
+
+    let _ = rm(&dst_unaligned_apk);
+    let _ = rm(&dst_apk);
+
+    println!("Compiling APK & R.java files");
+    build_r_class(sdk_dir, &build_paths, &root_java_files.manifest_file)?;
+    compile_java(sdk_dir, &build_paths, &root_java_files.java_file)?;
+
+    println!("Building APK");
+    build_dex(sdk_dir, &build_paths.out_dir, &root_java_files.java_class)?;
+    build_unaligned_apk(sdk_dir, &underscore_target, &build_paths.out_dir, &root_java_files.manifest_file)?;
+    add_rust_library(sdk_dir, &underscore_target, &build_paths.out_dir)?;
+    add_resources(sdk_dir, &underscore_target, &build_paths.out_dir)?;
+    build_zipaligned_apk(sdk_dir, &dst_unaligned_apk, &dst_apk, &build_paths.out_dir)?;
+    sign_apk(sdk_dir, &dst_apk)?;
 
     println!("Compile APK completed");
     Ok(BuildResult{
