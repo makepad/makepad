@@ -1,5 +1,5 @@
 use {
-    makepad_code_editor_core::{event, sel, state::ViewId, Pos, State},
+    makepad_code_editor_core::{event, cursor_set, state::ViewId, Cursor, Pos, State},
     makepad_widgets::*,
     std::iter::Peekable,
 };
@@ -36,8 +36,8 @@ impl CodeEditor {
                 draw_grapheme: &mut self.draw_grapheme,
                 draw_caret: &mut self.draw_caret,
                 cell_size,
-                active_sel_region: None,
-                pending_sel_regions: sel.iter().peekable(),
+                active_cursor: None,
+                cursors: sel.iter().peekable(),
                 text_pos: Pos::default(),
                 screen_pos: DVec2::default(),
             };
@@ -59,8 +59,8 @@ struct Drawer<'a> {
     draw_grapheme: &'a mut DrawText,
     draw_caret: &'a mut DrawColor,
     cell_size: DVec2,
-    active_sel_region: Option<ActiveSelRegion>,
-    pending_sel_regions: Peekable<sel::Iter<'a>>,
+    active_cursor: Option<ActiveCursor>,
+    cursors: Peekable<cursor_set::Iter<'a>>,
     text_pos: Pos,
     screen_pos: DVec2,
 }
@@ -69,46 +69,46 @@ impl<'a> Drawer<'a> {
     fn draw_line(&mut self, cx: &mut Cx2d, line: &str) {
         use makepad_code_editor_core::str::StrExt;
 
-        self.check_sel_region_end(cx);
+        self.check_cursor_end(cx);
         for grapheme in line.graphemes() {
-            self.check_sel_region_start(cx);
+            self.check_cursor_start(cx);
             self.draw_grapheme(cx, grapheme);
             self.text_pos.byte += grapheme.len();
             self.screen_pos.x += self.cell_size.x;
-            self.check_sel_region_end(cx);
+            self.check_cursor_end(cx);
         }
-        self.check_sel_region_start(cx);
+        self.check_cursor_start(cx);
         self.text_pos.byte = 0;
         self.text_pos.line += 1;
         self.screen_pos.x = 0.0;
         self.screen_pos.y += self.cell_size.y;
     }
 
-    fn check_sel_region_start(&mut self, cx: &mut Cx2d) {
+    fn check_cursor_start(&mut self, cx: &mut Cx2d) {
         if self
-            .pending_sel_regions
+            .cursors
             .peek()
-            .map_or(false, |region| region.start() == self.text_pos)
+            .map_or(false, |cursor| cursor.start() == self.text_pos)
         {
-            let sel_region = self.pending_sel_regions.next().unwrap();
-            if sel_region.active_end == self.text_pos {
+            let sel_cursor = self.cursors.next().unwrap();
+            if sel_cursor.caret == self.text_pos {
                 self.draw_caret(cx);
             }
-            self.active_sel_region = Some(ActiveSelRegion {
-                sel_region,
+            self.active_cursor = Some(ActiveCursor {
+                cursor: sel_cursor,
                 start_x: self.screen_pos.x,
             });
         }
     }
 
-    fn check_sel_region_end(&mut self, cx: &mut Cx2d) {
+    fn check_cursor_end(&mut self, cx: &mut Cx2d) {
         if self
-            .active_sel_region
+            .active_cursor
             .as_ref()
-            .map_or(false, |region| region.sel_region.end() == self.text_pos)
+            .map_or(false, |cursor| cursor.cursor.end() == self.text_pos)
         {
-            let active_sel_region = self.active_sel_region.take().unwrap();
-            if active_sel_region.sel_region.active_end == self.text_pos {
+            let active_sel_cursor = self.active_cursor.take().unwrap();
+            if active_sel_cursor.cursor.caret == self.text_pos {
                 self.draw_caret(cx);
             }
         }
@@ -133,8 +133,8 @@ impl<'a> Drawer<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct ActiveSelRegion {
-    sel_region: sel::Region,
+struct ActiveCursor {
+    cursor: Cursor,
     start_x: f64,
 }
 

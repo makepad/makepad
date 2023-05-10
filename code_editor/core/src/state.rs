@@ -1,5 +1,5 @@
 use {
-    crate::{arena::Id, mv, sel::Region, Arena, Buf, Diff, Event, Sel, Text},
+    crate::{arena::Id, cursor::Cursor, mv, Arena, Buf, Diff, Event, CursorSet, Text},
     std::{
         cell::{RefCell, RefMut},
         collections::HashSet,
@@ -24,7 +24,7 @@ impl State {
         });
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,
-            sel: Sel::new(),
+            sel: CursorSet::new(),
         }));
         self.models[model].view_ids.insert(view_id);
         ViewId(view_id)
@@ -39,7 +39,7 @@ impl State {
         self.views.remove(view_id);
     }
 
-    pub fn draw(&self, ViewId(view_id): ViewId, f: impl FnOnce(&Text, &Sel)) {
+    pub fn draw(&self, ViewId(view_id): ViewId, f: impl FnOnce(&Text, &CursorSet)) {
         let model_id = self.views[view_id].borrow().model_id;
         f(
             &self.models[model_id].buf.text(),
@@ -74,13 +74,13 @@ pub struct ViewId(Id<RefCell<View>>);
 #[derive(Debug)]
 struct View {
     model_id: Id<Model>,
-    sel: Sel,
+    sel: CursorSet,
 }
 
 impl View {
-    fn move_sel(&mut self, text: &Text, mut f: impl FnMut(&mv::Context<'_>, Region) -> Region) {
+    fn move_sel(&mut self, text: &Text, mut f: impl FnMut(&mv::Context<'_>, Cursor) -> Cursor) {
         let context = mv::Context { text };
-        self.sel.update_all_regions(|region| f(&context, region));
+        self.sel.update_all(|region| f(&context, region));
     }
 
     fn apply_diff(&mut self, diff: &Diff, local: bool) {
@@ -166,7 +166,7 @@ impl<'a> HandleEventContext<'a> {
                 ..
             }) => {
                 let diff = edit::Context {
-                    sel: &self.view.sel
+                    sel: &self.view.sel,
                 }
                 .insert("\n".into());
                 self.model.buf.apply_diff(diff.clone());

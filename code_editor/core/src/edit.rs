@@ -1,8 +1,8 @@
-use crate::{Diff, Sel, Text};
+use crate::{Diff, CursorSet, Text};
 
 #[derive(Debug)]
 pub struct Context<'a> {
-    pub sel: &'a Sel,
+    pub sel: &'a CursorSet,
 }
 
 impl<'a> Context<'a> {

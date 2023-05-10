@@ -1,4 +1,4 @@
-use crate::{Diff, Hist, Sel, Text};
+use crate::{Diff, Hist, CursorSet, Text};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Buf {
@@ -27,15 +27,15 @@ impl Buf {
         self.diff = mem::take(&mut self.diff).compose(diff);
     }
 
-    pub fn undo(&mut self) -> Option<(Diff, Sel)> {
+    pub fn undo(&mut self) -> Option<(Diff, CursorSet)> {
         self.hist.undo(&mut self.text)
     }
 
-    pub fn redo(&mut self) -> Option<(Diff, Sel)> {
+    pub fn redo(&mut self) -> Option<(Diff, CursorSet)> {
         self.hist.redo(&mut self.text)
     }
 
-    pub fn commit(&mut self, sel: Sel) {
+    pub fn commit(&mut self, sel: CursorSet) {
         use std::mem;
 
         let diff = mem::take(&mut self.diff);

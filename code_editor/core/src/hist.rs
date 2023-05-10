@@ -1,4 +1,4 @@
-use crate::{Diff, Sel, Text};
+use crate::{Diff, CursorSet, Text};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Hist {
@@ -11,7 +11,7 @@ impl Hist {
         Self::default()
     }
 
-    pub fn undo(&mut self, text: &mut Text) -> Option<(Diff, Sel)> {
+    pub fn undo(&mut self, text: &mut Text) -> Option<(Diff, CursorSet)> {
         if self.rev_id == 0 {
             return None;
         }
@@ -22,7 +22,7 @@ impl Hist {
         Some((diff, sel))
     }
 
-    pub fn redo(&mut self, text: &mut Text) -> Option<(Diff, Sel)> {
+    pub fn redo(&mut self, text: &mut Text) -> Option<(Diff, CursorSet)> {
         if self.rev_id == self.revs.len() {
             return None;
         }
@@ -33,7 +33,7 @@ impl Hist {
         Some((diff, sel))
     }
 
-    pub fn commit(&mut self, diff: Diff, sel: Sel) {
+    pub fn commit(&mut self, diff: Diff, sel: CursorSet) {
         self.rev_id += 1;
         self.revs.truncate(self.rev_id);
         self.revs.push(Rev { diff, sel });
@@ -52,5 +52,5 @@ impl Default for Hist {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct Rev {
     diff: Diff,
-    sel: Sel,
+    sel: CursorSet,
 }
