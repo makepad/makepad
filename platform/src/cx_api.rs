@@ -71,8 +71,6 @@ pub enum CxOsOp {
     StartDragging(DraggedItem),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
-    CopyToClipboard(String),
-    PasteFromClipboard(),
 }
 
 impl Cx { 
@@ -131,14 +129,6 @@ impl Cx {
 
     pub fn show_clipboard_actions(&mut self, selected: String) {
         self.platform_ops.push(CxOsOp::ShowClipboardActions(selected));
-    }
-
-    pub fn copy_to_clipboard(&mut self, selected: String) {
-        self.platform_ops.push(CxOsOp::CopyToClipboard(selected));
-    }
-    
-    pub fn paste_from_clipboard(&mut self) {
-        self.platform_ops.push(CxOsOp::PasteFromClipboard());
     }
 
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
