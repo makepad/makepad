@@ -830,7 +830,6 @@ impl XlibApp {
         // store the text on the clipboard
         self.clipboard = text.clone();
         // lets set the owner
-        println!("Set selection owner");
         x11_sys::XSetSelectionOwner(
             self.display,
             self.atoms.clipboard,
