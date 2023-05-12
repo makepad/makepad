@@ -27,4 +27,5 @@ pub enum KeyCode {
     Up,
     Down,
     Enter,
+    Backspace,
 }

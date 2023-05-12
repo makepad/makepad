@@ -296,6 +296,7 @@ fn convert_key_code(code: KeyCode) -> Option<event::KeyCode> {
         KeyCode::ArrowUp => event::KeyCode::Up,
         KeyCode::ArrowDown => event::KeyCode::Down,
         KeyCode::ReturnKey => event::KeyCode::Enter,
+        KeyCode::Backspace => event::KeyCode::Backspace,
         _ => return None,
     })
 }

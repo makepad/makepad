@@ -24,8 +24,11 @@ impl Cursor {
         self.caret.max(self.anchor)
     }
 
-    pub fn apply_move(self, f: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>)) -> Self {
-        let (caret, column) = f(self.caret, self.column);
+    pub fn apply_motion(
+        self,
+        motion: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>),
+    ) -> Self {
+        let (caret, column) = motion(self.caret, self.column);
         Self {
             caret,
             column,
