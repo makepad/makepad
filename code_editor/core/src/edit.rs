@@ -1,4 +1,4 @@
-use crate::{Diff, CursorSet, Text};
+use crate::{CursorSet, Diff, Text};
 
 #[derive(Debug)]
 pub struct Context<'a> {

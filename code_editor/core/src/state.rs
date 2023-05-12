@@ -1,5 +1,5 @@
 use {
-    crate::{arena::Id, cursor::Cursor, mv, Arena, Buf, Diff, Event, CursorSet, Text},
+    crate::{arena::Id, Cursor, mv, Arena, Buf, Diff, Event, CursorSet, Text},
     std::{
         cell::{RefCell, RefMut},
         collections::HashSet,
