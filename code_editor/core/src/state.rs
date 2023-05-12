@@ -1,5 +1,5 @@
 use {
-    crate::{arena::Id, Cursor, mv, Arena, Buf, Diff, Event, CursorSet, Text},
+    crate::{arena::Id, mv, Arena, Buf, CursorSet, Diff, Event, Text},
     std::{
         cell::{RefCell, RefMut},
         collections::HashSet,
@@ -24,7 +24,7 @@ impl State {
         });
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,
-            sel: CursorSet::new(),
+            cursors: CursorSet::new(),
         }));
         self.models[model].view_ids.insert(view_id);
         ViewId(view_id)
@@ -43,7 +43,7 @@ impl State {
         let model_id = self.views[view_id].borrow().model_id;
         f(
             &self.models[model_id].buf.text(),
-            &self.views[view_id].borrow().sel,
+            &self.views[view_id].borrow().cursors,
         );
     }
 
@@ -74,17 +74,12 @@ pub struct ViewId(Id<RefCell<View>>);
 #[derive(Debug)]
 struct View {
     model_id: Id<Model>,
-    sel: CursorSet,
+    cursors: CursorSet,
 }
 
 impl View {
-    fn move_sel(&mut self, text: &Text, mut f: impl FnMut(&mv::Context<'_>, Cursor) -> Cursor) {
-        let context = mv::Context { text };
-        self.sel.update_all(|region| f(&context, region));
-    }
-
     fn apply_diff(&mut self, diff: &Diff, local: bool) {
-        self.sel.apply_diff(diff, local);
+        self.cursors.apply_diff(diff, local);
     }
 }
 
@@ -103,83 +98,83 @@ struct HandleEventContext<'a> {
 
 impl<'a> HandleEventContext<'a> {
     fn handle_event(&mut self, event: Event) {
-        use crate::{edit, event::*, Event::*};
+        use crate::{edit, event::*};
 
         match event {
-            Key(KeyEvent {
+            Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift },
                 code: KeyCode::Left,
             }) => {
-                self.view
-                    .move_sel(self.model.buf.text(), |context, region| {
-                        let mut region = region.apply_move(|pos, _| (context.move_left(pos), None));
-                        if !shift {
-                            region = region.clear();
-                        }
-                        region
-                    });
+                self.view.cursors.update_all(|region| {
+                    let mut region = region
+                        .apply_move(|pos, _| (mv::move_left(self.model.buf.text(), pos), None));
+                    if !shift {
+                        region = region.clear();
+                    }
+                    region
+                });
             }
-            Key(KeyEvent {
+            Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift },
                 code: KeyCode::Right,
             }) => {
-                self.view
-                    .move_sel(self.model.buf.text(), |context, region| {
-                        let mut region =
-                            region.apply_move(|pos, _| (context.move_right(pos), None));
-                        if !shift {
-                            region = region.clear();
-                        }
-                        region
-                    });
+                self.view.cursors.update_all(|region| {
+                    let mut region = region
+                        .apply_move(|pos, _| (mv::move_right(self.model.buf.text(), pos), None));
+                    if !shift {
+                        region = region.clear();
+                    }
+                    region
+                });
             }
-            Key(KeyEvent {
+            Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift },
                 code: KeyCode::Up,
             }) => {
-                self.view
-                    .move_sel(self.model.buf.text(), |context, region| {
-                        let mut region =
-                            region.apply_move(|pos, column| context.move_up(pos, column));
-                        if !shift {
-                            region = region.clear();
-                        }
-                        region
-                    });
+                self.view.cursors.update_all(|region| {
+                    let mut region = region
+                        .apply_move(|pos, column| mv::move_up(self.model.buf.text(), pos, column));
+                    if !shift {
+                        region = region.clear();
+                    }
+                    region
+                });
             }
-            Key(KeyEvent {
+            Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift },
                 code: KeyCode::Down,
             }) => {
-                self.view
-                    .move_sel(self.model.buf.text(), |context, region| {
-                        let mut region =
-                            region.apply_move(|pos, column| context.move_down(pos, column));
-                        if !shift {
-                            region = region.clear();
-                        }
-                        region
+                self.view.cursors.update_all(|region| {
+                    let mut region = region.apply_move(|pos, column| {
+                        mv::move_down(self.model.buf.text(), pos, column)
                     });
+                    if !shift {
+                        region = region.clear();
+                    }
+                    region
+                });
             }
-            Key(KeyEvent {
+            Event::Key(KeyEvent {
                 code: KeyCode::Enter,
                 ..
             }) => {
-                let diff = edit::Context {
-                    sel: &self.view.sel,
-                }
-                .insert("\n".into());
+                let context = edit::Context {
+                    text: self.model.buf.text(),
+                };
+                let replace_with = ["".to_string(), "".to_string()].into();
+                let diff = context.insert(self.view.cursors.spans(), &replace_with);
                 self.model.buf.apply_diff(diff.clone());
                 self.view.apply_diff(&diff, true);
                 for sibling_view in &mut self.sibling_views {
                     sibling_view.apply_diff(&diff, false);
                 }
             }
-            Text(TextEvent { string }) => {
-                let diff = edit::Context {
-                    sel: &self.view.sel,
-                }
-                .insert(string.into());
+            Event::Text(TextEvent { string }) => {
+                let context = edit::Context {
+                    text: self.model.buf.text(),
+                };
+                let replace_with = string.into();
+                let diff = context.insert(self.view.cursors.spans(), &replace_with);
                 self.model.buf.apply_diff(diff.clone());
                 self.view.apply_diff(&diff, true);
                 for sibling_view in &mut self.sibling_views {

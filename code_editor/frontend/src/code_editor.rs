@@ -26,12 +26,12 @@ live_design! {
 
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.box(0., 0., self.rect_size.x, self.rect_size.y, self.border_radius);
-            if self.prev_w > 0. {
+            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.border_radius);
+            if self.prev_w > 0.0 {
                 sdf.box(self.prev_x, -self.rect_size.y, self.prev_w, self.rect_size.y, self.border_radius);
                 sdf.gloop(self.gloopiness);
             }
-            if self.next_w > 0. {
+            if self.next_w > 0.0 {
                 sdf.box(self.next_x, self.rect_size.y, self.next_w, self.rect_size.y, self.border_radius);
                 sdf.gloop(self.gloopiness);
             }
@@ -201,11 +201,11 @@ impl<'a> Drawer<'a> {
             size: DVec2 {
                 x: self.screen_pos.x - start_x,
                 y: self.cell_size.y,
-            }
+            },
         };
         self.draw_sel_rect(cx, Some(next_sel_rect));
         self.prev_sel_rect = self.sel_rect;
-        self.sel_rect = Some(next_sel_rect);   
+        self.sel_rect = Some(next_sel_rect);
     }
 
     fn draw_grapheme(&mut self, cx: &mut Cx2d, grapheme: &str) {
