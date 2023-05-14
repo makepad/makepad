@@ -72,12 +72,12 @@ live_design!{
         }
 
         ui:<DesktopWindow> {
-            window: {inner_size: vec2(1920, 1080),},
+            window: {inner_size: vec2(1920, 1080)},
             
             pass: {clear_color: #2A}
             block_signal_event: true; 
             <SlidesView> {
-                goal_pos: 8.0
+                goal_pos: 0.0
                 
                 <SlideChapter> {
                     title = {label: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
@@ -388,7 +388,7 @@ impl AppMain for App {
                 // check for actions inside the list item
                 if item.get_button(id!(delete)).clicked(&actions) {
                     // delete the item in the data
-                    list.redraw(cx);
+                    list.redraw(cx); 
                 }
             }
         }
