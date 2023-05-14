@@ -258,7 +258,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     cp(&cwd.join("examples/ironfish/resources/icons/Icon_Arp.svg"), &out_dir.join("assets/makepad/resources/icons/Icon_Arp.svg"), false) ?;
 
     //println!("Adding resources to apk");
-    shell_env_cap(&[], &out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
+    §(&[], &out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
         "add",
         &dst_unaligned_apk.to_str().unwrap(),
         "assets/makepad/makepad_widgets/resources/IBMPlexSans-Text.ttf",
