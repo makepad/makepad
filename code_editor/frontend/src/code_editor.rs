@@ -285,18 +285,20 @@ fn convert_text_event(event: &TextInputEvent) -> event::TextEvent {
 
 fn convert_key_modifiers(modifiers: KeyModifiers) -> event::KeyModifiers {
     event::KeyModifiers {
+        command: modifiers.logo,
         shift: modifiers.shift,
     }
 }
 
 fn convert_key_code(code: KeyCode) -> Option<event::KeyCode> {
     Some(match code {
-        KeyCode::ArrowLeft => event::KeyCode::Left,
-        KeyCode::ArrowRight => event::KeyCode::Right,
-        KeyCode::ArrowUp => event::KeyCode::Up,
-        KeyCode::ArrowDown => event::KeyCode::Down,
-        KeyCode::ReturnKey => event::KeyCode::Enter,
         KeyCode::Backspace => event::KeyCode::Backspace,
+        KeyCode::ReturnKey => event::KeyCode::Enter,
+        KeyCode::ArrowLeft => event::KeyCode::Left,
+        KeyCode::ArrowUp => event::KeyCode::Up,
+        KeyCode::ArrowRight => event::KeyCode::Right,
+        KeyCode::ArrowDown => event::KeyCode::Down,
+        KeyCode::KeyZ => event::KeyCode::Z,
         _ => return None,
     })
 }

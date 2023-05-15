@@ -17,15 +17,17 @@ pub struct TextEvent {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyModifiers {
+    pub command: bool,
     pub shift: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyCode {
-    Left,
-    Right,
-    Up,
-    Down,
-    Enter,
     Backspace,
+    Enter,
+    Left,
+    Up,
+    Right,
+    Down,
+    Z
 }

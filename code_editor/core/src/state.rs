@@ -102,7 +102,20 @@ impl<'a> HandleEventContext<'a> {
 
         match event {
             Event::Key(KeyEvent {
-                modifiers: KeyModifiers { shift },
+                code: KeyCode::Backspace,
+                ..
+            }) => {
+                self.edit(edit::delete(self.model.buf.text(), self.view.cursors.spans()));
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            }) => {
+                let replace_with = ["".to_string(), "".to_string()].into();
+                self.edit(edit::insert(self.view.cursors.spans(), &replace_with));
+            }
+            Event::Key(KeyEvent {
+                modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Left,
             }) => {
                 self.view.cursors.update_all(|region| {
@@ -116,21 +129,7 @@ impl<'a> HandleEventContext<'a> {
                 });
             }
             Event::Key(KeyEvent {
-                modifiers: KeyModifiers { shift },
-                code: KeyCode::Right,
-            }) => {
-                self.view.cursors.update_all(|region| {
-                    let mut region = region.apply_motion(|pos, _| {
-                        (mv::move_right(self.model.buf.text(), pos), None)
-                    });
-                    if !shift {
-                        region = region.clear();
-                    }
-                    region
-                });
-            }
-            Event::Key(KeyEvent {
-                modifiers: KeyModifiers { shift },
+                modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Up,
             }) => {
                 self.view.cursors.update_all(|region| {
@@ -144,7 +143,21 @@ impl<'a> HandleEventContext<'a> {
                 });
             }
             Event::Key(KeyEvent {
-                modifiers: KeyModifiers { shift },
+                modifiers: KeyModifiers { shift, .. },
+                code: KeyCode::Right,
+            }) => {
+                self.view.cursors.update_all(|region| {
+                    let mut region = region.apply_motion(|pos, _| {
+                        (mv::move_right(self.model.buf.text(), pos), None)
+                    });
+                    if !shift {
+                        region = region.clear();
+                    }
+                    region
+                });
+            }
+            Event::Key(KeyEvent {
+                modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Down,
             }) => {
                 self.view.cursors.update_all(|region| {
@@ -158,36 +171,56 @@ impl<'a> HandleEventContext<'a> {
                 });
             }
             Event::Key(KeyEvent {
-                code: KeyCode::Enter,
-                ..
+                modifiers: KeyModifiers { command: true, shift: false },
+                code: KeyCode::Z
             }) => {
-                let replace_with = ["".to_string(), "".to_string()].into();
-                let diff = edit::insert(self.view.cursors.spans(), &replace_with);
-                self.model.buf.apply_diff(diff.clone());
-                self.view.apply_diff(&diff, true);
-                for sibling_view in &mut self.sibling_views {
-                    sibling_view.apply_diff(&diff, false);
-                }
+                self.undo();
             }
             Event::Key(KeyEvent {
-                code: KeyCode::Backspace,
-                ..
+                modifiers: KeyModifiers { command: true, shift: true },
+                code: KeyCode::Z
             }) => {
-                let diff = edit::delete(self.model.buf.text(), self.view.cursors.spans());
-                self.model.buf.apply_diff(diff.clone());
-                self.view.apply_diff(&diff, true);
-                for sibling_view in &mut self.sibling_views {
-                    sibling_view.apply_diff(&diff, false);
-                }
+                self.redo();
             }
             Event::Text(TextEvent { string }) => {
                 let replace_with = string.into();
-                let diff = edit::insert(self.view.cursors.spans(), &replace_with);
-                self.model.buf.apply_diff(diff.clone());
-                self.view.apply_diff(&diff, true);
-                for sibling_view in &mut self.sibling_views {
-                    sibling_view.apply_diff(&diff, false);
-                }
+                self.edit(edit::insert(self.view.cursors.spans(), &replace_with));
+            }
+            _ => {}
+        }
+    }
+
+    fn edit(&mut self, diff: Diff) {
+        if self.model.buf.needs_commit() {
+            self.model.buf.commit(self.view.cursors.clone());
+        }
+        self.model.buf.apply_diff(diff.clone());
+        self.view.apply_diff(&diff, true);
+        for sibling_view in &mut self.sibling_views {
+            sibling_view.apply_diff(&diff, false);
+        } 
+    }
+
+    fn undo(&mut self) {
+        if self.model.buf.needs_commit() {
+            self.model.buf.commit(self.view.cursors.clone());
+        }
+        if let Some((diff, _)) = self.model.buf.undo() {
+            self.view.apply_diff(&diff, true);
+            for sibling_view in &mut self.sibling_views {
+                sibling_view.apply_diff(&diff, false);
+            }
+        }
+    }
+
+    fn redo(&mut self) {
+        if self.model.buf.needs_commit() {
+            return;
+        }
+        if let Some((diff, _)) = self.model.buf.redo() {
+            self.view.apply_diff(&diff, true);
+            for sibling_view in &mut self.sibling_views {
+                sibling_view.apply_diff(&diff, false);
             }
         }
     }

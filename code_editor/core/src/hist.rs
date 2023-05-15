@@ -17,26 +17,26 @@ impl Hist {
         }
         let diff = self.revs[self.rev_id].diff.clone().invert(&text);
         self.rev_id -= 1;
-        let sel = self.revs[self.rev_id].sel.clone();
+        let cursors = self.revs[self.rev_id].cursors.clone();
         text.apply_diff(diff.clone());
-        Some((diff, sel))
+        Some((diff, cursors))
     }
 
     pub fn redo(&mut self, text: &mut Text) -> Option<(Diff, CursorSet)> {
-        if self.rev_id == self.revs.len() {
+        if self.rev_id == self.revs.len() - 1 {
             return None;
         }
         self.rev_id += 1;
         let diff = self.revs[self.rev_id].diff.clone();
-        let sel = self.revs[self.rev_id].sel.clone();
+        let cursors = self.revs[self.rev_id].cursors.clone();
         text.apply_diff(diff.clone());
-        Some((diff, sel))
+        Some((diff, cursors))
     }
 
-    pub fn commit(&mut self, diff: Diff, sel: CursorSet) {
+    pub fn commit(&mut self, diff: Diff, cursors: CursorSet) {
         self.rev_id += 1;
         self.revs.truncate(self.rev_id);
-        self.revs.push(Rev { diff, sel });
+        self.revs.push(Rev { diff, cursors });
     }
 }
 
@@ -52,5 +52,5 @@ impl Default for Hist {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct Rev {
     diff: Diff,
-    sel: CursorSet,
+    cursors: CursorSet,
 }

@@ -16,6 +16,10 @@ impl Buf {
         }
     }
 
+    pub fn needs_commit(&self) -> bool {
+        !self.diff.is_empty()
+    }
+
     pub fn text(&self) -> &Text {
         &self.text
     }
@@ -28,17 +32,19 @@ impl Buf {
     }
 
     pub fn undo(&mut self) -> Option<(Diff, CursorSet)> {
+        assert!(!self.needs_commit());
         self.hist.undo(&mut self.text)
     }
 
     pub fn redo(&mut self) -> Option<(Diff, CursorSet)> {
+        assert!(!self.needs_commit());
         self.hist.redo(&mut self.text)
     }
 
-    pub fn commit(&mut self, sel: CursorSet) {
+    pub fn commit(&mut self, cursors: CursorSet) {
         use std::mem;
 
         let diff = mem::take(&mut self.diff);
-        self.hist.commit(diff, sel);
+        self.hist.commit(diff, cursors);
     }
 }
