@@ -1,10 +1,10 @@
 ## Contact
 
-Rik Arends: https://fosstodon.org/@rikarends#
+Rik Arends: @rikarends on twitter, https://fosstodon.org/@rikarends#
 
-Eddy Bruel: - 
+Eddy Bruel: @ejpbruel on twitter
 
-Sebastian Michailidis: -
+Sebastian Michailidis: @SebMichailidis on twitter
 
 Our discord channel for Makepad:
 https://discord.gg/adqBRq7Ece
