@@ -29,5 +29,5 @@ pub enum KeyCode {
     Up,
     Right,
     Down,
-    Z
+    Z,
 }

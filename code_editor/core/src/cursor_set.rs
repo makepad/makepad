@@ -1,5 +1,5 @@
 use {
-    crate::{Cursor, Diff, Len, Pos},
+    crate::{Cursor, Diff},
     std::{iter::Peekable, slice},
 };
 
@@ -22,13 +22,6 @@ impl CursorSet {
         Iter {
             latest: Some(&self.latest),
             earlier: self.earlier.iter().peekable(),
-        }
-    }
-
-    pub fn spans(&self) -> Spans<'_> {
-        Spans {
-            pos: Pos::default(),
-            iter: self.iter().peekable(),
         }
     }
 
@@ -103,6 +96,15 @@ impl CursorSet {
     }
 }
 
+impl<'a> IntoIterator for &'a CursorSet {
+    type Item = Cursor;
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Iter<'a> {
     latest: Option<&'a Cursor>,
@@ -127,40 +129,4 @@ impl<'a> Iterator for Iter<'a> {
         }
         .copied()
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct Spans<'a> {
-    pos: Pos,
-    iter: Peekable<Iter<'a>>,
-}
-
-impl<'a> Iterator for Spans<'a> {
-    type Item = Span;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let range = self.iter.peek().copied()?;
-        Some(if self.pos < range.start() {
-            let span = Span {
-                len: range.start() - self.pos,
-                is_sel: false,
-            };
-            self.pos = range.start();
-            span
-        } else {
-            let span = Span {
-                len: range.len(),
-                is_sel: true,
-            };
-            self.pos = range.end();
-            self.iter.next().unwrap();
-            span
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Span {
-    pub len: Len,
-    pub is_sel: bool,
 }

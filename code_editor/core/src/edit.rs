@@ -1,42 +1,38 @@
-use crate::{cursor_set, Diff, Text};
+use crate::{Cursor, Diff, Text};
 
-pub fn insert(spans: impl Iterator<Item = cursor_set::Span>, replace_with: &Text) -> Diff {
-    use crate::diff;
+pub fn insert(text: &Text, cursors: impl IntoIterator<Item = Cursor>, replace_with: &Text) -> Diff {
+    use crate::{Pos, diff};
 
+    let cursors = cursors.into_iter();
     let mut builder = diff::Builder::new();
-    for span in spans {
-        if span.is_sel {
-            builder.delete(span.len);
-            builder.insert(replace_with.clone());
-        } else {
-            builder.retain(span.len);
-        }
+    let mut prev_cursor_end = Pos::default();
+    for cursor in cursors {
+        builder.retain(cursor.start() - prev_cursor_end);
+        builder.delete(text.get(cursor.range()));
+        builder.insert(replace_with.clone());
+        prev_cursor_end = cursor.end();
     }
     builder.finish()
 }
 
-pub fn delete(text: &Text, spans: impl Iterator<Item = cursor_set::Span>) -> Diff {
-    use crate::{diff, mv, Len, Pos};
+pub fn delete(text: &Text, cursors: impl IntoIterator<Item = Cursor>) -> Diff {
+    use crate::{Pos, Range, diff, mv};
 
     let mut builder = diff::Builder::new();
-    let mut prev_pos = Pos::default();
-    let mut pos = Pos::default();
-    for span in spans {
-        if span.is_sel {
-            if span.len == Len::default() {
-                let new_pos = mv::move_left(text, pos);
-                let len = pos - new_pos;
-                pos = new_pos;
-                builder.retain(pos - prev_pos);
-                builder.delete(len);
-            } else {
-                builder.retain(pos - prev_pos);
-                builder.delete(span.len);
-            }
-            prev_pos = pos;
+    let mut prev_cursor_end = Pos::default();
+    for cursor in cursors {
+        if cursor.is_empty() {
+            let start = mv::move_left(text, cursor.caret);
+            builder.retain(start - prev_cursor_end);
+            builder.delete(text.get(Range {
+                start,
+                end: cursor.caret
+            }));
         } else {
-            pos += span.len;
+            builder.retain(cursor.start() - prev_cursor_end);
+            builder.delete(text.get(cursor.range()));
         }
+        prev_cursor_end = cursor.end();
     }
     builder.finish()
 }

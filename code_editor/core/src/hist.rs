@@ -1,4 +1,4 @@
-use crate::{CursorSet, Diff, Text};
+use crate::{CursorSet, Diff};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Hist {
@@ -11,25 +11,23 @@ impl Hist {
         Self::default()
     }
 
-    pub fn undo(&mut self, text: &mut Text) -> Option<(Diff, CursorSet)> {
+    pub fn undo(&mut self) -> Option<(Diff, CursorSet)> {
         if self.rev_id == 0 {
             return None;
         }
-        let diff = self.revs[self.rev_id].diff.clone().invert(&text);
+        let diff = self.revs[self.rev_id].diff.clone().invert();
         self.rev_id -= 1;
         let cursors = self.revs[self.rev_id].cursors.clone();
-        text.apply_diff(diff.clone());
         Some((diff, cursors))
     }
 
-    pub fn redo(&mut self, text: &mut Text) -> Option<(Diff, CursorSet)> {
+    pub fn redo(&mut self) -> Option<(Diff, CursorSet)> {
         if self.rev_id == self.revs.len() - 1 {
             return None;
         }
         self.rev_id += 1;
         let diff = self.revs[self.rev_id].diff.clone();
         let cursors = self.revs[self.rev_id].cursors.clone();
-        text.apply_diff(diff.clone());
         Some((diff, cursors))
     }
 

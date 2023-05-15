@@ -1,5 +1,5 @@
 use {
-    crate::{Len, Pos, Range, Text},
+    crate::{Len, Pos, Text},
     std::{slice, vec},
 };
 
@@ -27,7 +27,7 @@ impl Diff {
         }
     }
 
-    pub fn invert(self, text: &Text) -> Self {
+    pub fn invert(self) -> Self {
         let mut builder = Builder::new();
         let mut pos = Pos::default();
         for op in self.ops {
@@ -37,14 +37,11 @@ impl Diff {
                     pos += len;
                 }
                 Op::Insert(text) => {
-                    builder.delete(text.len());
+                    builder.delete(text);
                 }
-                Op::Delete(count) => {
-                    let next_pos = pos + count;
-                    builder.insert(text.get(Range {
-                        start: pos,
-                        end: next_pos,
-                    }));
+                Op::Delete(text) => {
+                    let next_pos = pos + text.len();
+                    builder.insert(text);
                     pos = next_pos;
                 }
             }
@@ -79,20 +76,21 @@ impl Diff {
                         op_opt_1 = op_iter_1.next();
                     }
                 },
-                (Some(Op::Retain(len_0)), Some(Op::Delete(len_1))) => match len_0.cmp(&len_1) {
+                (Some(Op::Retain(len)), Some(Op::Delete(mut text))) => match len.cmp(&text.len()) {
                     Ordering::Less => {
-                        builder.delete(len_0);
+                        builder.delete(text.take(len));
                         op_opt_0 = op_iter_0.next();
-                        op_opt_1 = Some(Op::Delete(len_1 - len_0));
+                        op_opt_1 = Some(Op::Delete(text));
                     }
                     Ordering::Equal => {
-                        builder.delete(len_0);
+                        builder.delete(text);
                         op_opt_0 = op_iter_0.next();
                         op_opt_1 = op_iter_1.next();
                     }
                     Ordering::Greater => {
-                        builder.delete(len_1);
-                        op_opt_0 = Some(Op::Retain(len_0 - len_1));
+                        let text_len = text.len();
+                        builder.delete(text);
+                        op_opt_0 = Some(Op::Retain(len - text_len));
                         op_opt_1 = op_iter_1.next();
                     }
                 },
@@ -116,21 +114,24 @@ impl Diff {
                         }
                     }
                 }
-                (Some(Op::Insert(mut text)), Some(Op::Delete(len))) => match text.len().cmp(&len) {
-                    Ordering::Less => {
-                        op_opt_0 = op_iter_0.next();
-                        op_opt_1 = Some(Op::Delete(len - text.len()));
+                (Some(Op::Insert(mut text_0)), Some(Op::Delete(mut text_1))) => {
+                    match text_0.len().cmp(&text_1.len()) {
+                        Ordering::Less => {
+                            text_1.skip(text_0.len());
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = Some(Op::Delete(text_1));
+                        }
+                        Ordering::Equal => {
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = op_iter_1.next();
+                        }
+                        Ordering::Greater => {
+                            text_0.skip(text_1.len());
+                            op_opt_0 = Some(Op::Insert(text_0));
+                            op_opt_1 = op_iter_1.next();
+                        }
                     }
-                    Ordering::Equal => {
-                        op_opt_0 = op_iter_0.next();
-                        op_opt_1 = op_iter_1.next();
-                    }
-                    Ordering::Greater => {
-                        text.skip(len);
-                        op_opt_0 = Some(Op::Insert(text));
-                        op_opt_1 = op_iter_1.next();
-                    }
-                },
+                }
                 (Some(Op::Insert(text)), None) => {
                     builder.insert(text);
                     op_opt_0 = op_iter_0.next();
@@ -210,24 +211,24 @@ impl Builder {
         }
     }
 
-    pub fn delete(&mut self, len: Len) {
+    pub fn delete(&mut self, text: Text) {
         use std::mem;
 
-        if len == Len::default() {
+        if text.is_empty() {
             return;
         }
         match self.ops.as_mut_slice() {
-            [.., Op::Delete(last_len)] => {
-                *last_len += len;
+            [.., Op::Delete(last_text)] => {
+                *last_text += text;
             }
-            [.., Op::Delete(second_last_len), Op::Insert(_)] => {
-                *second_last_len += len;
+            [.., Op::Delete(second_last_text), Op::Insert(_)] => {
+                *second_last_text += text;
             }
             [.., last_op @ Op::Insert(_)] => {
-                let op = mem::replace(last_op, Op::Delete(len));
+                let op = mem::replace(last_op, Op::Delete(text));
                 self.ops.push(op);
             }
-            _ => self.ops.push(Op::Delete(len)),
+            _ => self.ops.push(Op::Delete(text)),
         }
     }
 
@@ -281,7 +282,7 @@ impl Iterator for IntoIter {
 pub enum Op {
     Retain(Len),
     Insert(Text),
-    Delete(Len),
+    Delete(Text),
 }
 
 impl Op {
@@ -289,7 +290,7 @@ impl Op {
         match *self {
             Self::Retain(len) => LenOnlyOp::Retain(len),
             Self::Insert(ref text) => LenOnlyOp::Insert(text.len()),
-            Self::Delete(len) => LenOnlyOp::Delete(len),
+            Self::Delete(ref text) => LenOnlyOp::Delete(text.len()),
         }
     }
 }

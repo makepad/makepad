@@ -105,23 +105,25 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Backspace,
                 ..
             }) => {
-                self.edit(edit::delete(self.model.buf.text(), self.view.cursors.spans()));
+                self.edit(edit::delete(
+                    self.model.buf.text(),
+                    &self.view.cursors,
+                ));
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
                 ..
             }) => {
                 let replace_with = ["".to_string(), "".to_string()].into();
-                self.edit(edit::insert(self.view.cursors.spans(), &replace_with));
+                self.edit(edit::insert(self.model.buf.text(), &self.view.cursors, &replace_with));
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Left,
             }) => {
                 self.view.cursors.update_all(|region| {
-                    let mut region = region.apply_motion(|pos, _| {
-                        (mv::move_left(self.model.buf.text(), pos), None)
-                    });
+                    let mut region = region
+                        .apply_motion(|pos, _| (mv::move_left(self.model.buf.text(), pos), None));
                     if !shift {
                         region = region.clear();
                     }
@@ -147,9 +149,8 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Right,
             }) => {
                 self.view.cursors.update_all(|region| {
-                    let mut region = region.apply_motion(|pos, _| {
-                        (mv::move_right(self.model.buf.text(), pos), None)
-                    });
+                    let mut region = region
+                        .apply_motion(|pos, _| (mv::move_right(self.model.buf.text(), pos), None));
                     if !shift {
                         region = region.clear();
                     }
@@ -171,20 +172,28 @@ impl<'a> HandleEventContext<'a> {
                 });
             }
             Event::Key(KeyEvent {
-                modifiers: KeyModifiers { command: true, shift: false },
-                code: KeyCode::Z
+                modifiers:
+                    KeyModifiers {
+                        command: true,
+                        shift: false,
+                    },
+                code: KeyCode::Z,
             }) => {
                 self.undo();
             }
             Event::Key(KeyEvent {
-                modifiers: KeyModifiers { command: true, shift: true },
-                code: KeyCode::Z
+                modifiers:
+                    KeyModifiers {
+                        command: true,
+                        shift: true,
+                    },
+                code: KeyCode::Z,
             }) => {
                 self.redo();
             }
             Event::Text(TextEvent { string }) => {
                 let replace_with = string.into();
-                self.edit(edit::insert(self.view.cursors.spans(), &replace_with));
+                self.edit(edit::insert(self.model.buf.text(), self.view.cursors.iter(), &replace_with));
             }
             _ => {}
         }
@@ -198,7 +207,7 @@ impl<'a> HandleEventContext<'a> {
         self.view.apply_diff(&diff, true);
         for sibling_view in &mut self.sibling_views {
             sibling_view.apply_diff(&diff, false);
-        } 
+        }
     }
 
     fn undo(&mut self) {

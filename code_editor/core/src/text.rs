@@ -104,7 +104,7 @@ impl Text {
                     self.insert(pos, text);
                     pos += len;
                 }
-                Op::Delete(len) => self.delete(pos, len),
+                Op::Delete(text) => self.delete(pos, text.len()),
             }
         }
     }

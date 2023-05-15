@@ -1,4 +1,4 @@
-use crate::{Diff, Len, Pos};
+use crate::{Diff, Len, Pos, Range};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Cursor {
@@ -22,6 +22,13 @@ impl Cursor {
 
     pub fn end(self) -> Pos {
         self.caret.max(self.anchor)
+    }
+
+    pub fn range(self) -> Range {
+        Range {
+            start: self.start(),
+            end: self.end(),
+        }
     }
 
     pub fn apply_motion(

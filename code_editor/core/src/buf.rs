@@ -33,12 +33,22 @@ impl Buf {
 
     pub fn undo(&mut self) -> Option<(Diff, CursorSet)> {
         assert!(!self.needs_commit());
-        self.hist.undo(&mut self.text)
+        if let Some((diff, cursors)) = self.hist.undo() {
+            self.text.apply_diff(diff.clone());
+            Some((diff, cursors))
+        } else {
+            None
+        }
     }
 
     pub fn redo(&mut self) -> Option<(Diff, CursorSet)> {
         assert!(!self.needs_commit());
-        self.hist.redo(&mut self.text)
+        if let Some((diff, cursors)) = self.hist.redo() {
+            self.text.apply_diff(diff.clone());
+            Some((diff, cursors))
+        } else {
+            None
+        }
     }
 
     pub fn commit(&mut self, cursors: CursorSet) {
