@@ -304,7 +304,7 @@ impl Cx {
                     //et dpi_factor = self.os.window_geom.dpi_factor;
                     self.draw_pass_to_canvas(*pass_id);
                 }
-                CxPassParent::Pass(parent_pass_id) => {
+                CxPassParent::Pass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     self.draw_pass_to_texture(*pass_id);
                 },
