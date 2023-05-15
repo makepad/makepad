@@ -58,12 +58,12 @@ Make sure you have all the prerequisites above installed first!
 ### Native
 
 To build and run the native version of Ironfish, run the following command from the root directory of the repository:
-```cargo +nightly run -p makepad-example-ironfish --release -F nightly```
+```cargo run -p makepad-example-ironfish --release```
 
 ### Web
 
 To build the web version of Ironfish, run the following command from the root directory of the repository:
-```tools/build_wasm_thread.sh makepad-example-ironfish```
+```./tools/wasm/build_wasm_simd.sh makepad-example-ironfish```
 
 After the build is complete, run the following command to start our web server:
 ```cargo run -p makepad-web-server --release```
