@@ -288,14 +288,9 @@ impl Cx {
         }
     }
     
-    pub fn setup_pass_render_targets(&mut self, pass_id: PassId, inherit_dpi_factor: f64, first_target: &Option<ID3D11RenderTargetView >, d3d11_cx: &D3d11Cx) {
+    pub fn setup_pass_render_targets(&mut self, pass_id: PassId, first_target: &Option<ID3D11RenderTargetView >, d3d11_cx: &D3d11Cx) {
         
-        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
-            override_dpi_factor
-        }
-        else {
-            inherit_dpi_factor
-        };
+        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
@@ -392,11 +387,11 @@ impl Cx {
         cxpass.os.pass_uniforms.update_with_f32_constant_data(&d3d11_cx, cxpass.pass_uniforms.as_slice());
     }
     
-    pub fn draw_pass_to_window(&mut self, pass_id: PassId, vsync: bool, dpi_factor: f64, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
+    pub fn draw_pass_to_window(&mut self, pass_id: PassId, vsync: bool, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
-        self.setup_pass_render_targets(pass_id, dpi_factor, &d3d11_window.render_target_view, d3d11_cx);
+        self.setup_pass_render_targets(pass_id, &d3d11_window.render_target_view, d3d11_cx);
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
@@ -416,11 +411,11 @@ impl Cx {
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
     }
     
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, dpi_factor: f64, d3d11_cx: &D3d11Cx) {
+    pub fn draw_pass_to_texture(&mut self, pass_id: PassId,  d3d11_cx: &D3d11Cx) {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
-        self.setup_pass_render_targets(pass_id, dpi_factor, &None, d3d11_cx);
+        self.setup_pass_render_targets(pass_id, &None, d3d11_cx);
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
