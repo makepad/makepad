@@ -3,19 +3,14 @@ use {
     std::cell::Cell,
     crate::{
         cx::Cx,
-        makepad_live_id::*,
         makepad_micro_serde::*,
-        makepad_math::{DVec2},
+        makepad_math::{dvec2},
         window::CxWindowPool,
         area::Area,
         event::{
-            DigitInfo,
-            DigitDevice,
-            CxFingers,
-            KeyModifiers,
-            FingerDownEvent,
-            FingerUpEvent,
-            FingerMoveEvent,
+            MouseDownEvent,
+            MouseUpEvent,
+            MouseMoveEvent,
         }
     }
 };
@@ -28,111 +23,64 @@ pub struct StdinWindowSize{
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinFingerDown{
-   pub time: f64,
-   pub digit_id: u64,
-   pub mouse_button: Option<usize>,
+pub struct StdinMouseDown{
+   pub button: usize,
    pub x: f64,
-   pub y: f64
+   pub y: f64,
+   pub time: f64,
+}
+
+impl From<StdinMouseDown> for MouseDownEvent {
+    fn from(v: StdinMouseDown) -> Self {
+        Self{
+            abs: dvec2(v.x, v.y),
+            button: v.button,
+            window_id: CxWindowPool::id_zero(),
+            modifiers: Default::default(),
+            time: v.time,
+            handled: Cell::new(Area::Empty),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinFingerMove{
+pub struct StdinMouseMove{
    pub time: f64,
-   pub mouse_button: Option<usize>,
-   pub digit_id: u64,
    pub x: f64,
    pub y: f64
 }
 
+impl From<StdinMouseMove> for MouseMoveEvent {
+    fn from(v: StdinMouseMove) -> Self {
+        Self{
+            abs: dvec2(v.x, v.y),
+            window_id: CxWindowPool::id_zero(),
+            modifiers: Default::default(),
+            time: v.time,
+            handled: Cell::new(Area::Empty),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
-pub struct StdinFingerUp{
+pub struct StdinMouseUp{
    pub time: f64,
-   pub mouse_button: Option<usize>,
-   pub digit_id: u64,
+   pub button: usize,
    pub x: f64,
    pub y: f64
 }
 
-impl StdinFingerDown {
-    pub fn into_finger_down_event(self, fingers: &CxFingers) -> FingerDownEvent {
-        let digit_id = LiveId(self.digit_id).into();
-        FingerDownEvent {
+impl From<StdinMouseUp> for MouseUpEvent {
+    fn from(v: StdinMouseUp) -> Self {
+        Self{
+            abs: dvec2(v.x, v.y),
+            button: v.button,
             window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.x, y: self.y},
-            handled: Cell::new(Area::Empty),
-            digit: DigitInfo {
-                id: digit_id,
-                index: fingers.get_digit_index(digit_id),
-                count: fingers.get_digit_count(),
-                device: if let Some(mb) = self.mouse_button{
-                    DigitDevice::Mouse(mb)
-                } else{
-                    DigitDevice::Touch(self.digit_id)
-                }
-            },
-            sweep_lock: Cell::new(Area::Empty),
-            modifiers: KeyModifiers::default(),
-            time: self.time,
-            tap_count: fingers.get_tap_count(digit_id)
+            modifiers: Default::default(),
+            time: v.time,
         }
     }
 }
-
-impl StdinFingerMove {
-    pub fn into_finger_move_event(self, fingers: &CxFingers) -> FingerMoveEvent {
-        let digit_id = LiveId(self.digit_id).into();
-        FingerMoveEvent {
-            window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.x, y: self.y},
-            tap_count: fingers.get_tap_count(digit_id),
-            handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
-            digit: DigitInfo {
-                id: digit_id,
-                index: fingers.get_digit_index(digit_id),
-                count: fingers.get_digit_count(),
-                device: if let Some(mb) = self.mouse_button{
-                    DigitDevice::Mouse(mb)
-                } else{
-                    DigitDevice::Touch(self.digit_id)
-                }
-            },
-            hover_last: fingers.get_hover_area(digit_id),
-            //captured: fingers.get_captured_area(digit_id),
-            modifiers: KeyModifiers::default(),
-            time: self.time,
-        }
-    }
-}
-
-
-impl StdinFingerUp {
-    pub fn into_finger_up_event(self, fingers: &CxFingers) -> FingerUpEvent {
-        let digit_id = LiveId(self.digit_id).into();
-        FingerUpEvent {
-            window_id: CxWindowPool::id_zero(),
-            abs: DVec2 {x: self.x, y: self.y},
-            tap_count: fingers.get_tap_count(digit_id),
-            digit: DigitInfo {
-                id: digit_id,
-                index: fingers.get_digit_index(digit_id),
-                count: fingers.get_digit_count(),
-                device: if let Some(mb) = self.mouse_button{
-                    DigitDevice::Mouse(mb)
-                } else{
-                    DigitDevice::Touch(self.digit_id)
-                }
-            },
-            capture_time: fingers.get_capture_time(digit_id),
-            captured: fingers.get_captured_area(digit_id),
-            modifiers: KeyModifiers::default(),
-            time: self.time,
-        }
-    }
-}
-
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum HostToStdin{
@@ -142,9 +90,9 @@ pub enum HostToStdin{
         frame: u64,
         time: f64,
     },
-    FingerDown(StdinFingerDown),
-    FingerUp(StdinFingerUp),
-    FingerMove(StdinFingerMove)
+    MouseDown(StdinMouseDown),
+    MouseUp(StdinMouseUp),
+    MouseMove(StdinMouseMove)
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]

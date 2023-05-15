@@ -1,10 +1,10 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import crate::theme::*;
     
-    ScrollShadow= {{ScrollShadow}} {
+    DrawScrollShadow= {{DrawScrollShadow}} {
         
         shadow_size: 4.0,
         
@@ -27,14 +27,14 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
-pub struct ScrollShadow {
-    shadow_size: f32,
-    draw_super: DrawQuad,
-    shadow_is_top: f32,
-    scroll: f32,
+pub struct DrawScrollShadow {
+    #[live] shadow_size: f32,
+    #[deref] draw_super: DrawQuad,
+    #[live] shadow_is_top: f32,
+    #[live] scroll: f32,
 }
 
-impl ScrollShadow {
+impl DrawScrollShadow {
     pub fn draw(&mut self, cx: &mut Cx2d, offset: DVec2) {
         let shadow_size = self.shadow_size as f64;
         let rect = cx.turtle().rect();

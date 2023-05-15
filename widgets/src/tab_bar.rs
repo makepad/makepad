@@ -1,7 +1,7 @@
 use {
     
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         scroll_bars::ScrollBars,
         tab::{TabAction, Tab},
     },
@@ -13,11 +13,11 @@ live_design!{
     
     TabBar= {{TabBar}} {
         tab: <Tab> {}
-        drag: {
+        draw_drag: {
             draw_depth: 10
             color: #c
         }
-        bar_fill: {
+        draw_fill: {
             color: (COLOR_BG_HEADER)
         }
         walk: {
@@ -28,7 +28,7 @@ live_design!{
             show_scroll_x: true
             show_scroll_y: false
             scroll_bar_x: {
-                bar:{bar_width:3.0}
+                draw_bar:{bar_width:3.0}
                 bar_size: 4
                 use_vertical_finger_scroll: true
             }
@@ -39,12 +39,12 @@ live_design!{
 #[derive(Live)]
 pub struct TabBar {
     
-    scroll_bars: ScrollBars,
-    drag: DrawColor,
-    
-    bar_fill: DrawColor,
-    walk: Walk,
-    tab: Option<LivePtr>,
+    #[live] scroll_bars: ScrollBars,
+    #[live] draw_drag: DrawColor,
+
+    #[live] draw_fill: DrawColor,
+    #[live] walk: Walk,
+    #[live] tab: Option<LivePtr>,
     
     #[rust] view_area: Area,
 
@@ -83,7 +83,7 @@ impl TabBar {
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         if self.is_dragged {
-            self.drag.draw_walk(
+            self.draw_drag.draw_walk(
                 cx,
                 Walk {
                     width: Size::Fill,
@@ -93,7 +93,7 @@ impl TabBar {
             );
         }
         self.tabs.retain_visible();
-        self.bar_fill.draw_walk(cx, Walk::size(Size::Fill, Size::Fill));
+        self.draw_fill.draw_walk(cx, Walk::size(Size::Fill, Size::Fill));
         self.scroll_bars.end(cx);
     }
     
@@ -172,14 +172,14 @@ impl TabBar {
         self.view_area.redraw(cx)
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabBarAction),
     ) {
         let view_area = self.view_area;
-        self.scroll_bars.handle_event_fn(cx, event, &mut |cx,_|{
+        self.scroll_bars.handle_event_with(cx, event, &mut |cx,_|{
             view_area.redraw(cx);
         });
         
@@ -187,7 +187,7 @@ impl TabBar {
             dispatch_action(cx, TabBarAction::TabWasPressed(tab_id));
         }
         for (tab_id, tab) in self.tabs.iter_mut() {
-            tab.handle_event_fn(cx, event, &mut | cx, action | match action {
+            tab.handle_event_with(cx, event, &mut | cx, action | match action {
                 TabAction::WasPressed => {
                     dispatch_action(cx, TabBarAction::TabWasPressed(*tab_id));
                 }

@@ -1,8 +1,8 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     
     DrawRect = {{DrawRect}} {
         fn pixel(self) -> vec4 {
@@ -29,16 +29,16 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawRect {
-    draw_super: DrawQuad,
-    color: Vec4,
+    #[deref] draw_super: DrawQuad,
+    #[live] color: Vec4,
 }
 
 
 #[derive(Live, LiveHook)]
 pub struct DebugView {
-    view: View,
-    rect: DrawRect,
-    label: DrawText
+    #[live] view: View,
+    #[live] rect: DrawRect,
+    #[live] label: DrawText
 }
 
 impl DebugView {
@@ -49,7 +49,7 @@ impl DebugView {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if !self.view.begin(cx).is_redrawing() {
+        if !self.view.begin(cx, Walk::default()).is_redrawing() {
             return
         }
         let debug = cx.debug.clone();

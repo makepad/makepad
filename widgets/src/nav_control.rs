@@ -1,8 +1,8 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     
     DrawFocusRect= {{DrawFocusRect}} {
         fn pixel(self) -> vec4 {
@@ -11,7 +11,7 @@ live_design!{
     }
     
     NavControl= {{NavControl}} {
-        label: {
+        draw_label: {
             text_style: {
                 font_size: 6
             },
@@ -24,14 +24,14 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawFocusRect {
-    draw_super: DrawQuad,
+    #[deref] draw_super: DrawQuad,
 }
 
 #[derive(Live, LiveHook)]
 pub struct NavControl {
-    view: View,
-    focus: DrawFocusRect,
-    label: DrawText,
+    #[live] view: View,
+    #[live] draw_focus: DrawFocusRect,
+    #[live] draw_label: DrawText,
     #[rust] _recent_focus: Area,
 }
 
@@ -92,7 +92,7 @@ impl NavControl {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if !self.view.begin(cx).is_redrawing() {
+        if !self.view.begin(cx, Walk::default()).is_redrawing() {
             return
         }
         

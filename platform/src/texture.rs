@@ -30,7 +30,7 @@ impl Texture {
 }
 
 #[derive(Default)]
-pub struct CxTexturePool(IdPool<CxTexture>);
+pub struct CxTexturePool(pub (crate) IdPool<CxTexture>);
 impl CxTexturePool {
     pub fn alloc(&mut self) -> Texture {
         Texture(self.0.alloc())
@@ -88,7 +88,6 @@ pub struct TextureDesc {
     pub format: TextureFormat,
     pub width: Option<usize>,
     pub height: Option<usize>,
-    pub multisample: Option<usize>
 }
 
 impl Default for TextureDesc {
@@ -97,13 +96,13 @@ impl Default for TextureDesc {
             format: TextureFormat::Default,
             width: None,
             height: None,
-            multisample: None
         }
     }
 }
 
 impl LiveHook for Texture {}
 impl LiveNew for Texture {
+    fn live_design_with(_cx:&mut Cx){}
     fn new(cx: &mut Cx) -> Self {
         let texture = cx.textures.alloc();
         texture

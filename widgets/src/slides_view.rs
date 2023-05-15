@@ -1,36 +1,55 @@
-use crate::makepad_draw_2d::*;
-use crate::frame::*;
-use crate::widget::*;
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    frame::*,
+    widget::*,
+};
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::frame::*;
-    registry Widget::*;
+    import makepad_widgets::label::Label;
+    //registry Widget::*;
     
-    const SLIDE_WIDTH = 800
+    const SLIDE_WIDTH = 1920
     
-    Body = <Label> {
-        label: {
-            color: #f
+    SlideBody = <Label> {
+        draw_label: {
+            color: #D
             text_style: {
                 font_size: 35
             }
         }
-        text: ""
+        label: ""
     }
     
-    Slide = <Frame> {
-        bg: {shape: Box, color: #2, radius: 10}
+    Slide = <Box> {
+        draw_bg: { color: #x1A, radius: 5.0 }
         walk: {width: (SLIDE_WIDTH), height: Fill}
-        layout: {align: {x: 0.5, y: 0.5}, flow: Down, spacing: 40}
+        layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
         title = <Label> {
-            label: {
+            draw_label: {
                 color: #f
                 text_style: {
-                    font_size: 64
+                    font_size: 84
                 }
             }
-            text: "SlideTitle"
+            label: "SlideTitle"
+        }
+    }
+
+    SlideChapter = <Slide> {
+        draw_bg: { color: #xFF5C39, radius: 5.0 }
+        walk: {width: (SLIDE_WIDTH), height: Fill}
+        layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
+        title = <Label> {
+            draw_label: {
+                color: #x181818
+                text_style: {
+                    font_size: 120
+                }
+            }
+            label: "SlideTitle"
         }
     }
     
@@ -38,72 +57,91 @@ live_design!{
         slide_width: (SLIDE_WIDTH)
         goal_pos: 0.0
         anim_speed: 0.9
-        frame: <ScrollX> {
+        <ScrollX> {
             walk: {width: Fill, height: Fill}
-            <Slide> {title = {text: "Portable SIMD"}, <Body> {text: "For Native and Wasm"}}
-            <Slide> {title = {text: "Intro"}, <Body> {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
-            
-            <Slide> {title = {text: "Fractals Native"}, <Body> {text: "Native: All cores and SIMD"}}
-            <Slide> {title = {text: "Fractals web"}, <Body> {text: "No SIMD on safari"}}
-            <Slide> {title = {text: "Mandelbrot"}, <Body> {text: "Trivially parallel"}}
-            <Slide> {title = {text: "Tile engine"}, <Body> {text: "Threads and queues\nchange core counter"}}
-            <Slide> {title = {text: "Live updating"}, <Body> {text: "Core feature of makepad\nLive shaders+DSL"}}
-            
-            <Slide> {title = {text: "SIMD"}, <Body> {text: "Single instruction\nMultiple data\nLane bitsize"}}
-            <Slide> {title = {text: "Lanes"}, <Body> {text: "128 bit (ARM/Wasm)\n256 bit: AMD/Intel\n512 bit intel"}}
-            <Slide> {title = {text: "CPU Instructions"}, <Body> {text: "intel: MMX\nintel: SSE2\nintel: AVX\nARM: Neon"}}
-            <Slide> {title = {text: "Intrinsics"}, <Body> {text: "CPU specific\nMany codepaths"}}
-            <Slide> {title = {text: "Portable SIMD"}, <Body> {text: "Write once run everywhere"}}
-            <Slide> {title = {text: "Mandelbrot"}, <Body> {text: "Show code"}}
-            
-            <Slide> {title = {text: "Web issues"}, <Body> {text: "Bindgen huge\nRust primitives\nStack frame\nSafari"}}
-            <Slide> {title = {text: "Audio threads"}, <Body> {text: "Fun audio"}}
-            
-            <Slide> {title = {text: "Future for Makepad"}, <Body> {text: "Rust IDE\nLive coding\nDesigntool"}}
-            <Slide> {title = {text: "Links"}, <Body> {text: "twitter: @makepad @rikarends\ngithub.com/makepad/makepad"}}
-            /*
-            Slide {title = {text: "Makepad JS"}}
-            Slide {title = {text: "What was wrong"}, Body {text: "Not stable after 30+ mins"}}
-            Slide {title = {text: "The real problem"}, Body {text: "No CPU perf left over\nNo VR + HiFPS"}}
-            Slide {title = {text: "JS was wrong"}, Body {text: "GC limits complex use\nNot enough perf\nDynamic typing doesnt scale"}}
-            Slide {title = {text: "The end?"}, Body {text: "Your life has no purpose"}}
-            Slide {title = {text: "Hi Rust"}, Body {text: "Static typed\nCompiled native +wasm\nHigh and low level"}}
-            Slide {title = {text: "A new chance"}, Body {text: "Eddy Bruël - code\nSebastian Michaelidis - design"}}
-            Slide {title = {text: "Could this be it?"}, Body {text: "Run code native and on web"}}
-            Slide {title = {text: "Makepad Rust"}, Body {text: "6 months first iteration"}}
-            Slide {title = {text: "Chrome profile"}, Body {text: "Time left to be useful"}}
-            Slide {title = {text: "What is it"}, Body {text: "UI Stack\nCode editor and IDE\nDesigntool"}}
-            Slide {title = {text: "The idea"}, Body {text: "a UI DSL with live hybrid editing"}}
-            Slide {title = {text: "Why"}, Body {text: "Having fun again as a programmer"}}
-            Slide {title = {text: "Fun Audio"}}
-            Slide {title = {text: "Future"}, Body {text: "OSS release in 3 months\nDesigntool will be commercial"}}
-            Slide {title = {text: "Links"}, Body {text: "makepad.dev\ngithub.com/makepad/makepad\ntwitter: @rikarends @makepad"}}
-            */
         }
     }
 }
 
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct SlidesView {
-    slide_width: f64,
-    goal_pos: f64,
-    current_pos: f64,
-    anim_speed: f64,
-    frame: FrameRef,
+    #[live] slide_width: f64,
+    #[live] goal_pos: f64,
+    #[live] current_pos: f64,
+    #[live] anim_speed: f64,
+    #[deref] frame: Frame,
     #[rust] next_frame: NextFrame
 }
 
+impl LiveHook for SlidesView {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, SlidesView)
+    }
+}
+
+#[derive(Clone, WidgetAction)]
+pub enum SlidesViewAction {
+    None,
+}
+
+
+impl Widget for SlidesView {
+    fn handle_widget_event_with(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
+    ) {
+        let uid = self.widget_uid();
+        self.frame.handle_widget_event_with(cx, event, dispatch_action);
+        self.handle_event_with(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {
+        self.frame.get_walk()
+    }
+    
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.frame.redraw(cx)
+    }
+    
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        self.frame.find_widgets(path, cached, results);
+    }
+    
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        self.frame.draw_walk_widget(cx, walk)
+    }
+}
 
 impl SlidesView {
-    
     fn next_frame(&mut self, cx: &mut Cx) {
         self.next_frame = cx.new_next_frame();
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+    pub fn next_slide(&mut self, cx: &mut Cx) {
+        self.goal_pos += 1.0;
+        // lets cap goal pos on the # of slides
+        let max_goal_pos = (self.frame.child_count().max(1) - 1) as f64;
+        if self.goal_pos > max_goal_pos {
+            self.goal_pos = max_goal_pos
+        }
+        self.next_frame(cx);
+    }
+    
+    pub fn prev_slide(&mut self, cx: &mut Cx) {
+        self.goal_pos -= 1.0;
+        if self.goal_pos < 0.0 {
+            self.goal_pos = 0.0;
+        }
+        self.next_frame(cx);
+    }
+    
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, SlidesViewAction)) {
         // lets handle mousedown, setfocus
-        self.frame.handle_event(cx, event);
         match event {
             Event::Construct => {
                 self.next_frame(cx);
@@ -113,22 +151,17 @@ impl SlidesView {
                 if (self.current_pos - self.goal_pos).abs()>0.00001 {
                     self.next_frame(cx);
                 }
-                self.frame.set_scroll_pos(cx, dvec2(self.current_pos * self.slide_width, 0.0));
+                self.frame.set_scroll_pos(cx, dvec2((self.current_pos * self.slide_width).floor(), 0.0));
                 self.frame.redraw(cx);
             }
             _ => ()
         }
         match event.hits(cx, self.frame.area()) {
             Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, ..}) => {
-                self.goal_pos += 1.0;
-                self.next_frame(cx);
+                self.next_slide(cx);
             }
             Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, ..}) => {
-                self.goal_pos -= 1.0;
-                if self.goal_pos < 0.0 {
-                    self.goal_pos = 0.0;
-                }
-                self.next_frame(cx);
+                self.prev_slide(cx);
             }
             Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.frame.area());
@@ -141,8 +174,42 @@ impl SlidesView {
         self.frame.redraw(cx);
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw(cx).is_not_done() {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        while self.frame.draw_walk_widget(cx, walk).is_hook() {
         }
     }
 }
+
+// ImGUI convenience API for Piano
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct SlidesViewRef(WidgetRef);
+
+impl SlidesViewRef {
+    pub fn next_slide(&self, cx:&mut Cx){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.next_slide(cx);
+        }
+    }
+    pub fn prev_slide(&self, cx:&mut Cx){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.prev_slide(cx);
+        }
+    }
+}
+
+#[derive(Clone,  WidgetSet)]
+pub struct SlidesViewSet(WidgetSet);
+
+impl SlidesViewSet {
+    pub fn next_slide(&self, cx:&mut Cx){
+        for item in self.iter() {
+            item.next_slide(cx);
+        }
+    }
+    pub fn prev_slide(&self, cx:&mut Cx){
+        for item in self.iter() {
+            item.prev_slide(cx);
+        }
+    }
+}
+

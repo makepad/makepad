@@ -1,5 +1,5 @@
 use crate::{
-    makepad_draw_2d::*,
+    makepad_draw::*,
     scroll_bar::*
 };
 
@@ -12,10 +12,10 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct ScrollBars {
-    show_scroll_x: bool,
-    show_scroll_y: bool,
-    scroll_bar_x: ScrollBar,
-    scroll_bar_y: ScrollBar,
+    #[live] show_scroll_x: bool,
+    #[live] show_scroll_y: bool,
+    #[live] scroll_bar_x: ScrollBar,
+    #[live] scroll_bar_y: ScrollBar,
     #[rust] nav_scroll_index: Option<NavScrollIndex>,
     #[rust] scroll: DVec2,
     #[rust] area: Area,
@@ -41,7 +41,7 @@ impl ScrollBars {
         self.scroll
     }
 
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event,  dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event,  dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
         self.handle_main_event(cx, event, dispatch_action);
         self.handle_scroll_event(cx, event, dispatch_action);
     }
@@ -63,7 +63,7 @@ impl ScrollBars {
         
         if self.show_scroll_x {
             let mut ret_x = None;
-            self.scroll_bar_x.handle_event_fn(cx, event, &mut | cx, action | {
+            self.scroll_bar_x.handle_event_with(cx, event, &mut | cx, action | {
                 match action {
                     ScrollBarAction::Scroll {scroll_pos, ..} => {
                         ret_x = Some(scroll_pos);
@@ -76,7 +76,7 @@ impl ScrollBars {
         }
         if self.show_scroll_y {
             let mut ret_y = None;
-            self.scroll_bar_y.handle_event_fn(cx, event, &mut | cx, action | {
+            self.scroll_bar_y.handle_event_with(cx, event, &mut | cx, action | {
                 match action {
                     ScrollBarAction::Scroll {scroll_pos, ..} => {
                         ret_y = Some(scroll_pos);

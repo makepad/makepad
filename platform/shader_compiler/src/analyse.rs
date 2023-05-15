@@ -846,16 +846,21 @@ impl<'a> FnDefAnalyser<'a> {
         step_expr: &Option<Expr>,
         block: &Block,
     ) -> Result<(), LiveError> {
+        
         self.ty_checker()
-            .ty_check_expr_with_expected_ty(span, from_expr, &Ty::Int) ?;
+            .ty_check_expr_with_expected_ty(span, from_expr, &Ty::Float) ?;
+        
         let from = self
         .const_evaluator()
             .const_eval_expr(from_expr) ?
         .to_int()
             .unwrap();
+            
         self.dep_analyser().dep_analyse_expr(from_expr);
+        
         self.ty_checker()
-            .ty_check_expr_with_expected_ty(span, to_expr, &Ty::Int) ?;
+            .ty_check_expr_with_expected_ty(span, to_expr, &Ty::Float) ?;
+            
         let to = self
         .const_evaluator()
             .const_eval_expr(to_expr) ?
@@ -864,7 +869,7 @@ impl<'a> FnDefAnalyser<'a> {
         self.dep_analyser().dep_analyse_expr(to_expr);
         if let Some(step_expr) = step_expr {
             self.ty_checker()
-                .ty_check_expr_with_expected_ty(span, step_expr, &Ty::Int) ?;
+                .ty_check_expr_with_expected_ty(span, step_expr, &Ty::Float) ?;
             let step = self
             .const_evaluator()
                 .const_eval_expr(step_expr) ?
@@ -967,6 +972,7 @@ impl<'a> FnDefAnalyser<'a> {
                         message: format!("Variant not found on enum {}::{}", match_item.enum_name.0, match_item.enum_variant.0),
                     } .into())
                 }
+                
                 // lets see if we have the right name
                 self.scopes.push_scope();
                 self.analyse_block(&match_item.block) ?;

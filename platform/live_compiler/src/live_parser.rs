@@ -1,5 +1,6 @@
 use {
     std::{
+        rc::Rc,
         iter::Cloned,
         slice::Iter
     },
@@ -54,7 +55,7 @@ impl<'a> LiveParser<'a> {
     }
     
     fn peek_token(&self) -> LiveToken {
-        self.token_with_span.token
+        self.token_with_span.token.clone()
     }
     
     fn eat_token(&mut self) -> LiveToken {
@@ -114,6 +115,16 @@ impl<'a> LiveParser<'a> {
         }
     }
     
+    fn expect_string(&mut self) -> Result<Rc<String>, LiveError> {
+        match self.peek_token() {
+            LiveToken::String(v) => {
+                self.skip_token();
+                Ok(v.clone())
+            }
+            token => Err(self.error(format!("expected ident, unexpected token `{}`", token), live_error_origin!())),
+        }
+    }
+    
     fn expect_int2(&mut self) -> Result<i64, LiveError> {
         match self.peek_token() {
             LiveToken::Int(v) => {
@@ -125,14 +136,21 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_float(&mut self) -> Result<f64, LiveError> {
+        let sign = if let LiveToken::Punct(live_id!(-)) = self.peek_token(){
+            self.skip_token();
+            -1.0
+        }
+        else{
+            1.0
+        };
         match self.peek_token() {
             LiveToken::Float(v) => {
                 self.skip_token();
-                Ok(v)
+                Ok(v*sign)
             }
             LiveToken::Int(v) => {
                 self.skip_token();
-                Ok(v as f64)
+                Ok(v as f64 * sign)
             }
             token => Err(self.error(format!("expected float, unexpected token `{}`", token), live_error_origin!())),
         }
@@ -190,7 +208,7 @@ impl<'a> LiveParser<'a> {
         
         Ok(())
     }
-    
+    /*
    fn expect_registry(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
         let token_id = self.get_token_id();
         let crate_id = self.expect_ident() ?;
@@ -211,7 +229,7 @@ impl<'a> LiveParser<'a> {
             value: LiveValue::Registry(crate_id)
         });
         Ok(())
-    }
+    }*/
     
     fn expect_fn(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
         let token_start = self.token_index - 1;
@@ -307,20 +325,12 @@ impl<'a> LiveParser<'a> {
                                     value: LiveValue::Color(val)
                                 });
                             },
-                            LiveToken::String {index, len} => {
+                            LiveToken::String(rcstring) => {
                                 self.skip_token();
                                 ld.edit_info.push(LiveNode {
                                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                                     id: prop_id,
-                                    value: LiveValue::DocumentString {string_start: index as usize, string_count: len as usize}
-                                });
-                            },
-                            LiveToken::Dependency {index, len} => {
-                                self.skip_token();
-                                ld.edit_info.push(LiveNode {
-                                    origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
-                                    id: prop_id,
-                                    value: LiveValue::Dependency {string_start: index as usize, string_count: len as usize}
+                                    value: LiveValue::String(rcstring)
                                 });
                             },
                             other => return Err(self.error(format!("Unexpected token {} in edit_info", other), live_error_origin!()))
@@ -563,24 +573,33 @@ impl<'a> LiveParser<'a> {
                     value: LiveValue::Color(val)
                 });
             },
-            LiveToken::String {index, len} => {
+            LiveToken::String(v) => {
                 self.skip_token();
                 ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
-                    value: LiveValue::DocumentString {string_start: index as usize, string_count: len as usize}
+                    value: LiveValue::String(v)
                 });
             },
-            LiveToken::Dependency {index, len} => {
+            LiveToken::Ident(live_id!(dep)) => {
                 self.skip_token();
-                
-                
-                ld.nodes.push(LiveNode {
-                    origin,
-                    id: prop_id,
-                    value: LiveValue::Dependency {string_start: index as usize, string_count: len as usize}
-                });
-            },
+                if self.accept_token(LiveToken::Open(Delim::Paren)) {
+                    let x = self.expect_string() ?;
+                    ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Dependency(x)
+                    });
+                    self.expect_token(LiveToken::Close(Delim::Paren)) ?;
+                }
+                else {
+                    ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Id(live_id!(dep))
+                    });
+                }
+            }
             LiveToken::Ident(live_id!(vec2)) => {
                 self.skip_token();
                 if self.accept_token(LiveToken::Open(Delim::Paren)) {
@@ -653,6 +672,20 @@ impl<'a> LiveParser<'a> {
             LiveToken::Ident(variant) => { // parse enum
                 self.skip_token();
                 match self.peek_token() {
+                    LiveToken::Punct(live_id!(.))=>{ // IdPath
+                        let mut id_path = Vec::new();
+                        id_path.push(variant);
+                        while self.accept_token(LiveToken::Punct(live_id!(.))){
+                            let ident = self.expect_ident()?;
+                            id_path.push(ident);
+                        }
+                        ld.nodes.push(LiveNode {
+                            origin,
+                            id: prop_id,
+                            value: LiveValue::IdPath(Rc::new(id_path))
+                        })
+                        // loop till not id or =>
+                    }
                     LiveToken::Open(Delim::Brace) => {
                         self.expect_named_enum(prop_id, origin, variant, ld) ?;
                     }
@@ -779,10 +812,6 @@ impl<'a> LiveParser<'a> {
                                 self.expect_import(ld) ?;
                                 self.accept_optional_delim();
                             }
-                            live_id!(registry) => {
-                                self.expect_registry(ld) ?;
-                                self.accept_optional_delim();
-                            }
                             _ => {
                                 let token_id = self.get_token_id();
                                 let real_prop_id = self.expect_ident() ?;
@@ -826,12 +855,12 @@ impl<'a> LiveParser<'a> {
             LivePropType::Field
         }
         else if self.accept_token(LiveToken::Punct(live_id!(=))){
-            if self.accept_token(LiveToken::Punct(live_id!( ?))) {
+            /*if self.accept_token(LiveToken::Punct(live_id!( ?))) {
                 LivePropType::Template
             }
-            else{
+            else{*/
                 LivePropType::Instance
-            }
+            //}
         }
         else{
             return Err(self.error(format!("Unexpected assign_type, expected = or :"), live_error_origin!()))

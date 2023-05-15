@@ -1277,12 +1277,12 @@ impl Lit {
         }
     }
     
-    pub fn from_token(token: LiveToken) -> Option<Lit> {
+    pub fn from_token(token: &LiveToken) -> Option<Lit> {
         match token {
-            LiveToken::Bool(v) => Some(Lit::Bool(v)),
-            LiveToken::Int(v) => Some(Lit::Int(v as i32)),
-            LiveToken::Float(v) => Some(Lit::Float(v as f32)),
-            LiveToken::Color(v) => Some(Lit::Color(v)),
+            LiveToken::Bool(v) => Some(Lit::Bool(*v)),
+            LiveToken::Int(v) => Some(Lit::Int(*v as i32)),
+            LiveToken::Float(v) => Some(Lit::Float(*v as f32)),
+            LiveToken::Color(v) => Some(Lit::Color(*v)),
             _ => None
         }
     }
@@ -1384,6 +1384,7 @@ impl Val {
     pub fn to_int(&self) -> Option<i32> {
         match *self {
             Val::Int(val) => Some(val),
+            Val::Float(val) => Some(val as i32),
             _ => None,
         }
     }

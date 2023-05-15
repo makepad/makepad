@@ -1,5 +1,6 @@
 use {
     std::sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{
             channel,
             Sender,
@@ -12,27 +13,51 @@ use {
         Mutex
     },
     crate::{
-        makepad_live_id::LiveId,
         cx::Cx,
         cx_api::*,
-        event::{Signal, Event}
     }
 };
+
+#[derive(Clone, Debug, Default)]
+pub struct Signal(Arc<AtomicBool>);
+
+pub (crate) static UI_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+impl Signal {
+    pub fn set_ui_signal() {
+        UI_SIGNAL.store(true, Ordering::SeqCst)
+    }
+    
+    pub (crate) fn check_and_clear_ui_signal() -> bool {
+        UI_SIGNAL.swap(false, Ordering::SeqCst)
+    }
+    
+    pub fn new() -> Self {
+        Self (Arc::new(AtomicBool::new(false)))
+    }
+    
+    pub fn check_and_clear(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+    
+    pub fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+        Self::set_ui_signal();
+    }
+}
 
 pub struct ToUIReceiver<T> {
     sender: Sender<T>,
     pub receiver: Receiver<T>,
-    signal: Signal
 }
 
 pub struct ToUISender<T> {
     sender: Sender<T>,
-    signal: Signal
 }
 
 impl<T> Clone for ToUISender<T> {
     fn clone(&self) -> Self {
-        Self {sender: self.sender.clone(), signal: self.signal.clone()}
+        Self {sender: self.sender.clone()}
     }
 }
 
@@ -44,7 +69,6 @@ impl<T> Default for ToUIReceiver<T> {
         Self {
             sender,
             receiver,
-            signal: LiveId::unique().into()
         }
     }
 }
@@ -53,25 +77,40 @@ impl<T> ToUIReceiver<T> {
     pub fn sender(&self) -> ToUISender<T> {
         ToUISender {
             sender: self.sender.clone(),
-            signal: self.signal.clone()
         }
     }
     
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.receiver.try_recv()
+    }
     
-    pub fn try_recv(&self, event: &Event) -> Result<T, TryRecvError> {
-        if let Event::Signal(se) = event {
-            if se.signals.get(&self.signal).is_some() {
-                return self.receiver.try_recv()
+    pub fn try_recv_flush(&self) -> Result<T, TryRecvError> {
+        let mut store_last = None;
+        loop{
+            match self.receiver.try_recv() {
+                Ok(last) => {
+                    store_last = Some(last);
+                },
+                Err(TryRecvError::Empty) => {
+                    if let Some(last) = store_last{
+                        return Ok(last)
+                    }
+                    else {
+                        return Err(TryRecvError::Empty)
+                    }
+                },
+                Err(TryRecvError::Disconnected) => {
+                    return  Err(TryRecvError::Disconnected)
+                }
             }
         }
-        Err(TryRecvError::Empty)
     }
 }
 
 impl<T> ToUISender<T> {
     pub fn send(&self, t: T) -> Result<(), SendError<T >> {
         let res = self.sender.send(t);
-        Cx::post_signal(self.signal);
+        Signal::set_ui_signal();
         res
     }
 }
@@ -133,13 +172,13 @@ impl<T> FromUIReceiver<T> {
 }
 
 pub struct ThreadPool<T: Clone + Send + 'static> {
-    sender: Sender<Box<dyn FnOnce(Option<T>) + Send + 'static>>,
-    msg_senders: Vec<Sender<T>>
+    sender: Sender<Box<dyn FnOnce(Option<T>) + Send + 'static >>,
+    msg_senders: Vec<Sender<T >>
 }
 
-impl<T> ThreadPool<T> where T : Clone + Send + 'static{
+impl<T> ThreadPool<T> where T: Clone + Send + 'static {
     pub fn new(cx: &mut Cx, num_threads: usize) -> Self {
-        let (sender, receiver) = channel::<Box<dyn FnOnce(Option<T>) + Send + 'static>>();
+        let (sender, receiver) = channel::<Box<dyn FnOnce(Option<T>) + Send + 'static >> ();
         let receiver = Arc::new(Mutex::new(receiver));
         let mut msg_senders = Vec::new();
         for _ in 0..num_threads {
@@ -157,20 +196,20 @@ impl<T> ThreadPool<T> where T : Clone + Send + 'static{
                     panic!();
                 };
                 let mut msg_out = None;
-                while let Ok(msg) = msg_recv.try_recv(){
+                while let Ok(msg) = msg_recv.try_recv() {
                     msg_out = Some(msg);
                 }
                 task(msg_out);
             })
         }
-        Self{
+        Self {
             sender,
             msg_senders
         }
     }
     
-    pub fn send_msg(&self, msg: T){
-        for sender in &self.msg_senders{
+    pub fn send_msg(&self, msg: T) {
+        for sender in &self.msg_senders {
             sender.send(msg.clone()).unwrap();
         }
     }
