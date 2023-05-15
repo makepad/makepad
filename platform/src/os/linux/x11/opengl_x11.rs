@@ -27,13 +27,12 @@ impl Cx {
     pub fn draw_pass_to_window(
         &mut self,
         pass_id: PassId,
-        dpi_factor: f64,
         opengl_window: &mut OpenglWindow,
         opengl_cx: &OpenglCx,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
-        self.setup_render_pass(pass_id, dpi_factor);
+        self.setup_render_pass(pass_id);
         
         let window = opengl_window.xlib_window.window.unwrap();
         
