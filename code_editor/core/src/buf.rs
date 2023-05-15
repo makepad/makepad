@@ -3,25 +3,36 @@ use crate::{CursorSet, Diff, Hist, Text};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Buf {
     text: Text,
-    diff: Diff,
     hist: Hist,
+    cursors_before: CursorSet,
+    diff: Diff,
 }
 
 impl Buf {
     pub fn new(text: Text) -> Self {
         Self {
             text,
-            diff: Diff::new(),
             hist: Hist::new(),
+            cursors_before: CursorSet::new(),
+            diff: Diff::new(),
         }
-    }
-
-    pub fn needs_commit(&self) -> bool {
-        !self.diff.is_empty()
     }
 
     pub fn text(&self) -> &Text {
         &self.text
+    }
+
+    pub fn begin_commit(&mut self, cursors_before: CursorSet) {
+        self.cursors_before = cursors_before;
+    }
+
+    pub fn end_commit(&mut self) {
+        use std::mem;
+
+        self.hist.commit(
+            mem::take(&mut self.cursors_before),
+            mem::take(&mut self.diff),
+        );
     }
 
     pub fn apply_diff(&mut self, diff: Diff) {
@@ -31,30 +42,21 @@ impl Buf {
         self.diff = mem::take(&mut self.diff).compose(diff);
     }
 
-    pub fn undo(&mut self) -> Option<(Diff, CursorSet)> {
-        assert!(!self.needs_commit());
-        if let Some((diff, cursors)) = self.hist.undo() {
+    pub fn undo(&mut self) -> Option<(CursorSet, Diff)> {
+        if let Some((cursors_before, diff)) = self.hist.undo() {
             self.text.apply_diff(diff.clone());
-            Some((diff, cursors))
+            Some((cursors_before, diff))
         } else {
             None
         }
     }
 
     pub fn redo(&mut self) -> Option<(Diff, CursorSet)> {
-        assert!(!self.needs_commit());
-        if let Some((diff, cursors)) = self.hist.redo() {
+        if let Some((diff, cursors_after)) = self.hist.redo() {
             self.text.apply_diff(diff.clone());
-            Some((diff, cursors))
+            Some((diff, cursors_after))
         } else {
             None
         }
-    }
-
-    pub fn commit(&mut self, cursors: CursorSet) {
-        use std::mem;
-
-        let diff = mem::take(&mut self.diff);
-        self.hist.commit(diff, cursors);
     }
 }

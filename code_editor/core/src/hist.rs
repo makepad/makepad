@@ -11,14 +11,13 @@ impl Hist {
         Self::default()
     }
 
-    pub fn undo(&mut self) -> Option<(Diff, CursorSet)> {
+    pub fn undo(&mut self) -> Option<(CursorSet, Diff)> {
         if self.rev_id == 0 {
             return None;
         }
-        let diff = self.revs[self.rev_id].diff.clone().invert();
+        let rev = self.revs[self.rev_id].clone();
         self.rev_id -= 1;
-        let cursors = self.revs[self.rev_id].cursors.clone();
-        Some((diff, cursors))
+        Some((rev.cursors_before, rev.diff.revert()))
     }
 
     pub fn redo(&mut self) -> Option<(Diff, CursorSet)> {
@@ -26,15 +25,19 @@ impl Hist {
             return None;
         }
         self.rev_id += 1;
-        let diff = self.revs[self.rev_id].diff.clone();
-        let cursors = self.revs[self.rev_id].cursors.clone();
-        Some((diff, cursors))
+        let rev = self.revs[self.rev_id].clone();
+        let mut cursors_after = rev.cursors_before;
+        cursors_after.apply_diff(&rev.diff, true);
+        Some((rev.diff, cursors_after))
     }
 
-    pub fn commit(&mut self, diff: Diff, cursors: CursorSet) {
+    pub fn commit(&mut self, cursors_before: CursorSet, diff: Diff) {
         self.rev_id += 1;
         self.revs.truncate(self.rev_id);
-        self.revs.push(Rev { diff, cursors });
+        self.revs.push(Rev {
+            cursors_before,
+            diff,
+        });
     }
 }
 
@@ -49,6 +52,6 @@ impl Default for Hist {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct Rev {
+    cursors_before: CursorSet,
     diff: Diff,
-    cursors: CursorSet,
 }

@@ -78,8 +78,12 @@ struct View {
 }
 
 impl View {
-    fn apply_diff(&mut self, diff: &Diff, local: bool) {
-        self.cursors.apply_diff(diff, local);
+    fn update(&mut self, cursors: Option<CursorSet>, diff: &Diff, local: bool) {
+        if let Some(cursors) = cursors {
+            self.cursors = cursors
+        } else {
+            self.cursors.apply_diff(diff, local);
+        }
     }
 }
 
@@ -105,17 +109,18 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Backspace,
                 ..
             }) => {
-                self.edit(edit::delete(
-                    self.model.buf.text(),
-                    &self.view.cursors,
-                ));
+                self.edit(edit::delete(self.model.buf.text(), &self.view.cursors));
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
                 ..
             }) => {
                 let replace_with = ["".to_string(), "".to_string()].into();
-                self.edit(edit::insert(self.model.buf.text(), &self.view.cursors, &replace_with));
+                self.edit(edit::insert(
+                    self.model.buf.text(),
+                    &self.view.cursors,
+                    &replace_with,
+                ));
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
@@ -193,44 +198,39 @@ impl<'a> HandleEventContext<'a> {
             }
             Event::Text(TextEvent { string }) => {
                 let replace_with = string.into();
-                self.edit(edit::insert(self.model.buf.text(), self.view.cursors.iter(), &replace_with));
+                self.edit(edit::insert(
+                    self.model.buf.text(),
+                    self.view.cursors.iter(),
+                    &replace_with,
+                ));
             }
             _ => {}
         }
     }
 
     fn edit(&mut self, diff: Diff) {
-        if self.model.buf.needs_commit() {
-            self.model.buf.commit(self.view.cursors.clone());
-        }
+        self.model.buf.begin_commit(self.view.cursors.clone());
         self.model.buf.apply_diff(diff.clone());
-        self.view.apply_diff(&diff, true);
-        for sibling_view in &mut self.sibling_views {
-            sibling_view.apply_diff(&diff, false);
-        }
+        self.model.buf.end_commit();
+        self.update_views(None, &diff);
     }
 
     fn undo(&mut self) {
-        if self.model.buf.needs_commit() {
-            self.model.buf.commit(self.view.cursors.clone());
-        }
-        if let Some((diff, _)) = self.model.buf.undo() {
-            self.view.apply_diff(&diff, true);
-            for sibling_view in &mut self.sibling_views {
-                sibling_view.apply_diff(&diff, false);
-            }
+        if let Some((cursors_before, diff)) = self.model.buf.undo() {
+            self.update_views(Some(cursors_before), &diff);
         }
     }
 
     fn redo(&mut self) {
-        if self.model.buf.needs_commit() {
-            return;
+        if let Some((diff, cursors_after)) = self.model.buf.redo() {
+            self.update_views(Some(cursors_after), &diff);
         }
-        if let Some((diff, _)) = self.model.buf.redo() {
-            self.view.apply_diff(&diff, true);
-            for sibling_view in &mut self.sibling_views {
-                sibling_view.apply_diff(&diff, false);
-            }
+    }
+
+    fn update_views(&mut self, cursors: Option<CursorSet>, diff: &Diff) {
+        self.view.update(cursors, diff, true);
+        for sibling_view in &mut self.sibling_views {
+            sibling_view.update(None, diff, false);
         }
     }
 }

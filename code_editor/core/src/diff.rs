@@ -27,7 +27,7 @@ impl Diff {
         }
     }
 
-    pub fn invert(self) -> Self {
+    pub fn revert(self) -> Self {
         let mut builder = Builder::new();
         let mut pos = Pos::default();
         for op in self.ops {
