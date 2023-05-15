@@ -203,17 +203,17 @@ impl Cx {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
                     if let Some(window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        let dpi_factor = window.window_geom.dpi_factor;
+                        //let dpi_factor = window.window_geom.dpi_factor;
                         window.resize_buffers(&d3d11_cx);
-                        self.draw_pass_to_window(*pass_id, true, dpi_factor, window, d3d11_cx);
+                        self.draw_pass_to_window(*pass_id, true, window, d3d11_cx);
                     }
                 }
-                CxPassParent::Pass(parent_pass_id) => {
-                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, dpi_factor, d3d11_cx);
+                CxPassParent::Pass(_) => {
+                    //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    self.draw_pass_to_texture(*pass_id, d3d11_cx);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, 1.0, d3d11_cx);
+                    self.draw_pass_to_texture(*pass_id, d3d11_cx);
                 }
             }
         }

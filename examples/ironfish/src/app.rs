@@ -28,8 +28,8 @@ live_design!{
     import makepad_widgets::slides_view::SlideBody;
     import makepad_widgets::slides_view::SlidesView;
     
-    import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
-    import makepad_example_numbers::number_grid::NumberGrid;
+    //import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
+    //import makepad_example_numbers::number_grid::NumberGrid;
     // APP
     //ui: <AppMobile> {}
     App = {{App}} {
@@ -238,8 +238,8 @@ impl LiveHook for App {
         crate::sequencer::live_design(cx);
         crate::app_desktop::live_design(cx);
         crate::app_mobile::live_design(cx);
-        makepad_example_fractal_zoom::mandelbrot::live_design(cx);
-        makepad_example_numbers::number_grid::live_design(cx);
+       //makepad_example_fractal_zoom::mandelbrot::live_design(cx);
+        //makepad_example_numbers::number_grid::live_design(cx);
     }
 }
 
