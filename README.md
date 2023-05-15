@@ -1,3 +1,14 @@
+## Contact
+
+Rik Arends: https://fosstodon.org/@rikarends#
+
+Eddy Bruel: - 
+
+Sebastian Michailidis: -
+
+Our discord channel for Makepad:
+https://discord.gg/adqBRq7Ece
+
 # Makepad
 
 ## Overview
@@ -19,8 +30,6 @@ Demo links:
 [makepad-example-simple](https://makepad.nl/makepad/examples/simple/src/index.html)
 
 [makepad-example-numbers](https://makepad.nl/makepad/examples/numbers/src/index.html)
-
-[makepad-studio](https://makepad.nl/makepad/studio/src/index.html)
 
 ### Prerequisites
 
@@ -60,9 +69,6 @@ After the build is complete, run the following command to start our web server:
 ```cargo run -p makepad-web-server --release```
 
 After starting the web server, the web build of Ironfish should be available here:
-https://127.0.0.1/makepad/examples/ironfish/src/index.html
+https://127.0.0.1:8080/makepad/examples/ironfish/src/index.html
 
-## Contact
 
-If you have any questions/suggestions, feel free to reach out to us on our discord channel:
-https://discord.com/invite/urEMqtMcSd=
