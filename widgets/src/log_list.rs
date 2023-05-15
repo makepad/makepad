@@ -3,17 +3,17 @@ use {
         collections::{HashSet},
     },
     crate::{
-        scroll_shadow::ScrollShadow,
+        scroll_shadow::DrawScrollShadow,
         fold_button::FoldButton,
         scroll_bars::ScrollBars,
         link_label::LinkLabel,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         log_icon::{DrawLogIconQuad, LogIconType}
     },
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     DrawBgQuad = {{DrawBgQuad}} {
@@ -68,9 +68,9 @@ live_design!{
                     from: {all: Forward {duration: 0.1}}
                     apply: {
                         hover: 0.0,
-                        bg: {hover: (hover)}
-                        name: {hover: (hover)}
-                        icon: {hover: (hover)}
+                        draw_bg: {hover: (hover)}
+                        draw_name: {hover: (hover)}
+                        draw_icon: {hover: (hover)}
                     }
                 }
                 on = {
@@ -86,9 +86,9 @@ live_design!{
                     from: {all: Snap}
                     apply: {
                         selected: 0.0,
-                        bg: {selected: (selected)}
-                        name: {selected: (selected)}
-                        icon: {selected: (selected)}
+                        draw_bg: {selected: (selected)}
+                        draw_name: {selected: (selected)}
+                        draw_icon: {selected: (selected)}
                     }
                 }
                 on = {
@@ -114,55 +114,55 @@ live_design!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawBgQuad {
-    draw_super: DrawQuad,
-    is_even: f32,
-    selected: f32,
-    hover: f32,
-    opened: f32,
+    #[deref] draw_super: DrawQuad,
+    #[live] is_even: f32,
+    #[live] selected: f32,
+    #[live] hover: f32,
+    #[live] opened: f32,
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawNameText {
-    draw_super: DrawText,
-    is_even: f32,
-    selected: f32,
-    hover: f32,
-    opened: f32,
+    #[deref] draw_super: DrawText,
+    #[live] is_even: f32,
+    #[live] selected: f32,
+    #[live] hover: f32,
+    #[live] opened: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct LogListNode {
-    bg: DrawBgQuad,
-    icon: DrawLogIconQuad,
-    name: DrawNameText,
-    layout: Layout,
+    #[live] draw_bg: DrawBgQuad,
+    #[live] draw_icon: DrawLogIconQuad,
+    #[live] draw_name: DrawNameText,
+    #[live] layout: Layout,
     
-    state: State,
+    #[state] state: LiveState,
     
-    indent_width: f64,
+    #[live] indent_width: f64,
     
-    fold_button: FoldButton,
-    link_label: LinkLabel,
+    #[live] fold_button: FoldButton,
+    #[live] link_label: LinkLabel,
     
-    icon_walk: Walk,
-    name_walk: Walk,
-    min_drag_distance: f64,
+    #[live] icon_walk: Walk,
+    #[live] name_walk: Walk,
+    #[live] min_drag_distance: f64,
     
-    opened: f32,
-    hover: f32,
-    selected: f32,
+    #[live] opened: f32,
+    #[live] hover: f32,
+    #[live] selected: f32,
 }
 
 #[derive(Live)]
 pub struct LogList {
-    scroll_bars: ScrollBars,
-    fold_node: Option<LivePtr>,
+    #[live] scroll_bars: ScrollBars,
+    #[live] fold_node: Option<LivePtr>,
     
-    filler_quad: DrawBgQuad,
-    layout: Layout,
-    node_height: f64,
+    #[live] filler_quad: DrawBgQuad,
+    #[live] layout: Layout,
+    #[live] node_height: f64,
     
-    scroll_shadow: ScrollShadow,
+    #[live] draw_scroll_shadow: DrawScrollShadow,
     
     #[rust] selected_node_ids: HashSet<LogListNodeId>,
     #[rust] open_nodes: HashSet<LogListNodeId>,
@@ -202,8 +202,8 @@ pub struct LogListNodeId(pub LiveId);
 
 impl LogListNode {
     pub fn set_draw_state(&mut self, is_even: f32) {
-        self.bg.is_even = is_even;
-        self.name.is_even = is_even;
+        self.draw_bg.is_even = is_even;
+        self.draw_name.is_even = is_even;
     }
     
     
@@ -219,20 +219,20 @@ impl LogListNode {
     ) {
         self.set_draw_state(is_even);
         
-        self.bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
+        self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
         
         // lets draw a fold button
         //self.fold_button.draw_walk(cx, self.fold_button.get_walk());
         
         // lets draw a fold button
-        self.icon.icon_type = icon_type;
-        self.icon.draw_walk(cx, self.icon_walk);
+        self.draw_icon.icon_type = icon_type;
+        self.draw_icon.draw_walk(cx, self.icon_walk);
         if link.len()>0 {
             self.link_label.draw_label(cx, link);
         }
         
-        self.name.draw_walk(cx, self.name_walk, Align::default(), body);
-        self.bg.end(cx);
+        self.draw_name.draw_walk(cx, self.name_walk, Align::default(), body);
+        self.draw_bg.end(cx);
     }
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
@@ -243,21 +243,21 @@ impl LogListNode {
         self.fold_button.set_is_open(cx, is_open, animate);
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, LogNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg.area().redraw(cx);
+            self.draw_bg.area().redraw(cx);
         }
         
-        self.fold_button.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.fold_button.handle_event_with(cx, event, &mut | _, _ | {});
         
-        self.link_label.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.link_label.handle_event_with(cx, event, &mut | _, _ | {});
         
-        match event.hits(cx, self.bg.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
             }
@@ -305,7 +305,7 @@ impl LogList {
             self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
-        self.scroll_shadow.draw(cx, dvec2(0., 0.));
+        self.draw_scroll_shadow.draw(cx, dvec2(0., 0.));
         self.scroll_bars.end(cx);
         
         let selected_node_ids = &self.selected_node_ids;
@@ -370,18 +370,18 @@ impl LogList {
         self.stack.pop();
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
         //let view_area = self.view_area;
-        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
         
         let mut actions = Vec::new();
         for (node_id, node) in self.fold_nodes.iter_mut() {
-            node.handle_event_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event_with(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {

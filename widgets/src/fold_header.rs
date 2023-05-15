@@ -1,6 +1,6 @@
 use crate::{
     makepad_derive_widget::*,
-    makepad_draw_2d::*,
+    makepad_draw::*,
     widget::*,
     fold_button::*
 };
@@ -42,19 +42,24 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(FoldHeader))]
+#[derive(Live)]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] rect_size: f64,
     #[rust] area: Area,
-    header: WidgetRef,
-    body: WidgetRef,
-    state: State,
-    opened: f64,
-    layout: Layout,
-    walk: Walk,
-    body_walk: Walk,
+    #[live] header: WidgetRef,
+    #[live] body: WidgetRef,
+    #[state] state: LiveState,
+    #[live] opened: f64,
+    #[live] layout: Layout,
+    #[live] walk: Walk,
+    #[live] body_walk: Walk,
+}
+
+impl LiveHook for FoldHeader{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,FoldHeader)
+    }
 }
 
 #[derive(Clone)]
@@ -64,9 +69,7 @@ enum DrawState {
 }
 
 impl Widget for FoldHeader {
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-
-    fn handle_widget_event_fn(
+    fn handle_widget_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -93,7 +96,7 @@ impl Widget for FoldHeader {
             dispatch_action(cx, item)
         }
         
-        self.body.handle_widget_event_fn(cx, event, dispatch_action);
+        self.body.handle_widget_event_with(cx, event, dispatch_action);
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
@@ -103,17 +106,17 @@ impl Widget for FoldHeader {
     
     fn get_walk(&self) -> Walk {self.walk}
 
-    fn find_widget(&mut self, path: &[LiveId], cached: WidgetCache) -> WidgetResult {
-        self.header.find_widget(path, cached) ?;
-        self.body.find_widget(path, cached)
+    fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
+        self.header.find_widgets(path, cached, results);
+        self.body.find_widgets(path, cached, results);
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
-        if let DrawState::DrawHeader = self.draw_state.get() {
-            self.header.draw_walk_widget(cx) ?;
+        if let Some(DrawState::DrawHeader) = self.draw_state.get() {
+            self.header.draw_widget(cx) ?;
             cx.begin_turtle(
                 self.body_walk,
                 Layout::flow_down()
@@ -121,8 +124,8 @@ impl Widget for FoldHeader {
             );
             self.draw_state.set(DrawState::DrawBody);
         }
-        if let DrawState::DrawBody = self.draw_state.get() {
-            self.body.draw_walk_widget(cx) ?;
+        if let Some(DrawState::DrawBody) = self.draw_state.get() {
+            self.body.draw_widget(cx) ?;
             self.rect_size = cx.turtle().used().y;
             cx.end_turtle();
             cx.end_turtle_with_area(&mut self.area);

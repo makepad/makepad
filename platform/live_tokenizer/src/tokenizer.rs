@@ -13,6 +13,7 @@
 //! before it finds the end of the token.
 
 use {
+    std::rc::Rc,
     crate::{
         char_ext::CharExt,
         live_id::{LiveId,LIVE_ID_SEED},
@@ -27,7 +28,7 @@ pub enum State {
     Initial(InitialState),
     BlockCommentTail(BlockCommentTailState),
     DoubleQuotedStringTail(DoubleQuotedStringTailState),
-    DoubleQuotedDependencyTailState(DoubleQuotedDependencyTailState),
+    //DoubleQuotedDependencyTailState(DoubleQuotedDependencyTailState),
     RawDoubleQuotedStringTail(RawDoubleQuotedStringTailState),
 }
 
@@ -75,7 +76,7 @@ impl State {
             State::BlockCommentTail(state) => state.next(cursor),
             State::DoubleQuotedStringTail(state) => state.next(cursor),
             State::RawDoubleQuotedStringTail(state) => state.next(cursor),
-            State::DoubleQuotedDependencyTailState(state)=> state.next(cursor)
+            //State::DoubleQuotedDependencyTailState(state)=> state.next(cursor)
         };
         let end = cursor.index;
         assert!(start < end);
@@ -108,9 +109,9 @@ impl InitialState {
             }
             ('/', '/', _) => self.line_comment(cursor),
             ('/', '*', _) => self.block_comment(cursor),
-            ('b', '\'', _) => self.byte(cursor),
+            //('b', '\'', _) => self.byte(cursor),
             ('b', '"', _) => self.byte_string(cursor),
-            ('d', '"', _) => self.dependency_string(cursor),
+            //('d', '"', _) => self.dependency_string(cursor),
             ('!', '=', _)
                 | ('%', '=', _)
                 | ('&', '&', _)
@@ -138,7 +139,7 @@ impl InitialState {
                     FullToken::Punct(id),
                 )
             }
-            ('\'', _, _) => self.char_or_lifetime(cursor),
+            //('\'', _, _) => self.char_or_lifetime(cursor),
             ('"', _, _) => self.string(cursor),
             ('(', _, _) => {
                 cursor.skip(1);
@@ -203,7 +204,7 @@ impl InitialState {
                 | ('?', _, _)
                 | ('@', _, _)
                 | ('^', _, _)
-                | ('_', _, _)
+               // | ('_', _, _)
                 | ('|', _, _) => {
                 let id = cursor.id_from_1();
                  cursor.skip(1);
@@ -375,7 +376,7 @@ impl InitialState {
             (State::Initial(InitialState), FullToken::Unknown)
         }
     }
-    
+    /*
     fn char_or_lifetime(self, cursor: &mut Cursor) -> (State, FullToken) {
         if cursor.peek(1).is_identifier_start() && cursor.peek(2) != '\'' {
             debug_assert!(cursor.peek(0) == '\'');
@@ -391,23 +392,24 @@ impl InitialState {
         } else {
             self.single_quoted_string(cursor)
         }
-    }
+    }*/
     
-    fn byte(self, cursor: &mut Cursor) -> (State, FullToken) {
+    /*fn byte(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
         self.single_quoted_string(cursor)
-    }
+    }*/
     
     fn string(self, cursor: &mut Cursor) -> (State, FullToken) {
         self.double_quoted_string(cursor)
     }
 
-    fn dependency_string(self, cursor: &mut Cursor) -> (State, FullToken) {
+    /*fn dependency_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'd');
         cursor.skip(1);
         self.double_quoted_dependency(cursor)
     }
+    */
     
     fn byte_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'b');
@@ -426,7 +428,7 @@ impl InitialState {
         cursor.skip(2);
         self.raw_double_quoted_string(cursor)
     }
-    
+    /*
     fn single_quoted_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '\'');
         cursor.skip(1);
@@ -443,19 +445,19 @@ impl InitialState {
             }
         }
         (State::Initial(InitialState), FullToken::String)
-    }
+    }*/
     
     fn double_quoted_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '"');
         cursor.skip(1);
         DoubleQuotedStringTailState.next(cursor)
     }
-
+/*
     fn double_quoted_dependency(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '"');
         cursor.skip(1);
         DoubleQuotedDependencyTailState.next(cursor)
-    }
+    }*/
     
     fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         let mut start_hash_count = 0;
@@ -509,26 +511,30 @@ pub struct DoubleQuotedStringTailState;
 
 impl DoubleQuotedStringTailState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
+        let mut s = String::new();
         loop {
             match (cursor.peek(0), cursor.peek(1)) {
                 ('"', _) => {
                     cursor.skip(1);
                     cursor.skip_suffix();
-                    break (State::Initial(InitialState), FullToken::String);
+                    break (State::Initial(InitialState), FullToken::String(Rc::new(s)));
                 }
                 ('\0', _) => {
                     break (
                         State::DoubleQuotedStringTail(DoubleQuotedStringTailState),
-                        FullToken::String,
+                        FullToken::String(Rc::new(s)),
                     );
                 }
                 ('\\', '"') => cursor.skip(2),
-                _ => cursor.skip(1),
+                (x,_) => {
+                    s.push(x);
+                    cursor.skip(1);
+                }
             }
         }
     }
 }
-
+/*
 /// The state of the tokenizer when it is in the middle of a double quoted string.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DoubleQuotedDependencyTailState;
@@ -553,7 +559,7 @@ impl DoubleQuotedDependencyTailState {
             }
         }
     }
-}
+}*/
 
 /// The state of the tokenizer when it is in the middle of a raw double quoted string.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -563,6 +569,7 @@ pub struct RawDoubleQuotedStringTailState {
 
 impl RawDoubleQuotedStringTailState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
+        let mut s = String::new();
         loop {
             match cursor.peek(0) {
                 '"' => {
@@ -573,13 +580,16 @@ impl RawDoubleQuotedStringTailState {
                     }
                     if end_hash_count == self.start_hash_count {
                         cursor.skip_suffix();
-                        break (State::Initial(InitialState), FullToken::String);
+                        break (State::Initial(InitialState), FullToken::String(Rc::new(s)));
                     }
                 }
                 '\0' => {
-                    break (State::RawDoubleQuotedStringTail(self), FullToken::String);
+                    break (State::RawDoubleQuotedStringTail(self), FullToken::String(Rc::new(s)));
                 }
-                _ => cursor.skip(1),
+                x => {
+                    s.push(x);
+                    cursor.skip(1);
+                }
             }
         }
     }

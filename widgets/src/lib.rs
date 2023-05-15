@@ -1,9 +1,9 @@
-pub use makepad_draw_2d::makepad_platform;
-pub use makepad_draw_2d::makepad_image_formats;
-pub use makepad_draw_2d;
+pub use makepad_draw::makepad_platform;
+pub use makepad_draw::makepad_image_formats;
+pub use makepad_draw;
 
 pub use makepad_derive_widget;
-pub use makepad_platform::*;
+pub use makepad_draw::*;
 pub use makepad_derive_widget::*;
 
 pub mod button;
@@ -20,21 +20,35 @@ pub mod scroll_bars;
 pub mod splitter;
 pub mod fold_header;
 pub mod fold_button;
+pub mod hook_widget;
+pub mod multi_window;
+pub mod designer;
+//#[cfg(ide_widgets)]
 pub mod dock;
+//#[cfg(ide_widgets)]
 pub mod tab;
+//#[cfg(ide_widgets)]
 pub mod tab_bar;
+//#[cfg(ide_widgets)]
 pub mod tab_close_button;
-pub mod bare_window;
 
 pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
 
+pub mod swipe_list;
+
+//#[cfg(ide_widgets)]
 pub mod list_box;
+//#[cfg(ide_widgets)]
 pub mod file_tree;
+//#[cfg(ide_widgets)]
 pub mod slides_view;
+//#[cfg(ide_widgets)]
 pub mod log_list;
+//#[cfg(ide_widgets)]
 pub mod log_icon;
+//#[cfg(ide_widgets)]
 pub mod color_picker;
 
 #[macro_use]
@@ -51,8 +65,7 @@ pub mod data_binding;
 mod theme;
 
 pub use crate::{
-    data_binding::{DataBinding},
-    bare_window::BareWindow,
+    data_binding::{DataBindingStore, DataBindingMap},
     button::*,
     frame::*,
     label::*,
@@ -60,13 +73,17 @@ pub use crate::{
     check_box::*,
     drop_down::*,
     radio_button::*,
-    text_input::{TextInput},
-    link_label::{LinkLabel},
-    desktop_window::{DesktopWindow},
+    swipe_list::*,
+    text_input::*,
+    link_label::*,
+    desktop_window::*,
     scroll_bars::{ScrollBars},
-    scroll_shadow::{ScrollShadow},
+    scroll_shadow::{DrawScrollShadow},
     scroll_bar::{ScrollBar},
+    slides_view::{SlidesView},
     widget::{
+        WidgetSet,
+        WidgetSetIterator,
         WidgetUid,
         WidgetDraw,
         WidgetDrawApi,
@@ -84,9 +101,7 @@ pub use crate::{
 
 
 pub fn live_design(cx: &mut Cx) {
-    makepad_draw_2d::live_design(cx);
-    crate::log_list::live_design(cx);
-    crate::log_icon::live_design(cx);
+    makepad_draw::live_design(cx);
     crate::debug_view::live_design(cx);
     crate::fold_header::live_design(cx);
     crate::splitter::live_design(cx);
@@ -102,20 +117,27 @@ pub fn live_design(cx: &mut Cx) {
     crate::button::live_design(cx);
     crate::desktop_button::live_design(cx);
     crate::desktop_window::live_design(cx);
-    crate::bare_window::live_design(cx);
     crate::window_menu::live_design(cx);
     crate::scroll_bar::live_design(cx);
     crate::scroll_bars::live_design(cx);
     crate::check_box::live_design(cx);
     crate::radio_button::live_design(cx);
-    crate::tab_close_button::live_design(cx);
-    crate::tab::live_design(cx);
-    crate::tab_bar::live_design(cx);
-    crate::dock::live_design(cx);
-    crate::color_picker::live_design(cx);
-    crate::file_tree::live_design(cx);
-    crate::slides_view::live_design(cx);
-    crate::list_box::live_design(cx);
     crate::popup_menu::live_design(cx);
     crate::drop_down::live_design(cx);
+    crate::swipe_list::live_design(cx);
+    crate::multi_window::live_design(cx);
+    crate::designer::live_design(cx);
+    crate::hook_widget::live_design(cx);
+    //#[cfg(ide_widgets)]{
+        crate::log_list::live_design(cx);
+        crate::log_icon::live_design(cx);
+        crate::tab::live_design(cx);
+        crate::tab_bar::live_design(cx);
+        crate::dock::live_design(cx);
+        crate::color_picker::live_design(cx);
+        crate::file_tree::live_design(cx);
+        crate::slides_view::live_design(cx);
+        crate::list_box::live_design(cx);
+        crate::tab_close_button::live_design(cx);
+    //}
 }

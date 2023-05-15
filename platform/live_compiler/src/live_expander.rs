@@ -1,11 +1,13 @@
 use {
+    std::rc::Rc,
+    std::collections::HashMap,
     crate::{
         makepad_live_id::*,
         makepad_live_tokenizer::{live_error_origin, LiveErrorOrigin},
         live_ptr::{LiveFileId, LivePtr, LiveFileGeneration},
         live_error::{LiveError},
         live_document::{LiveOriginal, LiveExpanded},
-        live_node::{LiveValue, LiveNode, LiveIdAsProp, LivePropType},
+        live_node::{LiveValue, LiveNode, LiveIdAsProp, LiveFieldKind, LivePropType},
         live_node_vec::{LiveNodeSliceApi, LiveNodeVecApi},
         live_registry::{LiveRegistry, LiveScopeTarget},
     }
@@ -43,8 +45,13 @@ impl<'a> LiveExpander<'a> {
     }
     
     pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation: LiveFileGeneration) {
-
-        out_doc.nodes.push(in_doc.nodes[0].clone());
+        
+        //out_doc.nodes.push(in_doc.nodes[0].clone());
+        out_doc.nodes.push(LiveNode{
+            origin: in_doc.nodes[0].origin,
+            id: LiveId(0),
+            value: LiveValue::Root{id_resolve:Box::new(HashMap::new())}
+        });
         let mut current_parent = vec![(LiveId(0), 0usize)];
         let mut in_index = 1;
         
@@ -57,59 +64,53 @@ impl<'a> LiveExpander<'a> {
             let in_value = &in_node.value;
             
             match in_value {
+                
                 LiveValue::Close => {
                     current_parent.pop();
                     in_index += 1;
                     continue;
                 }
-                LiveValue::Registry(component_type) => {
-                    let registries = self.live_registry.components.0.borrow();
-                    if let Some(registry) = registries.values().find( | v | v.component_type() == *component_type) {
-                        if in_node.id != LiveId(0) && registry.get_component_info(in_node.id).is_none() {
-                            self.errors.push(LiveError {
-                                origin: live_error_origin!(),
-                                span: in_node.origin.token_id().unwrap().into(),
-                                message: format!("Use statement component not found {}::{}", component_type, in_node.id)
-                            });
-                        }
-                    }
-                    else {
-                        self.errors.push(LiveError {
-                            origin: live_error_origin!(),
-                            span: in_node.origin.token_id().unwrap().into(),
-                            message: format!("Use statement invalid component type {}::{}", component_type, in_node.id)
-                        });
-                    }
-                    let index = out_doc.nodes.append_child_index(current_parent.last().unwrap().1);
-                    let old_len = out_doc.nodes.len();
-                    out_doc.nodes.insert(index, in_node.clone());
-                    self.shift_parent_stack(&mut current_parent, &out_doc.nodes, index, old_len, out_doc.nodes.len());
-                    in_index += 1;
-                    continue;
-                }
                 LiveValue::Import(module_id) => {
                     // lets verify it points anywhere
-                    if self.live_registry.module_id_and_name_to_doc(*module_id, in_node.id).is_none() {
+                    let mut found = false;
+                    let is_glob = in_node.id == LiveId::empty();
+                    if let Some(nodes) = self.live_registry.module_id_to_expanded_nodes(*module_id){
+                        let file_id = self.live_registry.module_id_to_file_id(*module_id).unwrap();
+                        let mut node_iter = Some(1);
+                        while let Some(index) = node_iter {
+                            if is_glob || nodes[index].id == in_node.id{ // its *
+                                // ok so what do we store...
+                                if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
+                                    id_resolve.insert(nodes[index].id, LiveScopeTarget::LivePtr(
+                                        self.live_registry.file_id_index_to_live_ptr(file_id, index)
+                                    ));
+                                }
+                                found = true;
+                            }
+                            node_iter = nodes.next_child(index);
+                        }
+                    }
+                    if !found{
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_node.origin.token_id().unwrap().into(),
-                            message: format!("Import statement invalid target {}::{}", module_id, in_node.id)
+                            message: format!("Import statement nothing found {}::{}", module_id, in_node.id)
                         });
                     }
-                    let index = out_doc.nodes.append_child_index(current_parent.last().unwrap().1);
-                    let old_len = out_doc.nodes.len();
-                    out_doc.nodes.insert(index, in_node.clone());
-                    self.shift_parent_stack(&mut current_parent, &out_doc.nodes, index, old_len, out_doc.nodes.len());
                     in_index += 1;
                     continue;
                 }
-                _ => ()
+                _=>()
             }
             
             //// determine node overwrite rules
-            
             let out_index = match out_doc.nodes.child_or_append_index_by_name(current_parent.last().unwrap().1, in_node.prop()) {
                 Ok(overwrite) => {
+                    if current_parent.len() == 1{
+                        if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
+                            id_resolve.insert(in_node.id, LiveScopeTarget::LocalPtr(overwrite));
+                        }
+                    } 
                     let out_value = &out_doc.nodes[overwrite].value;
                     let out_origin = out_doc.nodes[overwrite].origin;
                     
@@ -168,8 +169,14 @@ impl<'a> LiveExpander<'a> {
                     overwrite
                 }
                 Err(insert_point) => {
+                    if current_parent.len() == 1{
+                        if let LiveValue::Root{id_resolve} = &mut out_doc.nodes[0].value{
+                            id_resolve.insert(in_node.id, LiveScopeTarget::LocalPtr(insert_point));
+                        }
+                    }
+
                     // ok so. if we are inserting an expression, just do the whole thing in one go.
-                    if in_node.is_expr() {
+                    if in_node.is_expr(){
                         // splice it in
                         let old_len = out_doc.nodes.len();
                         out_doc.nodes.splice(insert_point..insert_point, in_doc.nodes.node_slice(in_index).iter().cloned());
@@ -191,10 +198,33 @@ impl<'a> LiveExpander<'a> {
                 }
             };
             
+            
             // process stacks
             match in_value {
+                LiveValue::Dependency(path)=>{
+                    if let Some(path) = path.strip_prefix("crate://self/"){
+                        let file_id = in_node.origin.token_id().unwrap().file_id().unwrap();
+                        let mut final_path = self.live_registry.file_id_to_cargo_manifest_path(file_id);
+                        final_path.push('/');
+                        final_path.push_str(path);
+                        out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
+                    }
+                    else 
+                    if let Some(path) = path.strip_prefix("crate://"){
+                        let mut split = path.split('/');
+                        if let Some(crate_name) = split.next(){
+                            if let Some(mut final_path) = self.live_registry.crate_name_to_cargo_manifest_path(crate_name){
+                                while let Some(next) = split.next(){
+                                    final_path.push('/');
+                                    final_path.push_str(next);
+                                }
+                                out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
+                            }
+                        }                
+                    }
+                },
                 LiveValue::Clone(clone) => {
-                    if let Some(target) = self.live_registry.find_scope_target_via_start(*clone, out_index, &out_doc.nodes) {
+                    if let Some(target) = self.live_registry.find_scope_target(*clone, &out_doc.nodes) {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
                                 
@@ -218,7 +248,8 @@ impl<'a> LiveExpander<'a> {
                                 
                                 out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
-                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
+                                    //*class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
+                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: local_ptr as u32, generation});
                                 }
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
@@ -230,7 +261,8 @@ impl<'a> LiveExpander<'a> {
                                 
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
-                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
+                                    *class_parent = Some(live_ptr);
+                                    //*class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
                                 }
                             }
                         };
@@ -252,87 +284,87 @@ impl<'a> LiveExpander<'a> {
                     }
                     
                     let mut insert_point = out_index + 1;
-                    let mut live_type_info = self.live_registry.live_type_infos.get(live_type).unwrap();
+                    let live_type_info = self.live_registry.live_type_infos.get(live_type).unwrap();
                     
-                    let mut has_deref_hop = false;
-                    while let Some(field) = live_type_info.fields.iter().find( | f | f.id == live_id!(draw_super)) {
-                        has_deref_hop = true;
-                        live_type_info = &field.live_type_info;
-                    }
-                    if has_deref_hop {
-                        // ok so we need the lti of the deref hop and clone all children
-                        if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&live_type_info.module_id) {
-                            let doc = &self.live_registry.live_files[file_id.to_index()].expanded;
-                            if let Some(index) = doc.nodes.child_by_name(0, live_type_info.type_name.as_instance()) {
-                                let old_len = out_doc.nodes.len();
-                                out_doc.nodes.insert_children_from_other(index, out_index + 1, &doc.nodes);
-                                self.shift_parent_stack(&mut current_parent, &out_doc.nodes, out_index, old_len, out_doc.nodes.len());
+                    if let Some(field) = live_type_info.fields.iter().find( | f | f.live_field_kind == LiveFieldKind::Deref) {
+                        if !field.live_type_info.live_ignore{
+                            let live_type_info = &field.live_type_info;
+                            if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&live_type_info.module_id) {
+                                let doc = &self.live_registry.live_files[file_id.to_index()].expanded;
+                                if let Some(index) = doc.nodes.child_by_name(0, live_type_info.type_name.as_instance()) {
+                                    let old_len = out_doc.nodes.len();
+                                    out_doc.nodes.insert_children_from_other(index, out_index + 1, &doc.nodes);
+                                    self.shift_parent_stack(&mut current_parent, &out_doc.nodes, out_index, old_len, out_doc.nodes.len());
+                                }
                             }
                         }
                     }
-                    else {
-                        for field in &live_type_info.fields {
-                            let lti = &field.live_type_info;
-                            if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&lti.module_id) {
-                                
-                                if *file_id == self.in_file_id { // clone on self
-                                    if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name.as_instance()) {
-                                        let node_insert_point = insert_point;
-                                        
-                                        let old_len = out_doc.nodes.len();
-                                        insert_point = out_doc.nodes.insert_node_from_self(index, insert_point);
-                                        self.shift_parent_stack(&mut current_parent, &out_doc.nodes, node_insert_point - 1, old_len, out_doc.nodes.len());
-                                        
-                                        out_doc.nodes[node_insert_point].id = field.id;
-                                        out_doc.nodes[node_insert_point].origin.set_prop_type(LivePropType::Field);
-                                        
-                                    }
-                                    else if !lti.live_ignore {
-                                        self.errors.push(LiveError {
-                                            origin: live_error_origin!(),
-                                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
-                                            message: format!("Can't find live definition of {} did you forget to call live_design for it?", lti.type_name)
-                                        });
-                                    }
+                   // else {
+                    for field in &live_type_info.fields {
+                        if field.live_field_kind == LiveFieldKind::Deref{
+                            continue;
+                        }
+                        let lti = &field.live_type_info;
+                        if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&lti.module_id) {
+                            
+                            if *file_id == self.in_file_id { // clone on self
+                                if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name.as_instance()) {
+                                    let node_insert_point = insert_point;
+                                    
+                                    let old_len = out_doc.nodes.len();
+                                    insert_point = out_doc.nodes.insert_node_from_self(index, insert_point);
+                                    self.shift_parent_stack(&mut current_parent, &out_doc.nodes, node_insert_point - 1, old_len, out_doc.nodes.len());
+                                    
+                                    out_doc.nodes[node_insert_point].id = field.id;
+                                    out_doc.nodes[node_insert_point].origin.set_prop_type(LivePropType::Field);
+                                    
                                 }
-                                else {
-                                    let other_nodes = &self.live_registry.live_files[file_id.to_index()].expanded.nodes;
-                                    if other_nodes.len() == 0 {
-                                        panic!(
-                                            "Dependency order bug finding {}, file {} not registered before {}",
-                                            lti.type_name,
-                                            self.live_registry.file_id_to_file_name(*file_id),
-                                            self.live_registry.file_id_to_file_name(self.in_file_id),
-                                        );
-                                    }
-                                    if let Some(index) = other_nodes.child_by_name(0, lti.type_name.as_instance()) {
-                                        let node_insert_point = insert_point;
-                                        
-                                        let old_len = out_doc.nodes.len();
-                                        insert_point = out_doc.nodes.insert_node_from_other(index, insert_point, other_nodes);
-                                        self.shift_parent_stack(&mut current_parent, &out_doc.nodes, node_insert_point - 1, old_len, out_doc.nodes.len());
-                                        
-                                        out_doc.nodes[node_insert_point].id = field.id;
-                                        out_doc.nodes[node_insert_point].origin.set_prop_type(LivePropType::Field);
-                                    }
-                                    else if lti.type_name != LiveId(0) {
-                                        self.errors.push(LiveError {
-                                            origin: live_error_origin!(),
-                                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
-                                            message: format!("Typename {}, not defined in file where it was expected", lti.type_name)
-                                        });
-                                    }
+                                else if !lti.live_ignore {
+                                    self.errors.push(LiveError {
+                                        origin: live_error_origin!(),
+                                        span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
+                                        message: format!("Can't find live definition of {} did you forget to call live_design for it?", lti.type_name)
+                                    });
                                 }
                             }
-                            else if !lti.live_ignore {
-                                self.errors.push(LiveError {
-                                    origin: live_error_origin!(),
-                                    span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
-                                    message: format!("Can't find live definition of {} did you forget to call live_design for it?", lti.type_name)
-                                });
+                            else {
+                                let other_nodes = &self.live_registry.live_files[file_id.to_index()].expanded.nodes;
+                                if other_nodes.len() == 0 {
+                                    panic!(
+                                        "Dependency order bug finding {}, file {} not registered before {}",
+                                        lti.type_name,
+                                        self.live_registry.file_id_to_file_name(*file_id),
+                                        self.live_registry.file_id_to_file_name(self.in_file_id),
+                                    );
+                                }
+                                if let Some(index) = other_nodes.child_by_name(0, lti.type_name.as_instance()) {
+                                    let node_insert_point = insert_point;
+                                    
+                                    let old_len = out_doc.nodes.len();
+                                    insert_point = out_doc.nodes.insert_node_from_other(index, insert_point, other_nodes);
+                                    self.shift_parent_stack(&mut current_parent, &out_doc.nodes, node_insert_point - 1, old_len, out_doc.nodes.len());
+                                    
+                                    out_doc.nodes[node_insert_point].id = field.id;
+                                    out_doc.nodes[node_insert_point].origin.set_prop_type(LivePropType::Field);
+                                }
+                                else if !lti.live_ignore && lti.type_name != LiveId(0) {
+                                    self.errors.push(LiveError {
+                                        origin: live_error_origin!(),
+                                        span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
+                                        message: format!("Typename {}, not defined in file where it was expected", lti.type_name)
+                                    });
+                                }
                             }
                         }
+                        else if !lti.live_ignore {
+                            self.errors.push(LiveError {
+                                origin: live_error_origin!(),
+                                span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
+                                message: format!("Can't find live definition of {} did you forget to call live_design for it?", lti.type_name)
+                            });
+                        }
                     }
+                    //}
                     current_parent.push((out_doc.nodes[out_index].id, out_index));
                 }
                 LiveValue::Expr {..} => {panic!()},

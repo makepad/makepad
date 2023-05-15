@@ -1,8 +1,8 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     
     Slides:[
         JsToRust,
@@ -75,12 +75,12 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct ShaderView {
-    bg_quad: DrawQuad,
+    #[live] bg_quad: DrawQuad,
     
-    size: DVec2,
-    pad: DVec2,
+    #[live] size: DVec2,
+    #[live] pad: DVec2,
 
-    state: State
+    #[live] state: State
 }
 
 
@@ -100,7 +100,7 @@ impl ShaderView {
                 self.animate_state(cx, id!(hover.pressed));
             },
             Hit::FingerUp(fe) => {
-                if fe.is_over && fe.digit.has_hovers() {
+                if fe.is_over && fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else {

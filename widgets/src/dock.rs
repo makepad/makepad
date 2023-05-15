@@ -1,13 +1,13 @@
 use {
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
     },
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import crate::tab_bar::TabBar
     import makepad_widgets::splitter::Splitter
     import makepad_widgets::theme::*;
@@ -61,21 +61,21 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawRoundCorner {
-    draw_super: DrawQuad,
-    border_radius: f32,
-    flip: Vec2,
+    #[deref] draw_super: DrawQuad,
+    #[live] border_radius: f32,
+    #[live] flip: Vec2,
 }
 
 #[derive(Live)]
 pub struct Dock {
-    layout: Layout,
-    overlay_view: View,
-    round_corner: DrawRoundCorner,
-    padding_fill: DrawColor,
-    border_size: f64,
-    drag_quad: DrawColor,
-    tab_bar: Option<LivePtr>,
-    splitter: Option<LivePtr>,
+    #[live] layout: Layout,
+    #[live] overlay_view: View,
+    #[live] round_corner: DrawRoundCorner,
+    #[live] padding_fill: DrawColor,
+    #[live] border_size: f64,
+    #[live] drag_quad: DrawColor,
+    #[live] tab_bar: Option<LivePtr>,
+    #[live] splitter: Option<LivePtr>,
     #[rust] area: Area,
     #[rust] panels: ComponentMap<PanelId, Panel>,
     #[rust] panel_id_stack: Vec<PanelId>,
@@ -105,7 +105,7 @@ impl Dock {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        if self.overlay_view.begin(cx).is_redrawing() {
+        if self.overlay_view.begin(cx, Walk::default()).is_redrawing() {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
@@ -212,7 +212,7 @@ impl Dock {
     pub fn begin_contents(&mut self, cx: &mut Cx2d)->ViewRedrawing {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
-        panel.contents_view.begin(cx)
+        panel.contents_view.begin(cx, Walk::default())
     } 
     
     pub fn end_contents(&mut self, cx: &mut Cx2d){
@@ -284,7 +284,7 @@ impl Dock {
                 Panel::Split(panel) => {
                     panel
                         .splitter
-                        .handle_event_fn(cx, event, &mut | cx, action | match action {
+                        .handle_event_with(cx, event, &mut | cx, action | match action {
                         SplitterAction::Changed {axis, align} => {
                             dispatch_action(cx, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align});
                         },
@@ -295,7 +295,7 @@ impl Dock {
                     let mut redraw = false;
                     panel
                         .tab_bar
-                        .handle_event_fn(cx, event, &mut | cx, action | match action {
+                        .handle_event_with(cx, event, &mut | cx, action | match action {
                         TabBarAction::ReceivedDraggedItem(item) => dispatch_action(
                             cx,
                             DockAction::TabBarReceivedDraggedItem(*panel_id, item),

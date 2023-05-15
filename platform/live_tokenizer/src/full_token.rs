@@ -1,12 +1,13 @@
 use {
     std::{
+        rc::Rc,
         ops::Deref,
         ops::DerefMut,
     },
     crate::live_id::LiveId
 };
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TokenWithLen {
     pub len: usize,
     pub token: FullToken,
@@ -21,7 +22,7 @@ impl DerefMut for TokenWithLen {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.token}
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FullToken {
     Punct(LiveId),
     Ident(LiveId),
@@ -29,8 +30,7 @@ pub enum FullToken {
     Open(Delim),
     Close(Delim),
 
-    String,
-    Dependency,
+    String(Rc<String>),
     Bool(bool),
     Color(u32),
     Float(f64),

@@ -7,6 +7,7 @@ use {
         sel_impl,
     },
     crate::{
+        makepad_objc_sys::objc_block,
         makepad_shader_compiler::{
             generate_metal,
             generate_metal::MetalGeneratedShader,
@@ -15,7 +16,7 @@ use {
         makepad_live_id::*,
         makepad_error_log::*,
         os::{
-            apple::frameworks::*,
+            apple::apple_sys::*,
             apple::apple_util::{
                 nsstring_to_string,
                 str_to_nsstring,
@@ -83,11 +84,12 @@ impl Cx {
                 }else {
                     continue;
                 };
+                
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if sh.platform.is_none() { // shader didnt compile somehow
+                if sh.os_shader_id.is_none() { // shader didnt compile somehow
                     continue;
                 }
-                let shp = &self.draw_shaders.platform[sh.platform.unwrap()];
+                let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
@@ -245,7 +247,6 @@ impl Cx {
     pub fn draw_pass(
         &mut self,
         pass_id: PassId,
-        dpi_factor: f64,
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) {
@@ -255,21 +256,29 @@ impl Cx {
         
         let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
         
-        let pass_size = self.passes[pass_id].pass_size;
+        let dpi_factor = self.passes[pass_id].dpi_factor.unwrap();
         
-        self.passes[pass_id].set_matrix(DVec2::default(), pass_size);
+        let pass_rect = self.get_pass_rect(pass_id, if mode.is_drawable().is_some() {1.0}else {dpi_factor}).unwrap();
+        
+        self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
         
-        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
+        if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
+            return
+        }
+        
+        
+        /*let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
         }
         else {
             dpi_factor
-        };
+        };*/
         
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
         if let Some(drawable) = mode.is_drawable() {
+            
             let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
             let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
             let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
@@ -296,7 +305,7 @@ impl Cx {
                 
                 let cxtexture = &mut self.textures[color_texture.texture_id];
                 
-                cxtexture.os.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_size);
+                cxtexture.os.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_rect.size);
                 
                 let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
                 
@@ -345,7 +354,7 @@ impl Cx {
         // attach depth texture
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id];
-            cxtexture.os.update_render_target(metal_cx, AttachmentKind::Depth, &cxtexture.desc, dpi_factor * pass_size);
+            cxtexture.os.update_render_target(metal_cx, AttachmentKind::Depth, &cxtexture.desc, dpi_factor * pass_rect.size);
             let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
             
             let depth_attachment: ObjcId = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
@@ -374,20 +383,20 @@ impl Cx {
                 }
             }
             // create depth state
-            if self.passes[pass_id].platform.mtl_depth_state.is_none() {
+            if self.passes[pass_id].os.mtl_depth_state.is_none() {
                 
                 let desc: ObjcId = unsafe {msg_send![class!(MTLDepthStencilDescriptor), new]};
                 let () = unsafe {msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]};
                 let () = unsafe {msg_send![desc, setDepthWriteEnabled: true]};
                 let depth_stencil_state: ObjcId = unsafe {msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc]};
-                self.passes[pass_id].platform.mtl_depth_state = Some(depth_stencil_state);
+                self.passes[pass_id].os.mtl_depth_state = Some(depth_stencil_state);
             }
         }
         
         let command_buffer: ObjcId = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
         let encoder: ObjcId = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
         
-        if let Some(depth_state) = self.passes[pass_id].platform.mtl_depth_state {
+        if let Some(depth_state) = self.passes[pass_id].os.mtl_depth_state {
             let () = unsafe {msg_send![encoder, setDepthStencilState: depth_state]};
         }
         
@@ -428,7 +437,7 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn commit_command_buffer(&mut self, _stdin_frame:Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
+    fn commit_command_buffer(&mut self, _stdin_frame: Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         let () = unsafe {msg_send![
             command_buffer,
@@ -437,6 +446,39 @@ impl Cx {
             })
         ]};
         let () = unsafe {msg_send![command_buffer, commit]};
+    }
+    
+    
+    pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
+        for draw_shader_ptr in &self.draw_shaders.compile_set {
+            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
+                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
+                let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
+                let gen = generate_metal::generate_shader(
+                    draw_shader_def.as_ref().unwrap(),
+                    &cx_shader.mapping.const_table,
+                    &self.shader_registry
+                );
+                
+                if cx_shader.mapping.flags.debug {
+                    log!("{}", gen.mtlsl);
+                }
+                // lets see if we have the shader already
+                for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
+                    if ds.mtlsl == gen.mtlsl {
+                        cx_shader.os_shader_id = Some(index);
+                        break;
+                    }
+                }
+                if cx_shader.os_shader_id.is_none() {
+                    if let Some(shp) = CxOsDrawShader::new(metal_cx, gen) {
+                        cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                        self.draw_shaders.os_shaders.push(shp);
+                    }
+                }
+            }
+        }
+        self.draw_shaders.compile_set.clear();
     }
 }
 
@@ -562,41 +604,6 @@ pub enum PackType {
 
 pub struct SlErr {
     _msg: String
-}
-
-impl Cx {
-    
-    pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
-        for draw_shader_ptr in &self.draw_shaders.compile_set {
-            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
-                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
-                let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
-                let gen = generate_metal::generate_shader(
-                    draw_shader_def.as_ref().unwrap(),
-                    &cx_shader.mapping.const_table,
-                    &self.shader_registry
-                );
-                
-                if cx_shader.mapping.flags.debug {
-                    log!("{}", gen.mtlsl);
-                }
-                // lets see if we have the shader already
-                for (index, ds) in self.draw_shaders.platform.iter().enumerate() {
-                    if ds.mtlsl == gen.mtlsl {
-                        cx_shader.platform = Some(index);
-                        break;
-                    }
-                }
-                if cx_shader.platform.is_none() {
-                    if let Some(shp) = CxOsDrawShader::new(metal_cx, gen) {
-                        cx_shader.platform = Some(self.draw_shaders.platform.len());
-                        self.draw_shaders.platform.push(shp);
-                    }
-                }
-            }
-        }
-        self.draw_shaders.compile_set.clear();
-    }
 }
 
 impl MetalCx {
@@ -882,7 +889,6 @@ impl CxOsTexture {
                 width,
                 height,
                 format: desc.format,
-                multisample: desc.multisample,
                 texture,
             });
             
@@ -961,7 +967,6 @@ impl CxOsTexture {
                 width,
                 height,
                 format: desc.format,
-                multisample: desc.multisample,
                 texture,
             });
         }
@@ -984,7 +989,6 @@ impl CxOsTexture {
             width,
             height,
             format: TextureFormat::RenderBGRA,
-            multisample: None,
             texture,
         });
     }
@@ -1051,7 +1055,6 @@ impl CxOsTexture {
             width,
             height,
             format: desc.format,
-            multisample: desc.multisample,
             texture,
         });
     }
@@ -1062,9 +1065,6 @@ struct CxOsTextureInner {
     width: u64,
     height: u64,
     format: TextureFormat,
-    multisample: Option<usize>,
-    
-    
     texture: RcObjcId
 }
 
@@ -1077,9 +1077,6 @@ impl CxOsTextureInner {
             return true;
         }
         if inner.format != desc.format {
-            return true;
-        }
-        if inner.multisample != desc.multisample {
             return true;
         }
         false

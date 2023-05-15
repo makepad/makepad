@@ -1,7 +1,8 @@
 use {
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         makepad_widgets::{
+            Widget,
             splitter::{SplitterAlign},
             DesktopWindow,
             dock::{Dock, DockAction, DragPosition, PanelId},
@@ -55,7 +56,7 @@ pub struct AppInner {
 impl AppInner {
     
     pub fn draw(&mut self, cx: &mut Cx2d, state: &AppState) {
-        if self.window.begin(cx, None).is_redrawing() {
+        if self.window.begin(cx).is_redrawing() {
             self.dock.begin(cx);
             self.draw_panel(cx, state, live_id!(root).into());
             self.dock.end(cx);
@@ -92,7 +93,7 @@ impl AppInner {
                                 self.run_view.draw(cx, &state.build_state)
                             }
                             TabKind::SlidesView => {
-                                self.slides_view.draw(cx)
+                                self.slides_view.draw_walk(cx, self.slides_view.get_walk())
                             }
                             TabKind::LogView => {
                                 self.log_view.draw(cx, &state.editor_state)
@@ -137,7 +138,7 @@ impl AppInner {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) {
-        self.window.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.window.handle_event_with(cx, event, &mut | _, _ | {});
         
         match event {
             Event::Construct => {
@@ -320,9 +321,9 @@ impl AppInner {
             }
         }
         self.run_view.handle_event(cx, event, &mut state.build_state);
-        self.log_view.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.log_view.handle_event_with(cx, event, &mut | _, _ | {});
         self.shader_view.handle_event(cx, event);
-        self.slides_view.handle_event(cx, event);
+        self.slides_view.handle_event_with(cx, event, &mut | _, _ | {});
     }
     
     

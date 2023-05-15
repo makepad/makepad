@@ -10,10 +10,10 @@ use {
             position_set::PositionSet,
             range_set::{RangeSet, Span},
         },
-        makepad_draw_2d::*,
+        makepad_draw::*,
         makepad_widgets::{
             ScrollBars,
-            ScrollShadow
+            DrawScrollShadow
         },
         editor_state::{
             EditorState,
@@ -38,7 +38,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     DrawSelection = {{DrawSelection}} {
@@ -201,51 +201,51 @@ pub struct CodeEditorImpl {
     #[rust] zoom_anim_center: Option<Position>,
     #[rust] zoom_last_pos: Option<DVec2>,
     
-    pub scroll_bars: ScrollBars,
+    #[live] pub scroll_bars: ScrollBars,
     
-    pub zoom_out: f64,
-    pub max_zoom_out: f64,
+    #[live] pub zoom_out: f64,
+    #[live] pub max_zoom_out: f64,
     
-    padding_top: f64,
+    #[live] padding_top: f64,
     
-    state: State,
+    #[live] state: State,
     
-    selection_quad: DrawSelection,
-    code_text: DrawText,
-    caret_quad: DrawColor,
-    line_num_quad: DrawColor,
-    line_num_text: DrawText,
-    indent_line_quad: DrawIndentLine,
-    msg_line_quad: DrawMsgLine,
+    #[live] selection_quad: DrawSelection,
+    #[live] code_text: DrawText,
+    #[live] caret_quad: DrawColor,
+    #[live] line_num_quad: DrawColor,
+    #[live] line_num_text: DrawText,
+    #[live] indent_line_quad: DrawIndentLine,
+    #[live] msg_line_quad: DrawMsgLine,
     
-    text_color_linenum: Vec4,
-    text_color_linenum_current: Vec4,
-    text_color_indent_line: Vec4,
+    #[live] text_color_linenum: Vec4,
+    #[live] text_color_linenum_current: Vec4,
+    #[live] text_color_indent_line: Vec4,
     
-    current_line_quad: DrawColor,
+    #[live] current_line_quad: DrawColor,
     
-    scroll_shadow: ScrollShadow,
+    #[live] draw_scroll_shadow: DrawScrollShadow,
     
     #[rust] pub line_num_width: f64,
-    caret_blink_timeout: f64,
+    #[live] caret_blink_timeout: f64,
     
 }
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSelection {
-    draw_super: DrawQuad,
-    prev_x: f32,
-    prev_w: f32,
-    next_x: f32,
-    next_w: f32
+    #[deref] draw_super: DrawQuad,
+    #[live] prev_x: f32,
+    #[live] prev_w: f32,
+    #[live] next_x: f32,
+    #[live] next_w: f32
 }
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawIndentLine {
-    draw_super: DrawQuad,
-    indent_id: f32
+    #[deref] draw_super: DrawQuad,
+    #[live] indent_id: f32
 }
 
 #[derive(Live, LiveHook)]
@@ -273,8 +273,8 @@ impl From<BuildMsgLevel> for MsgLineLevel {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawMsgLine {
-    draw_super: DrawQuad,
-    level: MsgLineLevel
+    #[deref] draw_super: DrawQuad,
+    #[live] level: MsgLineLevel
 }
 
 pub enum CodeEditorAction {
@@ -323,7 +323,7 @@ impl CodeEditorImpl {
             lines_layout.total_height + visible.y - self.text_glyph_size.y,
         );
         
-        self.scroll_shadow.draw(cx, dvec2(self.line_num_width, 0.));
+        self.draw_scroll_shadow.draw(cx, dvec2(self.line_num_width, 0.));
         self.scroll_bars.end(cx);
     }
     
@@ -854,7 +854,7 @@ impl CodeEditorImpl {
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
         
         if self.state_handle_event(cx, event).must_redraw() {
             self.scroll_bars.redraw(cx);
@@ -1101,7 +1101,7 @@ impl CodeEditorImpl {
         }
     }
     
-    fn handle_select_scroll_in_finger_move(&mut self, fe: &FingerMoveHitEvent) {
+    fn handle_select_scroll_in_finger_move(&mut self, fe: &FingerMoveEvent) {
         let pow_scale = 0.1;
         let pow_fac = 3.;
         let max_speed = 40.;

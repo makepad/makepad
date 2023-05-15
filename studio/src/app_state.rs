@@ -6,7 +6,7 @@ use {
             dock::{PanelId},
             tab_bar::{TabId},
         },
-        makepad_draw_2d::*,
+        makepad_draw::*,
         editor_state::{EditorState, SessionId},
         build::build_manager::BuildState,
         makepad_collab_protocol::{

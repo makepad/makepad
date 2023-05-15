@@ -374,6 +374,8 @@ impl<'a> DrawShaderGenerator<'a> {
         
         for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
             self.write_var_decl(live_ref, ty);
+            write!(self.string, " = ").unwrap();
+            self.write_ty_init(ty);
             writeln!(self.string, ";").unwrap();
         }
         
@@ -449,6 +451,8 @@ impl<'a> DrawShaderGenerator<'a> {
             &DisplayDsIdent(decl.ident),
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
+        write!(self.string, " = ").unwrap();
+        self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
         writeln!(self.string, ";").unwrap();
     }
     
@@ -769,9 +773,8 @@ struct GlslBackendWriter<'a> {
 }
 
 impl<'a> BackendWriter for GlslBackendWriter<'a> {
-    
-    fn needs_cstyle_struct_cons(&self) -> bool {
-        true
+    fn get_struct_cons_type(&self) -> StructConsType {
+        StructConsType::Paren
     }
     
     fn enum_is_float(&self) -> bool {

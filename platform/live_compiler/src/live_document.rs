@@ -11,8 +11,6 @@ use {
 pub struct LiveOriginal {
     pub nodes: Vec<LiveNode >,
     pub edit_info: Vec<LiveNode>,
-
-    pub strings: Vec<char>,
     pub tokens: Vec<TokenWithSpan>,
 }
 
@@ -39,7 +37,6 @@ impl LiveOriginal {
         Self {
             nodes: Vec::new(),
             edit_info: Vec::new(),
-            strings: Vec::new(),
             tokens: Vec::new(),
         }
     }
@@ -62,14 +59,14 @@ impl LiveOriginal {
         }
         None
     }
-
+/*
     pub fn get_string(&self, string_start: usize, string_count: usize, out:&mut String) {
         let chunk = &self.strings[string_start..(string_start + string_count)];
         out.clear();
         for chr in chunk {
             out.push(*chr);
         }
-    }
+    }*/
     
     pub fn token_id_to_span(&self, token_id: LiveTokenId) -> TextSpan {
         self.tokens[token_id.token_index() as usize].span

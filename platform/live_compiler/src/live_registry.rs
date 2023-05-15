@@ -23,9 +23,9 @@ use {
 pub struct LiveFile {
     pub(crate) reexpand: bool,
     
-    pub(crate) module_id: LiveModuleId,
+    pub module_id: LiveModuleId,
     pub(crate) start_pos: TextPos,
-    pub(crate) file_name: String,
+    pub file_name: String,
     pub(crate) cargo_manifest_path: String,
     pub(crate) source: String,
     pub(crate) deps: BTreeSet<LiveModuleId>,
@@ -45,7 +45,8 @@ pub struct LiveRegistry {
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
     //pub ignore_no_dsl: HashSet<LiveId>,
     pub main_module: Option<LiveFileId>,
-    pub components: LiveComponentRegistries
+    pub components: LiveComponentRegistries,
+    pub package_root: Option<String>
 }
 
 impl Default for LiveRegistry {
@@ -60,20 +61,21 @@ impl Default for LiveRegistry {
             module_id_to_file_id: HashMap::new(),
             live_files: Vec::new(),
             live_type_infos: HashMap::new(),
-            components: LiveComponentRegistries::default()
+            components: LiveComponentRegistries::default(),
+            package_root: None
             //mutated_apply: None,
             //mutated_tokens: None
         }
     }
 }
-
+/*
 pub struct LiveDocNodes<'a> {
     pub nodes: &'a [LiveNode],
     pub file_id: LiveFileId,
     pub index: usize
-}
+}*/
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum LiveScopeTarget {
     LocalPtr(usize),
     LivePtr(LivePtr)
@@ -100,22 +102,42 @@ impl LiveRegistry {
         &doc.expanded.resolve_ptr(live_ptr.index as usize)
     }
     
+    pub fn file_name_to_file_id(&self, file_name:&str) -> Option<LiveFileId> {
+        for (index, file) in self.live_files.iter().enumerate(){
+            if file.file_name == file_name{
+                return Some(LiveFileId::new(index))
+            }
+        }
+        None
+    }
+    
     pub fn file_id_to_file_name(&self, file_id: LiveFileId) -> &str {
         &self.live_files[file_id.to_index()].file_name
     }
     
-    pub fn file_id_to_cargo_manifest_path(&self, file_id: LiveFileId) -> &str {
-        &self.live_files[file_id.to_index()].cargo_manifest_path
+    pub fn file_id_to_cargo_manifest_path(&self, file_id: LiveFileId) -> String {
+        let file = &self.live_files[file_id.to_index()];
+        let manifest_path = &file.cargo_manifest_path;
+        if let Some(package_root) = &self.package_root{
+            if file.module_id.0.0 == 0{
+                return package_root.to_string();
+            }
+            return format!("{}/{}", package_root, file.module_id.0); 
+        }
+        manifest_path.to_string()
     }
-
-    pub fn crate_name_to_cargo_manifest_path(&self, crate_name: &str) -> Option<&str> {
+ 
+    pub fn crate_name_to_cargo_manifest_path(&self, crate_name: &str) -> Option<String> {
         let crate_name = crate_name.replace('-',"_");
         let base_crate = LiveId::from_str(&crate_name).unwrap();
         for file in &self.live_files{
             if file.module_id.0 == base_crate{
-                return Some(&file.cargo_manifest_path)
+                if let Some(package_root) = &self.package_root{
+                    return Some(format!("{}/{}", package_root, crate_name)); 
+                }
+                return Some(file.cargo_manifest_path.to_string())
             }
-        }
+        }  
         None
     }
     
@@ -186,23 +208,14 @@ impl LiveRegistry {
             LiveValue::Str(v) => {
                 Some(v.to_string())
             }
-            LiveValue::FittedString(v) => {
+            LiveValue::String(v) => {
                 Some(v.as_str().to_string())
             }
             LiveValue::InlineString(v) => {
                 Some(v.as_str().to_string())
             }
-            LiveValue::DocumentString {string_start, string_count} => {
-                let origin_doc = self.token_id_to_origin_doc(node.origin.token_id().unwrap());
-                let mut out = String::new();
-                origin_doc.get_string(*string_start, *string_count, &mut out);
-                Some(out)
-            }
-            LiveValue::Dependency {string_start, string_count} => {
-                let origin_doc = self.token_id_to_origin_doc(node.origin.token_id().unwrap());
-                let mut out = String::new();
-                origin_doc.get_string(*string_start, *string_count, &mut out);
-                Some(out)
+            LiveValue::Dependency (v) => {
+                Some(v.as_str().to_string())
             }
             _ => None
         }
@@ -219,31 +232,17 @@ impl LiveRegistry {
             return None;
         }
         let doc = &self.live_files[first_def.file_id().unwrap().to_index()].original;
-        let token = doc.tokens[token_index - 1];
+        let token = &doc.tokens[token_index - 1];
         if let LiveToken::Ident(id) = token.token {
             return Some(id)
         }
         None
     }
     
-    pub fn module_id_and_name_to_doc(&self, module_id: LiveModuleId, name: LiveId) -> Option<LiveDocNodes> {
+    pub fn module_id_to_expanded_nodes(&self, module_id: LiveModuleId) -> Option<&[LiveNode]> {
         if let Some(file_id) = self.module_id_to_file_id.get(&module_id) {
             let doc = &self.live_files[file_id.to_index()].expanded;
-            if name != LiveId::empty() {
-                if doc.nodes.len() == 0 {
-                    error!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
-                    return None
-                }
-                if let Some(index) = doc.nodes.child_by_name(0, name.as_instance()) {
-                    return Some(LiveDocNodes {nodes: &doc.nodes, file_id: *file_id, index});
-                }
-                else {
-                    return None
-                }
-            }
-            else {
-                return Some(LiveDocNodes {nodes: &doc.nodes, file_id: *file_id, index: 0});
-            }
+            return Some(&doc.nodes)
         }
         None
     }
@@ -319,50 +318,23 @@ impl LiveRegistry {
         }
         None
     }
+      
+    pub fn find_scope_target(&self, item: LiveId, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
+        if let LiveValue::Root{id_resolve} = &nodes[0].value{
+            id_resolve.get(&item).cloned()
+        }
+        else{
+            log!("Can't find scope target on rootnode without id_resolve");
+            return None
+        }
+    }
     
-    pub fn find_scope_target_via_start(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
-        if let Some(index) = nodes.scope_up_down_by_name(index, item.as_instance()) {
-            match &nodes[index].value {
-                LiveValue::Import(module_id) => {
-                    if let Some(ret) = self.find_module_id_name(item, *module_id) {
-                        return Some(ret)
-                    }
-                }
-                LiveValue::Registry(component_type) => {
-                    if let Some(info) = self.components.find_component(*component_type, item) {
-                        if let Some(ret) = self.find_module_id_name(item, info.module_id) {
-                            return Some(ret)
-                        }
-                    };
-                }
-                _ => {
-                    return Some(LiveScopeTarget::LocalPtr(index))
-                }
-            }
+    
+    pub fn find_scope_target_one_level_or_global(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
+        if let Some(index) = nodes.scope_up_down_by_name(index, item.as_instance(), 1) {
+            return Some(LiveScopeTarget::LocalPtr(index))
         }
-        // ok now look at the glob use * things
-        let mut node_iter = Some(1);
-        while let Some(index) = node_iter {
-            if nodes[index].id == LiveId::empty() {
-                match &nodes[index].value {
-                    LiveValue::Import(module_id) => {
-                        if let Some(ret) = self.find_module_id_name(item, *module_id) {
-                            return Some(ret)
-                        }
-                    }
-                    LiveValue::Registry(component_type) => {
-                        if let Some(info) = self.components.find_component(*component_type, item) {
-                            if let Some(ret) = self.find_module_id_name(item, info.module_id) {
-                                return Some(ret)
-                            }
-                        };
-                    }
-                    _ => ()
-                }
-            }
-            node_iter = nodes.next_child(index);
-        }
-        None
+        return self.find_scope_target(item, nodes);
     }
     
     pub fn find_scope_ptr_via_expand_index(&self, file_id: LiveFileId, index: usize, item: LiveId) -> Option<LivePtr> {
@@ -371,7 +343,7 @@ impl LiveRegistry {
         //let index = origin.node_index().unwrap();
         //let file_id = token_id.file_id();
         let file = self.file_id_to_file(file_id);
-        match self.find_scope_target_via_start(item, index, &file.expanded.nodes) {
+        match self.find_scope_target_one_level_or_global(item, index, &file.expanded.nodes) {
             Some(LiveScopeTarget::LocalPtr(index)) => Some(LivePtr {file_id: file_id, index: index as u32, generation: file.generation}),
             Some(LiveScopeTarget::LivePtr(ptr)) => Some(ptr),
             None => None
@@ -411,11 +383,10 @@ impl LiveRegistry {
         self.live_files[token_id.file_id().unwrap().to_index()].original.token_id_to_span(token_id)
     }
     
-    pub fn tokenize_from_str(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<(Vec<TokenWithSpan>, Vec<char>), LiveError> {
+    pub fn tokenize_from_str(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<Vec<TokenWithSpan>, LiveError> {
         let mut line_chars = Vec::new();
         let mut state = State::default();
         let mut scratch = String::new();
-        let mut strings = Vec::new();
         let mut tokens = Vec::new();
         let mut pos = start_pos;
         for line_str in source.lines() {
@@ -438,25 +409,7 @@ impl LiveRegistry {
                                 message: format!("Error tokenizing")
                             })
                         },
-                        FullToken::String => {
-                            let len = full_token.len - 2;
-                            tokens.push(TokenWithSpan {span: span, token: LiveToken::String {
-                                index: strings.len() as u32,
-                                len: len as u32
-                            }});
-                            let col = pos.column as usize + 1;
-                            strings.extend(&line_chars[col..col + len]);
-                        },
-                        FullToken::Dependency => {
-                            let len = full_token.len - 3;
-                            tokens.push(TokenWithSpan {span: span, token: LiveToken::Dependency {
-                                index: strings.len() as u32,
-                                len: len as u32
-                            }});
-                            let col = pos.column as usize + 2;
-                            strings.extend(&line_chars[col..col + len]);
-                        },
-                        _ => match LiveToken::from_full_token(full_token.token) {
+                        _ => match LiveToken::from_full_token(&full_token.token) {
                             Some(live_token) => {
                                 // lets build up the span info
                                 tokens.push(TokenWithSpan {span: span, token: live_token})
@@ -475,7 +428,7 @@ impl LiveRegistry {
             pos.column = 0;
         }
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
-        Ok((tokens, strings))
+        Ok(tokens)
     }
     
     // called by the live editor to update a live file
@@ -494,15 +447,13 @@ impl LiveRegistry {
         
         let mut live_tokens = &mut original.tokens;
         let mut new_tokens = Vec::new();
-        let old_strings = &original.strings;
-        let mut new_strings: Vec<char> = Vec::new();
         
         let mut mutated_tokens = Vec::new();
         
         let mut parse_changed = false;
         
         for line in range.start.line..range.end.line {
-            let (line_chars, full_tokens) = get_line(line);
+            let (_, full_tokens) = get_line(line);
             // OK SO now we diff as we go
             let mut column = 0usize;
             for (token_index, full_token) in full_tokens.iter().enumerate() {
@@ -515,7 +466,7 @@ impl LiveRegistry {
                         end: TextPos {column: (column + full_token.len) as u32, line: line as u32}
                     };
                     
-                    match full_token.token {
+                    match &full_token.token {
                         FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
@@ -523,14 +474,8 @@ impl LiveRegistry {
                                 message: format!("Error tokenizing")
                             })
                         },
-                        FullToken::String => {
-                            let new_len = full_token.len - 2;
-                            let new_col = column as usize + 1;
-                            let new_chars = &line_chars[new_col..new_col + new_len];
-                            let new_string = LiveToken::String {
-                                index: new_strings.len() as u32,
-                                len: new_len as u32
-                            };
+                        FullToken::String(s) => {
+                            let new_string = LiveToken::String(s.clone());
                             if live_index >= live_tokens.len() { // just append
                                 if !parse_changed {
                                     new_tokens = live_tokens.clone();
@@ -539,12 +484,8 @@ impl LiveRegistry {
                                 }
                                 live_tokens.push(TokenWithSpan {span: span, token: new_string});
                             }
-                            else if let LiveToken::String {index, len} = live_tokens[live_index].token {
-                                let old_chars = &old_strings[index as usize ..(index + len) as usize];
-                                // compare string or len/position
-                                if new_chars != old_chars || new_strings.len() as u32 != index || new_len as u32 != len {
-                                    mutated_tokens.push(LiveTokenId::new(file_id, live_index));
-                                }
+                            else if let LiveToken::String (_) = &live_tokens[live_index].token {
+                                todo!();
                             }
                             else { // cant replace a sttring type with something else without a reparse
                                 if !parse_changed {
@@ -554,10 +495,9 @@ impl LiveRegistry {
                                 }
                                 live_tokens[live_index] = TokenWithSpan {span: span, token: new_string};
                             }
-                            new_strings.extend(new_chars);
                             live_index += 1;
                         },
-                        _ => match LiveToken::from_full_token(full_token.token) {
+                        _ => match LiveToken::from_full_token(&full_token.token) {
                             Some(live_token) => {
                                 if live_index >= live_tokens.len() { // just append
                                     if !parse_changed {
@@ -568,7 +508,7 @@ impl LiveRegistry {
                                     live_tokens.push(TokenWithSpan {span: span, token: live_token})
                                 }
                                 else {
-                                    if live_tokens[live_index].is_parse_equal(live_token) { // token value changed
+                                    if live_tokens[live_index].is_parse_equal(&live_token) { // token value changed
                                         if live_tokens[live_index].token != live_token {
                                             live_tokens[live_index].token = live_token;
                                             mutated_tokens.push(LiveTokenId::new(file_id, live_index));
@@ -620,7 +560,6 @@ impl LiveRegistry {
             match parser.parse_live_document() {
                 Err(msg) => return Err(msg), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
                 Ok(mut ld) => { // only swap it out when it parses
-                    ld.strings = new_strings;
                     ld.tokens = new_tokens;
                     live_file.next_original = Some(ld);
                 }
@@ -631,8 +570,7 @@ impl LiveRegistry {
         else if mutated_tokens.len()>0 { // its a hotpatch
             // means if we had a next_original its now cancelled
             live_file.next_original = None;
-            original.strings = new_strings;
-            
+           
             let (apply, live_ptrs) = self.update_documents_from_mutated_tokens(&mutated_tokens);
             
             return Ok(Some(LiveEditEvent::Mutation {tokens: mutated_tokens, apply, live_ptrs}))
@@ -666,7 +604,7 @@ impl LiveRegistry {
         //let mutated_tokens = self.mutated_tokens.take().unwrap();
         let mut diff = Vec::new();
         let mut live_ptrs = Vec::new();
-        diff.open();
+        diff.open_object(LiveId(0));
         for token_id in mutated_tokens {
             let token_index = token_id.token_index();
             let file_id = token_id.file_id().unwrap();
@@ -749,11 +687,11 @@ impl LiveRegistry {
         
         // lets register our live_type_infos
         if self.file_ids.get(file_name).is_some() {
-            panic!("cant register same file twice");
+            panic!("cant register same file twice {}", file_name);
         }
         let file_id = LiveFileId::new(self.live_files.len());
         
-        let (tokens, strings) = match Self::tokenize_from_str(&source, start_pos, file_id) {
+        let tokens = match Self::tokenize_from_str(&source, start_pos, file_id) {
             Err(msg) => return Err(msg.into_live_file_error(file_name)), //panic!("Lex error {}", msg),
             Ok(lex_result) => lex_result
         };
@@ -765,7 +703,6 @@ impl LiveRegistry {
             Ok(ld) => ld
         };
         
-        original.strings = strings;
         original.tokens = tokens;
         
         // update our live type info
@@ -789,12 +726,12 @@ impl LiveRegistry {
                     };
                     deps.insert(*module_id);
                 }, // import
-                LiveValue::Registry(component_id) => {
+                /*LiveValue::Registry(component_id) => {
                     let reg = self.components.0.borrow();
                     if let Some(entry) = reg.values().find(|entry| entry.component_type() == *component_id){
                         entry.get_module_set(&mut deps);
                     }
-                }, 
+                }, */
                 LiveValue::Class {live_type, ..} => { // hold up. this is always own_module_path
                     let infos = self.live_type_infos.get(&live_type).unwrap();
                     for sub_type in infos.fields.clone() {

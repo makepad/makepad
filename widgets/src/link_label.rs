@@ -1,19 +1,17 @@
-#![allow(unused)]
 use {
     crate::{
-        makepad_draw_2d::*,
-        widget::*,
+        makepad_draw::*,
         button::{Button, ButtonAction}
     }
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import crate::theme::*;
     
     LinkLabel = {{LinkLabel}} {
         button: {
-            bg: {
+            draw_bg: {
                 const THICKNESS = 0.8
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -27,7 +25,7 @@ live_design!{
                     ), mix(0.0, THICKNESS, self.hover));
                 }
             }
-            label: {
+            draw_label: {
                 text_style: <FONT_META> {}
                 fn get_color(self) -> vec4 {
                     return mix(
@@ -57,13 +55,13 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct LinkLabel {
-    button: Button
+    #[live] button: Button
 }
 
 impl LinkLabel {
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
-        self.button.handle_event_fn(cx, event, dispatch_action)
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
+        self.button.handle_event_with(cx, event, dispatch_action)
     }
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {

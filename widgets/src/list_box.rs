@@ -5,13 +5,13 @@ use {
     crate::{
         makepad_derive_widget::*,
         scroll_bars::ScrollBars,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         widget::*,
     },
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     DrawBgQuad = {{DrawBgQuad}} {
@@ -28,7 +28,7 @@ live_design!{
         }
     }
     
-    DrawNameText = {{DrawNameText}} {
+    DrawName = {{DrawName}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -56,7 +56,7 @@ live_design!{
                     apply: {
                         hover: 0.0,
                         bg_quad: {hover: (hover)}
-                        name_text: {hover: (hover)}
+                        draw_name: {hover: (hover)}
                     }
                 }
                 on = {
@@ -73,7 +73,7 @@ live_design!{
                     apply: {
                         selected: 0.0,
                         bg_quad: {selected: (selected)}
-                        name_text: {selected: (selected)}
+                        draw_name: {selected: (selected)}
                     }
                 }
                 on = {
@@ -99,52 +99,51 @@ live_design!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawBgQuad {
-    draw_super: DrawQuad,
-    is_even: f32,
-    selected: f32,
-    hover: f32,
+    #[deref] draw_super: DrawQuad,
+    #[live] is_even: f32,
+    #[live] selected: f32,
+    #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
-struct DrawNameText {
-    draw_super: DrawText,
-    is_even: f32,
-    selected: f32,
-    hover: f32,
+struct DrawName {
+    #[deref] draw_super: DrawText,
+    #[live] is_even: f32,
+    #[live] selected: f32,
+    #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct ListBoxItem {
     
-    bg_quad: DrawBgQuad,
-    name_text: DrawNameText,
+    #[live] draw_bg: DrawBgQuad,
+    #[live] draw_name: DrawName,
     
-    layout: Layout,
-    state: State,
+    #[live] layout: Layout,
+    #[state] state: LiveState,
     
-    indent_width: f64,
-    icon_walk: Walk,
+    #[live] indent_width: f64,
+    #[live] icon_walk: Walk,
     
-    min_drag_distance: f64,
-    opened: f32,
-    hover: f32,
-    selected: f32,
+    #[live] min_drag_distance: f64,
+    #[live] opened: f32,
+    #[live] hover: f32,
+    #[live] selected: f32,
 }
 
 #[derive(Live)]
-#[live_design_fn(widget_factory!(ListBox))]
 pub struct ListBox {
-    scroll_bars: ScrollBars,
-    list_item: Option<LivePtr>,
+    #[live] scroll_bars: ScrollBars,
+    #[live] list_item: Option<LivePtr>,
     
-    filler_quad: DrawBgQuad,
-    layout: Layout,
-    node_height: f64,
-    multi_select: bool,
+    #[live] draw_filler: DrawBgQuad,
+    #[live] layout: Layout,
+    #[live] node_height: f64,
+    #[live] multi_select: bool,
     
-    walk: Walk,
+    #[live] walk: Walk,
     
-    items: Vec<String>,
+    #[live] items: Vec<String>,
     
     #[rust] selected_item_ids: HashSet<ListBoxItemId>,
     
@@ -154,6 +153,10 @@ pub struct ListBox {
 }
 
 impl LiveHook for ListBox {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, ListBox)
+    }
+
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, live_id!(list_item).as_field()) {
             for (_, item) in self.list_items.iter_mut() {
@@ -181,8 +184,8 @@ pub struct ListBoxItemId(pub LiveId);
 
 impl ListBoxItem {
     pub fn set_draw_state(&mut self, is_even: f32) {
-        self.bg_quad.is_even = is_even;
-        self.name_text.is_even = is_even;
+        self.draw_bg.is_even = is_even;
+        self.draw_name.is_even = is_even;
     }
     
     pub fn draw_item(
@@ -193,26 +196,26 @@ impl ListBoxItem {
         node_height: f64,
     ) {
         self.set_draw_state(is_even);
-        self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
-        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.bg_quad.end(cx);
+        self.draw_bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
+        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_bg.end(cx);
     }
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
         self.toggle_state(cx, is_selected, animate, id!(select.on), id!(select.off))
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg_quad.area().redraw(cx);
+            self.draw_bg.area().redraw(cx);
         }
         
-        match event.hits(cx, self.bg_quad.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
             }
@@ -246,8 +249,8 @@ impl ListBox {
         let mut walk = 0.0;
         while walk < height_left {
             self.count += 1;
-            self.filler_quad.is_even = Self::is_even(self.count);
-            self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
+            self.draw_filler.is_even = Self::is_even(self.count);
+            self.draw_filler.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
         
@@ -293,17 +296,17 @@ impl ListBox {
         }
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxAction),
     ) {
-        self.scroll_bars.handle_event_fn(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
         
         let mut actions = Vec::new();
         for (node_id, node) in self.list_items.iter_mut() {
-            node.handle_event_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event_with(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {
@@ -344,19 +347,19 @@ impl Widget for ListBox {
         self.scroll_bars.redraw(cx);
     }
     
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.begin(cx, walk);
         for (i, item_str) in self.items.iter().enumerate() {
-            let node_id = id_num!(listbox, i as u64).into();
+            let node_id = live_id_num!(listbox, i as u64).into();
             self.count += 1;
             let list_item = self.list_item;
             let item = self.list_items.get_or_insert(cx, node_id, | cx | {

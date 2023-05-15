@@ -31,7 +31,6 @@ impl CxWindowPool {
         Window(self.0.alloc())
     }
     
-    #[allow(dead_code)]
     pub fn id_zero()->WindowId{
         WindowId(0, 0)
     }
@@ -109,6 +108,11 @@ impl LiveApply for Window {
                     let v:Vec2 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
                     cx.windows[self.window_id()].create_position = Some(v.into());
                 }
+                live_id!(dpi_override) => {
+                    let v:f64 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
+                    //log!("DPI OVERRIDE {}", v);
+                    cx.windows[self.window_id()].dpi_override = Some(v);
+                }
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
@@ -154,24 +158,12 @@ impl Window {
         cx.windows[self.window_id()].window_geom.can_fullscreen
     }
     
-    pub fn xr_can_present(&mut self, cx: &mut Cx) -> bool {
-        cx.windows[self.window_id()].window_geom.xr_can_present
-    }
-    
     pub fn is_fullscreen(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.is_fullscreen
     }
     
     pub fn xr_is_presenting(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.xr_is_presenting
-    }
-    
-    pub fn xr_start_presenting(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxOsOp::XrStartPresenting(self.window_id()));
-    }
-    
-    pub fn xr_stop_presenting(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxOsOp::XrStopPresenting(self.window_id()));
     }
     
     pub fn is_topmost(&mut self, cx: &mut Cx) -> bool {
@@ -196,6 +188,7 @@ pub struct CxWindow {
     pub create_title: String,
     pub create_position: Option<DVec2>,
     pub create_inner_size: Option<DVec2>,
+    pub dpi_override: Option<f64>,
     pub is_created: bool,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<PassId>,
@@ -205,7 +198,8 @@ impl CxWindow {
     
     pub fn get_inner_size(&mut self) -> DVec2 {
         if !self.is_created {
-            panic!();
+            Default::default()
+            //panic!();
         }
         else {
             self.window_geom.inner_size

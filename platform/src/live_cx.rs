@@ -15,7 +15,6 @@ use {
             LiveTokenId,
             LiveFileId,
         },
-        live_prims::LiveDependency,
         makepad_error_log::*,
         makepad_live_compiler::LiveTypeInfo,
         makepad_math::*,
@@ -33,6 +32,18 @@ pub struct LiveBody {
     pub code: String,
     pub live_type_infos: Vec<LiveTypeInfo>
 }
+
+#[cfg(not(lines))]
+fn line_nr_error_once(){
+    use std::sync::atomic::{AtomicBool,Ordering};
+    static LINE_NR_ONCE: AtomicBool = AtomicBool::new(false);
+    const LINE_NR_ERROR: &'static str = "\n#############################################\n\nMakepad needs the nightly only proc_macro_span feature for accurate line information in errors\nTo install nightly use rustup:\n\nrustup install nightly\n\nPlease build your makepad application in this way on Unix:\n\nMAKEPAD=lines cargo +nightly build yourapp_etc\n\nAnd on Windows:\n\nset MAKEPAD=lines&cargo +nightly build yourapp_etc'\n\n#############################################\n";
+    if !LINE_NR_ONCE.load(Ordering::SeqCst) {
+        LINE_NR_ONCE.store(true,Ordering::SeqCst);
+        error!("{}", LINE_NR_ERROR);
+    }
+}
+
 
 impl Cx {
     
@@ -67,7 +78,7 @@ impl Cx {
     pub fn apply_error_expected_array(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode]) {
         self.apply_error(origin, index, nodes, format!("expected array, but got {} {:?}", nodes[index].id, nodes[index].value))
     }
-
+    
     pub fn apply_error_no_matching_field(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode]) {
         self.apply_error(origin, index, nodes, format!("no matching field: {}", nodes[index].id))
     }
@@ -113,7 +124,7 @@ impl Cx {
     }
     
     pub fn apply_error_cant_find_target(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], id: LiveId) {
-        self.apply_error(origin, index, nodes, format!("cant find target: {}", id))
+        self.apply_error(origin, index, nodes, format!("property: {} target class not found", id))
     }
     
     pub fn apply_image_type_not_supported(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path: &str) {
@@ -141,6 +152,8 @@ impl Cx {
                 message,
                 span: (*token_id).into()
             };
+            #[cfg(not(lines))]
+            line_nr_error_once();
             error!("Apply error: {} {:?}", live_registry.live_error_to_live_file_error(err), nodes[index].value);
         }
         else {
@@ -150,37 +163,34 @@ impl Cx {
     
     // ok so now what. now we should run the expansion
     pub fn live_expand(&mut self) {
-        // lets expand the f'er
         let mut errs = Vec::new();
         let mut live_registry = self.live_registry.borrow_mut();
+        /*
+        for file in &live_registry.live_files {
+            log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
+        }*/
         live_registry.expand_all_documents(&mut errs);
         for err in errs {
             error!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }
-        // lets dump our main doc
-        
-        // ok now we scan for all dependencies and store them on Cx.
     }
     
     pub fn live_scan_dependencies(&mut self) {
         let live_registry = self.live_registry.borrow();
-        
         for file in &live_registry.live_files {
-            for node in &file.original.nodes {
+            for node in &file.expanded.nodes {
                 match &node.value {
-                    LiveValue::Dependency {..} => {
-                        let dep = LiveDependency::qualify(self, &node);
-                        self.dependencies.insert(dep.into_string(), CxDependency {
+                    LiveValue::Dependency(dep)=> {
+                        self.dependencies.insert(dep.as_str().to_string(), CxDependency {
                             data: None
                         });
-                    },
+                    }, 
                     _ => {
                     }
                 }
             }
         }
     }
-    
     
     
     pub fn register_live_body(&mut self, live_body: LiveBody) {
@@ -195,6 +205,8 @@ impl Cx {
         );
         //println!("END");
         if let Err(err) = result {
+            #[cfg(not(lines))]
+            line_nr_error_once();
             error!("Error parsing live file {}", err);
         }
     }

@@ -42,56 +42,36 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         };
         
         // alright now. we have a field
-        // lets pull out all the alias fields
-        let mut aliases = Vec::new();
+
         for field in &mut fields {
-            while let Some(index) = field.attrs.iter().position( | attr | attr.name == "alias") {
-                let attr = field.attrs.remove(index);
-                if let Some(args) = &attr.args {
-                    let mut parser = TokenParser::new(args.clone());
-                    // ok its key:value comma
-                    let var = parser.expect_any_ident() ?;
-                    parser.expect_punct_alone(',') ?;
-                    aliases.push((var, parser.eat_level()));
-                }
+            if field.attrs.len() == 1 
+             && field.attrs[0].name != "live"
+             && field.attrs[0].name != "calc" 
+             && field.attrs[0].name != "state" 
+             && field.attrs[0].name != "rust"
+             && field.attrs[0].name != "deref" {
+                return error_result(&format!("Field {} does not have a live, calc, rust, state or deref attribute", field.name));
             }
-            if field.attrs.len() == 1 && field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" {
-                return error_result(&format!("Field {} does not have a live, calc into or rust attribute", field.name));
-            }
-            if field.attrs.len() == 0 { // insert a default
-                field.attrs.push(Attribute {name: "live".to_string(), args: None});
+            if field.attrs.len() == 0 { // need field def
+                return error_result("Please annotate the field type with #[rust] for rust-only fields, and #[live] for live DSL mapped fields and #[deref] for a base class");
             }
         }
         
-        // special marker fields
-        let draw_super = fields.iter().find( | field | field.name == "draw_super");
-        let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
-        let geometry = fields.iter().find( | field | field.name == "geometry");
+        let deref_field = fields.iter().find( | field | field.attrs.iter().find(|a| a.name == "deref").is_some());
+        let state_field = fields.iter().find( | field | field.attrs.iter().find(|a| a.name == "state").is_some());
         
-        //let animator = fields.iter().find( | field | field.name == "animator");
-        let state = fields.iter().find( | field | field.name == "state");
-        // ok we have to parse the animator args fields
-        
-        if draw_super.is_some() && draw_vars.is_some() {
-            return error_result("Cannot dereive Live with more than one of: both draw_vars and draw_super");
-        }
-        
-        if draw_vars.is_some() && !geometry.is_some() {
-            return error_result("drawvars requires a geometry object to be present");
-        }
-        
-        if state.is_some() {
+        if let Some(state_field) = state_field {
             
             tb.add("impl").stream(generic.clone());
-            tb.add("LiveState for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("LiveStateImpl for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             
             tb.add("    fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId;2]) {");
-            tb.add("         self.state.animate_to_live(cx, state);");
+            tb.add("         self.").ident(&state_field.name).add(".animate_to_live(cx, state);");
             tb.add("         self.apply_animating_state(cx);");
             tb.add("    }");
             
             tb.add("    fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId;2]) {");
-            tb.add("         self.state.cut_to_live(cx, state);");
+            tb.add("         self.").ident(&state_field.name).add(".cut_to_live(cx, state);");
             tb.add("         self.apply_animating_state(cx);");
             tb.add("    }");
             
@@ -109,7 +89,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                }");
             tb.add("            }");
             tb.add("            ApplyFrom::StateInit=>{"); // someone is calling state init on a state, means we need to find it
-            tb.add("                if let Some(live_ptr) = self.state.live_ptr {");
+            tb.add("                if let Some(live_ptr) = self.").ident(&state_field.name).add(".live_ptr {");
             tb.add("                    let live_registry_rc = cx.live_registry.clone();");
             tb.add("                    let live_registry = live_registry_rc.borrow();");
             tb.add("                    if live_registry.generation_valid(live_ptr) {");
@@ -129,8 +109,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("                while !nodes[index].is_close() {");
             tb.add("                    let state_id = LiveId::new_apply(cx, ApplyFrom::New, index, nodes);");
             tb.add("                    let state_pair = &[nodes[index].id, state_id];");
-            tb.add("                    if !self.state.is_in_state(cx, state_pair){");
-            tb.add("                       self.state.animate_to_live(cx, state_pair);");
+            tb.add("                    if !self.").ident(&state_field.name).add(".is_in_state(cx, state_pair){");
+            tb.add("                       self.").ident(&state_field.name).add(".animate_to_live(cx, state_pair);");
             tb.add("                    }");
             tb.add("                    index = nodes.skip_node(index);");
             tb.add("                }");
@@ -140,45 +120,32 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("    }");
             
             tb.add("    fn apply_animating_state(&mut self, cx: &mut Cx) {");
-            tb.add("        let state = self.state.swap_out_state();");
+            tb.add("        let state = self.").ident(&state_field.name).add(".swap_out_state();");
             tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,live_id!(state).as_field()).unwrap(), &state);");
-            tb.add("        self.state.swap_in_state(state);");
+            tb.add("        self.").ident(&state_field.name).add(".swap_in_state(state);");
             tb.add("    }");
             
             tb.add("    fn state_handle_event(&mut self, cx: &mut Cx, event: &Event)->StateAction{");
-            tb.add("        let ret = self.state.handle_event(cx, event);");
+            tb.add("        let ret = self.").ident(&state_field.name).add(".handle_event(cx, event);");
             tb.add("        if ret.is_animating(){self.apply_animating_state(cx);}");
             tb.add("        ret");
             tb.add("    }");
             tb.add("}");
         }
         
-        if let Some(draw_super) = draw_super {
+        if let Some(deref_field) = deref_field {
             tb.add("impl").stream(generic.clone());
             tb.add("std::ops::Deref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    type Target = ").stream(Some(draw_super.ty.clone())).add(";");
-            tb.add("    fn deref(&self) -> &Self::Target {&self.draw_super}");
+            tb.add("    type Target = ").stream(Some(deref_field.ty.clone())).add(";");
+            tb.add("    fn deref(&self) -> &Self::Target {&self.").ident(&deref_field.name).add("}");
             tb.add("}");
             tb.add("impl").stream(generic.clone());
             
             tb.add("std::ops::DerefMut for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.draw_super}");
+            tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.").ident(&deref_field.name).add("}");
             tb.add("}");
         }
-        
-        if let Some(_) = draw_vars {
-            tb.add("impl").stream(generic.clone());
-            tb.add("std::ops::Deref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    type Target = DrawVars;");
-            tb.add("    fn deref(&self) -> &Self::Target {&self.draw_vars}");
-            tb.add("}");
-            tb.add("impl").stream(generic.clone());
-            
-            tb.add("std::ops::DerefMut for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.draw_vars}");
-            tb.add("}");
-        }
-        
+
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApplyValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
@@ -187,81 +154,59 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            match nodes[index].id {");
         
         for field in &fields {
-            if field.attrs[0].name == "live" {
+            if field.attrs[0].name == "live" || field.attrs[0].name == "state" {
                 tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
         }
-        for (alias_var, alias_redir) in aliases {
-            tb.add("            LiveId(").suf_u64(LiveId::from_str(&alias_var).unwrap().0).add(")=>self.").stream(Some(alias_redir)).add(".apply(cx, apply_from, index, nodes),");
-        }
         // Unknown value handling
-        if draw_super.is_some() {
-            tb.add("            _=> self.draw_super.apply_value(cx, apply_from, index, nodes)");
+        if let Some(deref_field) = deref_field{
+            tb.add("            _=> self.").ident(&deref_field.name).add(".apply_value(cx, apply_from, index, nodes)");
         }
         else {
-            if draw_vars.is_some() {
-                tb.add("        _=> self.draw_vars.apply_value(cx, apply_from, index, nodes)");
-            }
-            else {
-                tb.add("        _=> self.apply_value_unknown(cx, apply_from, index, nodes)");
-            }
+            tb.add("        _=> self.apply_value_unknown(cx, apply_from, index, nodes)");
         }
         tb.add("            }");
-        tb.add("        } else {self.apply_value_instance(cx, apply_from, index, nodes)}");
-        tb.add("    }");
-        
-        tb.add("}");
-        
-        // forward a potential deref_target
-        if draw_vars.is_some() || draw_super.is_some() {
-
-            if main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "c").is_none() {
-                return error_result("Any struct with draw_vars or draw_super needs to be repr(c)")
-            }
-            
-            tb.add("impl").stream(generic.clone()).ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            
-            tb.add("    pub fn draw_super_before_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
-            tb.add("        self.before_apply(cx, apply_from, index, nodes);");
-            if draw_vars.is_some() {
-                tb.add("    self.draw_vars.before_apply(cx, apply_from, index, nodes, &self.geometry);");
-            }
-            else if draw_super.is_some() {
-                tb.add("    self.draw_super.draw_super_before_apply(cx, apply_from, index, nodes);");
-            }
-            tb.add("    }");
-            
-            tb.add("    pub fn draw_super_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
-            if draw_vars.is_some() {
-                tb.add("    self.draw_vars.after_apply(cx, apply_from, index, nodes, &self.geometry);");
-            }
-            else if draw_super.is_some() {
-                tb.add("    self.draw_super.draw_super_after_apply(cx, apply_from, index, nodes);");
-            }
-            tb.add("        self.after_apply(cx, apply_from, index, nodes);");
-            tb.add("    }");
-            
-            
-            tb.add("}");
+        tb.add("        } else {");
+             
+        if let Some(deref_field) = deref_field {
+            tb.add("        self.").ident(&deref_field.name).add(".apply_value_instance(cx, apply_from, index, nodes)");
         }
+        else{
+            tb.add("        self.apply_value_instance(cx, apply_from, index, nodes)");
+        }
+        tb.add("        }");
+        tb.add("    }");
+        tb.add("}");
+
+        tb.add("impl").stream(generic.clone());
+        tb.add("LiveHookDeref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        tb.add("    fn deref_before_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
+        tb.add("        self.before_apply(cx, apply_from, index, nodes);");
+        
+        if let Some(deref_field) = deref_field {
+            tb.add("    self.").ident(&deref_field.name).add(".deref_before_apply(cx, apply_from, index, nodes);");
+        }
+        tb.add("    }");
+
+        tb.add("    fn deref_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
+        tb.add("        self.after_apply(cx, apply_from, index, nodes);");
+
+        if let Some(deref_field) = deref_field {
+            tb.add("    self.").ident(&deref_field.name).add(".deref_after_apply(cx, apply_from, index, nodes);");
+        }
+        tb.add("        self.after_apply_from(cx, apply_from);");
+        tb.add("    }");              
+        tb.add("}");
         
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
         tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
-        
-        tb.add("        let skip_index = self.before_apply(cx, apply_from, start_index, nodes);");
-        if draw_vars.is_some() {
-            tb.add("    self.draw_vars.before_apply(cx, apply_from, start_index, nodes, &self.geometry);");
-        }
-        else if draw_super.is_some() {
-            tb.add("    self.draw_super.draw_super_before_apply(cx, apply_from, start_index, nodes);");
-        }
-        if state.is_some() { // apply the default states
+        tb.add("        self.deref_before_apply(cx, apply_from, start_index, nodes);");
+        if state_field.is_some() { // apply the default states
             tb.add("    let mut state_index = None;");
         }
-        
-        tb.add("        let index = if let Some(index) = skip_index{index} else {");
+        tb.add("        let index = if let Some(index) = self.skip_apply(cx, apply_from, start_index, nodes){index} else {");
         tb.add("            let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).unwrap().0).add(");");
         tb.add("            if !nodes[start_index].value.is_structy_type(){");
         tb.add("                cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, struct_id);");
@@ -275,28 +220,20 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("                    index += 1;");
         tb.add("                    break;");
         tb.add("                }");
-        if state.is_some() { // apply the default states
-            tb.add("            if nodes[index].id == live_id!(state){state_index = Some(index);}");
+   
+        if let Some(state_field) = state_field { // apply the default states
+            tb.add("            if nodes[index].id == live_id!(.").ident(&state_field.name).add(".){state_index = Some(index);}");
         }
         tb.add("                index = self.apply_value(cx, apply_from, index, nodes);");
         tb.add("            }");
         tb.add("            index");
         tb.add("        };");
-        
-        if let Some(_) = draw_vars {
-            tb.add("    self.draw_vars.after_apply(cx, apply_from, start_index, nodes, &self.geometry);");
-        }
-        else if let Some(_) = draw_super {
-            tb.add("    self.draw_super.draw_super_after_apply(cx, apply_from, start_index, nodes);");
-        }
-        
-        if state.is_some() { // apply the default states
+
+        if state_field.is_some() { // apply the default states
             tb.add("    if let Some(state_index) = state_index{self.after_apply_state_changed(cx, apply_from, state_index, nodes);}");
         }
         
-        tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
-        
-        tb.add("        self.after_apply_from(cx, apply_from);");
+        tb.add("        self.deref_after_apply(cx, apply_from, start_index, nodes);");
         
         
         tb.add("        return index;");
@@ -311,7 +248,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         for field in &fields {
             let attr = &field.attrs[0];
-            if attr.name == "live" || attr.name == "calc" {
+            if attr.name == "state" || attr.name == "live" || attr.name == "calc" || attr.name == "deref"{
                 tb.add("fields.push(LiveTypeField{id:LiveId::from_str(").string(&field.name).add(").unwrap(),");
                 // ok so what do we do if we have an Option<..>
                 // how about LiveOrCalc becomes LiveFieldType::Option
@@ -325,10 +262,16 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                     }
                     Err(not_option) => {
                         tb.add("live_type_info:").add("<").stream(Some(not_option)).add("as LiveNew>::live_type_info(cx),");
-                        if attr.name == "live" {
+                        if attr.name == "state" {
+                            tb.add("live_field_kind: LiveFieldKind::State");
+                        }
+                        else if attr.name == "live" {
                             tb.add("live_field_kind: LiveFieldKind::Live");
                         }
-                        else {
+                        else if attr.name == "deref" {
+                            tb.add("live_field_kind: LiveFieldKind::Deref");
+                        }
+                        else{
                             tb.add("live_field_kind: LiveFieldKind::Calc");
                         }
                     }
@@ -347,25 +290,18 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        }");
         tb.add("    }");
         
-        tb.add("    fn live_design(cx: &mut Cx) {");
-        
-        for attr in main_attribs.iter().filter( | attr | attr.name == "live_design_fn") {
-            if attr.args.is_none() {
-                return error_result("live_design needs an argument")
-            }
-            tb.add("(").stream(attr.args.clone()).add(")(cx);");
-        }
-        
+        tb.add("    fn live_design_with(cx: &mut Cx) {");
+        tb.add("<Self as LiveHook>::before_live_design(cx);");
         // we need this here for shader enums to register without hassle
         for field in &fields {
             let attr = &field.attrs[0];
-            if attr.name == "live" || attr.name == "calc" {
+            if attr.name == "live" || attr.name == "calc" || attr.name == "deref" {
                 match unwrap_option(field.ty.clone()) {
                     Ok(inside) => {
-                        tb.add("<").stream(Some(inside)).add("as LiveNew>::live_design(cx);");
+                        tb.add("<").stream(Some(inside)).add("as LiveNew>::live_design_with(cx);");
                     }
                     Err(not_option) => {
-                        tb.add("<").stream(Some(not_option)).add("as LiveNew>::live_design(cx);");
+                        tb.add("<").stream(Some(not_option)).add("as LiveNew>::live_design_with(cx);");
                     }
                 }
             }
@@ -378,11 +314,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         for field in &fields {
             let attr = &field.attrs[0];
             tb.ident(&field.name).add(":");
-            if field.name == "animator" {
-                tb.add("Default::default()");
-            }
-            else if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
-                if attr.name == "live" {
+            if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
+                if attr.name == "live" || attr.name == "deref"{
                     tb.add("LiveNew::new(cx)");
                 }
                 else {
@@ -491,7 +424,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        }");
         tb.add("    }");
         
-        tb.add("    fn live_design(cx: &mut Cx) {");
+        tb.add("    fn live_design_with(cx: &mut Cx) {");
         
         
         let is_u32_enum = main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
@@ -519,7 +452,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         //tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
         
         tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index:usize, nodes: &[LiveNode]) -> usize {");
-        tb.add("        if let Some(index) = self.before_apply(cx, apply_from, start_index, nodes){");
+        tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
+        tb.add("        if let Some(index) = self.skip_apply(cx, apply_from, start_index, nodes){");
         tb.add("            self.after_apply(cx, apply_from, start_index, nodes);");
         tb.add("            return index");
         tb.add("        }");

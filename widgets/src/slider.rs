@@ -1,16 +1,14 @@
 use {
     crate::{
         makepad_derive_widget::*,
-        frame::*,
-        data_binding::DataBinding,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         widget::*,
         text_input::{TextInput, TextInputAction}
     }
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     DrawSlider = {{DrawSlider}} {
         instance hover: float
         instance focus: float
@@ -51,6 +49,7 @@ live_design!{
     Slider = {{Slider}} {
         min: 0.0,
         max: 1.0,
+        step: 0.0,
         
         label_text: {
             color: #9
@@ -66,6 +65,8 @@ live_design!{
             y: 0.0
         }
         
+        precision: 2,
+        
         text_input: {
             cursor_margin_bottom: 3.0,
             cursor_margin_top: 4.0,
@@ -73,27 +74,26 @@ live_design!{
             cursor_size: 2.0,
             empty_message: "0",
             numeric_only: true,
-            bg: {
+            draw_bg: {
                 shape: None
                 color: #5
-                radius: 2
+                radius: 2.0
             },
             layout: {
-                padding: 0,
+                padding:0,
                 align: {y: 0.}
             },
             walk: {
                 margin: {top: 3, right: 5}
             }
         }
-        
         state: {
             hover = {
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        slider: {hover: 0.0}
+                        draw_slider: {hover: 0.0}
                         //text_input: {state: {hover = off}}
                     }
                 }
@@ -101,7 +101,7 @@ live_design!{
                     //cursor: Arrow,
                     from: {all: Snap}
                     apply: {
-                        slider: {hover: 1.0}
+                        draw_slider: {hover: 1.0}
                         //text_input: {state: {hover = on}}
                     }
                 }
@@ -111,13 +111,13 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.0}}
                     apply: {
-                        slider: {focus: 0.0}
+                        draw_slider: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        slider: {focus: 1.0}
+                        draw_slider: {focus: 1.0}
                     }
                 }
             }
@@ -125,12 +125,12 @@ live_design!{
                 default: off
                 off = {
                     from: {all: Forward {duration: 0.1}}
-                    apply: {slider: {drag: 0.0}}
+                    apply: {draw_slider: {drag: 0.0}}
                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Snap}
-                    apply: {slider: {drag: 1.0}}
+                    apply: {draw_slider: {drag: 1.0}}
                 }
             }
         }
@@ -140,34 +140,42 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSlider {
-    draw_super: DrawQuad,
-    slide_pos: f32
+    #[deref] draw_super: DrawQuad,
+    #[live] slide_pos: f32
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(Slider))]
+#[derive(Live)]
 pub struct Slider {
-    slider: DrawSlider,
+    #[live] draw_slider: DrawSlider,
     
-    walk: Walk,
+    #[live] walk: Walk,
     
-    layout: Layout,
-    state: State,
+    #[live] layout: Layout,
+    #[state] state: LiveState,
     
-    label_walk: Walk,
-    label_align: Align,
-    label_text: DrawText,
-    label: String,
+    #[live] label_walk: Walk,
+    #[live] label_align: Align,
+    #[live] label_text: DrawText,
+    #[live] label: String,
     
-    text_input: TextInput,
+    #[live] text_input: TextInput,
     
-    min: f64,
-    max: f64,
+    #[live] precision: usize,
     
-    bind: String,
+    #[live] min: f64,
+    #[live] max: f64,
+    #[live] step: f64,
+    
+    #[live] bind: String,
     
     #[rust] pub value: f64,
     #[rust] pub dragging: Option<f64>,
+}
+
+impl LiveHook for Slider{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,Slider)
+    }
 }
 
 #[derive(Clone, WidgetAction)]
@@ -183,7 +191,13 @@ pub enum SliderAction {
 impl Slider {
     
     fn to_external(&self) -> f64 {
-        self.value * (self.max - self.min) + self.min
+        let val = self.value * (self.max - self.min) + self.min;
+        if self.step != 0.0{
+            return (val * self.step).floor() / self.step
+        }
+        else{
+            val
+        }
     }
     
     fn set_internal(&mut self, external: f64) -> bool {
@@ -192,7 +206,7 @@ impl Slider {
         old != self.value
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
         self.state_handle_event(cx, event);
         for action in self.text_input.handle_event(cx, event) {
             match action {
@@ -215,7 +229,7 @@ impl Slider {
                 _ => ()
             }
         };
-        match event.hits(cx, self.slider.area()) {
+        match event.hits(cx, self.draw_slider.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, id!(hover.on));
@@ -239,7 +253,7 @@ impl Slider {
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.create_external_undo();
                 self.animate_state(cx, id!(drag.off));
-                if fe.is_over && fe.digit.has_hovers() {
+                if fe.is_over && fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else {
@@ -252,7 +266,8 @@ impl Slider {
                 let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
                     self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
-                    self.slider.redraw(cx);
+                    self.set_internal(self.to_external());
+                    self.draw_slider.redraw(cx);
                     self.update_text_input(cx);
                     dispatch_action(cx, SliderAction::Slide(self.to_external()));
                 }
@@ -262,66 +277,73 @@ impl Slider {
     }
     
     pub fn update_text_input(&mut self, cx: &mut Cx) {
-        self.text_input.text = format!("{:.2}", self.to_external());
+        let e = self.to_external();
+        self.text_input.text = match self.precision{
+            0=>format!("{:.0}",e),
+            1=>format!("{:.1}",e),
+            2=>format!("{:.2}",e),
+            3=>format!("{:.3}",e),
+            4=>format!("{:.4}",e),
+            5=>format!("{:.5}",e),
+            6=>format!("{:.6}",e),
+            7=>format!("{:.7}",e),
+            _=>format!("{}",e)
+        };
         self.text_input.select_all();
         self.text_input.redraw(cx)
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.slider.slide_pos = self.value as f32;
-        self.slider.begin(cx, walk, self.layout);
+        self.draw_slider.slide_pos = self.value as f32;
+        self.draw_slider.begin(cx, walk, self.layout);
         
-        if let Some(dw) = cx.defer_walk(self.label_walk) {
+        if let Some(mut dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.get_walk());
             self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
         }
         
-        self.slider.end(cx);
+        self.draw_slider.end(cx);
     }
 }
 
 
 impl Widget for Slider {
     fn redraw(&mut self, cx: &mut Cx) {
-        self.slider.redraw(cx);
+        self.draw_slider.redraw(cx);
     }
     
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-    
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
     
-    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions, path: &[LiveId]) {
-        match db {
-            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.widget_uid()) {
-                match item.action() {
-                    SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
-                        nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Float64(v as f64))]);
-                    }
-                    _ => ()
-                }
+    fn widget_to_data(&self, _cx: &mut Cx, actions:&WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
+        match actions.single_action(self.widget_uid()) {
+            SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
+                nodes.write_field_value(path, LiveValue::Float64(v as f64));
+                true
             }
-            DataBinding::ToWidgets{nodes,..} => {
-                if let Some(value) = nodes.read_by_field_path(path) {
-                    if let Some(value) = value.as_float() {
-                        if self.set_internal(value) {
-                            self.redraw(cx)
-                        }
-                        self.update_text_input(cx);
-                    }
+            _ => false
+        }
+    }
+    
+    fn data_to_widget(&mut self, cx: &mut Cx, nodes:&[LiveNode], path: &[LiveId]){
+        if let Some(value) = nodes.read_field_value(path) {
+            if let Some(value) = value.as_float() {
+                if self.set_internal(value) {
+                    self.redraw(cx)
                 }
+                self.update_text_input(cx);
             }
         }
     }

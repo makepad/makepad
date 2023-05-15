@@ -1,14 +1,13 @@
 use {
     crate::{
-        makepad_derive_widget::*,
         button::ButtonAction,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         widget::*
     }
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     
     DrawDesktopButton= {{DrawDesktopButton}} {
         fn pixel(self) -> vec4 {
@@ -95,7 +94,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        bg: {pressed: 0.0, hover: 0.0}
+                        draw_bg: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -105,7 +104,7 @@ live_design!{
                         state_down: Snap
                     }
                     apply: {
-                        bg: {
+                        draw_bg: {
                             pressed: 0.0,
                             hover: 1.0,
                         }
@@ -115,7 +114,7 @@ live_design!{
                 pressed = {
                     from: {all: Snap}
                     apply: {
-                        bg: {
+                        draw_bg: {
                             pressed: 1.0,
                             hover: 1.0,
                         }
@@ -126,39 +125,66 @@ live_design!{
     }
 }
 
-#[derive(Live, LiveHook, Widget)]
-#[live_design_fn(widget_factory!(DesktopButton))]
+#[derive(Live)]
 pub struct DesktopButton {
-    walk: Walk,
-    state: State,
+    #[state] state: LiveState,
+    #[live] walk: Walk,
+    #[live] draw_bg: DrawDesktopButton,
+}
+
+impl Widget for DesktopButton{
+   fn handle_widget_event_with(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
+    ) {
+        let uid = self.widget_uid();
+        self.handle_event_with(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(),uid));
+        });
+    }
+
+    fn get_walk(&self)->Walk{self.walk}
     
-    #[alias(button_type, bg.button_type)]
-    pub bg: DrawDesktopButton,
+    fn redraw(&mut self, cx:&mut Cx){
+        self.draw_bg.redraw(cx)
+    }
+    
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
 }
 
 #[derive(Live, LiveHook)]
+#[live_ignore]
 #[repr(u32)]
 pub enum DesktopButtonType {
-    WindowsMin,
-    WindowsMax,
-    WindowsMaxToggled,
-    WindowsClose,
-    XRMode,
-    #[pick] Fullscreen
+    WindowsMin = shader_enum(1),
+    WindowsMax = shader_enum(2),
+    WindowsMaxToggled = shader_enum(3),
+    WindowsClose = shader_enum(4),
+    XRMode = shader_enum(5),
+    #[pick] Fullscreen = shader_enum(6),
 }
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawDesktopButton {
-    draw_super: DrawQuad,
-    hover: f32,
-    pressed: f32,
-    button_type: DesktopButtonType
+    #[deref] draw_super: DrawQuad,
+    #[live] hover: f32,
+    #[live] pressed: f32,
+    #[live] button_type: DesktopButtonType
 }
 
-impl DrawDesktopButton{
-    pub fn get_walk(&self)->Walk{
-        let (w, h) = match self.button_type {
+impl LiveHook for DesktopButton {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, DesktopButton)
+    }
+    
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
+        let (w, h) = match self.draw_bg.button_type {
             DesktopButtonType::WindowsMin
                 | DesktopButtonType::WindowsMax
                 | DesktopButtonType::WindowsMaxToggled
@@ -166,15 +192,15 @@ impl DrawDesktopButton{
             DesktopButtonType::XRMode => (50., 36.),
             DesktopButtonType::Fullscreen => (50., 36.),
         };
-        Walk::fixed_size(dvec2(w, h))
+        self.walk = Walk::fixed_size(dvec2(w, h))
     }
 }
 
 impl DesktopButton {
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.state_handle_event(cx, event);
 
-        match event.hits(cx, self.bg.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
                 dispatch_action(cx, ButtonAction::Press);
                 self.animate_state(cx, id!(hover.pressed));
@@ -188,7 +214,7 @@ impl DesktopButton {
             }
             Hit::FingerUp(fe) => if fe.is_over {
                 dispatch_action(cx, ButtonAction::Click);
-                if fe.digit.has_hovers() {
+                if fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else{
@@ -204,10 +230,11 @@ impl DesktopButton {
     }
     
     pub fn area(&mut self)->Area{
-        self.bg.area()
+        self.draw_bg.area()
     }
+    pub fn get_widget_walk(&self)->Walk{self.walk}
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
-        self.bg.draw_walk(cx, walk);
+        self.draw_bg.draw_walk(cx, walk);
     }
 }

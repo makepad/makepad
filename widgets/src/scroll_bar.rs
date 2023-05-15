@@ -1,12 +1,12 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import crate::theme::*;
     
     DrawScrollBar= {{DrawScrollBar}} {
         draw_depth: 5.0
-        const BORDER_RADIUS = 1.5
+        uniform border_radius: 1.5
         instance bar_width:6.0
         instance pressed: 0.0
         instance hover: 0.0
@@ -19,7 +19,7 @@ live_design!{
                     self.rect_size.y * self.norm_scroll,
                     self.bar_width,
                     self.rect_size.y * self.norm_handle,
-                    BORDER_RADIUS
+                    self.border_radius
                 );
             }
             else {
@@ -28,7 +28,7 @@ live_design!{
                     1.,
                     self.rect_size.x * self.norm_handle,
                     self.bar_width,
-                    BORDER_RADIUS
+                    self.border_radius
                 );
             }
             return sdf.fill(mix(
@@ -54,7 +54,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        bar: {pressed: 0.0, hover: 0.0}
+                        draw_bar: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -65,7 +65,7 @@ live_design!{
                         pressed: Forward {duration: 0.01}
                     }
                     apply: {
-                        bar: {
+                        draw_bar: {
                             pressed: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
@@ -76,7 +76,7 @@ live_design!{
                     cursor: Default,
                     from: {all: Snap}
                     apply: {
-                        bar: {
+                        draw_bar: {
                             pressed: 1.0,
                             hover: 1.0,
                         }
@@ -89,16 +89,16 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct ScrollBar {
-    bar: DrawScrollBar,
-    pub bar_size: f64,
-    pub min_handle_size: f64, //minimum size of the handle in pixels
-    bar_side_margin: f64,
+    #[live] draw_bar: DrawScrollBar,
+    #[live] pub bar_size: f64,
+    #[live] pub min_handle_size: f64, //minimum size of the handle in pixels
+    #[live] bar_side_margin: f64,
     #[live(Axis::Horizontal)] pub axis: Axis,
     
-    use_vertical_finger_scroll: bool,
-    smoothing: Option<f64>,
+    #[live] use_vertical_finger_scroll: bool,
+    #[live] smoothing: Option<f64>,
     
-    state: State,
+    #[state] state: LiveState,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
@@ -115,10 +115,10 @@ pub struct ScrollBar {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawScrollBar {
-    draw_super: DrawQuad,
-    is_vertical: f32,
-    norm_handle: f32,
-    norm_scroll: f32
+    #[deref] draw_super: DrawQuad,
+    #[live] is_vertical: f32,
+    #[live] norm_handle: f32,
+    #[live] norm_scroll: f32
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -169,10 +169,10 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self.bar.apply_over(cx, live!{
+        self.draw_bar.apply_over(cx, live!{
             norm_scroll: (norm_scroll)
         });
-        //self.bg.set_norm_scroll(cx, norm_scroll);
+        //self.draw_bg.set_norm_scroll(cx, norm_scroll);
     }
     
     // turns scroll_pos into an event on this.event
@@ -297,22 +297,22 @@ impl ScrollBar {
     }
     
     pub fn handle_scroll_event(&mut self, cx: &mut Cx, event: &Event, scroll_area: Area, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
-        if let Event::FingerScroll(fe) = event {
-            if scroll_area.get_rect(cx).contains(fe.abs) {
+        if let Event::Scroll(e) = event {
+            if scroll_area.get_rect(cx).contains(e.abs) {
                 if !match self.axis {
-                    Axis::Horizontal => fe.handled_x.get(),
-                    Axis::Vertical => fe.handled_y.get()
+                    Axis::Horizontal => e.handled_x.get(),
+                    Axis::Vertical => e.handled_y.get()
                 } {
                     let scroll = match self.axis {
-                        Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
-                        Axis::Vertical => fe.scroll.y
+                        Axis::Horizontal => if self.use_vertical_finger_scroll {e.scroll.y}else {e.scroll.x},
+                        Axis::Vertical => e.scroll.y
                     };
-                    if !self.smoothing.is_none() && fe.device.is_mouse() {
+                    if !self.smoothing.is_none() && e.is_mouse {
                         let scroll_pos_target = self.get_scroll_target();
                         if self.set_scroll_target(cx, scroll_pos_target + scroll) {
                             match self.axis {
-                                Axis::Horizontal => fe.handled_x.set(true),
-                                Axis::Vertical => fe.handled_y.set(true)
+                                Axis::Horizontal => e.handled_x.set(true),
+                                Axis::Vertical => e.handled_y.set(true)
                             }
                         };
                         self.move_towards_scroll_target(cx); // take the first step now
@@ -322,8 +322,8 @@ impl ScrollBar {
                         let scroll_pos = self.get_scroll_pos();
                         if self.set_scroll_pos(cx, scroll_pos + scroll) {
                             match self.axis {
-                                Axis::Horizontal => fe.handled_x.set(true),
-                                Axis::Vertical => fe.handled_y.set(true)
+                                Axis::Horizontal => e.handled_x.set(true),
+                                Axis::Vertical => e.handled_y.set(true)
                             }
                         }
                         return dispatch_action(cx, self.make_scroll_action());
@@ -333,7 +333,7 @@ impl ScrollBar {
         }
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         if self.visible {
             self.state_handle_event(cx, event);
             if self.next_frame.is_event(event).is_some() {
@@ -343,7 +343,7 @@ impl ScrollBar {
                 return dispatch_action(cx, self.make_scroll_action());
             }
             
-            match event.hits(cx, self.bar.area()) {
+            match event.hits(cx, self.draw_bar.area()) {
                 Hit::FingerDown(fe) => {
                     self.animate_state(cx, id!(hover.pressed));
                     let rel = fe.abs - fe.rect.pos;
@@ -371,7 +371,7 @@ impl ScrollBar {
                 },
                 Hit::FingerUp(fe) => {
                     self.drag_point = None;
-                    if fe.is_over && fe.digit.has_hovers() {
+                    if fe.is_over && fe.device.has_hovers() {
                         self.animate_state(cx, id!(hover.on));
                     }
                     else {
@@ -423,11 +423,11 @@ impl ScrollBar {
                 
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.bar.is_vertical = 0.0;
-                    self.bar.norm_scroll = norm_scroll as f32;
-                    self.bar.norm_handle = norm_handle as f32;
+                    self.draw_bar.is_vertical = 0.0;
+                    self.draw_bar.norm_scroll = norm_scroll as f32;
+                    self.draw_bar.norm_handle = norm_handle as f32;
                     let scroll = cx.turtle().scroll();
-                    self.bar.draw_rel(
+                    self.draw_bar.draw_rel(
                         cx,
                         Rect {
                             pos: dvec2(self.bar_side_margin, view_rect.size.y - self.bar_size) + scroll,
@@ -450,11 +450,11 @@ impl ScrollBar {
                 self.scroll_pos = self.scroll_pos.min(self.view_total - self.view_visible).max(0.);
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.bar.is_vertical = 1.0;
-                    self.bar.norm_scroll = norm_scroll as f32;
-                    self.bar.norm_handle = norm_handle as f32;
+                    self.draw_bar.is_vertical = 1.0;
+                    self.draw_bar.norm_scroll = norm_scroll as f32;
+                    self.draw_bar.norm_handle = norm_handle as f32;
                     let scroll = cx.turtle().scroll();
-                    self.bar.draw_rel(
+                    self.draw_bar.draw_rel(
                         cx,
                         Rect {
                             pos: dvec2(view_rect.size.x - self.bar_size, self.bar_side_margin) + scroll,
