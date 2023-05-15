@@ -1,7 +1,6 @@
 use {
     crate::{
         makepad_live_compiler::*,
-        event::Event,
         cx::Cx,
     }
 };
@@ -9,6 +8,8 @@ use {
 pub use crate::live_cx::LiveBody;
 
 pub trait LiveHook {
+    fn before_live_design(_cx:&mut Cx){}
+        
     fn apply_value_unknown(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if !nodes[index].origin.node_has_prefix() {
             cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
@@ -19,8 +20,9 @@ pub trait LiveHook {
     fn apply_value_instance(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         nodes.skip_node(index)
     }
-
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize>{None}
+    
+    fn skip_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize>{None}
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]){}
     fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
     fn after_apply_from(&mut self, cx: &mut Cx, apply_from: ApplyFrom) {
         match apply_from{
@@ -28,16 +30,19 @@ pub trait LiveHook {
             _=>()
         }
     }
-    
     fn after_new_from_doc(&mut self, _cx:&mut Cx){}
     fn after_new_before_apply(&mut self, _cx: &mut Cx) {}
 }
 
+pub trait LiveHookDeref {
+    fn deref_before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]){}
+    fn deref_after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]){}
+}
 
 pub trait LiveNew: LiveApply {
     fn new(cx: &mut Cx) -> Self;
     
-    fn live_design(_cx: &mut Cx) {}
+    fn live_design_with(_cx: &mut Cx) {}
     
     fn live_type_info(cx: &mut Cx) -> LiveTypeInfo;
     
@@ -103,40 +108,11 @@ pub trait LiveApplyValue {
     fn apply_value(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
 }
 
-pub trait LiveApply: LiveHook {
+pub trait LiveApply {
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
     
     fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
-    }
-
-    fn handle_live_edit_event(&mut self, cx: &mut Cx, event: &Event, id: LiveId) {
-        match event {
-            Event::LiveEdit(live_edit_event) => {
-                match live_edit_event {
-                    LiveEditEvent::ReparseDocument => {
-                        cx.flush_draw_shaders();
-                        // ok so main_module needs a reload.
-                        let live_registry_rc = cx.live_registry.clone();
-                        let live_registry = live_registry_rc.borrow();
-                        if let Some(file_id) = live_registry.main_module {
-                            let file = live_registry.file_id_to_file(file_id);
-                            if let Some(index) = file.expanded.nodes.child_by_name(0, id.as_instance()) {
-                                self.apply(cx, ApplyFrom::UpdateFromDoc {file_id}, index, &file.expanded.nodes);
-                            }
-                        }
-                        cx.redraw_all();
-                    }
-                    LiveEditEvent::Mutation {tokens, apply, live_ptrs} => {
-                        cx.update_shader_tables_with_live_edit(&tokens, &live_ptrs);
-                        if let Some(index) = apply.child_by_name(0, id.as_instance()) {
-                            self.apply(cx, ApplyFrom::LiveEdit, index, &apply);
-                        }
-                    }
-                }
-            }
-            _ => ()
-        }
     }
 }
 

@@ -4,7 +4,7 @@ use {
             ComponentMap,
             tab_bar::TabId,
         },
-        makepad_draw_2d::*,
+        makepad_draw::*,
         editor_state::{
             EditorState,
             DocumentId,
@@ -64,7 +64,7 @@ impl EditorView {
         }
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
@@ -97,7 +97,7 @@ impl From<TabId> for EditorViewId {
 pub struct Editors {
     #[rust] editor_views: ComponentMap<EditorViewId, EditorView>,
     
-    rust_editor: Option<LivePtr>,
+    #[live] rust_editor: Option<LivePtr>,
 }
 
 impl LiveHook for Editors {
@@ -165,7 +165,7 @@ impl Editors {
     ) {
         let view = &mut self.editor_views[view_id];
         let mut actions = Vec::new();
-        view.handle_event_fn(cx, state, event, send_request, &mut | _, action | actions.push(action));
+        view.handle_event_with(cx, state, event, send_request, &mut | _, action | actions.push(action));
         for action in actions {
             match action {
                 CodeEditorAction::RedrawViewsForDocument(document_id) => {

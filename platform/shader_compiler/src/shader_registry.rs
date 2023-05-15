@@ -170,31 +170,31 @@ impl ShaderRegistry {
             let now_ptr = LivePtr {file_id, index: index as u32, generation};
             //let first_def = node.origin.first_def().unwrap();
             match node.value {
-                LiveValue::Bool(_) if live_registry.get_node_prefix(node.origin) == Some(live_id!(const)) => {
+                LiveValue::Bool(_) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Bool)
                 },
-                LiveValue::Int64(_) if live_registry.get_node_prefix(node.origin) == Some(live_id!(const)) => {
+                LiveValue::Int64(_)=> {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Int)
                 }
-                LiveValue::Float32(_) if live_registry.get_node_prefix(node.origin) == Some(live_id!(const)) => {
+                LiveValue::Float32(_)  => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Float)
                 }
-                LiveValue::Float64(_) if live_registry.get_node_prefix(node.origin) == Some(live_id!(const)) => {
+                LiveValue::Float64(_)  => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Float)
                 }
-                LiveValue::Color(_) if live_registry.get_node_prefix(node.origin) == Some(live_id!(const)) => {
+                LiveValue::Color(_)  => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec4)
                 }
-                LiveValue::Vec2(_) if live_registry.get_node_prefix(node.origin) == Some(live_id!(const)) => {
+                LiveValue::Vec2(_)  => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec2)
                 }
-                LiveValue::Vec3(_) if live_registry.get_node_prefix(node.origin) == Some(live_id!(const)) => {
+                LiveValue::Vec3(_)  => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec3)
                 }
-                LiveValue::Vec4(_) if live_registry.get_node_prefix(node.origin) == Some(live_id!(const)) => {
+                LiveValue::Vec4(_) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec4)
                 }
-                LiveValue::Expr{..} if live_registry.get_node_prefix(node.origin) == Some(live_id!(const)) => {
+                LiveValue::Expr{..} => {
                     // ok lets eval the expr to get a type
                     match live_eval(live_registry, index, &mut (index + 1), nodes){
                         Ok(value) => {
@@ -498,19 +498,17 @@ impl ShaderRegistry {
         let mut draw_shader_def = DrawShaderDef::default();
         
         // lets insert the 2D drawshader uniforms
-        draw_shader_def.add_uniform(id_from_str!(camera_projection).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(camera_view).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(camera_inv).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(dpi_factor).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(dpi_dilate).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(view_transform).unwrap(), id_from_str!(view).unwrap(), Ty::Mat4, TokenSpan::default());
-        //draw_shader_def.add_uniform(id_from_str!(draw_clip).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
-        //raw_shader_def.add_uniform(id_from_str!(draw_scroll).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(draw_zbias).unwrap(), id_from_str!(draw).unwrap(), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(camera_projection).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(camera_view).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(camera_inv).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(dpi_factor).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(dpi_dilate).unwrap(), live_id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(view_transform).unwrap(), live_id_from_str!(view).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(live_id_from_str!(draw_zbias).unwrap(), live_id_from_str!(draw).unwrap(), Ty::Float, TokenSpan::default());
         
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
 
-        match class_node.value {
+        match &class_node.value {
             LiveValue::Class {live_type, ..} => {
                 
                 ext_self(
@@ -518,7 +516,7 @@ impl ShaderRegistry {
                     self,
                     class_node.origin.token_id().unwrap().into(),
                     DrawShaderQuery::DrawShader,
-                    live_type,
+                    *live_type,
                     &mut draw_shader_def
                 );
                 
@@ -544,12 +542,12 @@ impl ShaderRegistry {
                         LiveValue::Vec3(_) |
                         LiveValue::Vec4(_) | 
                         LiveValue::Expr{..} => {
-                            let before = live_registry.get_node_prefix(prop.origin);
+                            //let before = live_registry.get_node_prefix(prop.origin);
                             if prop.origin.prop_type() != LivePropType::Field{
-                                if before == Some(live_id!(const)){
+                                /*if before == Some(live_id!(const)){
                                     node_iter = doc.nodes.next_child(node_index);
                                     continue;
-                                }
+                                }*/
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
                                     span: prop.origin.token_id().unwrap().into(),
@@ -755,10 +753,13 @@ impl ShaderRegistry {
                         let field_a = &draw_shader_def.fields[i];
                         let field_b = &draw_shader_def.fields[j];
                         if field_a.ident == field_b.ident && !field_a.ident.0.is_empty() {
+                            //let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
+                            //doc.nodes.to_string(draw_shader_ptr.index as usize,100)
+                            
                             return Err(LiveError {
                                 origin: live_error_origin!(),
                                 span: field_a.span.into(),
-                                message: format!("Field double declaration  {}", field_b.ident)
+                                message: format!("Field double declaration  {}",field_a.ident)
                             })
                         }
                     }
@@ -798,10 +799,10 @@ impl ShaderRegistry {
                 // ok we have all structs
                 return Ok(())
             }
-            _ => return Err(LiveError {
+            x => return Err(LiveError {
                 origin: live_error_origin!(),
                 span: class_node.origin.token_id().unwrap().into(),
-                message: format!("analyse_draw_shader could not find shader class")
+                message: format!("analyse_draw_shader could not find shader class {:?}", x)
             })
         }
     }

@@ -18,6 +18,8 @@ Cargo.lock
 
 /webgl/target/wasm32-unknown-unknown/release/makepad_webgl.wasm
 
+/platform/bind/windows/generate
+
 /edit_repo
 
 *.bat
@@ -25,3 +27,4 @@ mandelbrot_presets.json
 makepad_settings.ron
 makepad_state.ron
 key.ron
+.vscode

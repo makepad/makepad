@@ -1,15 +1,14 @@
 use {
     crate::{
         makepad_derive_widget::*,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         widget::*,
-        data_binding::DataBinding,
-        frame::*,
     }
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
+    
     DrawCheckBox = {{DrawCheckBox}} {
         uniform size: 7.0;
         fn pixel(self) -> vec4 {
@@ -59,9 +58,48 @@ live_design!{
     }
     
     CheckBox = {{CheckBox}} {
-        label_text: {
-            color: #9
+        
+        draw_label: {
+            color: #9,
+            instance focus: 0.0
+            instance selected: 0.0
+            instance hover: 0.0
+            text_style: {
+                font: {
+                    //path: d"resources/IBMPlexSans-SemiBold.ttf"
+                }
+                font_size: 11.0
+            }
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #fff6,
+                        #fff6,
+                        self.hover
+                    ),
+                    #fff6,
+                    self.selected
+                )
+            }
         }
+        
+        draw_icon:{
+            instance focus: 0.0
+            instance hover: 0.0
+            instance selected: 0.0
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #9,
+                        #c,
+                        self.hover
+                    ),
+                    #9,
+                    self.selected
+                )
+            }
+        }
+        
         walk: {
             width: Fit,
             height: Fit
@@ -72,7 +110,7 @@ live_design!{
             height: Fit,
         }
         
-        check_box: {
+        draw_check: {
         }
         
         label_align: {
@@ -85,41 +123,57 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.15}}
                     apply: {
-                        check_box: {hover: 0.0}
+                        draw_check: {hover: 0.0}
+                        draw_label: {hover: 0.0}
+                        draw_icon: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        check_box: {hover: 1.0}
+                        draw_check: {hover: 1.0}
+                        draw_label: {hover: 1.0}
+                        draw_icon: {hover: 1.0}
                     }
                 }
             }
             focus = {
                 default: off
                 off = {
-                    from: {all: Forward {duration: 0.0}}
+                    from: {all: Snap}
                     apply: {
-                        check_box: {focus: 0.0}
+                        draw_check: {focus: 0.0}
+                        draw_label: {focus: 0.0}
+                        draw_icon: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        check_box: {focus: 1.0}
+                        draw_check: {focus: 1.0}
+                        draw_label: {focus: 1.0}
+                        draw_icon: {focus: 1.0}
                     }
                 }
             }
             selected = {
                 default: off
                 off = {
-                    from: {all: Forward {duration: 0.0}}
-                    apply: {check_box: {selected: 0.0}}
-                }
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_check: {selected: 0.0},
+                        draw_label: {selected: 0.0},
+                        draw_icon: {selected: 0.0},
+                    }
+                 }
                 on = {
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.0}}
-                    apply: {check_box: {selected: 1.0}}
+                    apply: {
+                        draw_check: {selected: 1.0}
+                        draw_label: {selected: 1.0}
+                        draw_icon: {selected: 1.0},
+                    }
                 }
             }
         }
@@ -129,14 +183,15 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawCheckBox {
-    draw_super: DrawQuad,
-    check_type: CheckType,
-    hover: f32,
-    focus: f32,
-    selected: f32
+    #[deref] draw_super: DrawQuad,
+    #[live] check_type: CheckType,
+    #[live] hover: f32,
+    #[live] focus: f32,
+    #[live] selected: f32
 }
 
 #[derive(Live, LiveHook)]
+#[live_ignore]
 #[repr(u32)]
 pub enum CheckType {
     #[pick] Check = shader_enum(1),
@@ -144,22 +199,31 @@ pub enum CheckType {
     Toggle = shader_enum(3),
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(CheckBox))]
+#[derive(Live)]
 pub struct CheckBox {
-    check_box: DrawCheckBox,
     
-    walk: Walk,
+    #[live] walk: Walk,
+    #[live] icon_walk: Walk,
+
+    #[live] layout: Layout,
+    #[state] state: LiveState,
     
-    layout: Layout,
-    state: State,
+    #[live] label_walk: Walk,
+    #[live] label_align: Align,
     
-    label_walk: Walk,
-    label_align: Align,
-    label_text: DrawText,
-    label: String,
+    #[live] draw_check: DrawCheckBox,
+    #[live] draw_label: DrawText,
+    #[live] draw_icon: DrawIcon,
+
+    #[live] label: String,
     
-    bind: String,
+    #[live] bind: String,
+}
+
+impl LiveHook for CheckBox{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,CheckBox)
+    }
 }
 
 #[derive(Clone, WidgetAction)]
@@ -168,13 +232,19 @@ pub enum CheckBoxAction {
     None
 }
 
+#[derive(Live, LiveHook)]#[repr(C)]
+struct DrawLabelText {
+    #[deref] draw_super: DrawText,
+    #[live] hover: f32,
+    #[live] pressed: f32,
+}
 
 impl CheckBox {
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CheckBoxAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, CheckBoxAction)) {
         self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.check_box.area()) {
+        match event.hits(cx, self.draw_check.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, id!(hover.on));
@@ -203,49 +273,47 @@ impl CheckBox {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.check_box.begin(cx, walk, self.layout);
-        self.label_text.draw_walk(cx, self.label_walk, self.label_align, &self.label);
-        self.check_box.end(cx);
+        self.draw_check.begin(cx, walk, self.layout);
+        self.draw_label.draw_walk(cx, self.label_walk, self.label_align, &self.label);
+        self.draw_icon.draw_walk(cx, self.icon_walk);
+        self.draw_check.end(cx);
     }
 }
 
 impl Widget for CheckBox {
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-    
-    fn bind_to(&mut self, cx: &mut Cx, db: &mut DataBinding, act: &WidgetActions, path: &[LiveId]) {
-        match db {
-            DataBinding::FromWidgets{nodes,..} => if let Some(item) = act.find_single_action(self.widget_uid()) {
-                match item.action() {
-                    CheckBoxAction::Change(v) => {
-                        nodes.write_by_field_path(path, &[LiveNode::from_value(LiveValue::Bool(v))]);
-                    }
-                    _ => ()
-                }
+
+    fn widget_to_data(&self, _cx: &mut Cx, actions:&WidgetActions, nodes: &mut LiveNodeVec, path: &[LiveId])->bool{
+        match actions.single_action(self.widget_uid()) {
+            CheckBoxAction::Change(v) => {
+                nodes.write_field_value(path, LiveValue::Bool(v));
+                true
             }
-            DataBinding::ToWidgets{nodes} => {
-                if let Some(value) = nodes.read_by_field_path(path) {
-                    if let Some(value) = value.as_bool() {
-                        self.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
-                    }
-                }
+            _ => false
+        }
+    }
+    
+    fn data_to_widget(&mut self, cx: &mut Cx, nodes:&[LiveNode], path: &[LiveId]){
+        if let Some(value) = nodes.read_field_value(path) {
+            if let Some(value) = value.as_bool() {
+                self.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
             }
         }
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
-        self.check_box.redraw(cx);
+        self.draw_check.redraw(cx);
     }
     
-    fn handle_widget_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
-        self.handle_event_fn(cx, event, &mut | cx, action | {
+        self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });
     }
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk);
         WidgetDraw::done()
     }
@@ -253,3 +321,12 @@ impl Widget for CheckBox {
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct CheckBoxRef(WidgetRef);
+
+impl CheckBoxRef {
+    pub fn set_label_text(&self, text:&str){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.label.clear();
+            inner.label.push_str(text);
+        }
+    }
+}

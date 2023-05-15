@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+
 use {
     std::collections::{HashSet, HashMap},
     crate::{
@@ -10,7 +10,6 @@ use {
         },
         event::{
             DrawEvent,
-            SignalEvent,
             TriggerEvent,
             Event,
             KeyFocusEvent,
@@ -20,8 +19,7 @@ use {
 };
 
 impl Cx {
-    
-    
+    #[allow(dead_code)]
     pub (crate) fn repaint_windows(&mut self) {
         for pass_id in self.passes.id_iter() {
             match self.passes[pass_id].parent {
@@ -126,24 +124,8 @@ impl Cx {
         }
     }
     
-    pub fn handle_triggers_and_signals(&mut self) {
+    pub fn handle_triggers(&mut self) {
         // post op events like signals, triggers and key-focus
-        let mut counter = 0;
-        while self.signals.len() != 0 {
-            counter += 1;
-            let mut signals = HashSet::new();
-            std::mem::swap(&mut self.signals, &mut signals);
-            
-            self.inner_call_event_handler(&Event::Signal(SignalEvent {
-                signals: signals,
-            }));
-            self.inner_key_focus_change();
-            if counter > 100 {
-                error!("Signal feedback loop detected");
-                break
-            }
-        }
-        
         let mut counter = 0;
         while self.triggers.len() != 0 {
             counter += 1;
@@ -163,18 +145,18 @@ impl Cx {
     pub (crate) fn call_event_handler(&mut self, event: &Event) {
         self.inner_call_event_handler(event);
         self.inner_key_focus_change();
-        self.handle_triggers_and_signals();
+        self.handle_triggers();
     }
 
     // helpers
     
-    
+    /*
     pub (crate) fn call_all_keys_up(&mut self) {
         let keys_down = self.keyboard.all_keys_up();
         for key_event in keys_down {
             self.call_event_handler(&Event::KeyUp(key_event))
         }
-    }
+    }*/ 
     
     pub (crate) fn call_draw_event(&mut self) {
         let mut draw_event = DrawEvent::default();

@@ -24,7 +24,7 @@ use {
         area::Area,
         geometry::{GeometryFields},
         live_traits::*,
-        cx_draw_shaders::*
+        draw_shader::*
     },
 };
 
@@ -36,46 +36,46 @@ pub enum ShaderCompileResult {
 
 
 #[cfg(target_arch = "wasm32")]
-pub const fn shader_enum(i:u32)->u32{
-    match i{
-        1=>0x3f800000,
-        2=>0x40000000,
-        3=>0x40400000,
-        4=>0x40800000,
-        5=>0x40a00000,
-        6=>0x40c00000,
-        7=>0x40e00000,
-        8=>0x41000000,
-        9=>0x41100000,
-        10=>0x41200000,
-        11=>0x41300000,
-        12=>0x41400000,
-        13=>0x41500000,
-        14=>0x41600000,
-        15=>0x41700000,
-        16=>0x41800000,
-        17=>0x41880000,
-        18=>0x41900000,
-        19=>0x41980000,
-        20=>0x41a00000,
-        21=>0x41a80000,
-        22=>0x41b00000,
-        23=>0x41b80000,
-        24=>0x41c00000,
-        25=>0x41c80000,
-        26=>0x41d00000,
-        27=>0x41d80000,
-        28=>0x41e00000,
-        29=>0x41e80000,
-        30=>0x41f00000,
-        31=>0x41f80000,
-        _=>panic!()
+pub const fn shader_enum(i: u32) -> u32 {
+    match i {
+        1 => 0x3f800000,
+        2 => 0x40000000,
+        3 => 0x40400000,
+        4 => 0x40800000,
+        5 => 0x40a00000,
+        6 => 0x40c00000,
+        7 => 0x40e00000,
+        8 => 0x41000000,
+        9 => 0x41100000,
+        10 => 0x41200000,
+        11 => 0x41300000,
+        12 => 0x41400000,
+        13 => 0x41500000,
+        14 => 0x41600000,
+        15 => 0x41700000,
+        16 => 0x41800000,
+        17 => 0x41880000,
+        18 => 0x41900000,
+        19 => 0x41980000,
+        20 => 0x41a00000,
+        21 => 0x41a80000,
+        22 => 0x41b00000,
+        23 => 0x41b80000,
+        24 => 0x41c00000,
+        25 => 0x41c80000,
+        26 => 0x41d00000,
+        27 => 0x41d80000,
+        28 => 0x41e00000,
+        29 => 0x41e80000,
+        30 => 0x41f00000,
+        31 => 0x41f80000,
+        _ => panic!()
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub const fn shader_enum(i:u32)->u32{
-    if i<1 ||i > 31{
+pub const fn shader_enum(i: u32) -> u32 {
+    if i<1 || i > 31 {
         panic!();
     }
     i
@@ -83,7 +83,7 @@ pub const fn shader_enum(i:u32)->u32{
 
 pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
-pub const DRAW_CALL_VAR_INSTANCES: usize = 16;
+pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
 #[derive(Default, Debug)]
 #[repr(C)]
@@ -98,6 +98,8 @@ pub struct DrawVars {
     pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
+
+impl LiveHookDeref for DrawVars{}
 
 impl LiveNew for DrawVars {
     fn new(_cx: &mut Cx) -> Self {
@@ -129,19 +131,32 @@ impl DrawVars {
         self.texture_slots[slot] = Some(texture.texture_id());
     }
     
-    pub fn redraw(&self, cx:&mut Cx) {
+    pub fn set_uniform(&mut self, cx:&Cx, uniform: &[LiveId], value: &[f32]) {
+        if let Some(draw_shader) = self.draw_shader {
+            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+            for input in &sh.mapping.user_uniforms.inputs {
+                let offset = input.offset;
+                let slots = input.slots;
+                if input.id == uniform[0] {
+                    for i in 0..value.len().min(slots) {
+                        self.user_uniforms[offset + i] = value[i]
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn redraw(&self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
     
-    pub fn area(&self)->Area {
+    pub fn area(&self) -> Area {
         self.area
     }
     
     pub fn can_instance(&self) -> bool {
         self.draw_shader.is_some()
     }
-    
-    pub fn live_design(_cx: &mut Cx) {}
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
@@ -216,18 +231,15 @@ impl DrawVars {
                                 
                                 let mut slots = 0;
                                 for field in &lf.fields {
-                                    if field.id == live_id!(draw_super) {
-                                        recur_expand(live_registry, shader_registry, level + 1, after_draw_vars, field.live_type_info.live_type, draw_shader_def, span);
-                                        continue
-                                    }
-                                    if field.id == live_id!(draw_vars) {
-                                        // assert the thing to be marked correctly
-                                        if let LiveFieldKind::Calc = field.live_field_kind {}
-                                        else {panic!()}
-                                        if field.live_type_info.live_type != LiveType::of::<DrawVars>() {panic!();}
-                                        
-                                        *after_draw_vars = true;
-                                        continue;
+                                    if let LiveFieldKind::Deref = field.live_field_kind {
+                                        if field.live_type_info.live_type != LiveType::of::<DrawVars>() {
+                                            recur_expand(live_registry, shader_registry, level + 1, after_draw_vars, field.live_type_info.live_type, draw_shader_def, span);
+                                            continue
+                                        }
+                                        else{
+                                            *after_draw_vars = true;
+                                            continue
+                                        }
                                     }
                                     if *after_draw_vars {
                                         // lets count sizes
@@ -311,7 +323,7 @@ impl DrawVars {
                     cx.draw_shaders.shaders.push(CxDrawShader {
                         class_prop: class_node.id,
                         type_name: shader_type_name,
-                        platform: None,
+                        os_shader_id: None,
                         mapping: mapping
                     });
                     // ok so. maybe we should fill the live_uniforms buffer?
@@ -338,9 +350,6 @@ impl DrawVars {
     
     pub fn update_area_with_self(&mut self, cx: &mut Cx, index: usize, nodes: &[LiveNode]) {
         if let Some(draw_shader) = self.draw_shader {
-            // ok now what.
-            // we could iterate our uniform and instance props
-            // call get_write_ref and write into it
             if let Some(inst) = self.area.valid_instance(cx) {
                 if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
                     return;
@@ -367,6 +376,7 @@ impl DrawVars {
                                     instances[input.offset + i + j * stride] = inst_slice[input.offset + i]
                                 }
                             }
+                            draw_call.instance_dirty = true;
                         }
                     }
                     for input in &sh.mapping.user_uniforms.inputs {
@@ -375,14 +385,47 @@ impl DrawVars {
                                 draw_call.user_uniforms[input.offset + i] = self.user_uniforms[input.offset + i]
                             }
                         }
+                        draw_call.uniforms_dirty = true;
                     }
                     node_iter = nodes.next_child(node_index);
                 }
                 // DONE!
-                
                 cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
+            }
+        }
+    }
+    
+    pub fn update_rect(&mut self, cx: &mut Cx, rect: Rect) {
+        if let Some(draw_shader) = self.draw_shader {
+            if let Some(inst) = self.area.valid_instance(cx) {
+                if draw_shader.draw_shader_generation != cx.draw_shaders.generation {
+                    return;
+                }
+                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.kind.draw_call_mut().unwrap();
+                
+                let repeat = inst.instance_count;
+                let stride = sh.mapping.instances.total_slots;
+                let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
+                
+                for input in &sh.mapping.instances.inputs {
+                    if input.id == live_id!(rect_pos) {
+                        for j in 0..repeat {
+                            instances[input.offset + 0 + j * stride] = rect.pos.x as f32;
+                            instances[input.offset + 1 + j * stride] = rect.pos.y as f32;
+                        }
+                    }
+                    if input.id == live_id!(rect_size) {
+                        for j in 0..repeat {
+                            instances[input.offset + 0 + j * stride] = rect.size.x as f32;
+                            instances[input.offset + 1 + j * stride] = rect.size.y as f32;
+                        }
+                    }
+                }
                 draw_call.instance_dirty = true;
-                draw_call.uniforms_dirty = true;
+                cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
             }
         }
     }
@@ -440,7 +483,7 @@ impl DrawVars {
         }
     }
     
-    pub fn before_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn before_apply_init_shader(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         
         let draw_shader_ptr = if let Some(file_id) = from.file_id() {
             let generation = cx.live_registry.borrow().file_id_to_file(file_id).generation;
@@ -510,6 +553,7 @@ impl DrawVars {
                 }
             }
             for input in &sh.mapping.var_instances.inputs {
+                
                 let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
                 let slots = input.slots;
                 if input.id == id {
@@ -538,7 +582,7 @@ impl DrawVars {
         nodes.skip_node(index)
     }
     
-    pub fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn after_apply_update_self(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         // alright. so.if we are ApplyFrom::
         if let ApplyFrom::LiveEdit = from {
             // alright, we might have to update something here.

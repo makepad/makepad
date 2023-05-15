@@ -104,6 +104,10 @@ impl Rect {
             size:  dvec2((self.size.x / f).floor() * f,(self.size.y / f).floor() * f),
         }
     }
+    
+    pub fn is_nan(&self)->bool{
+        return self.pos.is_nan() || self.size.is_nan()
+    }
 
 }
 
@@ -147,6 +151,20 @@ impl DVec2 {
         };
     }
     
+    pub fn floor(self) -> DVec2 {
+        return DVec2 {
+            x: self.x.floor(), 
+            y: self.y.floor(),
+        };
+    }
+        
+    pub fn ceil(self) -> DVec2 {
+        return DVec2 {
+            x: self.x.ceil(), 
+            y: self.y.ceil(),
+        };
+    }
+    
     pub fn distance(&self, other: &DVec2) -> f64 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
@@ -155,6 +173,10 @@ impl DVec2 {
     
     pub fn length(&self) -> f64 {
         (self.x * self.x + self.y * self.y).sqrt()
+    }
+    
+    pub fn is_nan(&self)->bool{
+        return self.x.is_nan() || self.y.is_nan()
     }
 }
 

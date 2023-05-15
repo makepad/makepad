@@ -13,7 +13,7 @@ use {
             log_icon::LogIconType,
             log_list::{LogList, LogListAction}
         },
-        makepad_draw_2d::*,
+        makepad_draw::*,
         editor_state::EditorState,
         //builder::{
         //    builder_protocol::BuilderMsg,
@@ -28,7 +28,7 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct LogView {
-    log_list: LogList
+    #[live] log_list: LogList
 }
 
 pub enum LogViewAction {
@@ -76,12 +76,12 @@ impl LogView {
         self.log_list.end(cx);
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
-        self.log_list.handle_event_fn(cx, event, &mut |_,_|{})
+        self.log_list.handle_event_with(cx, event, &mut |_,_|{})
     }
 }

@@ -4,7 +4,7 @@ use {
     std::marker::PhantomData,
     std::{
         sync::Arc,
-        sync::atomic::{AtomicU32, AtomicI64,  Ordering, AtomicBool},
+        sync::atomic::{AtomicU32, AtomicI32, AtomicI64,  Ordering, AtomicBool},
     },
     crate::{
         live_traits::*,
@@ -352,6 +352,75 @@ impl LiveRead for i64a{
         self.get().live_read_to(id, out);
     }
 }
+
+
+
+
+// atomic i64
+
+
+pub struct i32a(AtomicI32);
+
+impl Clone for i32a {
+    fn clone(&self)->Self{ 
+        i32a(AtomicI32::new(self.get()))
+    }
+}
+
+
+impl AtomicGetSet<i32> for i32a {
+    fn get(&self) -> i32 {
+        self.0.load(Ordering::Relaxed)
+    }
+    fn set(&self, val: i32) {
+        self.0.store(val, Ordering::Relaxed);
+    }
+}
+
+impl LiveAtomic for i32a {
+    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        let mut val = 0i32;
+        let index = val.apply(cx, apply_from, index, nodes);
+        self.0.store(val, Ordering::Relaxed);
+        index
+    }
+}
+
+impl LiveHook for i32a {}
+impl LiveApply for i32a {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, from, index, nodes)
+    }
+}
+
+impl Debug for i32a{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+        self.get().fmt(f)
+    }
+}
+
+impl Into<i32a> for i32 {
+    fn into(self) -> i32a {
+        i32a(AtomicI32::new(self))
+    }
+}
+
+impl LiveNew for i32a {
+    fn new(_cx: &mut Cx) -> Self {
+        Self (AtomicI32::new(0))
+    }
+    
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
+        u32::live_type_info(_cx)
+    }
+}
+
+impl LiveRead for i32a{
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read_to(id, out);
+    }
+}
+
 
 
 

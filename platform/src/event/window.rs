@@ -12,7 +12,6 @@ use {
 pub struct WindowGeom {
     pub dpi_factor: f64,
     pub can_fullscreen: bool,
-    pub xr_can_present: bool,
     pub xr_is_presenting: bool,
     pub is_fullscreen: bool, 
     pub is_topmost: bool,

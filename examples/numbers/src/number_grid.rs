@@ -1,13 +1,12 @@
 use {
     crate::{
-        makepad_draw_2d::*,
         makepad_widgets::*,
     },
     std::fmt::Write,
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     DrawBg= {{DrawBg}} {
         instance hover: float
         instance focus: float
@@ -51,7 +50,7 @@ live_design!{
     DrawLabel= {{DrawLabel}} {
         instance hover: float
         instance focus: float
-
+        
         fn get_color(self) -> vec4 {
             return #fff
         }
@@ -60,7 +59,7 @@ live_design!{
     NumberBox= {{NumberBox}} {
        
        layout:{padding:{left:14,top:1, bottom:1, right:5}}
-       
+        draw_label:{text_style:{font_size: 12}}
         label_align: {
             y: 0.0
         }
@@ -71,15 +70,15 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        label: {hover: 0.0}
-                        bg: {hover: 0.0}
+                        draw_label: {hover: 0.0}
+                        draw_bg: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        label: {hover: 1.0}
-                        bg: {hover: 1.0}
+                        draw_label: {hover: 1.0}
+                        draw_bg: {hover: 1.0}
                     }
                 }
             }
@@ -88,15 +87,15 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        label: {focus: 0.0}
-                        bg: {focus: 0.0}
+                        draw_label: {focus: 0.0}
+                        draw_bg: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Snap}
                     apply: {
-                        label: {focus: 1.0}
-                        bg: {focus: 1.0}
+                        draw_label: {focus: 1.0}
+                        draw_bg: {focus: 1.0}
                     }
                 }
             }
@@ -115,49 +114,84 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawBg {
-    draw_super: DrawQuad,
-    last_number: f32,
-    fast_path: f32,
-    number: f32
+    #[deref] draw_super: DrawQuad,
+    #[live] last_number: f32,
+    #[live] fast_path: f32,
+    #[live] number: f32
 }
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawLabel {
-    draw_super: DrawText,
-    last_number: f32,
-    number: f32
+    #[deref] draw_super: DrawText,
+    #[live] last_number: f32,
+    #[live] number: f32
 }
 
 #[derive(Live, LiveHook)]
 pub struct NumberBox {
-    bg: DrawBg,
-    label: DrawLabel,
+    #[live] draw_bg: DrawBg,
+    #[live] draw_label: DrawLabel,
 
-    layout: Layout,
-    state: State,
+    #[live] layout: Layout,
+    #[state] state: LiveState,
     
-    label_align: Align,
+    #[live] label_align: Align,
 }
 
-#[derive(Live, Widget)]
-#[live_design_fn(widget_factory!(NumberGrid))]
+impl Widget for NumberGrid {
+    fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let uid = self.widget_uid();
+        self.handle_event_with(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.scroll_bars.redraw(cx)
+    }
+    
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        let _ = self.draw_walk(cx, walk);
+        WidgetDraw::done()
+    }
+    
+    
+}
+
+#[derive(Live)]
 pub struct NumberGrid {
-    scroll_bars: ScrollBars,
-    walk: Walk,
-    layout: Layout,
-    seed: u32,
-    fast_path: bool,
-    number_box: Option<LivePtr>,
-    regen_animate: bool,
+    #[live] scroll_bars: ScrollBars,
+    #[live] walk: Walk,
+    #[live] layout: Layout,
+    #[live] seed: u32,
+    #[live] fast_path: bool,
+    #[live] number_box: Option<LivePtr>,
+    #[live] regen_animate: bool,
     #[rust] number_boxes: ComponentMap<NumberBoxId, NumberBox>,
 }
 
+impl LiveHook for NumberGrid{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, NumberGrid)
+    }
+    
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        for number_box in self.number_boxes.values_mut() {
+            if let Some(index) = nodes.child_by_name(index, live_id!(number_box).as_field()) {
+                number_box.apply(cx, from, index, nodes);
+            }
+        }
+    }
+}
+
 impl NumberBox {
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
         self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.bg.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, id!(hover.on));
@@ -178,14 +212,14 @@ impl NumberBox {
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos:DVec2, number:f32, fmt:&str) {
         
-        self.bg.last_number = self.bg.number;
-        self.bg.number = number;
-        self.label.last_number = self.label.number;
-        self.label.number = number;
+        self.draw_bg.last_number = self.draw_bg.number;
+        self.draw_bg.number = number;
+        self.draw_label.last_number = self.draw_label.number;
+        self.draw_label.number = number;
         
-        self.bg.begin(cx, Walk::fit().with_abs_pos(pos), self.layout);
-        self.label.draw_walk(cx, Walk::fit(),self.label_align, fmt);
-        self.bg.end(cx);
+        self.draw_bg.begin(cx, Walk::fit().with_abs_pos(pos), self.layout);
+        self.draw_label.draw_walk(cx, Walk::fit(),self.label_align, fmt);
+        self.draw_bg.end(cx);
     }
 }
 
@@ -199,16 +233,6 @@ pub enum NumberBoxAction {
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct NumberBoxId(pub LiveId);
-
-impl LiveHook for NumberGrid {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        for number_box in self.number_boxes.values_mut() {
-            if let Some(index) = nodes.child_by_name(index, live_id!(number_box).as_field()) {
-                number_box.apply(cx, from, index, nodes);
-            }
-        }
-    }
-}
 
 fn random_bit(seed:&mut u32)->u32{
     *seed = seed.overflowing_add((seed.overflowing_mul(*seed)).0 | 5).0;
@@ -234,8 +258,8 @@ impl NumberGrid{
 
         let mut buf = String::new();
 
-        for y in 0..70{
-            for x in 0..35{
+        for y in 0..40{
+            for x in 0..30{
                 let box_id = LiveId(x*100+y).into();
                 let number_box = self.number_boxes.get_or_insert(cx, box_id, | cx | {
                     NumberBox::new_from_ptr(cx, number_box)
@@ -243,8 +267,8 @@ impl NumberGrid{
                 let number = random_f32(&mut self.seed);
                 buf.clear();
                 write!(buf,"{:.3}", number).unwrap();
-                let pos = start_pos + dvec2(x as f64 * 55.0,y as f64*15.0);
-                number_box.bg.fast_path = if self.fast_path{1.0}else{0.0};
+                let pos = start_pos + dvec2(x as f64 * 70.0,y as f64*20.0);
+                number_box.draw_bg.fast_path = if self.fast_path{1.0}else{0.0};
                 number_box.draw_abs(cx, pos, number, &buf);
             }
         }
@@ -255,17 +279,13 @@ impl NumberGrid{
         }
     }
     
-    pub fn area(&self)->Area{
-        self.scroll_bars.area()
-    }
-    
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, NumberGridAction),
     ) {
-        self.scroll_bars.handle_event_fn(cx, event, &mut |_,_|{});
+        self.scroll_bars.handle_event_with(cx, event, &mut |_,_|{});
         
         match event{
             Event::KeyDown(fe) if fe.key_code == KeyCode::Space=>{
@@ -284,7 +304,7 @@ impl NumberGrid{
         
         let mut actions = Vec::new();
         for (box_id, number_box) in self.number_boxes.iter_mut() {
-            number_box.handle_event_fn(cx, event, &mut | _, action | {
+            number_box.handle_event_with(cx, event, &mut | _, action | {
                 actions.push((*box_id, action))
             });
         }

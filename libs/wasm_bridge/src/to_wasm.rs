@@ -51,7 +51,7 @@ pub trait ToWasm {
     
     fn to_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize);
     
-    fn to_string()->String{
+    fn to_js_code()->String{
         let mut wrapper = String::new();
         let id = Self::live_id();
         wrapper.push_str(&format!("{}(t0){{\n", Self::type_name()));
