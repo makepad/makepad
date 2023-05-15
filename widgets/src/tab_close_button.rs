@@ -1,11 +1,11 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     TabCloseButton= {{TabCloseButton}} {
-        button: {
+        draw_button: {
             
             instance hover: float;
             instance selected: float;
@@ -34,7 +34,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        button: {hover: 0.0}
+                        draw_button: {hover: 0.0}
                     }
                 }
                 
@@ -42,7 +42,7 @@ live_design!{
                     cursor: Hand,
                     from: {all: Snap}
                     apply: {
-                        button: {hover:1.0}
+                        draw_button: {hover:1.0}
                     }
                 }
             }
@@ -58,16 +58,16 @@ live_design!{
 
 #[derive(Live, LiveHook)]
 pub struct TabCloseButton {
-    button: DrawQuad,
-    state: State,
+    #[live] draw_button: DrawQuad,
+    #[state] state: LiveState,
 
-    walk: Walk
+    #[live] walk: Walk
 }
 
 impl TabCloseButton {
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        self.button.draw_walk(
+        self.draw_button.draw_walk(
             cx,
             self.walk
         );
@@ -79,7 +79,7 @@ impl TabCloseButton {
         event: &Event,
     ) -> TabCloseButtonAction {
         self.state_handle_event(cx, event);
-        match event.hits(cx, self.button.area()) {
+        match event.hits(cx, self.draw_button.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
                 return TabCloseButtonAction::HoverIn;

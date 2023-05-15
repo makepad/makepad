@@ -6,13 +6,21 @@ mod live_prims;
 #[macro_use]
 mod cx;
 mod cx_api;
-mod cx_draw_shaders;
 
 pub mod live_traits;
 pub mod live_cx;
 pub mod live_atomic;
 
 pub mod thread;
+pub mod audio;
+pub mod midi;
+pub mod video;
+
+mod draw_matrix;
+mod draw_shader; 
+mod draw_list;
+mod draw_vars;
+
 mod id_pool;
 mod event;
 mod area;
@@ -21,18 +29,18 @@ mod pass;
 mod texture;
 mod cursor;
 mod menu;
-mod state;
+mod live_state;
 mod gpu_info;
-mod draw_vars;
 mod geometry;
-mod draw_list;
 mod debug;
 mod component_map;
 
+pub mod audio_stream;
+
+mod media_api;
+
 #[macro_use]
-mod main_app;
-//pub mod audio;
-//pub mod midi;
+mod app_main;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
@@ -40,6 +48,9 @@ pub use makepad_wasm_bridge;
 #[cfg(target_os = "macos")]
 pub use makepad_objc_sys;
 
+#[cfg(target_os = "windows")]
+pub use makepad_windows as windows_crate;
+ 
 pub use {
     makepad_shader_compiler,
     makepad_shader_compiler::makepad_derive_live,
@@ -53,6 +64,7 @@ pub use {
     makepad_error_log::*,
     makepad_math::*,
     makepad_live_id::*,
+    app_main::AppMain,
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,
@@ -61,7 +73,6 @@ pub use {
         LiveErrorOrigin,
         LiveNodeOrigin,
         LiveRegistry,
-        LiveDocNodes,
         LiveId,
         LiveIdMap,
         LiveFileId,
@@ -78,8 +89,9 @@ pub use {
         LiveProp,
         LiveIdAsProp,
         LiveValue,
-        FittedString,
         InlineString,
+        LiveBinding,
+        LiveIdPath,
         LiveNodeSliceToCbor,
         LiveNodeVecFromCbor,
         LiveModuleId,
@@ -98,8 +110,12 @@ pub use {
         ShaderTy,
     },
     crate::{
+        os::*,
         cx_api::{
             CxOsApi,
+        },
+        media_api::{
+            CxMediaApi
         },
         draw_list::{
             CxDrawItem,
@@ -111,6 +127,7 @@ pub use {
         },
         cx::{
             Cx,
+            CxRef,
             OsType
         },
         area::{
@@ -121,13 +138,13 @@ pub use {
         menu::{
             MenuCommand,
         },
+        thread::Signal,
         event::{
             Margin,
             KeyCode,
             Event,
             Hit,
             DragHit,
-            Signal,
             Trigger,
             //MidiInputListEvent,
             WebSocket,
@@ -137,6 +154,9 @@ pub use {
             KeyModifiers,
             DrawEvent,
             DigitDevice,
+            MouseDownEvent,
+            MouseMoveEvent,
+            MouseUpEvent,
             FingerDownEvent,
             FingerMoveEvent,
             FingerUpEvent,
@@ -147,7 +167,6 @@ pub use {
             WindowMovedEvent,
             NextFrameEvent,
             TimerEvent,
-            SignalEvent,
             KeyEvent,
             KeyFocusEvent,
             TextInputEvent,
@@ -165,21 +184,17 @@ pub use {
             DragAction,
             DraggedItem,
             HitOptions,
-            FingerScrollHitEvent,
-            FingerMoveHitEvent,
-            FingerHoverHitEvent,
-            FingerDownHitEvent,
-            FingerUpHitEvent,
             DragHitEvent,
             DropHitEvent,
         },
         cursor::MouseCursor,
         menu::Menu,
-        
+        draw_matrix::DrawMatrix,
         window::Window,
         pass::{
             PassId,
             CxPassParent,
+            CxPassRect,
             Pass,
             PassClearColor,
             PassClearDepth
@@ -192,9 +207,9 @@ pub use {
         },
         live_prims::{
             LiveDependency,
-            LiveIdToEnum,
         },
         live_traits::{
+            LiveHookDeref,
             LiveBody,
             LiveNew,
             LiveApply,
@@ -204,12 +219,12 @@ pub use {
             ToLiveValue,
             ApplyFrom,
         },
-        state::{
+        live_state::{
             Ease,
             Play,
             Animate,
             LiveState,
-            State,
+            LiveStateImpl,
             StateAction,
             StatePair
         },

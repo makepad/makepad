@@ -13,7 +13,11 @@ use {
             keyboard::*,
             window::*,
             xr::*,
+            drag_drop::*,
         },
+        audio::AudioDevicesEvent,
+        midi::MidiPortsEvent,
+        video::VideoInputsEvent,
         draw_list::DrawListId,
         menu::MenuCommand,
     },
@@ -24,6 +28,9 @@ use {
 pub enum Event {
     Construct,
     Destruct,
+    
+    Pause,
+    Resume,
 
     Draw(DrawEvent),
     LiveEdit(LiveEditEvent),
@@ -32,20 +39,20 @@ pub enum Event {
     NextFrame(NextFrameEvent),
     XRUpdate(XRUpdateEvent),
     
-    //WindowSetHoverCursor(MouseCursor),
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
     
-    FingerDown(FingerDownEvent),
-    FingerMove(FingerMoveEvent),
-    FingerHover(FingerHoverEvent),
-    FingerUp(FingerUpEvent),
-    FingerScroll(FingerScrollEvent),
+    MouseDown(MouseDownEvent),
+    MouseMove(MouseMoveEvent),
+    MouseUp(MouseUpEvent),
+    TouchUpdate(TouchUpdateEvent),
+    Scroll(ScrollEvent),
+    
     Timer(TimerEvent),
     
-    Signal(SignalEvent),
+    Signal,
     Trigger(TriggerEvent),
     MenuCommand(MenuCommand),
     KeyFocus(KeyFocusEvent),
@@ -54,6 +61,7 @@ pub enum Event {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
+    TextCut,
     
     Drag(DragEvent),
     Drop(DropEvent),
@@ -64,10 +72,12 @@ pub enum Event {
     WebSocketError(WebSocketErrorEvent),
     WebSocketMessage(WebSocketMessageEvent),
     
+    AudioDevices(AudioDevicesEvent),
+    MidiPorts(MidiPortsEvent),
+    VideoInputs(VideoInputsEvent),
+    
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
-    //Midi1InputData(Vec<Midi1InputData>),
-    //MidiInputList(MidiInputListEvent),
 }
 
 pub enum Hit{
@@ -78,17 +88,16 @@ pub enum Hit{
     Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    FingerScroll(FingerScrollHitEvent),
-    FingerDown(FingerDownHitEvent),
-    FingerMove(FingerMoveHitEvent),
-    FingerHoverIn(FingerHoverHitEvent),
-    FingerHoverOver(FingerHoverHitEvent),
-    FingerHoverOut(FingerHoverHitEvent),
-    FingerUp(FingerUpHitEvent),
+    TextCut,
     
-    FingerSweep(FingerSweepEvent),
-    FingerSweepIn(FingerSweepEvent),
-    FingerSweepOut(FingerSweepEvent),
+    FingerScroll(FingerScrollEvent),
+    FingerDown(FingerDownEvent),
+    FingerMove(FingerMoveEvent),
+    FingerHoverIn(FingerHoverEvent),
+    FingerHoverOver(FingerHoverEvent),
+    FingerHoverOut(FingerHoverEvent),
+    FingerUp(FingerUpEvent),
+    
     Nothing
 }
 
@@ -97,6 +106,19 @@ pub enum DragHit<'a>{
     Drop(DropHitEvent<'a>),
     DragEnd,
     NoHit
+}
+
+impl Event{
+    pub fn requires_visibility(&self)->bool{
+        match self{
+            Self::MouseDown(_)|
+            Self::MouseMove(_)|
+            Self::MouseUp(_)|
+            Self::TouchUpdate(_)|
+            Self::Scroll(_)=>true,
+            _=>false
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -165,13 +187,6 @@ pub struct TimerEvent {
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct Signal(pub LiveId);
-impl From<LiveId> for Signal {
-    fn from(live_id: LiveId) -> Signal {Signal(live_id)}
-}
-
-
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
 pub struct Trigger{
     pub id:LiveId,
     pub from:Area
@@ -198,11 +213,6 @@ pub struct WebSocketErrorEvent {
 pub struct WebSocketMessageEvent {
     pub web_socket: WebSocket,
     pub data: Vec<u8>
-}
-
-#[derive(Clone, Debug)]
-pub struct SignalEvent {
-    pub signals: HashSet<Signal>
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]

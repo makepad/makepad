@@ -1,57 +1,58 @@
-#![allow(unused)]
 use {
     crate::{
         makepad_derive_widget::*,
-        makepad_draw_2d::*,
-        frame::*,
+        makepad_draw::*,
         widget::*
     }
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     Label= {{Label}} {
         walk:{
             width:Fit
             height:Fit
         }
-        label:{
+        draw_label:{
             color:#8
         }
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_design_fn(widget_factory!(Label))]
+#[derive(Live)]
 pub struct Label {
-    label: DrawText,
-    walk: Walk,
+    #[live] draw_label: DrawText,
+    #[live] walk: Walk,
     
-//    overflow: Overflow,
-    align: Align,
+//  #[live] overflow: Overflow,
+    #[live] align: Align,
 
     //margin: Margin,
-    text: String,
+    #[live] label: String,
+} 
+
+impl LiveHook for Label{
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx,Label)
+    }
 }
 
 impl Widget for Label {
-    fn widget_uid(&self) -> WidgetUid {return WidgetUid(self as *const _ as u64)}
-
     fn redraw(&mut self, cx:&mut Cx){
-        self.label.redraw(cx)
+        self.draw_label.redraw(cx)
     }
     
     fn get_walk(&self)->Walk{
         self.walk
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
-        let mut lines = self.text.split("\\n");
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
+        let lines = self.label.split("\\n");
         for line in lines{
             // lets debugdraw the cliprect
             
-            self.label.draw_walk(cx, walk, self.align, line);
+            self.draw_label.draw_walk(cx, walk, self.align, line);
         }
         WidgetDraw::done()
     }
@@ -62,10 +63,10 @@ impl Widget for Label {
 pub struct LabelRef(WidgetRef); 
 
 impl LabelRef{
-    pub fn set_text(&self, text:&str){
-        if let Some(mut inner) = self.inner_mut(){
-            inner.text.clear();
-            inner.text.push_str(text);
+    pub fn set_label(&self, text:&str){
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.label.clear();
+            inner.label.push_str(text);
         }
     }
 }

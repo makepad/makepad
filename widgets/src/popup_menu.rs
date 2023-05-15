@@ -1,25 +1,31 @@
 use {
     crate::{
         makepad_derive_widget::*,
-        makepad_draw_2d::*,
+        makepad_draw::*,
         widget::*,
     },
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
-    DrawBgQuad = {{DrawBgQuad}} {
+    DrawBg = {{DrawBg}} {
+        instance color: #0
+        instance color_selected: #0ff
+
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             
             sdf.clear(mix(
-                COLOR_BG_EDITOR,
-                COLOR_BG_SELECTED,
+                self.color,
+                self.color_selected,
+                // COLOR_BG_EDITOR,
+                // COLOR_BG_SELECTED,
                 self.hover
-            ));
-            
+            ))
+
+            // 
             // we have 3 points, and need to rotate around its center
             let sz = 3.;
             let dx = 2.0;
@@ -33,7 +39,7 @@ live_design!{
         }
     }
     
-    DrawNameText = {{DrawNameText}} {
+    DrawName = {{DrawName}} {
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -54,7 +60,7 @@ live_design!{
             padding: {left: 15, top: 5, bottom: 5},
         }
         walk: {
-            width: Fill,
+            width: Fit,
             height: Fit
         }
         state: {
@@ -63,15 +69,17 @@ live_design!{
                 off = {
                     from: {all: Snap}
                     apply: {
-                        hover: 0.0,
-                        bg: {hover: (hover)}
-                        name: {hover: (hover)}
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
                     }
                 }
                 on = {
                     cursor: Hand
                     from: {all: Snap}
-                    apply: {hover: 1.0},
+                    apply: {
+                        draw_bg: {hover: 1.0}
+                        draw_name: {hover: 1.0}
+                    }
                 }
             }
             
@@ -80,14 +88,16 @@ live_design!{
                 off = {
                     from: {all: Snap}
                     apply: {
-                        selected: 0.0,
-                        bg: {selected: (selected)}
-                        name: {selected: (selected)}
+                        draw_bg: {selected: 0.0,}
+                        draw_name: {selected: 0.0,}
                     }
                 }
                 on = {
                     from: {all: Snap}
-                    apply: {selected: 1.0}
+                    apply: {
+                        draw_bg: {selected: 1.0,}
+                        draw_name: {selected: 1.0,}
+                    }
                 }
             }
         }
@@ -100,55 +110,86 @@ live_design!{
             flow: Down,
             padding: 5
         }
-        bg: {
-            shape: ShadowBox,
-            radius: 4,
-            color: #0
+        walk:{
+            width:100,
+            height:Fit
+        }
+        draw_bg: {
+            
+            instance color: #0
+            instance border_width: 0.0,
+            instance border_color: #0000,
+            instance inset: vec4(0.0, 0.0, 0.0, 0.0),
+            instance radius: 4.0
+            
+            fn get_color(self) -> vec4 {
+                return self.color
+            }
+            
+            fn get_border_color(self) -> vec4 {
+                return self.border_color
+            }
+            
+            fn pixel(self) -> vec4 {
+                
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.blur = 20.0;
+                sdf.box(
+                    self.inset.x + self.border_width,
+                    self.inset.y + self.border_width,
+                    self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                    self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                    max(1.0, self.radius)
+                )
+                sdf.fill_keep(self.get_color())
+                return sdf.result;
+            }
         }
     }
 }
 
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
-struct DrawBgQuad {
-    draw_super: DrawQuad,
-    selected: f32,
-    hover: f32,
+struct DrawBg {
+    #[deref] draw_super: DrawQuad,
+    #[live] selected: f32,
+    #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
-struct DrawNameText {
-    draw_super: DrawText,
-    selected: f32,
-    hover: f32,
+struct DrawName {
+    #[deref] draw_super: DrawText,
+    #[live] selected: f32,
+    #[live] hover: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct PopupMenuItem {
     
-    bg: DrawBgQuad,
-    name: DrawNameText,
+    #[live] draw_bg: DrawBg,
+    #[live] draw_name: DrawName,
     
-    layout: Layout,
-    state: State,
-    walk: Walk,
+    #[live] layout: Layout,
+    #[state] state: LiveState,
+    #[live] walk: Walk,
     
-    indent_width: f32,
-    icon_walk: Walk,
+    #[live] indent_width: f32,
+    #[live] icon_walk: Walk,
     
-    opened: f32,
-    hover: f32,
-    selected: f32,
+    #[live] opened: f32,
+    #[live] hover: f32,
+    #[live] selected: f32,
 }
 
 #[derive(Live)]
 pub struct PopupMenu {
-    view: View,
-    menu_item: Option<LivePtr>,
+    #[live] view: View,
+    #[live] menu_item: Option<LivePtr>,
     
-    bg: DrawShape,
-    layout: Layout,
-    items: Vec<String>,
+    #[live] draw_bg: DrawQuad,
+    #[live] layout: Layout,
+    #[live] walk: Walk,
+    #[live] items: Vec<String>,
     #[rust] first_tap: bool,
     #[rust] menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
     #[rust] init_select_item: Option<PopupMenuItemId>,
@@ -191,12 +232,12 @@ impl PopupMenuItem {
         cx: &mut Cx2d,
         label: &str,
     ) {
-        self.bg.begin(cx, self.walk, self.layout);
-        self.name.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.bg.end(cx);
+        self.draw_bg.begin(cx, self.walk, self.layout);
+        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.draw_bg.end(cx);
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -204,13 +245,13 @@ impl PopupMenuItem {
         dispatch_action: &mut dyn FnMut(&mut Cx, PopupMenuItemAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg.area().redraw(cx);
+            self.draw_bg.area().redraw(cx);
         }
         
         match event.hits_with_options(
             cx,
-            self.bg.area(),
-            HitOptions::with_sweep_area(sweep_area)
+            self.draw_bg.area(),
+            HitOptions::new().with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
@@ -218,19 +259,20 @@ impl PopupMenuItem {
             Hit::FingerHoverOut(_) => {
                 self.animate_state(cx, id!(hover.off));
             }
-            Hit::FingerSweepIn(_) => {
+            Hit::FingerDown(_) => {
                 dispatch_action(cx, PopupMenuItemAction::WasSweeped);
                 self.animate_state(cx, id!(hover.on));
                 self.animate_state(cx, id!(select.on));
             }
-            Hit::FingerSweepOut(se) => {
-                if se.is_finger_up() {
-                    if se.was_tap() { // ok this only goes for the first time
-                        dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
-                    }
-                    else {
+            Hit::FingerUp(se) => {
+                if !se.is_sweep {
+                    //if se.was_tap() { // ok this only goes for the first time
+                    //    dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
+                    //    println!("MIGHTBESELECTED");
+                   // }
+                    //else {
                         dispatch_action(cx, PopupMenuItemAction::WasSelected);
-                    }
+                    //}
                 }
                 else {
                     self.animate_state(cx, id!(hover.off));
@@ -245,16 +287,16 @@ impl PopupMenuItem {
 impl PopupMenu {
     
     pub fn menu_contains_pos(&self, cx: &mut Cx, pos: DVec2) -> bool {
-        self.bg.area().get_clipped_rect(cx).contains(pos)
+        self.draw_bg.area().get_clipped_rect(cx).contains(pos)
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, width: f64) {
-        self.view.begin_overlay(cx);
+    pub fn begin(&mut self, cx: &mut Cx2d) {
+        self.view.begin_overlay_reuse(cx);
         
         cx.begin_overlay_turtle(Layout::flow_down());
         
         // ok so. this thing needs a complete position reset
-        self.bg.begin(cx, Walk::size(Size::Fixed(width), Size::Fit), self.layout);
+        self.draw_bg.begin(cx, self.walk, self.layout);
         self.count = 0;
     }
     
@@ -264,10 +306,10 @@ impl PopupMenu {
         let pass_rect = Rect {pos: dvec2(0.0, 0.0), size: cx.current_pass_size()};
         let menu_rect2 = pass_rect.add_margin(-dvec2(10.0, 10.0)).contain(menu_rect1);
         cx.turtle_mut().set_shift(shift + (menu_rect2.pos - menu_rect1.pos));
-        self.bg.end(cx);
+        self.draw_bg.end(cx);
         
         cx.end_overlay_turtle();
-        //cx.debug.rect_r(self.bg.area().get_rect(cx));
+        //cx.debug.rect_r(self.draw_bg.area().get_rect(cx));
         self.view.end(cx);
         self.menu_items.retain_visible();
         if let Some(init_select_item) = self.init_select_item.take() {
@@ -313,7 +355,7 @@ impl PopupMenu {
         }
     }
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -322,7 +364,7 @@ impl PopupMenu {
     ) {
         let mut actions = Vec::new();
         for (item_id, node) in self.menu_items.iter_mut() {
-            node.handle_event_fn(cx, event, sweep_area, &mut | _, e | actions.push((*item_id, e)));
+            node.handle_event_with(cx, event, sweep_area, &mut | _, e | actions.push((*item_id, e)));
         }
         
         for (node_id, action) in actions {

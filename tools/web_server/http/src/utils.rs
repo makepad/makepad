@@ -3,21 +3,22 @@ use std::io::Write;
 use std::io::BufReader;
 use std::io::prelude::*;
 
-pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8]) {
+pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8])->bool {
     let bytes_total = bytes.len();
     let mut bytes_left = bytes_total;
     while bytes_left > 0 {
         let buf = &bytes[(bytes_total - bytes_left)..bytes_total];
         if let Ok(bytes_written) = tcp_stream.write(buf) {
             if bytes_written == 0 {
-                return
+                return true
             }
             bytes_left -= bytes_written;
         }
         else {
-            return
+            return true
         }
     }
+    false
 }
 
 pub fn http_error_out(mut tcp_stream: TcpStream, code: usize) {

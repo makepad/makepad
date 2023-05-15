@@ -1,4 +1,4 @@
-#![cfg_attr(feature = "nightly", feature(proc_macro_span))]
+#![cfg_attr(lines, feature(proc_macro_span))]
 
 use proc_macro::{TokenStream};
 
@@ -31,13 +31,12 @@ use crate::derive_live_registry::*;
 //mod colorhex;
 
 #[proc_macro_derive(Live, attributes(
-    alias,
     calc,
     live,
     rust,
     pick,
     state,
-    live_design_fn,
+    deref,
     live_ignore,
     live_debug
 ))]

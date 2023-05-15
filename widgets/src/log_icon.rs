@@ -1,7 +1,7 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     DrawLogIconQuad= {{DrawLogIconQuad}} {
@@ -72,13 +72,14 @@ live_design!{
 
 #[derive(Live, LiveHook)]#[repr(C)]
 pub struct DrawLogIconQuad {
-    draw_super: DrawQuad,
-    selected: f32,
-    hover: f32,
-    pub icon_type: LogIconType
+    #[deref] draw_super: DrawQuad,
+    #[live] selected: f32,
+    #[live] hover: f32,
+    #[live] pub icon_type: LogIconType
 }
 
 #[derive(Live, LiveHook)]
+#[live_ignore]
 #[repr(u32)]
 pub enum LogIconType {
     Wait = shader_enum(1),

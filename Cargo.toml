@@ -1,24 +1,28 @@
-workspace.exclude = [
-    "code_editor/regex",
-    "code_editor/range_set",
-    "code_editor/rope",
-    "code_editor/segment",
-    "code_editor/regex",
-    "code_editor/ucd",
-    "code_editor/varint"
-]
-
 workspace.members = [
+    "code_editor/core",
+    "code_editor/frontend",
     "examples/numbers", 
     "examples/fractal_zoom", 
-    "examples/cmdline_example",
     "examples/ironfish",
     "examples/simple",
-    "examples/shader",
+    "examples/video_mixer",
+    "examples/video_sender",
+    "libs/futures",
     "libs/wasm_bridge/test",
     "studio",
+    "tools/cargo_makepad",
+    "tools/windows_strip",
     "tools/auto_version",
-    "tools/web_server",
+    "tools/web_server", 
+    "tools/file_router", 
     "tools/wasm_strip",
 ]
 
+
+[profile.release]
+#debug = true
+# opt-level = 'z'     # Optimize for size
+#lto = true          # Enable link-time optimization
+#codegen-units = 1   # Reduce number of codegen units to increase optimizations
+#panic = 'abort'     # Abort on panic
+#strip = true   

@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_draw_2d::*,
+        makepad_draw::*,
         makepad_editor_core::{
             text::{Text},
         },
@@ -28,7 +28,7 @@ use {
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::fold_button::FoldButton;
     
     RustEditor= {{RustEditor}} {
@@ -68,30 +68,30 @@ live_design!{
 
 #[derive(Live)]
 pub struct RustEditor {
-    editor_impl: CodeEditorImpl,
+    #[live] editor_impl: CodeEditorImpl,
     
-    widget_layout: Layout,
-    fold_button: Option<LivePtr>,
+    #[live] widget_layout: Layout,
+    #[live] fold_button: Option<LivePtr>,
     
-    zoom_indent_depth: usize,
+    #[live] zoom_indent_depth: usize,
     
     
-    text_color_color: Vec4,
-    text_color_type_name: Vec4,
-    text_color_comment: Vec4,
-    text_color_lifetime: Vec4,
-    text_color_identifier: Vec4,
-    text_color_macro_identifier: Vec4,
-    text_color_function_identifier: Vec4,
-    text_color_branch_keyword: Vec4,
-    text_color_loop_keyword: Vec4,
-    text_color_other_keyword: Vec4,
-    text_color_bool: Vec4,
-    text_color_number: Vec4,
-    text_color_punctuator: Vec4,
-    text_color_string: Vec4,
-    text_color_whitespace: Vec4,
-    text_color_unknown: Vec4,
+    #[live] text_color_color: Vec4,
+    #[live] text_color_type_name: Vec4,
+    #[live] text_color_comment: Vec4,
+    #[live] text_color_lifetime: Vec4,
+    #[live] text_color_identifier: Vec4,
+    #[live] text_color_macro_identifier: Vec4,
+    #[live] text_color_function_identifier: Vec4,
+    #[live] text_color_branch_keyword: Vec4,
+    #[live] text_color_loop_keyword: Vec4,
+    #[live] text_color_other_keyword: Vec4,
+    #[live] text_color_bool: Vec4,
+    #[live] text_color_number: Vec4,
+    #[live] text_color_punctuator: Vec4,
+    #[live] text_color_string: Vec4,
+    #[live] text_color_whitespace: Vec4,
+    #[live] text_color_unknown: Vec4,
     
     #[rust] lines_layout: LinesLayout,
 }
@@ -284,7 +284,7 @@ impl RustEditor {
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        self.editor_impl.scroll_bars.handle_event_fn(cx, event, &mut |_,_|{});
+        self.editor_impl.scroll_bars.handle_event_with(cx, event, &mut |_,_|{});
         
         if self.editor_impl.session_id.is_none() {
             return

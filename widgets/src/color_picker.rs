@@ -1,8 +1,8 @@
-use crate::makepad_draw_2d::*;
+use crate::makepad_draw::*;
 
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     
     DrawColorWheel= {{DrawColorWheel}} {
         instance hover: float
@@ -78,7 +78,7 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        wheel: {pressed: 0.0, hover: 0.0}
+                        draw_wheel: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -89,7 +89,7 @@ live_design!{
                         pressed: Forward {duration: 0.01}
                     }
                     apply: {
-                        wheel: {
+                        draw_wheel: {
                             pressed: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
@@ -100,7 +100,7 @@ live_design!{
                     cursor: Arrow,
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        wheel: {
+                        draw_wheel: {
                             pressed: [{time: 0.0, value: 1.0}],
                             hover: 1.0,
                         }
@@ -115,17 +115,17 @@ live_design!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawColorWheel {
-    draw_super: DrawQuad,
-    hue: f32,
-    sat: f32,
-    val: f32,
+    #[deref] draw_super: DrawQuad,
+    #[live] hue: f32,
+    #[live] sat: f32,
+    #[live] val: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct ColorPicker {
-    wheel: DrawColorWheel,
+    #[live] draw_wheel: DrawColorWheel,
     
-    state: State,
+    #[state] state: LiveState,
     
     #[rust] pub size: f64,
     #[rust] hue: f32,
@@ -174,15 +174,15 @@ impl ColorPicker {
         let mut changed = false;
         
         if last_hue != self.hue {
-            self.wheel.apply_over(cx, live!{hue: (self.hue)});
+            self.draw_wheel.apply_over(cx, live!{hue: (self.hue)});
             changed = true;
         }
         if last_sat != self.sat {
-            self.wheel.apply_over(cx, live!{sat: (self.sat)});
+            self.draw_wheel.apply_over(cx, live!{sat: (self.sat)});
             changed = true;
         }
         if last_val != self.val {
-            self.wheel.apply_over(cx, live!{val: (self.val)});
+            self.draw_wheel.apply_over(cx, live!{val: (self.val)});
             changed = true;
         }
         if changed {
@@ -194,10 +194,10 @@ impl ColorPicker {
         Vec4::from_hsva(Vec4 {x: self.hue, y: self.sat, z: self.val, w: 1.0})
     }
     
-    pub fn handle_event_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
         self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.wheel.area()) {
+        match event.hits(cx, self.draw_wheel.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
             }
@@ -223,7 +223,7 @@ impl ColorPicker {
                 // lets check where we clicked!
             },
             Hit::FingerUp(fe) => {
-                if fe.is_over && fe.digit.has_hovers() {
+                if fe.is_over && fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
                 else {
@@ -252,13 +252,13 @@ impl ColorPicker {
                 self.val = hsva.z;
             }
         }
-        //self.wheel.shader = live_shader!(cx, self::shader_wheel);
-        // i wanna draw a wheel with 'width' set but height a fixed height.
+        //self.draw_wheel.shader = live_shader!(cx, self::shader_wheel);
+        // i wanna draw a draw_wheel with 'width' set but height a fixed height.
         self.size = cx.turtle().rect().size.y;
-        self.wheel.hue = self.hue;
-        self.wheel.sat = self.sat;
-        self.wheel.val = self.val;
-        self.wheel.draw_walk(cx, Walk::fixed_size(dvec2(self.size * height_scale, self.size * height_scale)));
+        self.draw_wheel.hue = self.hue;
+        self.draw_wheel.sat = self.sat;
+        self.draw_wheel.val = self.val;
+        self.draw_wheel.draw_walk(cx, Walk::fixed_size(dvec2(self.size * height_scale, self.size * height_scale)));
     }
 }
 

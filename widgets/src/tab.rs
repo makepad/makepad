@@ -1,16 +1,16 @@
 use {
     crate::{
         tab_close_button::{TabCloseButtonAction, TabCloseButton},
-        makepad_draw_2d::*,
+        makepad_draw::*,
     }
 };
 
 live_design!{
-    import makepad_draw_2d::shader::std::*;
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
     Tab= {{Tab}} {
-        name: {
+        draw_name: {
             text_style: <FONT_LABEL> {}
             instance hover: 0.0
             instance selected: 0.0
@@ -27,7 +27,7 @@ live_design!{
             }
         }
         
-        bg: {
+        draw_bg: {
             instance hover: float
             instance selected: float
             
@@ -72,8 +72,8 @@ live_design!{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         hover: 0.0,
-                        bg: {hover: (hover)}
-                        name: {hover: (hover)}
+                        draw_bg: {hover: (hover)}
+                        draw_name: {hover: (hover)}
                     }
                 }
                 
@@ -92,9 +92,9 @@ live_design!{
                     from: {all: Forward {duration: 0.3}}
                     apply: {
                         selected: 0.0,
-                        close_button: {button: {selected: (selected)}}
-                        bg: {selected: (selected)}
-                        name: {selected: (selected)}
+                        close_button: {draw_button: {selected: (selected)}}
+                        draw_bg: {selected: (selected)}
+                        draw_name: {selected: (selected)}
                     }
                 }
                 
@@ -114,21 +114,21 @@ pub struct Tab {
     #[rust] is_selected: bool,
     #[rust] is_dragged: bool,
     
-    bg: DrawQuad,
-    name: DrawText,
-    drag: DrawColor,
+    #[live] draw_bg: DrawQuad,
+    #[live] draw_name: DrawText,
+    #[live] draw_drag: DrawColor,
     
-    state: State,
+    #[state] state: LiveState,
     
-    close_button: TabCloseButton,
+    #[live] close_button: TabCloseButton,
     
     // height: f32,
     
-    hover: f32,
-    selected: f32,
+    #[live] hover: f32,
+    #[live] selected: f32,
 
-    walk: Walk, 
-    layout: Layout,
+    #[live] walk: Walk, 
+    #[live] layout: Layout,
 }
 
 pub enum TabAction {
@@ -150,21 +150,21 @@ impl Tab {
     
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
         //self.bg_quad.color = self.color(self.is_selected);
-        self.bg.begin(cx, self.walk, self.layout);
+        self.draw_bg.begin(cx, self.walk, self.layout);
         //self.name_text.color = self.name_color(self.is_selected);
         self.close_button.draw(cx);
         //cx.turtle_align_y();
-        self.name.draw_walk(cx, Walk::fit(), Align::default(),  name);
+        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(),  name);
         //cx.turtle_align_y();
-        self.bg.end(cx);
+        self.draw_bg.end(cx);
         
         if self.is_dragged {
-            self.drag.draw_abs(cx, self.bg.area().get_clipped_rect(cx));
+            self.draw_drag.draw_abs(cx, self.draw_bg.area().get_clipped_rect(cx));
         }
     }
     
     
-    pub fn handle_event_fn(
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
@@ -180,7 +180,7 @@ impl Tab {
             _ => ()
         };
         
-        match event.hits(cx, self.bg.area()) {
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, id!(hover.on));
             }
@@ -192,16 +192,16 @@ impl Tab {
             }
             _ => {}
         }
-        match event.drag_hits(cx, self.bg.area()) {
+        match event.drag_hits(cx, self.draw_bg.area()) {
             DragHit::Drag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
-                    self.bg.redraw(cx);
+                    self.draw_bg.redraw(cx);
                     f.action.set(DragAction::Copy);
                 }
                 DragState::Out => {
                     self.is_dragged = false;
-                    self.bg.redraw(cx);
+                    self.draw_bg.redraw(cx);
                 }
                 DragState::Over => match event {
                     Event::Drag(event) => {
@@ -212,7 +212,7 @@ impl Tab {
             },
             DragHit::Drop(f) => {
                 self.is_dragged = false;
-                self.bg.area().redraw(cx);
+                self.draw_bg.area().redraw(cx);
                 dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))
             }
             _ => {}

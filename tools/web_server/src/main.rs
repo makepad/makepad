@@ -12,7 +12,9 @@ use std::{
     net::SocketAddr,
     sync::mpsc,
     io::prelude::*,
+    io::BufReader,
     fs::File,
+    fs,
 };
 
 #[derive(Clone)]
@@ -38,7 +40,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
     #[cfg(target_os = "macos")]
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 61234));
     
     start_http_server(HttpServer{
         listen_address:addr,
@@ -48,13 +50,25 @@ fn main() {
     println!("Server listening on {}", addr);
     let mut clb_server = CollabServer::new("./");
     let mut clb_connections = HashMap::new();
+    
+    let route_secret = fs::read_to_string("route_secret.txt").unwrap_or("\nNO\nACCESS\n".to_string()).trim().to_string();
+    let route_start = format!("/route/{}", route_secret);
+    let mut route_connections = HashMap::new();
+    
     let prefixes = [
         format!("/makepad/{}/",std::env::current_dir().unwrap().display()),
         "/makepad/".to_string()
     ];
     while let Ok(message) = rx_request.recv() {
         match message{
-            HttpRequest::ConnectWebSocket {web_socket_id, response_sender, ..}=>{
+            HttpRequest::ConnectWebSocket {web_socket_id, response_sender, headers}=>{
+                if headers.path == route_start{
+                    // plug this websocket into a route
+                    // the client then routes messages to the child process
+                    route_connections.insert(web_socket_id, response_sender);
+                    continue;
+                }
+                
                 let sender = CollabNotificationSender{
                     sender:response_sender
                 };
@@ -65,10 +79,19 @@ fn main() {
             },
             HttpRequest::DisconnectWebSocket {web_socket_id}=>{
                 // eddy do something here
+                route_connections.remove(&web_socket_id);
                 clb_connections.remove(&web_socket_id);
             },
             HttpRequest::BinaryMessage {web_socket_id, response_sender, data}=>{
-                if let Some(connection) = clb_connections.get(&web_socket_id){
+                if route_connections.get(&web_socket_id).is_some(){
+                    // lets send it to everyone connected except us
+                    for (other_id, sender) in &mut route_connections{
+                        if *other_id != web_socket_id{
+                            let _ = sender.send(data.clone());
+                        }
+                    }
+                }
+                else if let Some(connection) = clb_connections.get(&web_socket_id){
                     // turn data into a request
                     if let Ok(request) = CollabRequest::de_bin(&mut 0, &data){
                         let response = connection.handle_request(request);

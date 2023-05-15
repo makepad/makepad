@@ -112,8 +112,16 @@ impl LiveId {
         Self (0)
     }
     
+    pub fn seeded()->Self{
+        Self(LIVE_ID_SEED)
+    }
+    
     pub fn is_unique(&self) -> bool {
         (self.0 & 0x8000_0000_0000_0000) == 0 && self.0 != 0
+    }
+    
+    pub fn is_ident(&self) -> bool {
+        return !self.is_unique()
     }
     
     pub fn is_empty(&self) -> bool {
@@ -141,6 +149,20 @@ impl LiveId {
     pub const fn from_str_unchecked(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
         Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len())
+    }
+    
+    pub const fn str_append(self, id_str: &str) -> Self {
+        let bytes = id_str.as_bytes();
+        Self::from_bytes(self.0, bytes, 0, bytes.len())
+    }
+
+    pub const fn bytes_append(self, bytes: &[u8]) -> Self {
+        Self::from_bytes(self.0, bytes, 0, bytes.len())
+    }
+    
+    pub const fn id_append(self, id: LiveId) -> Self {
+        let bytes = id.0.to_be_bytes();
+        Self::from_bytes(self.0, &bytes, 0, bytes.len())
     }
     
     pub const fn from_str_num_unchecked(id_str: &str, num:u64) -> Self {
@@ -179,10 +201,13 @@ impl LiveId {
     }
     
     pub fn as_string<F, R>(&self, f: F) -> R
-    where F: FnOnce(Option<&String>) -> R
+    where F: FnOnce(Option<&str>) -> R
     {
         LiveIdInterner::with( | idmap | {
-            return f(idmap.id_to_string.get(self))
+            match idmap.id_to_string.get(self){
+                Some(v)=>f(Some(&v)),
+                None=>f(None)
+            }
         })
     }
 

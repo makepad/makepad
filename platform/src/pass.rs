@@ -13,6 +13,7 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         id_pool::*,
+        area::Area,
         window::{
             WindowId,
         },
@@ -33,24 +34,25 @@ use {
     }
 };
 
+#[derive(Debug)]
 pub struct Pass(PoolId);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PassId(pub(crate) usize);
+pub struct PassId(pub (crate) usize);
 
-impl Pass{
+impl Pass {
 }
 
 #[derive(Default)]
-pub struct CxPassPool(IdPool<CxPass>);
-impl CxPassPool{
-    fn alloc(&mut self)->Pass{
+pub struct CxPassPool(pub (crate) IdPool<CxPass>);
+impl CxPassPool {
+    fn alloc(&mut self) -> Pass {
         Pass(self.0.alloc())
     }
     
     pub fn id_iter(&self) -> PassIterator {
-        PassIterator{
-            cur:0,
+        PassIterator {
+            cur: 0,
             len: self.0.pool.len()
         }
     }
@@ -64,7 +66,7 @@ pub struct PassIterator {
 impl Iterator for PassIterator {
     type Item = PassId;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur >= self.len{
+        if self.cur >= self.len {
             return None;
         }
         let cur = self.cur;
@@ -73,27 +75,28 @@ impl Iterator for PassIterator {
     }
 }
 
-impl std::ops::Index<PassId> for CxPassPool{
+impl std::ops::Index<PassId> for CxPassPool {
     type Output = CxPass;
-    fn index(&self, index: PassId) -> &Self::Output{
+    fn index(&self, index: PassId) -> &Self::Output {
         &self.0.pool[index.0].item
     }
 }
 
-impl std::ops::IndexMut<PassId> for CxPassPool{
-    fn index_mut(&mut self, index: PassId) -> &mut Self::Output{
+impl std::ops::IndexMut<PassId> for CxPassPool {
+    fn index_mut(&mut self, index: PassId) -> &mut Self::Output {
         &mut self.0.pool[index.0].item
     }
 }
 
-impl LiveHook for Pass{}
+impl LiveHook for Pass {}
 impl LiveNew for Pass {
-    fn new(cx: &mut Cx)->Self{
+    fn live_design_with(_cx:&mut Cx){}
+    fn new(cx: &mut Cx) -> Self {
         let pass = cx.passes.alloc();
         pass
     }
     
-    fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo{
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<Self>(),
@@ -122,7 +125,8 @@ impl LiveApply for Pass {
             }
             match nodes[index].id {
                 live_id!(clear_color) => cx.passes[self.pass_id()].clear_color = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                _=> {
+                live_id!(dont_clear) => cx.passes[self.pass_id()].dont_clear = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
                 }
@@ -133,19 +137,39 @@ impl LiveApply for Pass {
 }
 
 impl Pass {
-    pub fn pass_id(&self)->PassId{PassId(self.0.id)}
-
-    pub fn set_pass_parent(&self, cx:&mut Cx, pass:&Pass){
+    pub fn id_equals(&self, id:usize)->bool{
+        self.0.id == id
+    }
+    
+    pub fn new_with_name(cx: &mut Cx, name:&str) -> Self {
+        let pass = cx.passes.alloc();
+        pass.set_pass_name(cx, name);
+        pass
+    }
+    
+    pub fn pass_id(&self) -> PassId {PassId(self.0.id)}
+    
+    pub fn set_pass_parent(&self, cx: &mut Cx, pass: &Pass) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.parent = CxPassParent::Pass(pass.pass_id());
     }
     
+    pub fn set_pass_name(&self, cx: &mut Cx, name: &str) {
+        let cxpass = &mut cx.passes[self.pass_id()];
+        cxpass.debug_name = name.to_string();
+    }
+    
+    pub fn pass_name<'a>(&self, cx: &'a mut Cx)->&'a str{
+        let cxpass = &mut cx.passes[self.pass_id()];
+        &cxpass.debug_name
+    }
+    
     pub fn set_size(&self, cx: &mut Cx, pass_size: DVec2) {
         let mut pass_size = pass_size;
-        if pass_size.x < 1.0{pass_size.x = 1.0};
-        if pass_size.y < 1.0{pass_size.y = 1.0};
+        if pass_size.x < 1.0 {pass_size.x = 1.0};
+        if pass_size.y < 1.0 {pass_size.y = 1.0};
         let cxpass = &mut cx.passes[self.pass_id()];
-        cxpass.pass_size = pass_size;
+        cxpass.pass_rect = Some(CxPassRect::Size(pass_size));
     }
     
     pub fn set_window_clear_color(&self, cx: &mut Cx, clear_color: Vec4) {
@@ -172,17 +196,17 @@ impl Pass {
         cxpass.clear_depth = clear_depth;
     }
     
-    pub fn set_matrix_mode(&self, cx: &mut Cx, pmm: PassMatrixMode){
+    pub fn set_matrix_mode(&self, cx: &mut Cx, pmm: PassMatrixMode) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.paint_dirty = true;
         cxpass.matrix_mode = pmm;
     }
-
-    pub fn set_debug(&mut self, cx: &mut Cx, debug:bool){
+    
+    pub fn set_debug(&mut self, cx: &mut Cx, debug: bool) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.debug = debug;
     }
-
+    
 }
 
 #[derive(Clone)]
@@ -211,68 +235,79 @@ pub struct CxPassColorTexture {
 
 #[derive(Default, Clone)]
 #[repr(C)]
-pub struct PassUniforms{
-    camera_projection:Mat4,
-    camera_view:Mat4,
-    camera_inv:Mat4,
-    dpi_factor:f32,
-    dpi_dilate:f32,
-    pad1:f32,
-    pad2:f32
+pub struct PassUniforms {
+    camera_projection: Mat4,
+    camera_view: Mat4,
+    camera_inv: Mat4,
+    dpi_factor: f32,
+    dpi_dilate: f32,
+    pad1: f32,
+    pad2: f32
 }
 
-impl PassUniforms{
-    pub fn as_slice(&self)->&[f32;std::mem::size_of::<PassUniforms>()>>2]{
-        unsafe{std::mem::transmute(self)}
+impl PassUniforms {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<PassUniforms>() >> 2] {
+        unsafe {std::mem::transmute(self)}
     }
 }
 
 #[derive(Clone, Debug)]
-pub enum PassMatrixMode{
+pub enum PassMatrixMode {
     Ortho,
-    Projection{fov_y:f32, near:f32, far:f32, cam:Mat4}
+    Projection {fov_y: f32, near: f32, far: f32, cam: Mat4}
+}
+
+#[derive(Clone)]
+pub enum CxPassRect {
+    Area(Area),
+    ScaledArea(Area,f64),
+    Size(DVec2)
 }
 
 #[derive(Clone)]
 pub struct CxPass {
     pub debug: bool,
+    pub debug_name: String,
     pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<TextureId>,
     pub clear_depth: PassClearDepth,
+    pub dont_clear: bool,
     pub depth_init: f64,
     pub clear_color: Vec4,
-    pub override_dpi_factor: Option<f64>,
+    pub dpi_factor: Option<f64>,
     pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxPassParent,
     pub paint_dirty: bool,
-    pub pass_size: DVec2,
+    pub pass_rect: Option<CxPassRect>,
     pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
-    pub platform: CxOsPass,
+    pub os: CxOsPass,
 }
 
 impl Default for CxPass {
     fn default() -> Self {
         CxPass {
             debug: false,
+            dont_clear: false,
+            debug_name: String::new(),
             matrix_mode: PassMatrixMode::Ortho,
             zbias_step: 0.001,
             pass_uniforms: PassUniforms::default(),
             color_textures: Vec::new(),
             depth_texture: None,
-            override_dpi_factor: None,
+            dpi_factor: None,
             clear_depth: PassClearDepth::ClearWith(1.0),
             clear_color: Vec4::default(),
             depth_init: 1.0,
             main_draw_list_id: None,
             parent: CxPassParent::None,
             paint_dirty: false,
-            pass_size: DVec2::default(),
-            platform: CxOsPass::default()
+            pass_rect: None,
+            os: CxOsPass::default()
         }
     }
-} 
+}
 
 #[derive(Clone, Debug)]
 pub enum CxPassParent {
@@ -290,8 +325,8 @@ impl CxPass {
     }
     
     pub fn set_matrix(&mut self, offset: DVec2, size: DVec2) {
-         match self.matrix_mode{
-            PassMatrixMode::Ortho=>{
+        match self.matrix_mode {
+            PassMatrixMode::Ortho => {
                 let ortho = Mat4::ortho(
                     offset.x as f32,
                     (offset.x + size.x) as f32,
@@ -305,7 +340,7 @@ impl CxPass {
                 self.pass_uniforms.camera_projection = ortho;
                 self.pass_uniforms.camera_view = Mat4::identity();
             }
-            PassMatrixMode::Projection{fov_y, near, far, cam}=>{
+            PassMatrixMode::Projection {fov_y, near, far, cam} => {
                 let proj = Mat4::perspective(fov_y, (size.x / size.y) as f32, near, far);
                 self.pass_uniforms.camera_projection = proj;
                 self.pass_uniforms.camera_view = cam;

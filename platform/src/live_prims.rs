@@ -1,10 +1,11 @@
 use {
+    std::rc::Rc,
     crate::{
         makepad_live_compiler::*,
         makepad_math::*,
         cx::Cx,
         live_traits::*,
-        state::State
+        live_state::LiveState
     }
 };
 
@@ -25,7 +26,7 @@ macro_rules!live_primitive {
         impl LiveRead for $ ty {
             fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
                 out.push(LiveNode::from_id_value(id, self.to_live_value()));
-            }
+            } 
         }
         impl LiveApply for $ ty {
             //fn type_id(&self) -> TypeId {
@@ -35,6 +36,7 @@ macro_rules!live_primitive {
             $ apply
         }
         impl LiveNew for $ ty {
+            fn live_design_with(_cx:&mut Cx){}
             fn new(_cx: &mut Cx) -> Self {
                 $ default
             }
@@ -58,7 +60,7 @@ live_primitive!(
     LiveValue::None,
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if nodes[index].is_array() {
-            if let Some(_) = State::last_keyframe_value_from_array(index, nodes) {
+            if let Some(_) = LiveState::last_keyframe_value_from_array(index, nodes) {
                 self.apply(cx, from, index, nodes);
             }
             nodes.skip_node(index)
@@ -86,7 +88,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -116,7 +118,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -179,7 +181,7 @@ live_primitive!(
                 nodes.skip_node(index)
             },
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -227,7 +229,7 @@ live_primitive!(
                 nodes.skip_node(index)
             },
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -275,7 +277,7 @@ live_primitive!(
                 nodes.skip_node(index)
             },
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -289,6 +291,54 @@ live_primitive!(
     },
     fn to_live_value(&self) -> LiveValue {
         LiveValue::Int64(*self)
+    }
+);
+
+live_primitive!(
+    i32,
+    0i32,
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Float32(val) => {
+                *self = *val as i32;
+                index + 1
+            }
+            LiveValue::Float64(val) => {
+                *self = *val as i32;
+                index + 1
+            }
+            LiveValue::Int64(val) => {
+                *self = *val as i32;
+                index + 1
+            }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Float64(v) => {*self = v as i32;}
+                        LiveEval::Int64(v) => {*self = v as i32;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            },
+            LiveValue::Array => {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::DSL {..} => nodes.skip_node(index),
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "i64");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::Int64(*self as i64)
     }
 );
 
@@ -323,7 +373,7 @@ live_primitive!(
                 nodes.skip_node(index)
             },
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -371,7 +421,7 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -411,7 +461,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -468,7 +518,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -529,7 +579,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -580,6 +630,10 @@ live_primitive!(
                 *self = Vec4{x:v.x, y:v.y, z:v.z, w:1.0};
                 index + 1
             }
+            LiveValue::Vec4(v) => {
+                *self = Vec4{x:v.x, y:v.y, z:v.z, w:v.w};
+                index + 1
+            }
             LiveValue::Int64(v) => {
                 *self = Vec4::all(*v as f32);
                 index + 1
@@ -597,7 +651,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -648,7 +702,7 @@ live_primitive!(
                 self.push_str(v);
                 index + 1
             }
-            LiveValue::FittedString(v) => {
+            LiveValue::String(v) => {
                 self.clear();
                 self.push_str(v.as_str());
                 index + 1
@@ -658,16 +712,13 @@ live_primitive!(
                 self.push_str(v.as_str());
                 index + 1
             }
-            LiveValue::DocumentString {string_start, string_count} => {
-                let live_registry = cx.live_registry.borrow();
-                let origin_doc = live_registry.token_id_to_origin_doc(nodes[index].origin.token_id().unwrap());
-                origin_doc.get_string(*string_start, *string_count, self);
-                index + 1
-            }
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                        LiveEval::String(v) => {*self = v;}
+                        LiveEval::String(v) => {
+                            self.clear();
+                            self.push_str(v.as_str());                            
+                        }
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
                         }
@@ -677,7 +728,7 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             LiveValue::Array => {
-                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
@@ -695,7 +746,60 @@ live_primitive!(
             LiveValue::InlineString(inline_str)
         }
         else {
-            LiveValue::FittedString(FittedString::from_string(self.clone()))
+            LiveValue::String(Rc::new(self.clone()))
+        }
+    }
+);
+
+live_primitive!(
+    Rc<String>,
+    Default::default(),
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Str(v) => {
+                *self = Rc::new(v.to_string());
+                index + 1
+            }
+            LiveValue::String(v) => {
+                *self = v.clone();
+                index + 1
+            }
+            LiveValue::InlineString(v) => {
+                *self = Rc::new(v.as_str().to_string());
+                index + 1
+            }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::String(v) => {*self = v.clone();}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::Array => {
+                if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "String");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        // lets check our byte size and choose a storage mode appropriately.
+        //let bytes = self.as_bytes();
+        if let Some(inline_str) = InlineString::from_str(&self) {
+            LiveValue::InlineString(inline_str)
+        }
+        else {
+            LiveValue::String(self.clone())
         }
     }
 );
@@ -708,12 +812,12 @@ impl ToLiveValue for &str{
             LiveValue::InlineString(inline_str)
         }
         else {
-            LiveValue::FittedString(FittedString::from_string(self.to_string()))
+            LiveValue::String(Rc::new(self.to_string()))
         }
     }
 }
 
-
+/*
 pub trait LiveIdToEnum{
     fn to_enum(&self) -> LiveValue;
 }
@@ -722,57 +826,39 @@ impl LiveIdToEnum for &[LiveId;1]{
     fn to_enum(&self) -> LiveValue {
         LiveValue::BareEnum(self[0])
     }
-}
+}*/
 
 #[derive(Debug, Default, Clone)]
-pub struct LiveDependency(String);
+pub struct LiveDependency(Rc<String>);
 
 impl LiveDependency{
-    pub fn into_string(self)->String{self.0}
-    pub fn as_ref(&self)->&str{&self.0}
-    pub fn qualify(cx:&Cx, node:&LiveNode)->Self{
-        if let LiveValue::Dependency{string_start, string_count} = node.value{
-            let live_registry = cx.live_registry.borrow();
-            let origin_doc = live_registry.token_id_to_origin_doc(node.origin.token_id().unwrap());
-            let mut path = String::new();
-            origin_doc.get_string(string_start, string_count, &mut path);
-            
-            if let Some(path) = path.strip_prefix("crate://self/"){
-                let file_id = node.origin.token_id().unwrap().file_id().unwrap();
-                let manifest_path = live_registry.file_id_to_cargo_manifest_path(file_id);
-                return Self(format!("{}/{}", manifest_path, path));
-            }
-            else if let Some(path) = path.strip_prefix("crate://"){
-                let mut split = path.split('/');
-                if let Some(crate_name) = split.next(){
-                    if let Some(cmp) = live_registry.crate_name_to_cargo_manifest_path(crate_name){
-                        let mut path = cmp.to_string();
-                        path.push('/');
-                        while let Some(next) = split.next(){
-                            path.push('/');
-                            path.push_str(next);
-                        }
-                        return Self(path);
-                    }
-                }                
-            }
-            else{
-                return Self(path)
-            }
-        }
-        panic!()
-    }
+    pub fn as_str(&self)->&str{&self.0}
+    pub fn as_ref(&self)->&Rc<String>{&self.0}
 }
+
 
 live_primitive!(
     LiveDependency,
     LiveDependency::default(),
     fn apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
-            LiveValue::Dependency {..} => {
-                *self = LiveDependency::qualify(cx, &nodes[index]);
+            LiveValue::Dependency (dep)=> {
+                *self = Self(dep.clone());
                 index + 1
             }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::String(v) => {*self = Self(v.clone());}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            }
+
             _ => {
                 cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Dependency");
                 nodes.skip_node(index)
@@ -781,7 +867,6 @@ live_primitive!(
     },
     fn to_live_value(&self) -> LiveValue { panic!() }
 );
-
 
 
 live_primitive!(

@@ -26,7 +26,7 @@ pub fn live_design_impl(input: TokenStream) -> TokenStream {
         tb.add("        live_type_infos:{");
         tb.add("            let mut v = Vec::new();");
         for live_type in &live_types {
-            tb.stream(Some(live_type.clone())).add("::live_design(cx);");
+            tb.stream(Some(live_type.clone())).add("::live_design_with(cx);");
             tb.add("        v.push(").stream(Some(live_type.clone())).add("::live_type_info(cx));");
         }
         tb.add("            v");
@@ -103,11 +103,11 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
             }
         }
         
-        #[cfg(not(feature = "nightly"))]
+        #[cfg(not(lines))]
         fn delta_whitespace(_now: Lc, _needed: Lc, _out: &mut String) {
         }
         
-        #[cfg(feature = "nightly")]
+        #[cfg(lines)]
         fn delta_whitespace(now: Lc, needed: Lc, out: &mut String) {
             if now.line == needed.line {
                 for _ in now.column..needed.column {
@@ -128,7 +128,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
             *last_end = Some(lc_from_start(span));
         }
         
-        #[cfg(not(feature = "nightly"))]
+        #[cfg(not(lines))]
         let mut last_tt = None;
         
         while !parser.eat_eot() {
@@ -153,7 +153,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
             }
             else {
                 if let Some(tt) = &parser.current {
-                    #[cfg(not(feature = "nightly"))]
+                    #[cfg(not(lines))]
                     {
                         fn is_ident(tt: &TokenTree) -> bool {
                             if let TokenTree::Ident(_) = tt {
@@ -186,7 +186,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
                         }
                         last_tt = Some(tt.clone());
                     };
-                    #[cfg(feature = "nightly")]
+                    #[cfg(lines)]
                     {
                         let start = lc_from_start(span);
                         delta_whitespace(last_end.unwrap(), start, out);
@@ -203,16 +203,16 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
 
 // Span fallback API
 
-#[cfg(not(feature = "nightly"))]
+#[cfg(not(lines))]
 use proc_macro::TokenTree;
 
-#[cfg(not(feature = "nightly"))]
+#[cfg(not(lines))]
 struct SpanFallbackApiInfo {
     line: usize,
     column: usize
 }
 
-#[cfg(not(feature = "nightly"))]
+#[cfg(not(lines))]
 trait SpanFallbackApi {
     fn start(&self) -> SpanFallbackApiInfo {
         SpanFallbackApiInfo {line: 1, column: 1}
@@ -222,5 +222,5 @@ trait SpanFallbackApi {
     }
 }
 
-#[cfg(not(feature = "nightly"))]
+#[cfg(not(lines))]
 impl SpanFallbackApi for Span {}
