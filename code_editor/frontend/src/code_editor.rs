@@ -25,14 +25,32 @@ live_design! {
         }
 
         fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.border_radius);
+            let sdf = Sdf2d::viewport(self.rect_pos + self.pos * self.rect_size);
             if self.prev_w > 0.0 {
-                sdf.box(self.prev_x, -self.rect_size.y, self.prev_w, self.rect_size.y, self.border_radius);
+                sdf.box(
+                    self.prev_x,
+                    self.rect_pos.y - self.rect_size.y,
+                    self.prev_w,
+                    self.rect_size.y,
+                    self.border_radius
+                );
                 sdf.gloop(self.gloopiness);
             }
+            sdf.box(
+                self.rect_pos.x,
+                self.rect_pos.y,
+                self.rect_size.x,
+                self.rect_size.y,
+                self.border_radius
+            );
             if self.next_w > 0.0 {
-                sdf.box(self.next_x, self.rect_size.y, self.next_w, self.rect_size.y, self.border_radius);
+                sdf.box(
+                    self.next_x,
+                    self.rect_pos.y + self.rect_size.y,
+                    self.next_w,
+                    self.rect_size.y,
+                    self.border_radius
+                );
                 sdf.gloop(self.gloopiness);
             }
             return sdf.fill(#08f8);
