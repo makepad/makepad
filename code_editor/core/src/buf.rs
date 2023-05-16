@@ -4,8 +4,7 @@ use crate::{CursorSet, Diff, Hist, Text};
 pub struct Buf {
     text: Text,
     hist: Hist,
-    cursors_before: CursorSet,
-    diff: Diff,
+    edit_group: Option<EditGroup>,
 }
 
 impl Buf {
@@ -13,8 +12,7 @@ impl Buf {
         Self {
             text,
             hist: Hist::new(),
-            cursors_before: CursorSet::new(),
-            diff: Diff::new(),
+            edit_group: None,
         }
     }
 
@@ -22,41 +20,65 @@ impl Buf {
         &self.text
     }
 
-    pub fn begin_commit(&mut self, cursors_before: CursorSet) {
-        self.cursors_before = cursors_before;
+    pub fn end_edit_group(&mut self) {
+        if let Some(edit_group) = self.edit_group.take() {
+            self.hist.commit(edit_group.cursors_before, edit_group.diff);
+        }
     }
 
-    pub fn end_commit(&mut self) {
-        use std::mem;
-
-        self.hist.commit(
-            mem::take(&mut self.cursors_before),
-            mem::take(&mut self.diff),
-        );
-    }
-
-    pub fn apply_diff(&mut self, diff: Diff) {
+    pub fn edit(&mut self, kind: EditKind, cursors_before: &CursorSet, diff: Diff) {
         use std::mem;
 
         self.text.apply_diff(diff.clone());
-        self.diff = mem::take(&mut self.diff).compose(diff);
+        if self
+            .edit_group
+            .as_ref()
+            .map_or(false, |edit_group| edit_group.kind != kind)
+        {
+            self.end_edit_group();
+        }
+        let edit_group = self.edit_group.get_or_insert(EditGroup {
+            kind,
+            cursors_before: cursors_before.clone(),
+            diff: Diff::new(),
+        });
+        edit_group.diff = mem::take(&mut edit_group.diff).compose(diff);
     }
 
     pub fn undo(&mut self) -> Option<(CursorSet, Diff)> {
-        if let Some((cursors_before, diff)) = self.hist.undo() {
+        if self.edit_group.is_some() {
+            self.end_edit_group();
+        }
+        if let Some((cursors, diff)) = self.hist.undo() {
             self.text.apply_diff(diff.clone());
-            Some((cursors_before, diff))
+            Some((cursors, diff))
         } else {
             None
         }
     }
 
-    pub fn redo(&mut self) -> Option<(Diff, CursorSet)> {
-        if let Some((diff, cursors_after)) = self.hist.redo() {
+    pub fn redo(&mut self) -> Option<(CursorSet, Diff)> {
+        if self.edit_group.is_some() {
+            return None;
+        }
+        if let Some((cursors, diff)) = self.hist.redo() {
             self.text.apply_diff(diff.clone());
-            Some((diff, cursors_after))
+            Some((cursors, diff))
         } else {
             None
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EditKind {
+    Insert,
+    Delete,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EditGroup {
+    kind: EditKind,
+    cursors_before: CursorSet,
+    diff: Diff,
 }

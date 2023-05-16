@@ -20,7 +20,7 @@ impl Hist {
         Some((rev.cursors_before, rev.diff.revert()))
     }
 
-    pub fn redo(&mut self) -> Option<(Diff, CursorSet)> {
+    pub fn redo(&mut self) -> Option<(CursorSet, Diff)> {
         if self.rev_id == self.revs.len() - 1 {
             return None;
         }
@@ -28,7 +28,7 @@ impl Hist {
         let rev = self.revs[self.rev_id].clone();
         let mut cursors_after = rev.cursors_before;
         cursors_after.apply_diff(&rev.diff, true);
-        Some((rev.diff, cursors_after))
+        Some((cursors_after, rev.diff))
     }
 
     pub fn commit(&mut self, cursors_before: CursorSet, diff: Diff) {
@@ -51,7 +51,7 @@ impl Default for Hist {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct Rev {
-    cursors_before: CursorSet,
-    diff: Diff,
+pub struct Rev {
+    pub cursors_before: CursorSet,
+    pub diff: Diff,
 }

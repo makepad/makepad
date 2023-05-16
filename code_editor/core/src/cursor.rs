@@ -37,10 +37,20 @@ impl Cursor {
         f: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>),
     ) -> Self {
         let (caret, column) = f(self.caret, self.column);
-        Self {
+        let mut cursor = Self {
             caret,
             column,
-            anchor: if select { self.anchor } else { self.caret },
+            ..self
+        };
+        if !select {
+            cursor = cursor.reset_anchor();
+        }
+        cursor
+    }
+
+    pub fn reset_anchor(self) -> Self {
+        Self {
+            anchor: self.caret,
             ..self
         }
     }
@@ -82,9 +92,9 @@ impl Cursor {
         if local {
             Self {
                 caret: self.caret.apply_diff(diff, true),
-                anchor: self.caret,
                 ..self
             }
+            .reset_anchor()
         } else {
             match self.caret.cmp(&self.anchor) {
                 Ordering::Less => Self {
@@ -94,9 +104,9 @@ impl Cursor {
                 },
                 Ordering::Equal => Self {
                     caret: self.caret.apply_diff(diff, true),
-                    anchor: self.caret,
                     ..self
-                },
+                }
+                .reset_anchor(),
                 Ordering::Greater => Self {
                     caret: self.caret.apply_diff(diff, true),
                     anchor: self.anchor.apply_diff(diff, false),

@@ -1,5 +1,5 @@
 use {
-    crate::{arena::Id, move_ops, Arena, Buf, CursorSet, Diff, Event, Text},
+    crate::{arena::Id, buf::EditKind, move_ops, Arena, Buf, CursorSet, Diff, Event, Pos, Text},
     std::{
         cell::{RefCell, RefMut},
         collections::HashSet,
@@ -109,57 +109,49 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Backspace,
                 ..
             }) => {
-                self.edit(edit_ops::delete(self.model.buf.text(), &self.view.cursors));
+                self.edit(
+                    EditKind::Delete,
+                    edit_ops::delete(self.model.buf.text(), &self.view.cursors),
+                );
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
                 ..
             }) => {
                 let replace_with = ["".to_string(), "".to_string()].into();
-                self.edit(edit_ops::insert(
-                    self.model.buf.text(),
-                    &self.view.cursors,
-                    &replace_with,
-                ));
+                self.edit(
+                    EditKind::Insert,
+                    edit_ops::insert(self.model.buf.text(), &self.view.cursors, &replace_with),
+                );
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Left,
             }) => {
-                self.view.cursors.update_all(|region| {
-                    region.do_move(shift, |pos, _| {
-                        (move_ops::move_left(self.model.buf.text(), pos), None)
-                    })
-                });
+                self.do_move(shift, |text, pos, _| (move_ops::move_left(text, pos), None));
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Up,
             }) => {
-                self.view.cursors.update_all(|region| {
-                    region.do_move(shift, |pos, column| {
-                        move_ops::move_up(self.model.buf.text(), pos, column)
-                    })
+                self.do_move(shift, |text, pos, column| {
+                    move_ops::move_up(text, pos, column)
                 });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Right,
             }) => {
-                self.view.cursors.update_all(|region| {
-                    region.do_move(shift, |pos, _| {
-                        (move_ops::move_right(self.model.buf.text(), pos), None)
-                    })
+                self.do_move(shift, |text, pos, _| {
+                    (move_ops::move_right(text, pos), None)
                 });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Down,
             }) => {
-                self.view.cursors.update_all(|region| {
-                    region.do_move(shift, |pos, column| {
-                        move_ops::move_down(self.model.buf.text(), pos, column)
-                    })
+                self.do_move(shift, |text, pos, column| {
+                    move_ops::move_down(text, pos, column)
                 });
             }
             Event::Key(KeyEvent {
@@ -184,32 +176,44 @@ impl<'a> HandleEventContext<'a> {
             }
             Event::Text(TextEvent { string }) => {
                 let replace_with = string.into();
-                self.edit(edit_ops::insert(
-                    self.model.buf.text(),
-                    self.view.cursors.iter(),
-                    &replace_with,
-                ));
+                self.edit(
+                    EditKind::Insert,
+                    edit_ops::insert(
+                        self.model.buf.text(),
+                        self.view.cursors.iter(),
+                        &replace_with,
+                    ),
+                );
             }
             _ => {}
         }
     }
 
-    fn edit(&mut self, diff: Diff) {
-        self.model.buf.begin_commit(self.view.cursors.clone());
-        self.model.buf.apply_diff(diff.clone());
-        self.model.buf.end_commit();
+    fn do_move(
+        &mut self,
+        select: bool,
+        mut f: impl FnMut(&Text, Pos, Option<usize>) -> (Pos, Option<usize>),
+    ) {
+        self.view.cursors.update_all(|cursor| {
+            cursor.do_move(select, |pos, column| f(self.model.buf.text(), pos, column))
+        });
+        self.model.buf.end_edit_group();
+    }
+
+    fn edit(&mut self, kind: EditKind, diff: Diff) {
+        self.model.buf.edit(kind, &self.view.cursors, diff.clone());
         self.update_views(None, &diff);
     }
 
     fn undo(&mut self) {
-        if let Some((cursors_before, diff)) = self.model.buf.undo() {
-            self.update_views(Some(cursors_before), &diff);
+        if let Some((cursors, diff)) = self.model.buf.undo() {
+            self.update_views(Some(cursors), &diff);
         }
     }
 
     fn redo(&mut self) {
-        if let Some((diff, cursors_after)) = self.model.buf.redo() {
-            self.update_views(Some(cursors_after), &diff);
+        if let Some((cursors, diff)) = self.model.buf.redo() {
+            self.update_views(Some(cursors), &diff);
         }
     }
 
