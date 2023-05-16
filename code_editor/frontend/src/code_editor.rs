@@ -129,7 +129,7 @@ impl<'a> Drawer<'a> {
     }
 
     fn draw_line(&mut self, cx: &mut Cx2d, line: &str) {
-        use makepad_code_editor_core::str::StrExt;
+        use makepad_code_editor_core::StrExt;
 
         self.check_cursor_start(cx);
         for grapheme in line.graphemes() {

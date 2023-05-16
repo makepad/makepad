@@ -31,21 +31,16 @@ impl Cursor {
         }
     }
 
-    pub fn apply_motion(
+    pub fn do_move(
         self,
-        motion: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>),
+        select: bool,
+        f: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>),
     ) -> Self {
-        let (caret, column) = motion(self.caret, self.column);
+        let (caret, column) = f(self.caret, self.column);
         Self {
             caret,
             column,
-            ..self
-        }
-    }
-
-    pub fn clear(self) -> Self {
-        Self {
-            anchor: self.caret,
+            anchor: if select { self.anchor } else { self.caret },
             ..self
         }
     }
@@ -87,9 +82,9 @@ impl Cursor {
         if local {
             Self {
                 caret: self.caret.apply_diff(diff, true),
+                anchor: self.caret,
                 ..self
             }
-            .clear()
         } else {
             match self.caret.cmp(&self.anchor) {
                 Ordering::Less => Self {
@@ -99,9 +94,9 @@ impl Cursor {
                 },
                 Ordering::Equal => Self {
                     caret: self.caret.apply_diff(diff, true),
+                    anchor: self.caret,
                     ..self
-                }
-                .clear(),
+                },
                 Ordering::Greater => Self {
                     caret: self.caret.apply_diff(diff, true),
                     anchor: self.anchor.apply_diff(diff, false),

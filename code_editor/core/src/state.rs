@@ -1,5 +1,5 @@
 use {
-    crate::{arena::Id, mv, Arena, Buf, CursorSet, Diff, Event, Text},
+    crate::{arena::Id, move_ops, Arena, Buf, CursorSet, Diff, Event, Text},
     std::{
         cell::{RefCell, RefMut},
         collections::HashSet,
@@ -102,21 +102,21 @@ struct HandleEventContext<'a> {
 
 impl<'a> HandleEventContext<'a> {
     fn handle_event(&mut self, event: Event) {
-        use crate::{edit, event::*};
+        use crate::{edit_ops, event::*};
 
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Backspace,
                 ..
             }) => {
-                self.edit(edit::delete(self.model.buf.text(), &self.view.cursors));
+                self.edit(edit_ops::delete(self.model.buf.text(), &self.view.cursors));
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
                 ..
             }) => {
                 let replace_with = ["".to_string(), "".to_string()].into();
-                self.edit(edit::insert(
+                self.edit(edit_ops::insert(
                     self.model.buf.text(),
                     &self.view.cursors,
                     &replace_with,
@@ -127,12 +127,9 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Left,
             }) => {
                 self.view.cursors.update_all(|region| {
-                    let mut region = region
-                        .apply_motion(|pos, _| (mv::move_left(self.model.buf.text(), pos), None));
-                    if !shift {
-                        region = region.clear();
-                    }
-                    region
+                    region.do_move(shift, |pos, _| {
+                        (move_ops::move_left(self.model.buf.text(), pos), None)
+                    })
                 });
             }
             Event::Key(KeyEvent {
@@ -140,13 +137,9 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Up,
             }) => {
                 self.view.cursors.update_all(|region| {
-                    let mut region = region.apply_motion(|pos, column| {
-                        mv::move_up(self.model.buf.text(), pos, column)
-                    });
-                    if !shift {
-                        region = region.clear();
-                    }
-                    region
+                    region.do_move(shift, |pos, column| {
+                        move_ops::move_up(self.model.buf.text(), pos, column)
+                    })
                 });
             }
             Event::Key(KeyEvent {
@@ -154,12 +147,9 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Right,
             }) => {
                 self.view.cursors.update_all(|region| {
-                    let mut region = region
-                        .apply_motion(|pos, _| (mv::move_right(self.model.buf.text(), pos), None));
-                    if !shift {
-                        region = region.clear();
-                    }
-                    region
+                    region.do_move(shift, |pos, _| {
+                        (move_ops::move_right(self.model.buf.text(), pos), None)
+                    })
                 });
             }
             Event::Key(KeyEvent {
@@ -167,13 +157,9 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Down,
             }) => {
                 self.view.cursors.update_all(|region| {
-                    let mut region = region.apply_motion(|pos, column| {
-                        mv::move_down(self.model.buf.text(), pos, column)
-                    });
-                    if !shift {
-                        region = region.clear();
-                    }
-                    region
+                    region.do_move(shift, |pos, column| {
+                        move_ops::move_down(self.model.buf.text(), pos, column)
+                    })
                 });
             }
             Event::Key(KeyEvent {
@@ -198,7 +184,7 @@ impl<'a> HandleEventContext<'a> {
             }
             Event::Text(TextEvent { string }) => {
                 let replace_with = string.into();
-                self.edit(edit::insert(
+                self.edit(edit_ops::insert(
                     self.model.buf.text(),
                     self.view.cursors.iter(),
                     &replace_with,

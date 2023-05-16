@@ -55,7 +55,7 @@ fn is_at_end_of_line(text: &Text, pos: Pos) -> bool {
 }
 
 fn move_to_next_grapheme(text: &Text, pos: Pos) -> Pos {
-    use crate::str::StrExt;
+    use crate::StrExt;
 
     Pos {
         line: pos.line,
@@ -66,7 +66,7 @@ fn move_to_next_grapheme(text: &Text, pos: Pos) -> Pos {
 }
 
 fn move_to_prev_grapheme(text: &Text, pos: Pos) -> Pos {
-    use crate::str::StrExt;
+    use crate::StrExt;
 
     Pos {
         line: pos.line,

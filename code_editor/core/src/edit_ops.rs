@@ -16,13 +16,13 @@ pub fn insert(text: &Text, cursors: impl IntoIterator<Item = Cursor>, replace_wi
 }
 
 pub fn delete(text: &Text, cursors: impl IntoIterator<Item = Cursor>) -> Diff {
-    use crate::{diff, mv, Pos, Range};
+    use crate::{diff, move_ops, Pos, Range};
 
     let mut builder = diff::Builder::new();
     let mut prev_cursor_end = Pos::default();
     for cursor in cursors {
         if cursor.is_empty() {
-            let start = mv::move_left(text, cursor.caret);
+            let start = move_ops::move_left(text, cursor.caret);
             builder.retain(start - prev_cursor_end);
             builder.delete(text.get(Range {
                 start,
