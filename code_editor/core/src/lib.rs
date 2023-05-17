@@ -7,6 +7,7 @@ pub mod edit_ops;
 pub mod event;
 pub mod hist;
 pub mod len;
+pub mod layout;
 pub mod move_ops;
 pub mod pos;
 pub mod range;

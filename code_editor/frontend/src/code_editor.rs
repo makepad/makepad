@@ -1,5 +1,5 @@
 use {
-    makepad_code_editor_core::{cursor_set, event, state::ViewId, Cursor, Pos, State, Text},
+    makepad_code_editor_core::{layout, cursor_set, event, state::ViewId, Cursor, Pos, State, Text},
     makepad_widgets::*,
     std::iter::Peekable,
 };
@@ -93,8 +93,9 @@ impl CodeEditor {
                 draw_caret: &mut self.draw_caret,
                 cursors: sel.iter().peekable(),
                 active_cursor: None,
-                text_pos: Pos::default(),
-                screen_pos: DVec2::default(),
+                pos: Pos::default(),
+                layout_pos: layout::Pos::default(),
+                screen_pos: DVec2::new(),
                 cell_size,
                 prev_sel_rect: None,
                 sel_rect: None,
@@ -132,7 +133,8 @@ struct Drawer<'a> {
     draw_caret: &'a mut DrawColor,
     cursors: Peekable<cursor_set::Iter<'a>>,
     active_cursor: Option<ActiveCursor>,
-    text_pos: Pos,
+    pos: Pos,
+    layout_pos: layout::Pos,
     screen_pos: DVec2,
     cell_size: DVec2,
     prev_sel_rect: Option<Rect>,
@@ -147,40 +149,57 @@ impl<'a> Drawer<'a> {
     }
 
     fn draw_line(&mut self, cx: &mut Cx2d, line: &str) {
-        use makepad_code_editor_core::StrExt;
+        use makepad_code_editor_core::layout::EventKind;
 
-        self.check_cursor_start(cx);
-        for grapheme in line.graphemes() {
-            self.check_cursor_end(cx);
-            self.draw_grapheme(cx, grapheme);
-            self.text_pos.byte += grapheme.len();
-            self.screen_pos.x += self.cell_size.x;
-            self.check_cursor_start(cx);
-        }
-        self.check_cursor_end(cx);
-        if let Some(&active_cursor) = self.active_cursor.as_ref() {
-            self.push_sel_rect(cx, active_cursor.start_x(self.text_pos.line));
-        }
-        self.text_pos.byte = 0;
-        self.text_pos.line += 1;
-        self.screen_pos.x = 0.0;
-        self.screen_pos.y += self.cell_size.y;
+        let start_row = self.layout_pos.row;
+        layout::layout(line, |event| {
+            self.pos.byte = event.byte;
+            self.layout_pos = layout::Pos {
+                row: start_row + event.pos.row,
+                column: event.pos.column,
+            };
+            self.screen_pos = DVec2 {
+                x: self.layout_pos.column as f64 * self.cell_size.x,
+                y: self.layout_pos.row as f64 * self.cell_size.y,
+            };
+            match event.kind {
+                EventKind::LineStart => self.check_cursor_start(cx),
+                EventKind::LineEnd => {
+                    self.check_cursor_end(cx);
+                    if let Some(&active_cursor) = self.active_cursor.as_ref() {
+                        self.push_sel_rect(cx, active_cursor.start_x(self.layout_pos.row));
+                    }
+                }
+                EventKind::GraphemeStart(grapheme) => {
+                    self.check_cursor_end(cx);
+                    self.draw_grapheme(cx, grapheme);
+                }
+                EventKind::GraphemeEnd(_) => {
+                    self.check_cursor_start(cx);
+                }
+            }
+        });
+        self.pos.line += 1;
+        self.pos.byte = 0;
+        self.layout_pos.row += 1;
+        self.layout_pos.column = 0;
     }
 
     fn check_cursor_start(&mut self, cx: &mut Cx2d) {
         if self
             .cursors
             .peek()
-            .map_or(false, |cursor| cursor.start() == self.text_pos)
+            .map_or(false, |cursor| cursor.start() == self.pos)
         {
             let cursor = self.cursors.next().unwrap();
             self.begin_sel();
-            if cursor.caret == self.text_pos {
+            if cursor.caret == self.pos {
                 self.draw_caret(cx);
             }
             self.active_cursor = Some(ActiveCursor {
                 cursor: cursor,
-                first_line_start_x: self.screen_pos.x,
+                first_row: self.layout_pos.row,
+                first_row_start_x: self.screen_pos.x,
             });
         }
     }
@@ -189,12 +208,12 @@ impl<'a> Drawer<'a> {
         if self
             .active_cursor
             .as_ref()
-            .map_or(false, |cursor| cursor.cursor.end() == self.text_pos)
+            .map_or(false, |cursor| cursor.cursor.end() == self.pos)
         {
             let active_cursor = self.active_cursor.take().unwrap();
-            self.push_sel_rect(cx, active_cursor.start_x(self.text_pos.line));
+            self.push_sel_rect(cx, active_cursor.start_x(self.pos.line));
             self.end_sel(cx);
-            if active_cursor.cursor.caret == self.text_pos {
+            if active_cursor.cursor.caret == self.pos {
                 self.draw_caret(cx);
             }
         }
@@ -264,16 +283,17 @@ impl<'a> Drawer<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct ActiveCursor {
     cursor: Cursor,
-    first_line_start_x: f64,
+    first_row: usize,
+    first_row_start_x: f64,
 }
 
 impl ActiveCursor {
-    fn start_x(self, line: usize) -> f64 {
-        if self.cursor.start().line == line {
-            self.first_line_start_x
+    fn start_x(self, row: usize) -> f64 {
+        if row == self.first_row {
+            self.first_row_start_x
         } else {
             0.0
         }
