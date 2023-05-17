@@ -70,7 +70,7 @@ impl BinaryMessageHeader{
         
         if len < 126{
             data[1] = len as u8;
-            return BinaryMessageHeader{len:2, data}
+            BinaryMessageHeader{len:2, data}
         }
         else if len < 65536{
             data[1] = 126; 
@@ -138,7 +138,7 @@ impl WebSocket {
             self.head_written += 1;
             self.head_expected -= 1;
         }
-        return self.head_expected != 0
+        self.head_expected != 0
     }
     
     fn to_state(&mut self, state: State) {
@@ -273,18 +273,16 @@ impl WebSocket {
                         else if self.is_pong {
                             result(Ok(WebSocketMessage::Pong(&self.data)));
                         }
-                        else {
-                            if self.is_text{
-                                if let Ok(text) = std::str::from_utf8(&self.data){
-                                    result(Ok(WebSocketMessage::Text(text)));
-                                }
-                                else{
-                                    result(Err(WebSocketError::TextNotUTF8(&self.data)))
-                                }
+                        else if self.is_text{
+                            if let Ok(text) = std::str::from_utf8(&self.data){
+                                result(Ok(WebSocketMessage::Text(text)));
                             }
                             else{
-                                result(Ok(WebSocketMessage::Binary(&self.data)));
+                                result(Err(WebSocketError::TextNotUTF8(&self.data)))
                             }
+                        }
+                        else{
+                            result(Ok(WebSocketMessage::Binary(&self.data)));
                         }
                         
                         self.to_state(State::Opcode);

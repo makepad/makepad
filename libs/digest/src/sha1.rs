@@ -10,7 +10,7 @@ pub struct Sha1 {
 impl Sha1 {
     pub fn new() -> Sha1 {
         Self {
-            state: SHA1_INIT_STATE.clone(),
+            state: SHA1_INIT_STATE,
             block: [0u8; U8_BLOCK_LEN],
             in_block: 0,
             total: 0

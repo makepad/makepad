@@ -21,16 +21,16 @@
 
 pub fn hex_bytes_to_u32(buf: &[u8]) -> Result<u32, ()> {
     fn hex_to_int(c: u8) -> Result<u32, ()> {
-        if c >= 48 && c <= 57 {
+        if (48..=57).contains(&c) {
             return Ok((c - 48) as u32);
         }
-        if c >= 65 && c <= 70 {
+        if (65..=70).contains(&c) {
             return Ok((c - 65 + 10) as u32);
         }
-        if c >= 97 && c <= 102 {
+        if (97..=102).contains(&c) {
             return Ok((c - 97 + 10) as u32);
         }
-        return Err(());
+        Err(())
     }
     
     match buf.len() {
@@ -75,5 +75,5 @@ pub fn hex_bytes_to_u32(buf: &[u8]) -> Result<u32, ()> {
         }
         _ => (),
     }
-    return Err(());
+    Err(())
 } 
