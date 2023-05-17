@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use makepad_toml_parser;
+
 use makepad_toml_parser::Toml;
 use makepad_digest::sha1;
 use makepad_base64::base64;
@@ -171,7 +171,7 @@ fn main() {
 }
 
 fn patch_cargo(cargo: &Path, toml_path: &str, with: &str, write: bool) {
-    let old_cargo = fs::read_to_string(&cargo).unwrap();
+    let old_cargo = fs::read_to_string(cargo).unwrap();
     let toml = makepad_toml_parser::parse_toml(&old_cargo).unwrap();
     
     if let Some(Toml::Str(_, span)) = toml.get(toml_path) {
@@ -188,7 +188,7 @@ fn patch_cargo(cargo: &Path, toml_path: &str, with: &str, write: bool) {
         }
         // lets write it back to disk
         if write {
-            fs::File::create(&cargo).unwrap().write_all(new_cargo.as_bytes()).unwrap();
+            fs::File::create(cargo).unwrap().write_all(new_cargo.as_bytes()).unwrap();
             println!("Updating {:?} with {}", cargo, with);
         }
         else {

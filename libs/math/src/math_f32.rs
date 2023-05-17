@@ -43,7 +43,7 @@ impl Transform {
     pub fn to_mat4(&self) -> Mat4 {
         let q = self.orientation;
         let t = self.position;
-        return Mat4 {v: [
+        Mat4 {v: [
             (1.0 - 2.0 * q.b * q.b - 2.0 * q.c * q.c),
             (2.0 * q.a * q.b - 2.0 * q.c * q.d),
             (2.0 * q.a * q.c + 2.0 * q.b * q.d),
@@ -96,15 +96,15 @@ impl Vec2 {
     }
     
     pub fn all(x: f32) -> Vec2 {
-        Vec2 {x: x, y: x}
+        Vec2 {x, y: x}
     }
     
     pub fn from_lerp(a: Vec2, b: Vec2, f: f32) -> Vec2 {
         let nf = 1.0 - f;
-        return Vec2{
+        Vec2{
             x: nf * a.x + f * b.x,
             y: nf * a.y + f * b.y,
-        };
+        }
     }
     
     pub fn distance(&self, other: &Vec2) -> f32 {
@@ -141,8 +141,8 @@ pub fn vec2(x: f32, y: f32) -> Vec2 {Vec2 {x, y}}
 pub fn vec3(x: f32, y: f32, z: f32) -> Vec3 {Vec3 {x, y, z}}
 pub fn vec4(x: f32, y: f32, z: f32, w: f32) -> Vec4 {Vec4 {x, y, z, w}}
 
-const TORAD: f32 = 0.017453292519943295;
-const TODEG: f32 = 57.295779513082321;
+const TORAD: f32 = 0.017_453_292;
+const TODEG: f32 = 57.295_78;
 
 /*
 pub fn vec2(x:f32, y:f32)->Vec2{
@@ -167,7 +167,7 @@ impl Vec3 {
     }
     
     pub fn all(x: f32) -> Vec3 {
-        Vec3 {x: x, y: x, z: x}
+        Vec3 {x, y: x, z: x}
     }
     
     pub fn to_vec2(&self) -> Vec2 {
@@ -232,7 +232,7 @@ impl Plane {
     
     pub fn from_points(p1: Vec3, p2: Vec3, p3: Vec3) -> Self {
         let normal = Vec3::cross(p2 - p1, p3 - p1);
-        return Self::from_point_normal(p1, normal);
+        Self::from_point_normal(p1, normal)
     }
     
     pub fn intersect_line(&self, v1: Vec3, v2: Vec3) -> Vec3 {
@@ -242,7 +242,7 @@ impl Plane {
             return (v1 * v2) * 0.5
         }
         let u = (self.a * v1.x + self.b * v1.y + self.c * v1.z + self.d) / denom;
-        return v1 + (v2 - v1) * u
+        v1 + (v2 - v1) * u
     }
 }
 
@@ -284,12 +284,12 @@ impl Vec4 {
     
     pub fn from_lerp(a: Vec4, b: Vec4, f: f32) -> Vec4 {
         let nf = 1.0 - f;
-        return Vec4 {
+        Vec4 {
             x: nf * a.x + f * b.x,
             y: nf * a.y + f * b.y,
             z: nf * a.z + f * b.z,
             w: nf * a.w + f * b.w,
-        };
+        }
     }
     
     pub fn is_equal_enough(&self, other: &Vec4, epsilon:f32) -> bool {
@@ -328,7 +328,7 @@ impl Vec4 {
         
         let d = q0 - q3.min(q1);
         let e = 1.0e-10;
-        return Vec4 {
+        Vec4 {
             x: (q2 + (q3 - q1) / (6.0 * d + e)).abs(),
             y: d / (q0 + e),
             z: q0,
@@ -342,7 +342,7 @@ impl Vec4 {
             x: ((val >> 24) & 0xff) as f32 / 255.0,
             y: ((val >> 16) & 0xff) as f32 / 255.0,
             z: ((val >> 8) & 0xff) as f32 / 255.0,
-            w: ((val >> 0) & 0xff) as f32 / 255.0,
+            w: (val & 0xff) as f32 / 255.0,
         }
     }
     
@@ -351,7 +351,7 @@ impl Vec4 {
         let g = (self.y * 255.0) as u8 as u32;
         let b = (self.z * 255.0) as u8 as u32;
         let a = (self.w * 255.0) as u8 as u32;
-        return (r<<24)|(g<<16)|(b<<8)|a;
+        (r<<24)|(g<<16)|(b<<8)|a
     }
 
     pub fn xy(&self) -> Vec2 {
@@ -420,7 +420,7 @@ impl Quat {
     }
     
     pub fn length(self) -> f32 {
-        return self.dot(self).sqrt()
+        self.dot(self).sqrt()
     }
     
     pub fn normalized(&mut self) -> Quat {
@@ -443,7 +443,7 @@ pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4{
 
 impl Mat4 {
     pub fn identity() -> Mat4 {
-        return Mat4 {v: [
+        Mat4 {v: [
             1.0,
             0.0,
             0.0,
@@ -545,7 +545,7 @@ impl Mat4 {
         let m9 = s * (sy * sz + cy * sx * cz);
         let m10 = s * (cx * cy);
         */
-        return Mat4 {v: [
+        Mat4 {v: [
             m0,
             m4,
             m8,
@@ -568,7 +568,7 @@ impl Mat4 {
     pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
         let f = 1.0 / f32::tan(fov_y * TORAD / 2.0);
         let nf = 1.0 / (near - far);
-        return Mat4 {v: [
+        Mat4 {v: [
             f / aspect,
             0.0,
             0.0,
@@ -589,7 +589,7 @@ impl Mat4 {
     }
     
     pub fn translation(x: f32, y: f32, z: f32) -> Mat4 {
-        return Mat4 {v: [
+        Mat4 {v: [
             1.0,
             0.0,
             0.0,
@@ -611,7 +611,7 @@ impl Mat4 {
     }
     
     pub fn scaled_translation(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
-        return Mat4 {v: [
+        Mat4 {v: [
             s,
             0.0,
             0.0,
@@ -633,7 +633,7 @@ impl Mat4 {
     }
     
     pub fn rotation(rx: f32, ry: f32, rz: f32) -> Mat4 {
-        const TORAD: f32 = 0.017453292519943295;
+        const TORAD: f32 = 0.017_453_292;
         let cx = f32::cos(rx * TORAD);
         let cy = f32::cos(ry * TORAD);
         let cz = f32::cos(rz * TORAD);
@@ -649,7 +649,7 @@ impl Mat4 {
         let m8 = -sy * cz + cy * sx * sz;
         let m9 = sy * sz + cy * sx * cz;
         let m10 = cx * cy;
-        return Mat4 {v: [
+        Mat4 {v: [
             m0,
             m4,
             m8,
@@ -679,7 +679,7 @@ impl Mat4 {
             0.0, 0.0, 2.0 * nf, (far + near) * nf,
             0.0, 0.0, 0.0, 1.0
         ]}*/
-        return Mat4 {v: [
+        Mat4 {v: [
             -2.0 * lr * scalex,
             0.0,
             0.0,
@@ -713,7 +713,7 @@ impl Mat4 {
         // this is probably stupid. Programmed JS for too long.
         let a = &a.v;
         let b = &b.v;
-        fn d(i: &[f32; 16], x: usize, y: usize) -> f32 {return i[x + 4 * y]}
+        fn d(i: &[f32; 16], x: usize, y: usize) -> f32 {i[x + 4 * y]}
         Mat4 {
             v: [
                 d(a, 0, 0) * d(b, 0, 0) + d(a, 1, 0) * d(b, 0, 1) + d(a, 2, 0) * d(b, 0, 2) + d(a, 3, 0) * d(b, 0, 3),
@@ -776,7 +776,7 @@ impl Mat4 {
         }
         
         let idet = 1.0 / det;
-        return Mat4 {
+        Mat4 {
             v: [
                 (a11 * b11 - a12 * b10 + a13 * b09) * idet,
                 (a02 * b10 - a01 * b11 - a03 * b09) * idet,

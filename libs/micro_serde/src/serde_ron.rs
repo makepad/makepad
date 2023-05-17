@@ -63,6 +63,7 @@ pub trait DeRon: Sized {
 }
 
 #[derive(PartialEq, Debug)]
+#[derive(Default)]
 pub enum DeRonTok {
     Ident,
     Str,
@@ -79,13 +80,12 @@ pub enum DeRonTok {
     BlockOpen,
     BlockClose,
     Comma,
+    #[default]
     Bof,
     Eof
 }
 
-impl Default for DeRonTok {
-    fn default() -> Self {DeRonTok::Bof}
-}
+
 
 #[derive(Default)]
 pub struct DeRonState {
@@ -417,7 +417,7 @@ impl DeRonState {
                                 self.next(i);
                                 break;
                             }
-                            if self.cur == '*' {last_star = true}else {last_star = false}
+                            last_star = self.cur == '*';
                             self.next(i);
                         }
                     }
@@ -654,7 +654,7 @@ impl DeRon for bool {
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<bool, DeRonErr> {
         let val = s.as_bool() ?;
         s.next_tok(i) ?;
-        return Ok(val);
+        Ok(val)
     }
 }
 
@@ -680,7 +680,7 @@ impl DeRon for String {
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<String, DeRonErr> {
         let val = s.as_string() ?;
         s.next_tok(i) ?;
-        return Ok(val);
+        Ok(val)
     }
 }
 
@@ -843,7 +843,7 @@ V: SerRon {
         for (k, v) in self {
             s.indent(d + 1);
             k.ser_ron(d + 1, s);
-            s.out.push_str(":");
+            s.out.push(':');
             v.ser_ron(d + 1, s);
             s.conl();
         }

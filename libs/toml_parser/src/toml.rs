@@ -144,7 +144,7 @@ impl TomlParser {
             TomlTok::Str(v)=>Ok(Toml::Str(v, tok.span)),
             TomlTok::U64(v)=>Ok(Toml::Num(v as f64, tok.span)),
             TomlTok::I64(v)=>Ok(Toml::Num(v as f64, tok.span)),
-            TomlTok::F64(v)=>Ok(Toml::Num(v as f64, tok.span)),
+            TomlTok::F64(v)=>Ok(Toml::Num(v, tok.span)),
             TomlTok::Bool(v)=>Ok(Toml::Bool(v, tok.span)),
             TomlTok::Nan(v)=>Ok(Toml::Num(if v{-std::f64::NAN}else{std::f64::NAN}, tok.span)),
             TomlTok::Inf(v)=>Ok(Toml::Num(if v{-std::f64::INFINITY}else{std::f64::INFINITY}, tok.span)),
@@ -161,7 +161,7 @@ impl TomlParser {
         let tok = self.next_tok(i)?;
         // if we are an ObjectOpen we do a subscope
         if let TomlTok::ObjectOpen = tok.tok{
-            let local_scope = if local_scope.len()>0{
+            let local_scope = if !local_scope.is_empty(){
                 format!("{}.{}", local_scope, key)
             }
             else{
@@ -186,7 +186,7 @@ impl TomlParser {
         }
         else{
             let val = self.to_val(tok, i)?;
-            let key = if local_scope.len()>0{
+            let key = if !local_scope.is_empty(){
                 format!("{}.{}", local_scope, key)
             }
             else{
@@ -229,31 +229,31 @@ impl TomlParser {
         let start = self.pos;
         match self.cur {
             '\0'=>{
-                return Ok(TomlTokWithSpan{tok:TomlTok::Eof, span:TomlSpan{start, len:0}})
+                Ok(TomlTokWithSpan{tok:TomlTok::Eof, span:TomlSpan{start, len:0}})
             }
             ',' => {
                 self.next(i);
-                return Ok(TomlTokWithSpan{tok:TomlTok::Comma, span:TomlSpan{start, len:1}})
+                Ok(TomlTokWithSpan{tok:TomlTok::Comma, span:TomlSpan{start, len:1}})
             }
             '[' => {
                 self.next(i);
-                return Ok(TomlTokWithSpan{tok:TomlTok::BlockOpen, span:TomlSpan{start, len:1}})
+                Ok(TomlTokWithSpan{tok:TomlTok::BlockOpen, span:TomlSpan{start, len:1}})
             }
             ']' => {
                 self.next(i);
-                return Ok(TomlTokWithSpan{tok:TomlTok::BlockClose, span:TomlSpan{start, len:1}})
+                Ok(TomlTokWithSpan{tok:TomlTok::BlockClose, span:TomlSpan{start, len:1}})
             }
             '{' => {
                 self.next(i);
-                return Ok(TomlTokWithSpan{tok:TomlTok::ObjectOpen, span:TomlSpan{start, len:1}})
+                Ok(TomlTokWithSpan{tok:TomlTok::ObjectOpen, span:TomlSpan{start, len:1}})
             }
             '}' => {
                 self.next(i);
-                return Ok(TomlTokWithSpan{tok:TomlTok::ObjectClose, span:TomlSpan{start, len:1}})
+                Ok(TomlTokWithSpan{tok:TomlTok::ObjectClose, span:TomlSpan{start, len:1}})
             }
             '=' => {
                 self.next(i);
-                return Ok(TomlTokWithSpan{tok:TomlTok::Equals, span:TomlSpan{start, len:1}})
+                Ok(TomlTokWithSpan{tok:TomlTok::Equals, span:TomlSpan{start, len:1}})
             }
             '+' | '-' | '0'..='9' => {
                 let mut num = String::new();
@@ -316,10 +316,10 @@ impl TomlParser {
                         self.next(i);
                     }
                     if let Ok(num) = num.parse() {
-                        return Ok(TomlTokWithSpan{tok:TomlTok::F64(num), span:TomlSpan{start, len:self.pos - start}})
+                        Ok(TomlTokWithSpan{tok:TomlTok::F64(num), span:TomlSpan{start, len:self.pos - start}})
                     }
                     else {
-                        return Err(self.err_parse("number"));
+                        Err(self.err_parse("number"))
                     }
                 }
                 else if self.cur == '-' { // lets assume its a date. whatever. i don't feel like more parsing today
@@ -369,7 +369,7 @@ impl TomlParser {
                 if ident == "nan" {
                     return Ok(TomlTokWithSpan{tok:TomlTok::Nan(false), span:TomlSpan{start, len:self.pos - start}})
                 }
-                return Ok(TomlTokWithSpan{tok:TomlTok::Ident(ident), span:TomlSpan{start, len:self.pos - start}})
+                Ok(TomlTokWithSpan{tok:TomlTok::Ident(ident), span:TomlSpan{start, len:self.pos - start}})
             },
             
             '"' => {
@@ -386,10 +386,10 @@ impl TomlParser {
                     self.next(i);
                 }
                 self.next(i);
-                return Ok(TomlTokWithSpan{tok:TomlTok::Str(val), span:TomlSpan{start, len:self.pos - start}})
+                Ok(TomlTokWithSpan{tok:TomlTok::Str(val), span:TomlSpan{start, len:self.pos - start}})
             },
             _ => {
-                return Err(self.err_parse("tokenizer"));
+                Err(self.err_parse("tokenizer"))
             }
         }
     }

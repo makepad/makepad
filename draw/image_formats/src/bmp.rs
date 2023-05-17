@@ -56,9 +56,9 @@ impl Component {
             size = 32 - shift;
         }
         Component {
-            mask: mask,
-            shift: shift,
-            size: size,
+            mask,
+            shift,
+            size,
         }
     }
 
@@ -142,7 +142,7 @@ pub fn decode_pixels(dst: &mut [u32],src: &[u8],width: usize,height: usize,botto
                 }
                 let rest = ((width + 3) / 4) & 3;
                 if rest > 0 {
-                    sp += (4 - rest) as usize;
+                    sp += 4 - rest;
                 }
                 line = (line as isize + dline) as usize;
             }
@@ -165,7 +165,7 @@ pub fn decode_pixels(dst: &mut [u32],src: &[u8],width: usize,height: usize,botto
                 }
                 let rest = ((width + 1) / 2) & 3;
                 if rest > 0 {
-                    sp += (4 - rest) as usize;
+                    sp += 4 - rest;
                 }
                 line = (line as isize + dline) as usize;
             }
@@ -197,12 +197,12 @@ pub fn decode_pixels(dst: &mut [u32],src: &[u8],width: usize,height: usize,botto
                             let c0 = palette[(code >> 12) as usize];
                             let c1 = palette[((code >> 8) & 15) as usize];
                             for _i in 0..count / 2 {
-                                dst[(y * width + x) as usize] = c0;
-                                dst[(y * width + x + 1) as usize] = c1;
+                                dst[y * width + x] = c0;
+                                dst[y * width + x + 1] = c1;
                                 x += 2;
                             }
                             if (count & 1) != 0 {
-                                dst[(y * width + x) as usize] = c0;
+                                dst[y * width + x] = c0;
                                 x += 1;
                             }
                         }
@@ -251,7 +251,7 @@ pub fn decode_pixels(dst: &mut [u32],src: &[u8],width: usize,height: usize,botto
                 }
                 let rest = width & 3;
                 if rest > 0 {
-                    sp += (4 - rest) as usize;
+                    sp += 4 - rest;
                 }
                 line = (line as isize + dline) as usize;
             }
@@ -348,7 +348,7 @@ pub fn decode_pixels(dst: &mut [u32],src: &[u8],width: usize,height: usize,botto
                 }
                 let rest = (width * 2) & 3;
                 if rest > 0 {
-                    sp += (4 - rest) as usize;
+                    sp += 4 - rest;
                 }
                 line = (line as isize + dline) as usize;
             }
@@ -366,14 +366,14 @@ pub fn decode_pixels(dst: &mut [u32],src: &[u8],width: usize,height: usize,botto
                 }
                 let rest = (width * 3) & 3;
                 if rest > 0 {
-                    sp += (4 - rest) as usize;
+                    sp += 4 - rest;
                 }
                 line = (line as isize + dline) as usize;
             }
         },
         TYPE_ARGB8 => {
             for _l in 0..height {
-                let mut dp = line as usize;
+                let mut dp = line;
                 for _x in 0..width {
                     let d = from_le32(&src[sp..sp+4]);
                     sp += 4;
@@ -381,7 +381,7 @@ pub fn decode_pixels(dst: &mut [u32],src: &[u8],width: usize,height: usize,botto
                     let g = (d >> 8) & 255;
                     let b = d & 255;
                     let a = if alphamask == 0 { 255 } else { d >> 24 };
-                    dst[dp] = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                    dst[dp] = (a << 24) | (r << 16) | (g << 8) | b;
                     dp += 1;
                 }
                 line = (line as isize + dline) as usize;
@@ -389,7 +389,7 @@ pub fn decode_pixels(dst: &mut [u32],src: &[u8],width: usize,height: usize,botto
         },
         TYPE_B32 => {
             for _l in 0..height {
-                let mut dp = line as usize;
+                let mut dp = line;
                 for _x in 0..width {
                     let d = from_le32(&src[sp..sp+4]);
                     sp += 4;
@@ -556,7 +556,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer,String> {
         if rest > 0 {
             line += 4 - rest;
         }
-        if offset as usize + (height * line) as usize > src.len() {
+        if offset as usize + (height * line) > src.len() {
             return Err("Invalid BMP".to_string());
         }
     }
@@ -587,7 +587,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer,String> {
         if rest > 0 {
             line += 4 - rest;
         }
-        if (line != 0) && (offset as usize + (height * line) as usize > src.len()) {
+        if (line != 0) && (offset as usize + (height * line) > src.len()) {
             return Err("Invalid BMP".to_string());
         }
         let imagesize = from_le32(&src[34..38]);

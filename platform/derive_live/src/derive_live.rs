@@ -14,7 +14,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     if let Err(err) = derive_live_impl_inner(&mut parser, &mut tb) {
-        return err
+        err
     }
     else {
         tb.end()
@@ -52,13 +52,13 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
              && field.attrs[0].name != "deref" {
                 return error_result(&format!("Field {} does not have a live, calc, rust, state or deref attribute", field.name));
             }
-            if field.attrs.len() == 0 { // need field def
+            if field.attrs.is_empty() { // need field def
                 return error_result("Please annotate the field type with #[rust] for rust-only fields, and #[live] for live DSL mapped fields and #[deref] for a base class");
             }
         }
         
-        let deref_field = fields.iter().find( | field | field.attrs.iter().find(|a| a.name == "deref").is_some());
-        let state_field = fields.iter().find( | field | field.attrs.iter().find(|a| a.name == "state").is_some());
+        let deref_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "deref"));
+        let state_field = fields.iter().find( | field | field.attrs.iter().any(|a| a.name == "state"));
         
         if let Some(state_field) = state_field {
             
@@ -378,9 +378,9 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             let attributes = parser.eat_attributes();
             // check if we have a default attribute
             if let Some(name) = parser.eat_any_ident() {
-                if attributes.len() > 0 && attributes[0].name == "pick" {
+                if !attributes.is_empty() && attributes[0].name == "pick" {
                     if pick.is_some() {
-                        return error_result(&format!("Enum can only have a single field marked pick"));
+                        return error_result("Enum can only have a single field marked pick");
                     }
                     pick = Some(items.len())
                 }
@@ -399,7 +399,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         }
         
         if pick.is_none() {
-            return error_result(&format!("Enum needs atleast one field marked pick"));
+            return error_result("Enum needs atleast one field marked pick");
         }
         
         
@@ -427,7 +427,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("    fn live_design_with(cx: &mut Cx) {");
         
         
-        let is_u32_enum = main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
+        let is_u32_enum = main_attribs.iter().any(| attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32");
         if is_u32_enum {
             tb.add("        let mut variants = Vec::new();");
             for item in &items {
