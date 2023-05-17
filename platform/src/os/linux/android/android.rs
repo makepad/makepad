@@ -491,12 +491,6 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(selected) => {
                     to_java.show_clipboard_actions(selected.as_str());
                 },
-                CxOsOp::CopyToClipboard(selected) => {
-                    to_java.copy_to_clipboard(selected.as_str());
-                },
-                CxOsOp::PasteFromClipboard() => {
-                    to_java.paste_from_clipboard();
-                },
                 _ => ()
             }
         }  
