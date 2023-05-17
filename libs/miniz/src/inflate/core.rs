@@ -571,14 +571,14 @@ where
     } else {
         let res = r.tables[table].tree_lookup(symbol, l.bit_buf, u32::from(FAST_LOOKUP_BITS));
         symbol = res.0;
-        code_len = res.1 as u32;
+        code_len = res.1;
     };
 
     if code_len == 0 {
         return Action::Jump(InvalidCodeLen);
     }
 
-    l.bit_buf >>= code_len as u32;
+    l.bit_buf >>= code_len;
     l.num_bits -= code_len;
     f(r, l, symbol)
 }
@@ -722,7 +722,7 @@ fn init_tree(r: &mut DecompressorOxide, l: &mut LocalVars) -> Action {
 
             let mut tree_cur = table.look_up[(rev_code & (FAST_LOOKUP_SIZE - 1)) as usize];
             if tree_cur == 0 {
-                table.look_up[(rev_code & (FAST_LOOKUP_SIZE - 1)) as usize] = tree_next as i16;
+                table.look_up[(rev_code & (FAST_LOOKUP_SIZE - 1)) as usize] = tree_next;
                 tree_cur = tree_next;
                 tree_next -= 2;
             }
@@ -732,7 +732,7 @@ fn init_tree(r: &mut DecompressorOxide, l: &mut LocalVars) -> Action {
                 rev_code >>= 1;
                 tree_cur -= (rev_code & 1) as i16;
                 if table.tree[(-tree_cur - 1) as usize] == 0 {
-                    table.tree[(-tree_cur - 1) as usize] = tree_next as i16;
+                    table.tree[(-tree_cur - 1) as usize] = tree_next;
                     tree_cur = tree_next;
                     tree_next -= 2;
                 } else {
@@ -1258,7 +1258,7 @@ pub fn decompress(
 
                     out_buf.write_slice(&in_iter.as_slice()[..bytes_to_copy]);
 
-                    (&mut in_iter).nth(bytes_to_copy - 1);
+                    in_iter.nth(bytes_to_copy - 1);
                     l.counter -= bytes_to_copy as u32;
                     Action::Jump(RawMemcpy1)
                 } else {
@@ -1532,7 +1532,7 @@ pub fn decompress(
                     let source_pos = out_buf.position()
                         .wrapping_sub(l.dist as usize) & out_buf_size_mask;
 
-                    let out_len = out_buf.get_ref().len() as usize;
+                    let out_len = out_buf.get_ref().len();
                     let match_end_pos = out_buf.position() + l.counter as usize;
 
                     if match_end_pos > out_len ||

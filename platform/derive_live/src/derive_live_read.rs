@@ -13,7 +13,7 @@ pub fn derive_live_read_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     if let Err(err) = derive_live_read_impl_inner(&mut parser, &mut tb) {
-        return err
+        err
     }
     else {
         tb.end()
@@ -45,13 +45,13 @@ fn derive_live_read_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) 
             if field.attrs.len() == 1 && field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" {
                 return error_result(&format!("Field {} does not have a live, calc into or rust attribute", field.name));
             }
-            if field.attrs.len() == 0 { // insert a default
+            if field.attrs.is_empty() { // insert a default
                 field.attrs.push(Attribute {name: "live".to_string(), args: None});
             }
         }
         
         tb.add("impl").stream(generic.clone());
-        tb.add("LiveRead for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        tb.add("LiveRead for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
         
         tb.add("    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){");
         tb.add("        out.push(LiveNode::from_id_value(id, LiveValue::Object));");

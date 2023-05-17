@@ -28,7 +28,7 @@ const TYPE_LA16: u16 = 0x1004;
 const TYPE_RGBA16: u16 = 0x1006;
 
 // grayscale distributions
-const GRAY2: [f32; 4] = [0.0, 0.33333333, 0.66666667, 1.0];
+const GRAY2: [f32; 4] = [0.0, 0.33333333, 0.666_666_7, 1.0];
 
 const GRAY4: [f32; 16] = [
     0.0,
@@ -39,12 +39,12 @@ const GRAY4: [f32; 16] = [
     0.33333333,
     0.4,
     0.46666667,
-    0.53333333,
+    0.533_333_3,
     0.6,
-    0.66666667,
+    0.666_666_7,
     0.73333333,
     0.8,
-    0.86666667,
+    0.866_666_7,
     0.93333333,
     1.0
 ];
@@ -119,10 +119,10 @@ struct ZipReader<'a> {
 impl<'a> ZipReader<'a> {
     fn new(block: &'a [u8]) -> ZipReader<'a> {
         ZipReader {
-            block: block,
+            block,
             rp: 6, // first 2 bytes a
             bit: 32,
-            cache: ((block[2] as u32) | ((block[3] as u32) << 8) | ((block[4] as u32) << 16) | ((block[5] as u32) << 24)) as u32,
+            cache: ((block[2] as u32) | ((block[3] as u32) << 8) | ((block[4] as u32) << 16) | ((block[5] as u32) << 24)),
         }
     }
     
@@ -201,8 +201,8 @@ impl<'a> ZipReader<'a> {
 
 fn inflate(src: &[u8], inflated_size: usize) -> Result<Vec<u8>, String> {
     
-    let mut dst: Vec<u8> = vec![0; inflated_size as usize];
-    let mut reader = ZipReader::new(&src);
+    let mut dst: Vec<u8> = vec![0; inflated_size];
+    let mut reader = ZipReader::new(src);
     let mut dp: usize = 0;
     
     // create default litlen table
@@ -239,7 +239,7 @@ fn inflate(src: &[u8], inflated_size: usize) -> Result<Vec<u8>, String> {
         
         // get final block and type bits
         match reader.read_bits(1) {
-            Ok(value) => {if value == 1 {is_final = true;} else {is_final = false;}},
+            Ok(value) => {is_final = value == 1;},
             Err(msg) => {return Err(msg);},
         }
         let block_type = match reader.read_bits(2) {
@@ -349,7 +349,7 @@ fn inflate(src: &[u8], inflated_size: usize) -> Result<Vec<u8>, String> {
         if (block_type == 1) || (block_type == 2) {
             // read them codes
             while dp < dst.len() {
-                let mut code = match reader.read_symbol(&hlitlen_tables) {
+                let mut code = match reader.read_symbol(hlitlen_tables) {
                     Ok(value) => {value},
                     Err(msg) => {return Err(msg);},
                 };
@@ -375,7 +375,7 @@ fn inflate(src: &[u8], inflated_size: usize) -> Result<Vec<u8>, String> {
                     }
                     
                     // get dist length and extra bit entries
-                    code = match reader.read_symbol(&hdist_tables) {
+                    code = match reader.read_symbol(hdist_tables) {
                         Ok(value) => {value},
                         Err(msg) => {return Err(msg);},
                     };
@@ -466,7 +466,7 @@ fn clampf(v: f32, min: f32, max: f32) -> f32 {
 
 fn make_lf(l: f32, gamma: f32) -> u32 {
     let ul = (clampf(l.powf(gamma), 0.0, 1.0) * 255.0) as u32;
-    return 0xFF000000 | (ul << 16) | (ul << 8) | ul;
+    0xFF000000 | (ul << 16) | (ul << 8) | ul
 }
 
 fn make_rgbaf(r: f32, g: f32, b: f32, a: f32, gamma: f32) -> u32 {
@@ -474,7 +474,7 @@ fn make_rgbaf(r: f32, g: f32, b: f32, a: f32, gamma: f32) -> u32 {
     let ug = (clampf(g.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ub = (clampf(b.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ua = (clampf(a.powf(gamma), 0.0, 1.0) * 255.0) as u32;
-    return (ua << 24) | (ur << 16) | (ug << 8) | ub;
+    (ua << 24) | (ur << 16) | (ug << 8) | ub
 }
 
 fn make_c(c: u32, gamma: f32) -> u32 {
@@ -486,7 +486,7 @@ fn make_c(c: u32, gamma: f32) -> u32 {
     let ug = (clampf(g.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ub = (clampf(b.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ua = (clampf(a.powf(gamma), 0.0, 1.0) * 255.0) as u32;
-    return (ua << 24) | (ur << 16) | (ug << 8) | ub;
+    (ua << 24) | (ur << 16) | (ug << 8) | ub
 }
 
 fn decode_pixels(dst: &mut [u32], src: &[u8], width: usize, height: usize, stride: usize, x0: usize, y0: usize, dx: usize, dy: usize, itype: u16, palette: &[u32; 256], gamma: f32) {
@@ -994,7 +994,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
         for i in 0..7 {
             if apresent[i] {
                 let raw_data = unfilter(&filtered_data[sp..sp + adsize[i]], aheight[i], astride[i], bpp);
-                decode_pixels(&mut result.data, &raw_data, awidth[i], aheight[i], width, ax0[i], ay0[i], adx[i], ady[i], itype as u16, &palette, gamma);
+                decode_pixels(&mut result.data, &raw_data, awidth[i], aheight[i], width, ax0[i], ay0[i], adx[i], ady[i], itype, &palette, gamma);
                 sp += adsize[i];
             }
         }
@@ -1015,7 +1015,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
         //let after_unfilter = Instant::now();
         
         let mut result = ImageBuffer::new(width, height);
-        decode_pixels(&mut result.data, &raw_data, width, height, width, 0, 0, 1, 1, itype as u16, &palette, gamma);
+        decode_pixels(&mut result.data, &raw_data, width, height, width, 0, 0, 1, 1, itype, &palette, gamma);
         
         //let after_decode = Instant::now();
         

@@ -13,8 +13,8 @@ const TYPE_RGB444: u16 = 0x01E4;
 const FOLDING: [u8; 64] = [56u8, 57, 8, 40, 9, 58, 59, 10, 41, 0, 48, 1, 42, 11, 60, 61, 12, 43, 2, 49, 16, 32, 17, 50, 3, 44, 13, 62, 63, 14, 45, 4, 51, 18, 33, 24, 25, 34, 19, 52, 5, 46, 15, 47, 6, 53, 20, 35, 26, 27, 36, 21, 54, 7, 55, 22, 37, 28, 29, 38, 23, 39, 30, 31,];
 const FC0: f32 = 1.0;
 const FC1: f32 = 0.98078528;
-const FC2: f32 = 0.92387953;
-const FC3: f32 = 0.83146961;
+const FC2: f32 = 0.923_879_5;
+const FC3: f32 = 0.831_469_6;
 const FC4: f32 = 0.70710678;
 const FC5: f32 = 0.55557023;
 const FC6: f32 = 0.38268343;
@@ -96,7 +96,7 @@ impl Table {
             }
         }
         Table {
-            prefix: prefix,
+            prefix,
         }
     }
 }
@@ -121,10 +121,8 @@ fn jpeg_get8(block: &[u8], rp: &mut usize) -> u8 {
 
 fn jpeg_unget8(block: &[u8], rp: &mut usize) {
     *rp -= 1;
-    if block[*rp] == 0x00 {
-        if block[*rp - 1] == 0xFF {
-            *rp -= 1;
-        }
+    if block[*rp] == 0x00 && block[*rp - 1] == 0xFF {
+        *rp -= 1;
     }
 }
 
@@ -221,7 +219,7 @@ fn unpack_sequential(reader: &mut Reader, coeffs: &mut [i32], dcht: &Table, acht
     let cat = reader.get_code(dcht);
     if cat > 0 {
         let code = reader.getn(cat as usize);
-        *dc += make_coeff(cat, code as isize) as i32;
+        *dc += make_coeff(cat, code as isize);
     }
     coeffs[FOLDING[0] as usize] = *dc;
     //if reader.debug_enabled { println!("DC {}",*dc); }
@@ -232,7 +230,7 @@ fn unpack_sequential(reader: &mut Reader, coeffs: &mut [i32], dcht: &Table, acht
         let cat = runcat & 15;
         if cat > 0 {
             let code = reader.getn(cat as usize);
-            let coeff = make_coeff(cat, code as isize) as i32;
+            let coeff = make_coeff(cat, code as isize);
             i += run;
             if i>=64{
                 println!("fail at i = {}, run {}, cat {}, code {}, coeff {}",i,run,cat,code,coeff);
@@ -241,15 +239,13 @@ fn unpack_sequential(reader: &mut Reader, coeffs: &mut [i32], dcht: &Table, acht
             coeffs[FOLDING[i as usize] as usize] = coeff;
             //if reader.debug_enabled { println!("coeffs[{}] = {}",i,coeff); }
         }
-        else {
-            if run == 15 { // ZRL
-                i += 15;
-                //if reader.debug_enabled { println!("ZRL"); }
-            }
-            else { // EOB
-                //if reader.debug_enabled { println!("EOB"); }
-                break;
-            }
+        else if run == 15 { // ZRL
+            i += 15;
+            //if reader.debug_enabled { println!("ZRL"); }
+        }
+        else { // EOB
+            //if reader.debug_enabled { println!("EOB"); }
+            break;
         }
         i += 1;
     }
@@ -259,7 +255,7 @@ fn unpack_progressive_start_dc(reader: &mut Reader, coeffs: &mut[i32], dcht: &Ta
     let cat = reader.get_code(dcht);
     if cat > 0 {
         let code = reader.getn(cat as usize);
-        *dc += make_coeff(cat, code as isize) as i32;
+        *dc += make_coeff(cat, code as isize);
     }
     //println!("DC = {}",*dc << shift);
     coeffs[FOLDING[0] as usize] = *dc << shift;
@@ -279,20 +275,18 @@ fn unpack_progressive_start_ac(reader: &mut Reader, coeffs: &mut[i32], acht: &Ta
                 let code = reader.getn(cat as usize);
                 let coeff = make_coeff(cat, code as isize);
                 i += run;
-                coeffs[FOLDING[i as usize] as usize] = (coeff << shift) as i32;
+                coeffs[FOLDING[i as usize] as usize] = coeff << shift;
+            }
+            else if run == 15 {
+                i += 15;
             }
             else {
-                if run == 15 {
-                    i += 15;
+                *eobrun = 1 << run;
+                if run != 0 {
+                    *eobrun += reader.getn(run as usize) as usize;
                 }
-                else {
-                    *eobrun = 1 << run;
-                    if run != 0 {
-                        *eobrun += reader.getn(run as usize) as usize;
-                    }
-                    *eobrun -= 1;
-                    break;
-                }
+                *eobrun -= 1;
+                break;
             }
             i += 1;
         }
@@ -351,19 +345,17 @@ fn unpack_progressive_refine_ac(reader: &mut Reader, coeffs: &mut[i32], acht: &T
                     coeffs[FOLDING[i as usize] as usize] = 11 << shift;
                 }
             }
+            else if run == 15 {
+                i = update_nonzeros(reader, &mut coeffs[0..64], i, end, shift, 15);
+            }
             else {
-                if run == 15 {
-                    i = update_nonzeros(reader, &mut coeffs[0..64], i, end, shift, 15);
+                *eobrun = 1 << run;
+                if run != 0 {
+                    *eobrun += reader.getn(run as usize) as usize;
                 }
-                else {
-                    *eobrun = 1 << run;
-                    if run != 0 {
-                        *eobrun += reader.getn(run as usize) as usize;
-                    }
-                    *eobrun -= 1;
-                    update_nonzeros(reader, &mut coeffs[0..64], i, end, shift, 64);
-                    break;
-                }
+                *eobrun -= 1;
+                update_nonzeros(reader, &mut coeffs[0..64], i, end, shift, 64);
+                break;
             }
         }
     }
@@ -375,21 +367,19 @@ fn unpack_block(reader: &mut Reader, coeffs: &mut [i32], dcht: &Table, acht: &Ta
             unpack_progressive_refine_dc(reader, &mut coeffs[0..64], shift);
         }
         else {
-            unpack_progressive_refine_ac(reader, &mut coeffs[0..64], &acht, start, end, shift, eobrun);
+            unpack_progressive_refine_ac(reader, &mut coeffs[0..64], acht, start, end, shift, eobrun);
+        }
+    }
+    else if start == 0 {
+        if (end == 63) && (shift == 0) {
+            unpack_sequential(reader, &mut coeffs[0..64], dcht, acht, dc);
+        }
+        else {
+            unpack_progressive_start_dc(reader, &mut coeffs[0..64], dcht, dc, shift);
         }
     }
     else {
-        if start == 0 {
-            if (end == 63) && (shift == 0) {
-                unpack_sequential(reader, &mut coeffs[0..64], &dcht, &acht, dc);
-            }
-            else {
-                unpack_progressive_start_dc(reader, &mut coeffs[0..64], &dcht, dc, shift);
-            }
-        }
-        else {
-            unpack_progressive_start_ac(reader, &mut coeffs[0..64], &acht, start, end, shift, eobrun);
-        }
+        unpack_progressive_start_ac(reader, &mut coeffs[0..64], acht, start, end, shift, eobrun);
     }
 }
 
@@ -780,7 +770,7 @@ fn draw_yuv(image: &mut ImageBuffer, px: usize, py: usize, y: i32, u: i32, v: i3
 fn draw_macroblock_y(image: &mut ImageBuffer, x0: usize, y0: usize, width: usize, height: usize, coeffs: &[i32]) {
     for i in 0..height {
         for k in 0..width {
-            draw_yuv(image, x0 + k, y0 + i, (coeffs[i * 8 + k] + 128) as i32, 0, 0);
+            draw_yuv(image, x0 + k, y0 + i, coeffs[i * 8 + k] + 128, 0, 0);
         }
     }
 }
@@ -796,7 +786,7 @@ fn draw_macroblock_yuv420(image: &mut ImageBuffer, x0: usize, y0: usize, width: 
             let hk = k >> 1;
             let u = coeffs[256 + hi * 8 + hk];
             let v = coeffs[320 + hi * 8 + hk];
-            draw_yuv(image, x0 + k, y0 + i, y as i32, u as i32, v as i32);
+            draw_yuv(image, x0 + k, y0 + i, y, u, v);
         }
     }
 }
@@ -810,7 +800,7 @@ fn draw_macroblock_yuv422_normal(image: &mut ImageBuffer, x0: usize, y0: usize, 
             let y = coeffs[by * 64 + i * 8 + sk] + 128;
             let u = coeffs[128 + i * 8 + hk];
             let v = coeffs[192 + i * 8 + hk];
-            draw_yuv(image, x0 + k, y0 + i, y as i32, u as i32, v as i32);
+            draw_yuv(image, x0 + k, y0 + i, y, u, v);
         }
     }
 }
@@ -825,7 +815,7 @@ fn draw_macroblock_yuv422(image: &mut ImageBuffer, x0: usize, y0: usize, width: 
 
 #[cfg(not(feature="nightly"))]
 fn draw_macroblock_yuv422(image: &mut ImageBuffer, x0: usize, y0: usize, width: usize, height: usize, coeffs: &[i32]) {
-    return draw_macroblock_yuv422_normal(image, x0, y0, width, height, coeffs);
+    draw_macroblock_yuv422_normal(image, x0, y0, width, height, coeffs)
 }
 
 #[cfg(feature="nightly")]
@@ -884,7 +874,7 @@ fn draw_macroblock_yuv440(image: &mut ImageBuffer, x0: usize, y0: usize, width: 
             let hi = i >> 1;
             let u = coeffs[128 + hi * 8 + k];
             let v = coeffs[192 + hi * 8 + k];
-            draw_yuv(image, x0 + k, y0 + i, y as i32, u as i32, v as i32);
+            draw_yuv(image, x0 + k, y0 + i, y, u, v);
         }
     }
 }
@@ -895,7 +885,7 @@ fn draw_macroblock_yuv444(image: &mut ImageBuffer, x0: usize, y0: usize, width: 
             let y = coeffs[i * 8 + k] + 128;
             let u = coeffs[64 + i * 8 + k];
             let v = coeffs[128 + i * 8 + k];
-            draw_yuv(image, x0 + k, y0 + i, y as i32, u as i32, v as i32);
+            draw_yuv(image, x0 + k, y0 + i, y, u, v);
         }
     }
 }
@@ -906,7 +896,7 @@ fn draw_macroblock_rgb444(image: &mut ImageBuffer, x0: usize, y0: usize, width: 
             let r = coeffs[i * 8 + k] + 128;
             let g = coeffs[64 + i * 8 + k] + 128;
             let b = coeffs[128 + i * 8 + k] + 128;
-            draw_rgb(image, x0 + k, y0 + i, r as i32, g as i32, b as i32);
+            draw_rgb(image, x0 + k, y0 + i, r, g, b);
         }
     }
 }
@@ -1022,7 +1012,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                     itype = TYPE_Y;
                 }
                 mbtotal = mbwidth * mbheight;
-                coeffs.resize(mbtotal * cpmb as usize, 0);
+                coeffs.resize(mbtotal * cpmb, 0);
                 //println!("type {:04X}, {} macroblocks in total, {} coefficients per row",itype,mbtotal,mbstride);
                 //println!("size {}x{}, macroblocks {}",width,height,mbtotal);
             },

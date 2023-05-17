@@ -111,9 +111,9 @@ impl TokenBuilder {
                     let mut out = 0u64;
                     while e < b.len() {
                         let c = b[e] as char;
-                        if c >= '0' && c <= '9' {out = (out << 4) | (b[e] - '0' as u8) as u64}
-                        else if c >= 'a' && c <= 'f' {out = (out << 4) | (b[e] - 'a' as u8 + 10) as u64}
-                        else if c >= 'A' && c <'F' {out = (out << 4) | (b[e] - 'A' as u8 + 10) as u64}
+                        if c.is_ascii_digit() {out = (out << 4) | (b[e] - b'0') as u64}
+                        else if ('a'..='f').contains(&c) {out = (out << 4) | (b[e] - b'a' + 10) as u64}
+                        else if ('A'..'F').contains(&c) {out = (out << 4) | (b[e] - b'A' + 10) as u64}
                         else if c == '_' {}
                         else {
                             break;
@@ -127,7 +127,7 @@ impl TokenBuilder {
                     let mut e = o + 1;
                     while e < b.len() {
                         let c = b[e] as char;
-                        if c >= '0' && c <= '9' {
+                        if c.is_ascii_digit() {
                             e += 1;
                         }
                         else {
@@ -135,7 +135,7 @@ impl TokenBuilder {
                         }
                     }
                     let num = std::str::from_utf8(&b[o..e]).unwrap();
-                    self.unsuf_usize(num.parse().expect(&format!("Can't parse usize number \"{}\"", what)));
+                    self.unsuf_usize(num.parse().unwrap_or_else(|_| panic!("Can't parse usize number \"{}\"", what)));
                     o = e;
                 }
                 ('"', _) => {
@@ -156,7 +156,7 @@ impl TokenBuilder {
                     let mut e = o + 1;
                     while e < b.len() {
                         let c = b[e] as char;
-                        if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' {
+                        if c.is_ascii_digit() || c.is_ascii_lowercase() || c.is_ascii_uppercase() || c == '_' {
                             e += 1;
                         } else {
                             break;
@@ -174,7 +174,7 @@ impl TokenBuilder {
                     let mut e = o;
                     while e < b.len() {
                         let c = b[e] as char;
-                        if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' {
+                        if c.is_ascii_digit() || c.is_ascii_lowercase() || c.is_ascii_uppercase() || c == '_' {
                             e += 1;
                         } else {
                             break;
@@ -403,24 +403,19 @@ impl TokenParser {
     }
     
     pub fn is_eot(&mut self) -> bool {
-        if self.current.is_none() && self.iter_stack.len() != 0 {
-            return true
-        }
-        else {
-            return false
-        }
+        self.current.is_none() && !self.iter_stack.is_empty()
     }
     
     pub fn eat_eot(&mut self) -> bool {
         // current is None
         if self.is_eot() {
             self.iter_stack.pop();
-            if self.iter_stack.len() != 0 {
+            if !self.iter_stack.is_empty() {
                 self.advance()
             }
             return true;
         }
-        return false
+        false
     }
     
     pub fn eat_level(&mut self) -> TokenStream {
@@ -453,7 +448,7 @@ impl TokenParser {
                 return true
             }
         }
-        return false
+        false
     }
     
     pub fn is_literal(&mut self) -> bool {
@@ -461,7 +456,7 @@ impl TokenParser {
         if let Some(TokenTree::Literal(_)) = &self.current {
             return true
         }
-        return false
+        false
     }
     
     pub fn eat_literal(&mut self) -> Option<Literal> {
@@ -471,16 +466,11 @@ impl TokenParser {
             self.advance();
             return ret
         }
-        return None
+        None
     }
     
     pub fn span(&self) -> Option<Span> {
-        if let Some(current) = &self.current {
-            Some(current.span())
-        }
-        else {
-            None
-        }
+        self.current.as_ref().map(|current| current.span())
     }
     
     pub fn is_punct_alone(&mut self, what: char) -> bool {
@@ -490,7 +480,7 @@ impl TokenParser {
                 return true
             }
         }
-        return false
+        false
     }
     
     pub fn is_punct_any(&mut self, what: char) -> bool {
@@ -500,7 +490,7 @@ impl TokenParser {
                 return true
             }
         }
-        return false
+        false
     }
     
     
@@ -517,7 +507,7 @@ impl TokenParser {
                 }
             }
         }
-        return false
+        false
     }
     
     pub fn eat_sep(&mut self) -> bool {
@@ -533,7 +523,7 @@ impl TokenParser {
                 }
             }
         }
-        return false
+        false
     }
     
     pub fn eat_punct_alone(&mut self, what: char) -> bool {
@@ -571,7 +561,7 @@ impl TokenParser {
             self.advance();
             return ret
         }
-        return None
+        None
     }
     
     pub fn eat_any_ident_with_span(&mut self) -> Option<(String, Span)> {
@@ -580,7 +570,7 @@ impl TokenParser {
             self.advance();
             return ret
         }
-        return None
+        None
     }
     
     pub fn expect_any_ident(&mut self) -> Result<String, TokenStream> {
@@ -589,14 +579,14 @@ impl TokenParser {
             self.advance();
             return Ok(ret)
         }
-        Err(error(&format!("Expected any ident")))
+        Err(error("Expected any ident"))
     }
     
     
     pub fn expect_punct_alone(&mut self, what: char) -> Result<(), TokenStream> {
         if self.is_punct_alone(what) {
             self.advance();
-            return Ok(())
+            Ok(())
         }
         else {
             Err(error(&format!("Expected punct {}", what)))
@@ -606,7 +596,7 @@ impl TokenParser {
     pub fn expect_punct_any(&mut self, what: char) -> Result<(), TokenStream> {
         if self.is_punct_any(what) {
             self.advance();
-            return Ok(())
+            Ok(())
         }
         else {
             Err(error(&format!("Expected punct {}", what)))
@@ -631,7 +621,7 @@ impl TokenParser {
         if !ts.is_empty() {
             return Some(ts)
         }
-        return None
+        None
     }
     
     pub fn eat_where_clause(&mut self, add_where: Option<&str>) -> Option<TokenStream> {
@@ -684,7 +674,7 @@ impl TokenParser {
                 }
             }
         }
-        return None
+        None
     }
     
     pub fn eat_struct_field(&mut self) -> Option<StructField> {
@@ -695,11 +685,11 @@ impl TokenParser {
         if let Some(field) = self.eat_any_ident() {
             if self.eat_punct_alone(':') {
                 if let Some(ty) = self.eat_type() {
-                    return Some(StructField {name: field, ty: ty, attrs: attrs})
+                    return Some(StructField {name: field, ty, attrs})
                 }
             }
         }
-        return None
+        None
     }
     
     pub fn eat_attributes(&mut self) -> Vec<Attribute> {
@@ -730,7 +720,7 @@ impl TokenParser {
                 break
             }
         }
-        return results;
+        results
     }
     
     pub fn eat_all_struct_fields(&mut self,) -> Option<Vec<StructField >> {
@@ -749,7 +739,7 @@ impl TokenParser {
             }
             return Some(fields)
         }
-        return None
+        None
     }
     
     
@@ -783,7 +773,7 @@ impl TokenParser {
             
             return Some(tb.end())
         }
-        return None
+        None
     }
     
     pub fn eat_all_types(&mut self) -> Option<Vec<TokenStream >> {
@@ -847,7 +837,7 @@ impl TokenParser {
             tb.stream(self.eat_generic());
             return Some(tb.end())
         }
-        return None
+        None
     }
     
 }
