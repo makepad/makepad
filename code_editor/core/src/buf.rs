@@ -20,9 +20,9 @@ impl Buf {
         &self.text
     }
 
-    pub fn end_edit_group(&mut self) {
-        if let Some(edit_group) = self.edit_group.take() {
-            self.hist.commit(edit_group.cursors_before, edit_group.diff);
+    pub fn flush(&mut self) {
+        if self.edit_group.is_some() {
+            self.end_edit_group();
         }
     }
 
@@ -37,18 +37,15 @@ impl Buf {
         {
             self.end_edit_group();
         }
-        let edit_group = self.edit_group.get_or_insert(EditGroup {
-            kind,
-            cursors_before: cursors_before.clone(),
-            diff: Diff::new(),
-        });
-        edit_group.diff = mem::take(&mut edit_group.diff).compose(diff);
+        if let Some(edit_group) = &mut self.edit_group {
+            edit_group.diff = mem::take(&mut edit_group.diff).compose(diff);
+        } else {
+            self.begin_edit_group(kind, cursors_before.clone(), diff);
+        }
     }
 
     pub fn undo(&mut self) -> Option<(CursorSet, Diff)> {
-        if self.edit_group.is_some() {
-            self.end_edit_group();
-        }
+        self.flush();
         if let Some((cursors, diff)) = self.hist.undo() {
             self.text.apply_diff(diff.clone());
             Some((cursors, diff))
@@ -67,6 +64,20 @@ impl Buf {
         } else {
             None
         }
+    }
+
+    fn begin_edit_group(&mut self, kind: EditKind, cursors_before: CursorSet, diff: Diff) {
+        assert!(self.edit_group.is_none());
+        self.edit_group = Some(EditGroup {
+            kind,
+            cursors_before: cursors_before.clone(),
+            diff,
+        });
+    }
+
+    fn end_edit_group(&mut self) {
+        let edit_group = self.edit_group.take().unwrap();
+        self.hist.commit(edit_group.cursors_before, edit_group.diff);
     }
 }
 

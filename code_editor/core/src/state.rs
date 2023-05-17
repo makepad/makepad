@@ -118,10 +118,13 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Enter,
                 ..
             }) => {
-                let replace_with = ["".to_string(), "".to_string()].into();
                 self.edit(
                     EditKind::Insert,
-                    edit_ops::insert(self.model.buf.text(), &self.view.cursors, &replace_with),
+                    edit_ops::insert(
+                        self.model.buf.text(),
+                        &self.view.cursors,
+                        &Text::from(["".to_string(), "".to_string()]),
+                    ),
                 );
             }
             Event::Key(KeyEvent {
@@ -175,13 +178,12 @@ impl<'a> HandleEventContext<'a> {
                 self.redo();
             }
             Event::Text(TextEvent { string }) => {
-                let replace_with = string.into();
                 self.edit(
                     EditKind::Insert,
                     edit_ops::insert(
                         self.model.buf.text(),
                         self.view.cursors.iter(),
-                        &replace_with,
+                        &Text::from(string),
                     ),
                 );
             }
@@ -197,7 +199,7 @@ impl<'a> HandleEventContext<'a> {
         self.view.cursors.update_all(|cursor| {
             cursor.do_move(select, |pos, column| f(self.model.buf.text(), pos, column))
         });
-        self.model.buf.end_edit_group();
+        self.model.buf.flush();
     }
 
     fn edit(&mut self, kind: EditKind, diff: Diff) {
