@@ -1,5 +1,6 @@
 pub mod arena;
 pub mod buf;
+pub mod char_ext;
 pub mod cursor;
 pub mod cursor_set;
 pub mod diff;
@@ -16,6 +17,6 @@ pub mod str_ext;
 pub mod text;
 
 pub use self::{
-    arena::Arena, buf::Buf, cursor::Cursor, cursor_set::CursorSet, diff::Diff, event::Event,
+    arena::Arena, buf::Buf, char_ext::CharExt, cursor::Cursor, cursor_set::CursorSet, diff::Diff, event::Event,
     hist::Hist, len::Len, pos::Pos, range::Range, state::State, str_ext::StrExt, text::Text,
 };

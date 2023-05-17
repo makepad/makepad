@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Event<'a> {
     pub byte: usize,
@@ -19,13 +21,13 @@ pub enum EventKind<'a> {
     GraphemeEnd(&'a str),
 }
 
-pub fn layout(line: &str, handle_event: impl FnMut(Event)) {
+pub fn layout<T>(line: &str, handle_event: impl FnMut(Event) -> ControlFlow<T>) -> ControlFlow<T> {
     Layouter {
         byte: 0,
         pos: Pos::default(),
         handle_event,
     }
-    .layout(line);
+    .layout(line)
 }
 
 #[derive(Debug)]
@@ -35,32 +37,34 @@ struct Layouter<F> {
     handle_event: F,
 }
 
-impl<F> Layouter<F>
+impl<T, F> Layouter<F>
 where
-    F: FnMut(Event<'_>)
+    F: FnMut(Event<'_>) -> ControlFlow<T>
 {
-    fn layout(&mut self, line: &str) {
+    fn layout(&mut self, line: &str) -> ControlFlow<T> {
         use crate::StrExt;
 
-        self.emit_event(EventKind::LineStart);
+        self.emit_event(EventKind::LineStart)?;
         for grapheme in line.graphemes() {
-            self.layout_grapheme(grapheme);
+            self.layout_grapheme(grapheme)?;
         }
-        self.emit_event(EventKind::LineEnd);
+        self.emit_event(EventKind::LineEnd)?;
+        ControlFlow::Continue(())
     }
 
-    fn layout_grapheme(&mut self, grapheme: &str) {
-        self.emit_event(EventKind::GraphemeStart(grapheme));
+    fn layout_grapheme(&mut self, grapheme: &str) -> ControlFlow<T> {
+        self.emit_event(EventKind::GraphemeStart(grapheme))?;
         self.byte += grapheme.len();
         self.pos.column += grapheme.len();
-        self.emit_event(EventKind::GraphemeEnd(grapheme));
+        self.emit_event(EventKind::GraphemeEnd(grapheme))?;
+        ControlFlow::Continue(())
     }
 
-    fn emit_event(&mut self, kind: EventKind<'_>) {
+    fn emit_event(&mut self, kind: EventKind<'_>) -> ControlFlow<T> {
         (self.handle_event)(Event {
             byte: self.byte,
             pos: self.pos,
             kind,
-        });
+        })
     }
 }

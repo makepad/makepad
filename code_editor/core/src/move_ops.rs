@@ -92,7 +92,7 @@ fn move_to_end_of_prev_line(text: &Text, pos: Pos) -> Pos {
 }
 
 fn move_to_next_line(text: &Text, pos: Pos, column: Option<usize>) -> (Pos, usize) {
-    let column = column.unwrap_or_else(|| byte_to_column(pos.line, pos.byte));
+    let column = column.unwrap_or_else(|| byte_to_column(text, pos.line, pos.byte));
     let next_line = pos.line + 1;
     (
         Pos {
@@ -104,7 +104,7 @@ fn move_to_next_line(text: &Text, pos: Pos, column: Option<usize>) -> (Pos, usiz
 }
 
 fn move_to_prev_line(text: &Text, pos: Pos, column: Option<usize>) -> (Pos, usize) {
-    let column = column.unwrap_or_else(|| byte_to_column(pos.line, pos.byte));
+    let column = column.unwrap_or_else(|| byte_to_column(text, pos.line, pos.byte));
     let prev_line = pos.line - 1;
     (
         Pos {
@@ -129,8 +129,18 @@ fn move_to_end_of_line(text: &Text, pos: Pos) -> Pos {
     }
 }
 
-fn byte_to_column(_line: usize, byte: usize) -> usize {
-    byte
+fn byte_to_column(text: &Text, line: usize, byte: usize) -> usize {
+    use {std::ops::ControlFlow, crate::layout};
+
+    match layout::layout(&text.as_lines()[line], |event| {
+        if event.byte == byte {
+            return ControlFlow::Break(event.pos.column);
+        }
+        ControlFlow::Continue(())
+    }) {
+        ControlFlow::Break(column) => column,
+        _ => panic!(),
+    }
 }
 
 fn column_to_byte(text: &Text, line: usize, column: usize) -> usize {

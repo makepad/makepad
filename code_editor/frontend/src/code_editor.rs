@@ -149,7 +149,7 @@ impl<'a> Drawer<'a> {
     }
 
     fn draw_line(&mut self, cx: &mut Cx2d, line: &str) {
-        use makepad_code_editor_core::layout::EventKind;
+        use {std::ops::ControlFlow, makepad_code_editor_core::layout::EventKind};
 
         let start_row = self.layout_pos.row;
         layout::layout(line, |event| {
@@ -178,6 +178,7 @@ impl<'a> Drawer<'a> {
                     self.check_cursor_start(cx);
                 }
             }
+            ControlFlow::<()>::Continue(())
         });
         self.pos.line += 1;
         self.pos.byte = 0;
