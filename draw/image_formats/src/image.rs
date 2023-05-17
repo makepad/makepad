@@ -11,8 +11,8 @@ pub struct ImageBuffer {
 impl ImageBuffer {
     pub fn new(width: usize,height: usize) -> ImageBuffer {
         ImageBuffer {
-            width: width,
-            height: height,
+            width,
+            height,
             data: vec![0; width * height],
         }
     }

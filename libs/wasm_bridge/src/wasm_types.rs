@@ -110,11 +110,11 @@ pub struct WasmDataF32 {
 
 impl WasmDataF32 {
     pub fn new(data:&[f32]) -> Self {
-        if data.len() != 0{
+        if !data.is_empty(){
             Self{ptr:WasmPtrF32::new(data.as_ptr()), len:data.len()}
         }
         else{
-            Self{ptr:WasmPtrF32::new(0 as *const f32), len:0}
+            Self{ptr:WasmPtrF32::new(std::ptr::null::<f32>()), len:0}
         }
     }
 }
@@ -127,11 +127,11 @@ pub struct WasmDataU32 {
 
 impl WasmDataU32 {
     pub fn new(data:&[u32]) -> Self {
-        if data.len() != 0{
+        if !data.is_empty(){
             Self{ptr:WasmPtrU32::new(data.as_ptr()), len:data.len()}
         }
         else{
-            Self{ptr:WasmPtrU32::new(0 as *const u32), len:0}
+            Self{ptr:WasmPtrU32::new(std::ptr::null::<u32>()), len:0}
         }
     }
 }
@@ -175,7 +175,7 @@ impl FromWasm for &str {
     }
     
     fn from_wasm_inner(self, out: &mut FromWasmMsg) {
-        out.push_str(&self);
+        out.push_str(self);
     }
 }
 

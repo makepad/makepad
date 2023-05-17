@@ -35,12 +35,12 @@ pub fn live_design_impl(input: TokenStream) -> TokenStream {
         tb.add("    };");
         tb.add("    cx.register_live_body(live_body);");
         tb.add("}");
-        return tb.end();
+        tb.end()
     }
     else {
         tb.add("pub fn live_design(cx:&mut Cx) {");
         tb.add("}");
-        return tb.end();
+        tb.end()
     }
 }
 
