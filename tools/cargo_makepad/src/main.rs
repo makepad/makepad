@@ -43,19 +43,23 @@ fn show_help(err: &str){
     }
 
 fn main() {
-   
-    /*let test_args = "cargo makepad android expand-sdk";
-    let args:Vec<String> = test_args.split(" ").map(|s| s.to_string()).collect();
-    let args = &args[2..];*/
     let args:Vec<String> = std::env::args().collect();
     println!("{:?}", args);
-    if args.len()<3{
+
+    // Skip the first argument if it's the binary path or 'cargo'
+    let args = if args.len() > 1 && (args[0].ends_with("cargo-makepad") || args[0] == "cargo") {
+        // If it's 'cargo makepad', then skip the second argument as well
+        if args.len() > 2 && args[1] == "makepad" {
+            args[2..].to_vec()
+        } else {
+            args[1..].to_vec()
+        }
+    } else {
+        args
+    };
+
+    if args.len() <= 1 {
         return show_help("not enough arguments");
-    }
-    let args = &args[2..];
-   
-    if args.len() == 0{
-        return show_help("");
     }
     match args[0].as_ref(){
         "android" => if let Err(e) = handle_android(&args[1..]){
@@ -67,5 +71,3 @@ fn main() {
         _=> show_help("not implemented yet")
     }
 }
-
-

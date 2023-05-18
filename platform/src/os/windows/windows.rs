@@ -176,6 +176,9 @@ impl Cx {
             Win32Event::TextCopy(e) => {
                 self.call_event_handler(&Event::TextCopy(e))
             }
+            Win32Event::TextCut(e) => {
+                self.call_event_handler(&Event::TextCut(e))
+            }
             Win32Event::Timer(e) => {
                 self.call_event_handler(&Event::Timer(e))
             }
