@@ -314,9 +314,9 @@ fn sha1_digest_block_u32(state: &mut [u32; 5], block: &[u32; 16]) {
 
 pub fn sha1_digest_bytes(state: &mut[u32; STATE_LEN], bytes: &[u8; U8_BLOCK_LEN]) {
     let mut block_u32 = [0u32; 16];
-    for i in 0..16 {
+    for (i, num) in block_u32.iter_mut().enumerate() {
         let off = i * 4;
-        block_u32[i] = (bytes[off + 3] as u32)
+        *num = (bytes[off + 3] as u32)
             | ((bytes[off + 2] as u32) << 8)
             | ((bytes[off + 1] as u32) << 16)
             | ((bytes[off] as u32) << 24);
