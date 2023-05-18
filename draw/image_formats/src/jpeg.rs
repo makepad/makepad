@@ -1,5 +1,6 @@
 // image_formats::jpeg
 // by Desmond Germans, 2019
+#![allow(clippy::approx_constant)]
 
 use crate::ImageBuffer;
 
