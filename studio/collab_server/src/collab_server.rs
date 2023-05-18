@@ -313,7 +313,7 @@ impl CollabConnection {
         file_guard.outstanding_deltas.push_back(delta.clone());
         
         if let Ok(mut file) = fs::File::create(&file_guard.path){
-            if let Err(_) = file.write_all(format!("{}", file_guard.text).as_bytes()){
+            if file.write_all(format!("{}", file_guard.text).as_bytes()).is_err() {
                 eprintln!("Error writing file {:?}", file_guard.path)
             }
         }
