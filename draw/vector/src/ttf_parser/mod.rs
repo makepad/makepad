@@ -648,8 +648,7 @@ fn parse_char_code_to_glyph_index_map_format_4(bytes: &[u8]) -> Result<Vec<usize
                 pos = pos.wrapping_add(delta);
                 pos = pos.wrapping_add(id_range_offset);
                 let mut reader = Reader::new(&bytes[pos as usize..]);
-                let id = reader.read_u16()?;
-                id
+                reader.read_u16()?
             };
             char_code_to_glyph_index_map.resize(code as usize + 1, 0);
             char_code_to_glyph_index_map[code as usize] = id as usize;
