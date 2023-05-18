@@ -88,11 +88,9 @@ fn main() {
                             },
                             Ok(WebSocketMessage::Close) => {
                                 println!("Websocket Close message received");
-                                return
                             }
                             Err(e) => {
                                 println!("Websocket parse error {:?}", e);
-                                return
                             }
                         }
                     });
@@ -142,7 +140,7 @@ fn main() {
         data.resize(CHUNK_SIZE as usize, 0u8);
         if let Ok(len) = file.read(&mut data) {
             data.resize(len, 0u8);
-            return data
+            data
         }
         else {
             panic!("File read failed")
@@ -258,5 +256,6 @@ fn hash_bytes(id_bytes: &[u8]) -> u64 {
         x ^= x >> 32;
         i += 1;
     }
-    return x
+
+    x
 }

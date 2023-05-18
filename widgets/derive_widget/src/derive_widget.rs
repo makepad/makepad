@@ -25,7 +25,8 @@ pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+
+    parser.unexpected()
 }
 /*
 pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
@@ -180,7 +181,8 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+
+    parser.unexpected()
 }
 
 
@@ -301,6 +303,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+
+    parser.unexpected()
 }
 
