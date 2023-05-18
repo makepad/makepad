@@ -52,6 +52,12 @@ impl Sha1 {
     }
 }
 
+impl Default for Sha1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub const STATE_LEN: usize = 5;
 pub const BLOCK_LEN: usize = 16;
 pub const U8_BLOCK_LEN: usize = BLOCK_LEN * 4;

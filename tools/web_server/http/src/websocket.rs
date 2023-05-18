@@ -75,7 +75,7 @@ impl BinaryMessageHeader{
         else if len < 65536{
             data[1] = 126; 
             let bytes = &(len as u16).to_be_bytes();
-            for i in 0..bytes.len(){
+            for i in 0..bytes.len() {
                 data[i+2] = bytes[i]
             }
             return BinaryMessageHeader{len:4, data}
@@ -83,7 +83,7 @@ impl BinaryMessageHeader{
         else{
             data[1] = 127;
             let bytes = &(len as u64).to_be_bytes();
-            for i in 0..bytes.len(){
+            for i in 0..bytes.len() {
                 data[i+2] = bytes[i]
             }
             return BinaryMessageHeader{len:10, data}
@@ -96,7 +96,6 @@ impl BinaryMessageHeader{
 }
 
 impl WebSocket {
-    
     pub fn new() -> Self {
         Self {
             head: [0u8; 8],
@@ -292,5 +291,11 @@ impl WebSocket {
         }
     }
     
+}
+
+impl Default for WebSocket {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
