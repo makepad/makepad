@@ -179,9 +179,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
                             false
                         }
                         if let Some(last_tt) = &last_tt {
-                            if is_ident(last_tt) && is_string_lit(tt) {}
-                            else if is_punct(last_tt) {}
-                            else {
+                            if !((is_ident(last_tt) && is_string_lit(tt)) || is_punct(last_tt)) {
                                 out.push(' ');
                             }
                         }
