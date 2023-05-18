@@ -69,7 +69,7 @@ impl<'a> GlyphsParser<'a> {
                 outline: Outline::new(),
             }
         } else {
-            let mut reader = Reader::new(&bytes);
+            let mut reader = Reader::new(bytes);
             let contour_count = reader.read_i16()?;
             let bounds = Rectangle::new(
                 Point::new(reader.read_i16()? as f64, reader.read_i16()? as f64),
@@ -85,7 +85,7 @@ impl<'a> GlyphsParser<'a> {
     }
 
     fn parse_offset(&self, index: usize) -> Result<usize> {
-        let mut reader = Reader::new(&self.loca_table_bytes);
+        let mut reader = Reader::new(self.loca_table_bytes);
         Ok(match self.index_to_loc_format {
             IndexToLocFormat::Short => {
                 reader.skip(index * 2)?;
