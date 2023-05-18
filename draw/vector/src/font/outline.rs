@@ -123,7 +123,7 @@ pub struct Contour<'a> {
 
 impl<'a> Contour<'a> {
     pub fn points(&self) -> &'a [OutlinePoint] {
-        &self.points
+        self.points
     }
 }
 
