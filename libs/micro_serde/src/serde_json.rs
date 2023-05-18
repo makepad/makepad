@@ -769,8 +769,7 @@ V: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
         s.out.push('{');
         let last = self.len() - 1;
-        let mut index = 0;
-        for (k, v) in self {
+        for (index, (k, v)) in self.iter().enumerate() {
             s.indent(d + 1);
             k.ser_json(d + 1, s);
             s.out.push(':');
@@ -778,7 +777,6 @@ V: SerJson {
             if index != last{
                 s.conl();
             }
-            index += 1;
         }
         s.indent(d);
         s.out.push('}');
