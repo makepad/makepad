@@ -50,6 +50,6 @@ impl Sub for Size {
 
 impl SubAssign<Size> for Size {
     fn sub_assign(&mut self, other: Self) {
-        *self += other;
+        *self = *self - other;
     }
 }
