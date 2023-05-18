@@ -18,7 +18,7 @@ pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             tb.add("}");
             tb.add("impl").stream(generic.clone());
-            tb.add("Default for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("Default for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
             tb.add("    fn default()->Self{Self::None}");
             tb.add("}");
             

@@ -35,7 +35,7 @@ impl<'a> LiveNodeReader<'a> {
             Some(Self {
                 eot: self.eot,
                 depth: (self.depth as isize + depth_change) as usize,
-                index: index,
+                index,
                 nodes: self.nodes
             })
         }
