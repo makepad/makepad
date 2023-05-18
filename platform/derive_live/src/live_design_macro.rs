@@ -104,6 +104,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
         }
         
         #[cfg(not(lines))]
+        #[allow(clippy::ptr_arg)]
         fn delta_whitespace(_now: Lc, _needed: Lc, _out: &mut String) {
         }
         
