@@ -605,18 +605,14 @@ impl TokenParser {
     
     pub fn eat_ident_path(&mut self) -> Option<TokenStream> {
         let mut tb = TokenBuilder::new();
-        loop {
-            if let Some(ident) = self.eat_any_ident() {
-                tb.ident(&ident);
-                if !self.eat_sep() {
-                    break
-                }
-                tb.sep();
-            }
-            else {
+        while let Some(ident) = self.eat_any_ident() {
+            tb.ident(&ident);
+            if !self.eat_sep() {
                 break
             }
+            tb.sep();
         }
+
         let ts = tb.end();
         if !ts.is_empty() {
             return Some(ts)

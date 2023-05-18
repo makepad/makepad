@@ -403,8 +403,8 @@ impl DeBin for char {
         let mut bytes = [0; 4];
         bytes[0] = u8::de_bin(o, d)?;
         let width = utf8_char_width(bytes[0]);
-        for index in 1..width {
-            bytes[index] = u8::de_bin(o, d)?;
+        for byte in &mut bytes[1..width] {
+            *byte = u8::de_bin(o, d)?;
         }
         Ok(str::from_utf8(&bytes[..width])
             .unwrap()

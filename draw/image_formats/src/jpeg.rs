@@ -1026,18 +1026,18 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                     //println!("tc = {}, n = {}",tc,n);
                     let mut bits = [0u8; 16];
                     let mut total = 0usize;
-                    for i in 0..16 {
-                        bits[i] = src[tsp];
+                    for bit in &mut bits {
+                        *bit = src[tsp];
                         tsp += 1;
-                        total += bits[i] as usize;
+                        total += *bit as usize;
                     }
                     if total >= 256 {
                         return Err("Invalid JPEG 7".to_string());
                     }
                     //println!("total codes: {}",total);
                     let mut huffval = [0u8; 256];
-                    for i in 0..total {
-                        huffval[i] = src[tsp];
+                    for huffbit in &mut huffval[..total] {
+                        *huffbit = src[tsp];
                         //println!("code {}: run {}, cat {}",i,huffval[i] >> 4,huffval[i] & 15);
                         tsp += 1;
                     }

@@ -19,8 +19,8 @@ impl Sha1 {
     
     pub fn update(&mut self, bytes: &[u8]) {
         // first write bytes into block,
-        for i in 0..bytes.len() {
-            self.block[self.in_block] = bytes[i];
+        for &byte in bytes {
+            self.block[self.in_block] = byte;
             self.in_block += 1;
             if self.in_block == U8_BLOCK_LEN {
                 sha1_digest_bytes(&mut self.state, &self.block);
@@ -58,8 +58,8 @@ pub fn base64_encode(input: &[u8]) -> String {
     let mut out = String::new();
     let mut rem: usize = 0;
     let mut step = 0;
-    for i in 0..input.len() {
-        let inp = input[i] as usize;
+    for &inp in input {
+        let inp = inp as usize;
         if step == 0 {
             out.push(BASE64_TABLE[inp >> 2] as char);
             rem = inp & 3;
