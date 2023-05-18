@@ -141,8 +141,8 @@ pub fn vec2(x: f32, y: f32) -> Vec2 {Vec2 {x, y}}
 pub fn vec3(x: f32, y: f32, z: f32) -> Vec3 {Vec3 {x, y, z}}
 pub fn vec4(x: f32, y: f32, z: f32, w: f32) -> Vec4 {Vec4 {x, y, z, w}}
 
-const TORAD: f32 = 0.017_453_292;
-const TODEG: f32 = 57.295_78;
+const TORAD: f32 = 0.017453292;
+const TODEG: f32 = 57.29578;
 
 /*
 pub fn vec2(x:f32, y:f32)->Vec2{
@@ -633,7 +633,7 @@ impl Mat4 {
     }
     
     pub fn rotation(rx: f32, ry: f32, rz: f32) -> Mat4 {
-        const TORAD: f32 = 0.017_453_292;
+        const TORAD: f32 = 0.017453292;
         let cx = f32::cos(rx * TORAD);
         let cy = f32::cos(ry * TORAD);
         let cz = f32::cos(rz * TORAD);
