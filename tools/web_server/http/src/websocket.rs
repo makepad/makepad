@@ -75,16 +75,16 @@ impl BinaryMessageHeader{
         else if len < 65536{
             data[1] = 126; 
             let bytes = &(len as u16).to_be_bytes();
-            for i in 0..bytes.len() {
-                data[i+2] = bytes[i]
+            for (i, &byte) in bytes.iter().enumerate() {
+                data[i + 2] = byte;
             }
             return BinaryMessageHeader{len:4, data}
         }
         else{
             data[1] = 127;
             let bytes = &(len as u64).to_be_bytes();
-            for i in 0..bytes.len() {
-                data[i+2] = bytes[i]
+            for (i, &byte) in bytes.iter().enumerate() {
+                data[i + 2] = byte;
             }
             return BinaryMessageHeader{len:10, data}
         }
