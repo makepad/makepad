@@ -258,6 +258,12 @@ impl TokenBuilder {
     }
 }
 
+impl Default for TokenBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub trait IdentifyLast: Iterator + Sized {
     fn identify_last(self) -> Iter<Self>;
 }
