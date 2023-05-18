@@ -4,6 +4,7 @@ use std::ops::ControlFlow;
 pub struct Event<'a> {
     pub byte_pos: usize,
     pub pos: Pos,
+    pub column_len: usize,
     pub kind: EventKind<'a>,
 }
 
@@ -15,19 +16,7 @@ pub struct Pos {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventKind<'a> {
-    BeginLine,
-    EndLine,
-    Elem(Elem<'a>),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Elem<'a> {
-    pub column_len: usize,
-    pub kind: ElemKind<'a>
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ElemKind<'a> {
+    NewLine,
     Grapheme(&'a str)
 }
 
@@ -54,32 +43,29 @@ where
     fn layout(&mut self, line: &str) -> ControlFlow<T> {
         use crate::StrExt;
 
-        self.emit_event(EventKind::BeginLine)?;
         for grapheme in line.graphemes() {
             self.layout_grapheme(grapheme)?;
         }
-        self.emit_event(EventKind::EndLine)?;
-        ControlFlow::Continue(())
+        self.emit_event(0, EventKind::NewLine)
     }
 
     fn layout_grapheme(&mut self, grapheme: &str) -> ControlFlow<T> {
         use crate::CharExt;
 
         let column_len = grapheme.chars().next().unwrap().column_len();
-        self.emit_event(EventKind::Elem(Elem {
-            column_len,
-            kind: ElemKind::Grapheme(grapheme),
-        }))?;
+        self.emit_event(column_len, EventKind::Grapheme(grapheme))?;
         self.byte_pos += grapheme.len();
-        self.pos.column += column_len;
         ControlFlow::Continue(())
     }
 
-    fn emit_event(&mut self, kind: EventKind<'_>) -> ControlFlow<T> {
+    fn emit_event(&mut self, column_len: usize, kind: EventKind<'_>) -> ControlFlow<T> {
         (self.handle_event)(Event {
             byte_pos: self.byte_pos,
             pos: self.pos,
+            column_len,
             kind,
-        })
+        })?;
+        self.pos.column += column_len;
+        ControlFlow::Continue(())
     }
 }
