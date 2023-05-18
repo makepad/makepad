@@ -312,7 +312,7 @@ impl LiveRegistry {
             }
             if let Some(index) = file.expanded.nodes.child_by_name(0, item.as_instance()) {
                 return Some(LiveScopeTarget::LivePtr(
-                    LivePtr {file_id: file_id, index: index as u32, generation: file.generation}
+                    LivePtr {file_id, index: index as u32, generation: file.generation}
                 ))
             }
         }
@@ -344,7 +344,7 @@ impl LiveRegistry {
         //let file_id = token_id.file_id();
         let file = self.file_id_to_file(file_id);
         match self.find_scope_target_one_level_or_global(item, index, &file.expanded.nodes) {
-            Some(LiveScopeTarget::LocalPtr(index)) => Some(LivePtr {file_id: file_id, index: index as u32, generation: file.generation}),
+            Some(LiveScopeTarget::LocalPtr(index)) => Some(LivePtr {file_id, index: index as u32, generation: file.generation}),
             Some(LiveScopeTarget::LivePtr(ptr)) => Some(ptr),
             None => None
         }
@@ -412,7 +412,7 @@ impl LiveRegistry {
                         _ => match LiveToken::from_full_token(&full_token.token) {
                             Some(live_token) => {
                                 // lets build up the span info
-                                tokens.push(TokenWithSpan {span: span, token: live_token})
+                                tokens.push(TokenWithSpan {span, token: live_token})
                             },
                             _ => ()
                         },
@@ -458,7 +458,7 @@ impl LiveRegistry {
             let mut column = 0usize;
             for (token_index, full_token) in full_tokens.iter().enumerate() {
                 
-                if range.is_in_range(TokenPos {line: line, index: token_index}) {
+                if range.is_in_range(TokenPos {line, index: token_index}) {
                     // ok so. now we filter the token
                     let span = TextSpan {
                         file_id,
@@ -482,7 +482,7 @@ impl LiveRegistry {
                                     live_tokens = &mut new_tokens;
                                     parse_changed = true;
                                 }
-                                live_tokens.push(TokenWithSpan {span: span, token: new_string});
+                                live_tokens.push(TokenWithSpan {span, token: new_string});
                             }
                             else if let LiveToken::String (_) = &live_tokens[live_index].token {
                                 todo!();
@@ -493,7 +493,7 @@ impl LiveRegistry {
                                     live_tokens = &mut new_tokens;
                                     parse_changed = true;
                                 }
-                                live_tokens[live_index] = TokenWithSpan {span: span, token: new_string};
+                                live_tokens[live_index] = TokenWithSpan {span, token: new_string};
                             }
                             live_index += 1;
                         },
@@ -505,7 +505,7 @@ impl LiveRegistry {
                                         live_tokens = &mut new_tokens;
                                         parse_changed = true;
                                     }
-                                    live_tokens.push(TokenWithSpan {span: span, token: live_token})
+                                    live_tokens.push(TokenWithSpan {span, token: live_token})
                                 }
                                 else {
                                     if live_tokens[live_index].is_parse_equal(&live_token) { // token value changed
