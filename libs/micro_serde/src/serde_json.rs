@@ -671,7 +671,7 @@ macro_rules!de_json_array_impl {
             DeJsonErr> {
                 unsafe{
                     let mut to = std::mem::MaybeUninit::<[T; $count]>::uninit();
-                    let top: *mut T = std::mem::transmute(&mut to);
+                    let top: *mut T = &mut to as *mut _ as *mut T;
                     de_json_array_impl_inner(top, $count, s, i)?;
                     Ok(to.assume_init())
                 }
