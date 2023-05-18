@@ -16,16 +16,10 @@ pub trait CharExt {
 
 impl CharExt for char {
     fn is_identifier_start(&self) -> bool {
-        match *self {
-            'A'..='Z' | '_' | 'a'..='z' => true,
-            _ => false,
-        }
+        matches!(*self, 'A'..='Z' | '_' | 'a'..='z')
     }
 
     fn is_identifier_continue(&self) -> bool {
-        match *self {
-            '0'..='9' | 'A'..='Z' | '_' | 'a'..='z' => true,
-            _ => false,
-        }
+        matches!(*self, '0'..='9' | 'A'..='Z' | '_' | 'a'..='z')
     }
 }

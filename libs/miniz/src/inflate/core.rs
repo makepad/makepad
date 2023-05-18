@@ -304,18 +304,18 @@ enum State {
 
 impl State {
     fn is_failure(self) -> bool {
-        match self {
-            BlockTypeUnexpected => true,
-            BadCodeSizeSum => true,
-            BadTotalSymbols => true,
-            BadZlibHeader => true,
-            DistanceOutOfBounds => true,
-            BadRawLength => true,
-            BadCodeSizeDistPrevLookup => true,
-            InvalidLitlen => true,
-            InvalidDist => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            BlockTypeUnexpected
+                | BadCodeSizeSum
+                | BadTotalSymbols
+                | BadZlibHeader
+                | DistanceOutOfBounds
+                | BadRawLength
+                | BadCodeSizeDistPrevLookup
+                | InvalidLitlen
+                | InvalidDist
+        )
     }
 
     #[inline]
@@ -1698,4 +1698,3 @@ pub fn decompress(
         out_buf.position() - out_pos,
     )
 }
-
