@@ -258,7 +258,7 @@ macro_rules!de_bin_array_impl {
             DeBinErr> {
                 unsafe{
                     let mut to = std::mem::MaybeUninit::<[T; $count]>::uninit();
-                    let top: *mut T = std::mem::transmute(&mut to);
+                    let top: *mut T = &mut to as *mut _ as *mut T;
                     de_bin_array_impl_inner(top, $count, o, d)?;
                     Ok(to.assume_init())
                 }
