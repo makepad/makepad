@@ -148,9 +148,9 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     out.push(CBOR_U16);
                     out.extend_from_slice(&(v as u16).to_be_bytes());
                 }
-                else if v <= std::u32::MAX as u32 {
+                else if v <= std::u32::MAX {
                     out.push(CBOR_U32);
-                    out.extend_from_slice(&(v as u32).to_be_bytes());
+                    out.extend_from_slice(&v.to_be_bytes());
                 }
             }
             
@@ -559,7 +559,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                     }
                     CBOR_U64 => {
                         *o += 1;
-                        Some(read_u64(data, o) ? as u64)
+                        Some(read_u64(data, o)?)
                     }
                     _ => return Ok(None)
                 }
@@ -590,7 +590,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                     }
                     CBOR_NU64 => {
                         *o += 1;
-                        Some(-(read_i64(data, o) ? as i64 + 1))
+                        Some(-(read_i64(data, o)? + 1))
                     }
                     _ => if let Some(data) = decode_u64(data, o) ? {
                         Some(data as i64)

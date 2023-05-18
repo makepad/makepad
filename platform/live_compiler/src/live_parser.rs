@@ -493,7 +493,7 @@ impl<'a> LiveParser<'a> {
                         origin,
                         id: prop_id,
                         value: LiveValue::Class {
-                            live_type: self.live_type_infos[val as usize].live_type,
+                            live_type: self.live_type_infos[val].live_type,
                             class_parent: None,
                         }
                     });
