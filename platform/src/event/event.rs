@@ -61,7 +61,7 @@ pub enum Event {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    TextCut,
+    TextCut(TextCutEvent),
     
     Drag(DragEvent),
     Drop(DropEvent),
@@ -88,7 +88,7 @@ pub enum Hit{
     Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    TextCut,
+    TextCut(TextCutEvent),
     
     FingerScroll(FingerScrollEvent),
     FingerDown(FingerDownEvent),
