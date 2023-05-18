@@ -1,4 +1,4 @@
-use crate::{Len, Pos};
+use super::{Len, Pos};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Range {

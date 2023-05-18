@@ -1,5 +1,12 @@
 use {
-    crate::{arena::Id, buf::EditKind, move_ops, Arena, Buf, CursorSet, Diff, Event, Pos, Text},
+    crate::{
+        arena::Id,
+        buf::EditKind,
+        move_ops,
+        text::Text,
+        text::{Diff, Pos},
+        Arena, Buf, CursorSet, Event,
+    },
     std::{
         cell::{RefCell, RefMut},
         collections::HashSet,

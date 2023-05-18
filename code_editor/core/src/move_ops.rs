@@ -1,4 +1,4 @@
-use crate::{Pos, Text};
+use crate::text::{Pos, Text};
 
 pub fn move_left(text: &Text, pos: Pos) -> Pos {
     if !is_at_start_of_line(pos) {
@@ -130,10 +130,10 @@ fn move_to_end_of_line(text: &Text, pos: Pos) -> Pos {
 }
 
 fn byte_to_column(text: &Text, line: usize, byte: usize) -> usize {
-    use {std::ops::ControlFlow, crate::layout};
+    use {crate::layout, std::ops::ControlFlow};
 
     match layout::layout(&text.as_lines()[line], |event| {
-        if event.byte == byte {
+        if event.byte_pos == byte {
             return ControlFlow::Break(event.pos.column);
         }
         ControlFlow::Continue(())

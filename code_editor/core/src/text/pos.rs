@@ -1,5 +1,5 @@
 use {
-    crate::{Diff, Len},
+    super::{Diff, Len},
     std::ops::{Add, AddAssign, Sub},
 };
 
@@ -11,7 +11,7 @@ pub struct Pos {
 
 impl Pos {
     pub fn apply_diff(self, diff: &Diff, after: bool) -> Pos {
-        use {crate::diff::LenOnlyOp, std::cmp::Ordering};
+        use {super::diff::LenOnlyOp, std::cmp::Ordering};
 
         let mut pos = Pos::default();
         let mut rem_len = self - Pos::default();

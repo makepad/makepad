@@ -1,5 +1,5 @@
 use {
-    crate::{Len, Pos, Text},
+    super::{Len, Pos, Text},
     std::{slice, vec},
 };
 
