@@ -119,7 +119,7 @@ impl<'a> LiveParser<'a> {
         match self.peek_token() {
             LiveToken::String(v) => {
                 self.skip_token();
-                Ok(v.clone())
+                Ok(v)
             }
             token => Err(self.error(format!("expected ident, unexpected token `{}`", token), live_error_origin!())),
         }
@@ -904,7 +904,7 @@ impl<'a> LiveParser<'a> {
         let expr = self.expect_prim_expr() ?;
         
         ld.nodes.push(LiveNode {
-            origin: origin,
+            origin,
             id: prop_id,
             value: LiveValue::Expr {expand_index: None}
         });
