@@ -219,7 +219,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 else {
                     id.as_string( | v | {
                         if let Some(v) = v {
-                            encode_str(&v, out);
+                            encode_str(v, out);
                         }
                         else {
                             encode_u64(id.0, out);
@@ -712,7 +712,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                 self.push(LiveNode {id, origin, value: LiveValue::Int64(v)});
             }
             else if let Some(v) = decode_str(data, &mut o) ? {
-                let value = if let Some(inline_str) = InlineString::from_str(&v) {
+                let value = if let Some(inline_str) = InlineString::from_str(v) {
                     LiveValue::InlineString(inline_str)
                 }
                 else {
