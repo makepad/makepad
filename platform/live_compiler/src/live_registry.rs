@@ -99,7 +99,7 @@ impl LiveRegistry {
         if doc.generation != live_ptr.generation {
             panic!("ptr_to_node generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
         }
-        &doc.expanded.resolve_ptr(live_ptr.index as usize)
+        doc.expanded.resolve_ptr(live_ptr.index as usize)
     }
     
     pub fn file_name_to_file_id(&self, file_name:&str) -> Option<LiveFileId> {
@@ -146,7 +146,7 @@ impl LiveRegistry {
         if doc.generation != live_ptr.generation {
             panic!("ptr_to_doc_node generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
         }
-        (&doc.expanded, &doc.expanded.resolve_ptr(live_ptr.index as usize))
+        (&doc.expanded, doc.expanded.resolve_ptr(live_ptr.index as usize))
     }
     
     pub fn ptr_to_doc(&self, live_ptr: LivePtr) -> &LiveExpanded {
@@ -733,7 +733,7 @@ impl LiveRegistry {
                     }
                 }, */
                 LiveValue::Class {live_type, ..} => { // hold up. this is always own_module_path
-                    let infos = self.live_type_infos.get(&live_type).unwrap();
+                    let infos = self.live_type_infos.get(live_type).unwrap();
                     for sub_type in infos.fields.clone() {
                         let sub_module_id = sub_type.live_type_info.module_id;
                         if sub_module_id != own_module_id {

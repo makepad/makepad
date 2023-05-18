@@ -38,7 +38,7 @@ fn main() {
     
     // skip over response, we don't care. either it works or it doesn't
     let mut data = [0u8; 65535];
-    tcp_stream.read(&mut data).unwrap();
+    let _ = tcp_stream.read(&mut data).unwrap();
     
     // create a new websocket parser instance 
     let mut web_socket = WebSocket::new();
