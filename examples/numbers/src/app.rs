@@ -3,12 +3,12 @@ use makepad_widgets::*;
 live_design!{
     import makepad_widgets::frame::*;
     import makepad_widgets::desktop_window::DesktopWindow
+    import makepad_example_numbers::number_grid::NumberGrid
 
-    registry Widget::*;
-    App= {{App}} {
+    App = {{App}} {
         ui:<DesktopWindow>{
             <ScrollY>{
-                draw_bg:{color:#5, shape:Solid}
+                draw_bg:{color:#5}
                 <NumberGrid>{
                 }
             }
