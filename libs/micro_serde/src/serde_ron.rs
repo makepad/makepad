@@ -743,7 +743,7 @@ macro_rules!de_ron_array_impl {
                 DeRonErr> {
                     unsafe {
                         let mut to = std::mem::MaybeUninit::<[T; $ count]>::uninit();
-                        let top: *mut T = std::mem::transmute(&mut to);
+                        let top: *mut T = &mut to as *mut _ as *mut T;
                         de_ron_array_impl_inner(top, $ count, s, i) ?;
                         Ok(to.assume_init())
                     }

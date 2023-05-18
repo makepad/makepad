@@ -340,7 +340,7 @@ impl<T, const N: usize> ToWasm for [T; N] where T: ToWasm {
     fn read_to_wasm(inp: &mut ToWasmMsgRef) -> Self {
         unsafe {
             let mut to = std::mem::MaybeUninit::<[T; N]>::uninit();
-            let top: *mut T = std::mem::transmute(&mut to);
+            let top: *mut T = &mut to as *mut _ as *mut T;
             for i in 0..N {
                 top.add(i).write(ToWasm::read_to_wasm(inp));
             }
