@@ -52,7 +52,7 @@ fn main() {
                 let mut bytes = Vec::new();
                 msg.ser_bin(&mut bytes);
                 let header = BinaryMessageHeader::from_len(bytes.len());
-                if tcp_stream.write_all(&header.as_slice()).is_err() {
+                if tcp_stream.write_all(header.as_slice()).is_err() {
                     println!("tcp stream write error");
                     return
                 };
