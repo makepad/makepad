@@ -132,9 +132,7 @@ fn main() {
                     continue
                 }
                 
-                let strip = if let Some(strip) = path.strip_prefix(&prefixes[0]){Some(strip)}
-                else if let Some(strip) = path.strip_prefix(&prefixes[1]){Some(strip)}
-                else {None};
+                let strip = path.strip_prefix(&prefixes[0]).or_else(|| path.strip_prefix(&prefixes[1]));
 
                 if let Some(base) = strip{
                     if let Ok(mut file_handle) = File::open(base) {

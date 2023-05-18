@@ -95,7 +95,7 @@ impl Trapezoidator {
                     pending_segments.push(pending_segment);
                 }
             }
-            return Some(event.point);
+            Some(event.point)
         })
     }
 
