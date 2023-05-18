@@ -317,12 +317,10 @@ impl<'a> OutlinePointReader<'a> {
                 } else {
                     -x
                 }
+            } else if flags.x_is_same_or_positive_x_short_vector() {
+                0.0
             } else {
-                if flags.x_is_same_or_positive_x_short_vector() {
-                    0.0
-                } else {
-                    self.x_coordinates_reader.read_i16()? as f64
-                }
+                self.x_coordinates_reader.read_i16()? as f64
             },
             if flags.y_short_vector() {
                 let y = self.y_coordinates_reader.read_u8()? as f64;
@@ -331,12 +329,10 @@ impl<'a> OutlinePointReader<'a> {
                 } else {
                     -y
                 }
+            } else if flags.y_is_same_or_positive_y_short_vector() {
+                0.0
             } else {
-                if flags.y_is_same_or_positive_y_short_vector() {
-                    0.0
-                } else {
-                    self.y_coordinates_reader.read_i16()? as f64
-                }
+                self.y_coordinates_reader.read_i16()? as f64
             },
         );
         Ok(OutlinePoint {
