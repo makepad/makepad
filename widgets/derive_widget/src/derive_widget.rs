@@ -96,7 +96,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             else{
                 return error("derive WidgetRef can only be done on a struct with ending name Ref")
             };
-            let snake_name = camel_case_to_snake_case(&clean_name);
+            let snake_name = camel_case_to_snake_case(clean_name);
             
             tb.add("impl std::ops::Deref for ").ident(&ref_name).add("{");
             tb.add("    type Target = WidgetRef;");
@@ -197,7 +197,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             else{
                 return error("derive WidgetRef can only be done on a struct with ending name Ref")
             };
-            let snake_name = camel_case_to_snake_case(&clean_name);
+            let snake_name = camel_case_to_snake_case(clean_name);
             
             tb.add("impl std::ops::Deref for ").ident(&set_name).add("{");
             tb.add("    type Target = WidgetSet;");
