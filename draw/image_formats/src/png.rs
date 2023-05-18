@@ -99,9 +99,9 @@ fn create_huffman_tables(lengths: &[u8]) -> Vec<[i16; TABLE_SIZE]> {
     tables.push([0i16; TABLE_SIZE]);
     let mut ofs: u64 = 0;
     for i in 1..25 {
-        for k in 0..lengths.len() {
-            if lengths[k] == i {
-                let size = insert_code(&mut tables, ofs as u32, k as u16, lengths[k]);
+        for (k, &length) in lengths.iter().enumerate() {
+            if length == i {
+                let size = insert_code(&mut tables, ofs as u32, k as u16, length);
                 ofs += size as u64;
             }
         }
@@ -207,17 +207,17 @@ fn inflate(src: &[u8], inflated_size: usize) -> Result<Vec<u8>, String> {
     
     // create default litlen table
     let mut lengths: [u8; 288] = [0; 288];
-    for i in 0..144 {
-        lengths[i] = 8;
+    for length in &mut lengths[0..144] {
+        *length = 8;
     }
-    for i in 144..256 {
-        lengths[i] = 9;
+    for length in &mut lengths[144..256] {
+        *length = 9;
     }
-    for i in 256..280 {
-        lengths[i] = 7;
+    for length in &mut lengths[256..280] {
+        *length = 7;
     }
-    for i in 280..288 {
-        lengths[i] = 8;
+    for length in &mut lengths[280..288] {
+        *length = 8;
     }
     
     let default_hlitlen_tables = create_huffman_tables(&lengths);
@@ -840,12 +840,12 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                 if chunk_length > 768 {
                     return Err("Invalid PNG".to_string());
                 }
-                for i in 0..(chunk_length / 3) {
+                for color in &mut palette[..(chunk_length / 3)] {
                     let r = src[sp];
                     let g = src[sp + 1];
                     let b = src[sp + 2];
                     sp += 3;
-                    palette[i] = 0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                    *color = 0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                 }
             },
             0x624B4744 => { // bKGD
