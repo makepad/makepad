@@ -125,10 +125,10 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
                     }
                     pick = Some(items.len())
                 }
-                if let Some(_) = parser.eat_all_types() {
+                if parser.eat_all_types().is_some() {
                     return error_result("For atomic enums only bare values are supported");
                 }
-                else if let Some(_) = parser.eat_all_struct_fields() { // named variant
+                else if parser.eat_all_struct_fields().is_some() { // named variant
                     return error_result("For atomic enums only bare values are supported");
                 }
                 else if parser.is_punct_alone(',') || parser.is_eot() { // bare variant
