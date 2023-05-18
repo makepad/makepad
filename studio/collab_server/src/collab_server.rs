@@ -227,7 +227,7 @@ impl CollabConnection {
                 
                 drop(shared_guard);
                 
-                Ok((file_id, their_revision as u32, text))
+                Ok((file_id, their_revision, text))
             }
             None => {
                 // The file was not yet opened, so we need to open it, and then add the client as

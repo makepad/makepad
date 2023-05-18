@@ -12,7 +12,7 @@ pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
         out[0] = table[(inp[i] >> 2) as usize];
         out[1] = table[((inp[i] & 0x3) << 4 | inp[i + 1] >> 4) as usize];
         out[2] = table[((inp[i + 1] & 0xf) << 2 | inp[i + 2] >> 6) as usize];
-        out[3] = table[((inp[i + 2] & 0x3f)) as usize];
+        out[3] = table[(inp[i + 2] & 0x3f) as usize];
         i += 3;
         o += 4;
     }
