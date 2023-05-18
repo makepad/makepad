@@ -126,31 +126,16 @@ impl Text {
     pub fn copy(&self, range: Range) -> Text {
         Text {
             lines: if range.start.line == range.end.line {
-                vec![
-                    self.lines[range.start.line][range.start.column..range.end.column]
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                ]
+                vec![self.lines[range.start.line][range.start.column..range.end.column].to_vec()]
             } else {
                 let mut lines = Vec::with_capacity(range.end.line - range.start.line + 1);
-                lines.push(
-                    self.lines[range.start.line][range.start.column..]
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                );
+                lines.push(self.lines[range.start.line][range.start.column..].to_vec());
                 lines.extend(
                     self.lines[range.start.line + 1..range.end.line]
                         .iter()
                         .cloned(),
                 );
-                lines.push(
-                    self.lines[range.end.line][..range.end.column]
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                );
+                lines.push(self.lines[range.end.line][..range.end.column].to_vec());
                 lines
             },
         }

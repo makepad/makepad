@@ -161,7 +161,7 @@ impl<'a> ZipReader<'a> {
         Ok(result)
     }
     
-    fn read_symbol(&mut self, prefix: &Vec<[i16; TABLE_SIZE]>) -> Result<u32, String> {
+    fn read_symbol(&mut self, prefix: &[[i16; TABLE_SIZE]]) -> Result<u32, String> {
         
         let mut n: usize = 0;
         let mut index = (self.cache & (TABLE_SIZE - 1) as u32) as usize;
