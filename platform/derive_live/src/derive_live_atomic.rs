@@ -125,17 +125,12 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
                     }
                     pick = Some(items.len())
                 }
-                if parser.eat_all_types().is_some() {
+                if parser.eat_all_types().is_some() || parser.eat_all_struct_fields().is_some() { // named variant
                     return error_result("For atomic enums only bare values are supported");
-                }
-                else if parser.eat_all_struct_fields().is_some() { // named variant
-                    return error_result("For atomic enums only bare values are supported");
-                }
-                else if parser.is_punct_alone(',') || parser.is_eot() { // bare variant
-                    items.push(EnumItem {name})
-                }
-                else {
-                    return error_result("unexpected whilst parsing enum")
+                } else if parser.is_punct_alone(',') || parser.is_eot() { // bare variant
+                    items.push(EnumItem {name});
+                } else {
+                    return error_result("unexpected whilst parsing enum");
                 }
             }
             parser.eat_punct_alone(',');

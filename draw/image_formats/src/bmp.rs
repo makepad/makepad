@@ -318,7 +318,7 @@ pub fn decode_pixels(dst: &mut [u32],src: &[u8],width: usize,height: usize,botto
                     let mut r = (d >> 10) & 31;
                     let mut g = (d >> 5) & 31;
                     let mut b = d & 31;
-                    let a = if alphamask == 0 { 255 } else if (d & 0x8000) != 0 { 255 } else { 0 };
+                    let a = if alphamask == 0 || (d & 0x8000) != 0 { 255 } else { 0 };
                     r = (r << 3) | (r >> 2);
                     g = (g << 3) | (g >> 2);
                     b = (b << 3) | (b >> 2);
