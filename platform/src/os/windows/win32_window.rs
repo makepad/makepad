@@ -613,7 +613,7 @@ impl Win32Window {
         //run_catch_panic(-1, || callback_inner(window, msg, wparam, lparam))
     }
 
-    fn copy_to_clipboard(text: &String) {
+    unsafe fn copy_to_clipboard(text: &String) {
         // plug it into the windows clipboard
         // make utf16 dta
         if OpenClipboard(None) == TRUE {
