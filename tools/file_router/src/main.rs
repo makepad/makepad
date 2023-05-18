@@ -122,7 +122,7 @@ fn main() {
     
     fn get_file_len(name:&str)->u64{
         let path = get_file_path(name);
-        fs::metadata(path).unwrap().len() as u64        
+        fs::metadata(path).unwrap().len()
     }
     
     fn set_file_len(name: &str, len: u64) {
