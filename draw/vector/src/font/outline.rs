@@ -157,17 +157,15 @@ impl<'a> InternalIterator for Commands<'a> {
                             return false;
                         }
                         first_on_curve_point = Some(point.point);
-                    } else {
-                        if let Some(first_off_curve_point) = first_off_curve_point {
-                            let midpoint = first_off_curve_point.lerp(point.point, 0.5);
-                            if !f(PathCommand::MoveTo(midpoint)) {
-                                return false;
-                            }
-                            first_on_curve_point = Some(midpoint);
-                            last_off_curve_point = Some(point.point);
-                        } else {
-                            first_off_curve_point = Some(point.point);
+                    } else if let Some(first_off_curve_point) = first_off_curve_point {
+                        let midpoint = first_off_curve_point.lerp(point.point, 0.5);
+                        if !f(PathCommand::MoveTo(midpoint)) {
+                            return false;
                         }
+                        first_on_curve_point = Some(midpoint);
+                        last_off_curve_point = Some(point.point);
+                    } else {
+                        first_off_curve_point = Some(point.point);
                     }
                 } else {
                     match (last_off_curve_point, point.is_on_curve) {
