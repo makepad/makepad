@@ -16,6 +16,7 @@ use {
             DragEvent,
             DropEvent,
             TextCopyEvent,
+            TextCutEvent,
             TimerEvent,
         },
     }
@@ -45,6 +46,7 @@ pub enum CocoaEvent {
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextCopy(TextCopyEvent),
+    TextCut(TextCutEvent),
     Timer(TimerEvent),
     MenuCommand(MenuCommand),
 }
