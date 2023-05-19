@@ -186,6 +186,9 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             &makepad_java_classes_dir.join("Makepad.java").to_str().unwrap(),
             &makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap(),
             &makepad_java_classes_dir.join("MakepadSurfaceView.java").to_str().unwrap(),
+            &makepad_java_classes_dir.join("MakepadNetwork.java").to_str().unwrap(),
+            &makepad_java_classes_dir.join("HttpResponse.java").to_str().unwrap(),
+            &makepad_java_classes_dir.join("HttpRequest.java").to_str().unwrap(),
             &java_file.to_str().unwrap()
         ]   
     ) ?; 
@@ -208,6 +211,9 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
             &compiled_java_classes_dir.join("Makepad.class").to_str().unwrap(),
             &compiled_java_classes_dir.join("MakepadActivity.class").to_str().unwrap(),
             &compiled_java_classes_dir.join("MakepadSurfaceView.class").to_str().unwrap(),
+            &compiled_java_classes_dir.join("MakepadNetwork.class").to_str().unwrap(),
+            &compiled_java_classes_dir.join("HttpResponse.class").to_str().unwrap(),
+            &compiled_java_classes_dir.join("HttpRequest.class").to_str().unwrap(),
             &compiled_java_classes_dir.join("Makepad$Callback.class").to_str().unwrap(),
             &java_class.to_str().unwrap(),
         ]
@@ -258,7 +264,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<BuildRe
     cp(&cwd.join("examples/ironfish/resources/icons/Icon_Arp.svg"), &out_dir.join("assets/makepad/resources/icons/Icon_Arp.svg"), false) ?;
 
     //println!("Adding resources to apk");
-    §(&[], &out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
+    shell_env_cap(&[], &out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
         "add",
         &dst_unaligned_apk.to_str().unwrap(),
         "assets/makepad/makepad_widgets/resources/IBMPlexSans-Text.ttf",

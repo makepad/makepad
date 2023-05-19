@@ -45,6 +45,9 @@ import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+
 public class MakepadActivity extends Activity implements 
 MidiManager.OnDeviceOpenedListener,
 View.OnCreateContextMenuListener,
@@ -54,7 +57,14 @@ Makepad.Callback{
         // this causes a pause/resume cycle.
         if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED ||
             checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED){
-            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.CAMERA}, 123);
+            requestPermissions(
+                new String[]{
+                    Manifest.permission.BLUETOOTH_CONNECT, 
+                    Manifest.permission.CAMERA,
+                    Manifest.permission.INTERNET
+                    }, 
+                123
+            );
         }
 
         super.onCreate(savedInstanceState);
@@ -323,6 +333,22 @@ Makepad.Callback{
                 return true;
             default:
                 return super.onContextItemSelected(item);
+        }
+    }
+
+    public void requestHttp(HttpRequest request) {
+        try {   
+            MakepadNetwork network = new MakepadNetwork();
+    
+            CompletableFuture<HttpResponse> future = network.performNetworkRequest(request);
+
+            future.thenAccept(response -> {
+                runOnUiThread(() -> Makepad.onHttpResponse(mCx, response, (Makepad.Callback) mView.getContext()));
+            }).exceptionally(ex -> {
+                return null;
+            });
+        } catch (Exception e) { //TODO: Handle the exception
+            // something like Makepad.onHttpError ? 
         }
     }
 
