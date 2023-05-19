@@ -129,7 +129,7 @@ pub struct Cx {
 }
 
 #[derive(Clone)]
-pub struct CxRef(pub (crate) Rc<RefCell<Cx>>);
+pub struct CxRef(pub Rc<RefCell<Cx>>); //TODO: I probably shouldn't remove the (crate)
 
 pub struct CxDependency {
     pub data: Option<Result<Vec<u8>, String >>

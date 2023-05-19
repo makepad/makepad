@@ -7,6 +7,7 @@ workspace.members = [
     "examples/simple",
     "examples/video_mixer",
     "examples/video_sender",
+    "examples/chatgpt",
     "libs/futures",
     "libs/wasm_bridge/test",
     "studio",

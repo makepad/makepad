@@ -1,0 +1,11 @@
+[package]
+name = "makepad-example-chatgpt"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad simple example"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "5POKajmZt90sjG2MIw5C9dizbBo="
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "0.3.0" }
