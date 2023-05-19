@@ -14,6 +14,7 @@ use {
             window::*,
             xr::*,
             drag_drop::*,
+            network::*,
         },
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
@@ -75,6 +76,9 @@ pub enum Event {
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
+
+    HttpResponse(HttpResponseEvent),
+
     
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
