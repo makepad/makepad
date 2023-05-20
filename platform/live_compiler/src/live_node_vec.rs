@@ -619,7 +619,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
             }
             index += 1;
         }
-        return index
+        index
     }
     
     fn clone_child(&self, parent_index: usize, out: &mut Vec<LiveNode>) {
@@ -644,7 +644,6 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
             }
             index += 1;
         }
-        return
     }
     
     fn debug_print(&self, parent_index: usize, max_depth: usize) {

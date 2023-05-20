@@ -325,16 +325,17 @@ impl LiveRegistry {
         }
         else{
             log!("Can't find scope target on rootnode without id_resolve");
-            return None
+            None
         }
     }
     
     
     pub fn find_scope_target_one_level_or_global(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
         if let Some(index) = nodes.scope_up_down_by_name(index, item.as_instance(), 1) {
-            return Some(LiveScopeTarget::LocalPtr(index))
+            Some(LiveScopeTarget::LocalPtr(index))
+        } else {
+            self.find_scope_target(item, nodes)
         }
-        return self.find_scope_target(item, nodes);
     }
     
     pub fn find_scope_ptr_via_expand_index(&self, file_id: LiveFileId, index: usize, item: LiveId) -> Option<LivePtr> {
@@ -591,10 +592,11 @@ impl LiveRegistry {
         let mut errors = Vec::new();
         self.expand_all_documents(&mut errors);
         
-        if errors.len()>0 {
-            return Err(errors);
+        if !errors.is_empty() {
+            Err(errors)
+        } else {
+            Ok(())
         }
-        return Ok(())
     }
     
     fn update_documents_from_mutated_tokens(
@@ -765,7 +767,7 @@ impl LiveRegistry {
         self.file_ids.insert(file_name.to_string(), file_id);
         self.live_files.push(live_file);
         
-        return Ok(file_id)
+        Ok(file_id)
     }
     
     pub fn expand_all_documents(&mut self, errors: &mut Vec<LiveError>) {

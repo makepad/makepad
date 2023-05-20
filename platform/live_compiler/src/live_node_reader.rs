@@ -120,7 +120,7 @@ impl<'a> LiveNodeReader<'a> {
     }
     
     pub fn is_eot(&self) -> bool {
-        return self.eot
+        self.eot
     }
     
     pub fn index(&self) -> usize {
@@ -214,7 +214,7 @@ impl<'a> LiveNodeMutReader<'a> {
     }
     
     pub fn is_eot(&mut self) -> bool {
-        return self.eot
+        self.eot
     }
     
     pub fn index(&mut self) -> usize {
