@@ -1,6 +1,6 @@
+#![allow(clippy::collapsible_if)]
 use {
     std::{
-        collections::HashMap,
         rc::Rc,
         fmt::Write,
         iter
@@ -109,14 +109,11 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 }
                 // lets see if we are a DSL node then match the token range
                 if also_in_dsl && token_id.file_id() == match_token_id.file_id() {
-                    match node.value {
-                        LiveValue::DSL {token_start, token_count, ..} => {
-                            let index = match_token_id.token_index() as u32;
-                            if index >= token_start && index <= token_start + token_count {
-                                return Some(node_index);
-                            }
+                    if let LiveValue::DSL { token_start, token_count, .. } = node.value {
+                        let index = match_token_id.token_index() as u32;
+                        if index >= token_start && index <= token_start + token_count {
+                            return Some(node_index);
                         }
-                        _ => ()
                     }
                 }
             }
@@ -128,7 +125,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
     
     fn parent(&self, child_index: usize) -> Option<usize> {
         let self_ref = self.as_ref();
-        if self_ref.len() == 0 {
+        if self_ref.is_empty() {
             return None
         }
         let mut stack_depth = 0;
@@ -154,7 +151,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
     
     fn get_num_sibling_nodes(&self, start_index: usize) -> usize {
         let self_ref = self.as_ref();
-        if self_ref.len() == 0 {
+        if self_ref.is_empty() {
             return 0
         }
         let mut stack_depth: isize = 0;
@@ -182,7 +179,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
     
     fn scope_up_by_name(&self, index: usize, name: LiveProp) -> Option<usize> {
         let self_ref = self.as_ref();
-        if self_ref.len() == 0 {
+        if self_ref.is_empty() {
             return None
         }
         let mut stack_depth: isize = 0;
@@ -211,7 +208,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
     
     fn scope_up_down_by_name(&self, start_index: usize,  name: LiveProp, mut levels_up:usize) -> Option<usize> {
         let self_ref = self.as_ref();
-        if self_ref.len() == 0 {
+        if self_ref.is_empty() {
             return None
         }
         let mut stack_depth: isize = 0;
@@ -271,17 +268,13 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 if stack_depth == 0 {
                     return None
                 }
-            }
-            else {
-                if stack_depth == 1 {
-                    if child_number == child_count {
-                        return Some(index);
-                    }
-                    child_count += 1;
+            } else if stack_depth == 1 {
+                if child_number == child_count {
+                    return Some(index);
                 }
-                else if stack_depth == 0 {
-                    panic!()
-                }
+                child_count += 1;
+            } else if stack_depth == 0 {
+                panic!()
             }
             index += 1;
         }
@@ -315,11 +308,8 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                     return None;
                 }
                 stack_depth -= 1;
-            }
-            else {
-                if stack_depth == 0 && index != child_index {
-                    return Some(index)
-                }
+            } else if stack_depth == 0 && index != child_index {
+                return Some(index);
             }
             index += 1;
         }
@@ -348,15 +338,11 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 if stack_depth == 0 {
                     return found_child
                 }
-            }
-            else {
-                if stack_depth == 1 {
-                    found_child = Some(index);
-                    //child_count += 1;
-                }
-                else if stack_depth == 0 {
-                    panic!()
-                }
+            } else if stack_depth == 1 {
+                found_child = Some(index);
+                //child_count += 1;
+            } else if stack_depth == 0 {
+                panic!()
             }
             index += 1;
         }
@@ -579,14 +565,10 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 if stack_depth == 0 {
                     return count
                 }
-            }
-            else {
-                if stack_depth == 1 {
-                    count += 1;
-                }
-                else if stack_depth == 0 {
-                    panic!()
-                }
+            } else if stack_depth == 1 {
+                count += 1;
+            } else if stack_depth == 0 {
+                panic!()
             }
             index += 1;
         }
@@ -600,8 +582,7 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
         while index < self_ref.len() {
             if self_ref[index].is_open() {
                 stack_depth += 1;
-            }
-            else if self_ref[index].is_close() {
+            } else if self_ref[index].is_close() {
                 if stack_depth == 0 {
                     panic!()
                 }
@@ -610,12 +591,9 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                     index += 1;
                     return index
                 }
-            }
-            else {
-                if stack_depth == 0 {
-                    index += 1;
-                    return index
-                }
+            } else if stack_depth == 0 {
+                index += 1;
+                return index
             }
             index += 1;
         }
@@ -636,11 +614,8 @@ impl<T> LiveNodeSliceApi for T where T: AsRef<[LiveNode]> {
                 if stack_depth == 0 {
                     return
                 }
-            }
-            else {
-                if stack_depth == 0 {
-                    return
-                }
+            } else if stack_depth == 0 {
+                return
             }
             index += 1;
         }
@@ -876,7 +851,7 @@ impl LiveNodeVecApi for LiveNodeVec {
             }
             ids[index] = LiveProp(*step, LivePropType::Field);
         }
-        let was_empty = self.len() == 0;
+        let was_empty = self.is_empty();
         if was_empty {
             self.open_object(LiveId(0));
         }
@@ -943,7 +918,7 @@ impl LiveNodeVecApi for LiveNodeVec {
                     }
                 }
                 None => {
-                    index = index + 1;
+                    index += 1;
                     if depth == path.len() - 1 { // last
                         self.splice(index..index, other.iter().cloned());
                         // lets overwrite the id
@@ -993,5 +968,5 @@ impl LiveNodeVecApi for LiveNodeVec {
     fn open_clone(&mut self, id: LiveId, clone: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Clone(clone)})}
     fn open_array(&mut self, id: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Array})}
     fn close(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Close})}
-    fn root2(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Root{id_resolve:Box::new(HashMap::new())}})}
+    fn root2(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Root{id_resolve:Box::default()}})}
 }

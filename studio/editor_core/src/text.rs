@@ -6,7 +6,7 @@ use {
         range::Range,
         size::Size,
     },
-    std::{fmt, iter, mem, ops::AddAssign},
+    std::{fmt, iter, ops::AddAssign},
 };
 
 /// A type for representing text.
@@ -279,7 +279,7 @@ impl Text {
                 iter::empty(),
             );
         } else {
-            let mut line = mem::replace(&mut self.lines[position.line], Vec::new());
+            let mut line = std::mem::take(&mut self.lines[position.line]);
             line.splice(
                 position.column..,
                 self.lines[position.line + count.line as usize][count.column as usize..]
