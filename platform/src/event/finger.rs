@@ -617,9 +617,9 @@ impl Event {
                     return Hit::TextCopy(tc.clone());
                 }
             },
-            Event::TextCut => {
+            Event::TextCut(tc) => {
                 if cx.keyboard.has_key_focus(area) {
-                    return Hit::TextCut;
+                    return Hit::TextCut(tc.clone());
                 }
             },
             Event::Scroll(e) => {
