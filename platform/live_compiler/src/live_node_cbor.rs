@@ -103,7 +103,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
             let node = &nodes[index];
             
             if node.value.is_close() {
-                if stack.len() == 0 {
+                if stack.is_empty() {
                     return Err("Unmatched closed".into())
                 }
                 let item = stack.pop().unwrap();
@@ -531,9 +531,10 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
             assert_len(*o, len, data) ?;
             if let Ok(val) = std::str::from_utf8(&data[*o..*o + len]) {
                 *o += len;
-                return Ok(Some(val))
+                Ok(Some(val))
+            } else {
+                Err(LiveNodeFromCborError::UTF8Error)
             }
-            return Err(LiveNodeFromCborError::UTF8Error);
         }
         
         fn decode_u64(data: &[u8], o: &mut usize) -> Result<Option<u64>, LiveNodeFromCborError> {
@@ -564,7 +565,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                     _ => return Ok(None)
                 }
             };
-            return Ok(v)
+            Ok(v)
         }
         
         fn decode_i64(data: &[u8], o: &mut usize) -> Result<Option<i64>, LiveNodeFromCborError> {
