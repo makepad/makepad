@@ -208,9 +208,7 @@ impl<'a> LiveExpander<'a> {
                         final_path.push('/');
                         final_path.push_str(path);
                         out_doc.nodes[out_index].value = LiveValue::Dependency(Rc::new(final_path));
-                    }
-                    else 
-                    if let Some(path) = path.strip_prefix("crate://"){
+                    } else if let Some(path) = path.strip_prefix("crate://") {
                         let mut split = path.split('/');
                         if let Some(crate_name) = split.next(){
                             if let Some(mut final_path) = self.live_registry.crate_name_to_cargo_manifest_path(crate_name){

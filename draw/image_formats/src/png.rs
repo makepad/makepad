@@ -1,6 +1,8 @@
 // image_formats::png
 // by Desmond Germans, 2019
 
+use std::cmp::Ordering;
+
 use crate::ImageBuffer;
 
 // Inflate algorithm
@@ -353,58 +355,59 @@ fn inflate(src: &[u8], inflated_size: usize) -> Result<Vec<u8>, String> {
                     Ok(value) => {value},
                     Err(msg) => {return Err(msg);},
                 };
-                if code < 256 {
-                    dst[dp] = code as u8;
-                    dp += 1;
-                }
-                else if code == 256 {
-                    break;
-                }
-                else {
-                    // get lit/len length and extra bit entries
-                    code -= 257;
-                    let mut length = LITLEN_LENGTH[code as usize] as usize;
-                    let extra = LITLEN_EXTRA[code as usize] as u32;
-                    
-                    // read extra bits
-                    if extra > 0 {
-                        length += match reader.read_bits(extra) {
+
+                match code.cmp(&256) {
+                    Ordering::Less => {
+                        dst[dp] = code as u8;
+                        dp += 1;
+                    }
+                    Ordering::Equal => break,
+                    Ordering::Greater => {
+                        // get lit/len length and extra bit entries
+                        code -= 257;
+                        let mut length = LITLEN_LENGTH[code as usize] as usize;
+                        let extra = LITLEN_EXTRA[code as usize] as u32;
+                        
+                        // read extra bits
+                        if extra > 0 {
+                            length += match reader.read_bits(extra) {
+                                Ok(value) => {value},
+                                Err(msg) => {return Err(msg);},
+                            } as usize;
+                        }
+                        
+                        // get dist length and extra bit entries
+                        code = match reader.read_symbol(hdist_tables) {
                             Ok(value) => {value},
                             Err(msg) => {return Err(msg);},
-                        } as usize;
+                        };
+                        let mut dist = DIST_DIST[code as usize] as usize;
+                        let extra = DIST_EXTRA[code as usize] as u32;
+                        
+                        // read extra bits
+                        if extra > 0 {
+                            dist += match reader.read_bits(extra) {
+                                Ok(value) => {value},
+                                Err(msg) => {return Err(msg);},
+                            } as usize;
+                        }
+                        
+                        // copy block
+                        if dp + length > dst.len() {
+                            length = dst.len() - dp;
+                            //return Err(format!("data corrupt (dp ({}) + length ({}) exceeds dst ({}))",dp,length,dst.len()));
+                        }
+                        if dist > dp {
+                            return Err(format!("data corrupt (dp ({}) - dist ({}) negative)", dp, dist));
+                        }
+                        if dp + length - dist > dst.len() {
+                            return Err(format!("data corrupt (dp ({}) - dist ({}) + length ({}) exceeds dst ({}))", dp, dist, length, dst.len()));
+                        }
+                        for i in 0..length {
+                            dst[dp + i] = dst[dp - dist + i];
+                        }
+                        dp += length;
                     }
-                    
-                    // get dist length and extra bit entries
-                    code = match reader.read_symbol(hdist_tables) {
-                        Ok(value) => {value},
-                        Err(msg) => {return Err(msg);},
-                    };
-                    let mut dist = DIST_DIST[code as usize] as usize;
-                    let extra = DIST_EXTRA[code as usize] as u32;
-                    
-                    // read extra bits
-                    if extra > 0 {
-                        dist += match reader.read_bits(extra) {
-                            Ok(value) => {value},
-                            Err(msg) => {return Err(msg);},
-                        } as usize;
-                    }
-                    
-                    // copy block
-                    if dp + length > dst.len() {
-                        length = dst.len() - dp;
-                        //return Err(format!("data corrupt (dp ({}) + length ({}) exceeds dst ({}))",dp,length,dst.len()));
-                    }
-                    if dist > dp {
-                        return Err(format!("data corrupt (dp ({}) - dist ({}) negative)", dp, dist));
-                    }
-                    if dp + length - dist > dst.len() {
-                        return Err(format!("data corrupt (dp ({}) - dist ({}) + length ({}) exceeds dst ({}))", dp, dist, length, dst.len()));
-                    }
-                    for i in 0..length {
-                        dst[dp + i] = dst[dp - dist + i];
-                    }
-                    dp += length;
                 }
             }
         }
@@ -999,8 +1002,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
             }
         }
         Ok(result)
-    } else
-    {
+    } else {
         //let after0 = Instant::now();
         
         let filtered_data = match inflate(&zipped_data, (stride + 1) * height) {
