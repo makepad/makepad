@@ -1,6 +1,5 @@
 use {
     std::fmt,
-    std::convert::Into,
     crate::live_token::LiveTokenId,
     crate::span::{TextSpan,TokenSpan},
     makepad_live_tokenizer::{LiveErrorOrigin},
@@ -21,21 +20,21 @@ impl LiveErrorSpan{
     }
 }
 
-impl Into<LiveErrorSpan> for TextSpan{
-    fn into(self)->LiveErrorSpan{
-        LiveErrorSpan::Text(self)
+impl From<TextSpan> for LiveErrorSpan {
+    fn from(val: TextSpan) -> Self {
+        LiveErrorSpan::Text(val)
     }
 }
 
-impl Into<LiveErrorSpan> for TokenSpan{
-    fn into(self)->LiveErrorSpan{
-        LiveErrorSpan::Token(self)
+impl From<TokenSpan> for LiveErrorSpan {
+    fn from(val: TokenSpan) -> Self {
+        LiveErrorSpan::Token(val)
     }
 }
 
-impl Into<LiveErrorSpan> for LiveTokenId{
-    fn into(self)->LiveErrorSpan{
-        LiveErrorSpan::Token(TokenSpan{token_id:self, len:1})
+impl From<LiveTokenId> for LiveErrorSpan {
+    fn from(val: LiveTokenId) -> Self {
+        LiveErrorSpan::Token(TokenSpan { token_id: val, len: 1 })
     }
 }
 
