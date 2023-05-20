@@ -255,9 +255,10 @@ impl LiveTokenId {
             panic!();
         }
         if ((v >> 18) & 0x3ff) == 0 {
-            return None
+            None
+        } else {
+            Some(Self(v))
         }
-        return Some(Self (v))
     }
 }
 

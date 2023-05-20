@@ -37,9 +37,10 @@ impl LiveModuleId {
             i += 1;
         }
         if i == len { // module_path is only one thing
-            return Ok(LiveModuleId(LiveId(0), LiveId::from_str(std::str::from_utf8(&bytes[0..len]).unwrap()) ?));
+            Ok(LiveModuleId(LiveId(0), LiveId::from_str(std::str::from_utf8(&bytes[0..len]).unwrap()) ?))
+        } else {
+            Ok(LiveModuleId(crate_id, LiveId::from_str(std::str::from_utf8(&bytes[i..len]).unwrap()) ?))
         }
-        return Ok(LiveModuleId(crate_id, LiveId::from_str(std::str::from_utf8(&bytes[i..len]).unwrap()) ?));
     }
 
 }

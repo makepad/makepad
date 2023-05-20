@@ -387,7 +387,7 @@ impl<'a> LiveParser<'a> {
             self.accept_token(LiveToken::Punct(live_id!(,)));
             counter += 1;
         }
-        return Err(self.error(format!("Eof in array body"), live_error_origin!()))
+        Err(self.error("Eof in array body".to_string(), live_error_origin!()))
     }
     
     
@@ -411,7 +411,7 @@ impl<'a> LiveParser<'a> {
             self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_prop_type(LivePropType::Nameless), ld) ?;
             self.accept_token(LiveToken::Punct(live_id!(,)));
         }
-        return Err(self.error(format!("Eof in object body"), live_error_origin!()))
+        Err(self.error("Eof in object body".to_string(), live_error_origin!()))
     }
     
     
@@ -440,7 +440,7 @@ impl<'a> LiveParser<'a> {
             self.expect_live_value(prop_id, LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info), ld) ?;
             self.accept_token(LiveToken::Punct(live_id!(,)));
         }
-        return Err(self.error(format!("Eof in named enum"), live_error_origin!()))
+        Err(self.error("Eof in named enum".to_string(), live_error_origin!()))
     }
     
     fn get_token_id(&self) -> LiveTokenId {
@@ -738,7 +738,7 @@ impl<'a> LiveParser<'a> {
             }
             self.skip_token();
         }
-        return Err(self.error(format!("Could not find ending token {} whilst scanning", scan_token), live_error_origin!()));
+        Err(self.error(format!("Could not find ending token {} whilst scanning", scan_token), live_error_origin!()))
     }
     /*
     fn expect_var_def_type(&mut self) -> Result<(), LiveError> {
@@ -847,7 +847,7 @@ impl<'a> LiveParser<'a> {
         if root {
             return Ok(())
         }
-        return Err(self.error(format!("Eof in class body"), live_error_origin!()))
+        Err(self.error("Eof in class body".to_string(), live_error_origin!()))
     }
     
     pub fn expect_prop_type(&mut self)->Result<LivePropType, LiveError>{
