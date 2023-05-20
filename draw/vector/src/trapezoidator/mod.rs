@@ -81,12 +81,7 @@ impl Trapezoidator {
             if let Some(pending_segment) = event.pending_segment {
                 pending_segments.push(pending_segment)
             }
-            loop {
-                let next_event = if let Some(&next_event) = self.event_queue.peek() {
-                    next_event
-                } else {
-                    break;
-                };
+            while let Some(&next_event) = self.event_queue.peek() {
                 if next_event != event {
                     break;
                 }

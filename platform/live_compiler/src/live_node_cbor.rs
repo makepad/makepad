@@ -593,12 +593,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                         *o += 1;
                         Some(-(read_i64(data, o)? + 1))
                     }
-                    _ => if let Some(data) = decode_u64(data, o) ? {
-                        Some(data as i64)
-                    }
-                    else {
-                        None
-                    }
+                    _ => decode_u64(data, o)?.map(|data| data as i64)
                 }
             };
             Ok(v)

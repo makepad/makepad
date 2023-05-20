@@ -41,16 +41,16 @@ fn parse_object(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenS
             prop.stream(Some(live_id));
             // if we have a = its an instance assign
             parse_value(prop.end(), parser, tb)?;
-        }
+
         /*
-        else if parser.is_brace(){  // its an inline class
+        } else if parser.is_brace(){  // its an inline class
             parser.open_group();
             tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:LiveId(0),value:LiveValue::Class{");
             tb.add("class:").stream(Some(prop_id_ts)).add("}},");
             parse_object(parser,tb)?;
             tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:LiveId(0),value:LiveValue::Close},");
         }*/
-        else{
+        } else {
             return Err(parser.unexpected());
         }
         parser.eat_punct_alone(',');
