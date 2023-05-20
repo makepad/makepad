@@ -135,3 +135,9 @@ impl FromWasmMsg {
     }
 
 }
+
+impl Default for FromWasmMsg {
+    fn default() -> Self {
+        Self::new()
+    }
+}
