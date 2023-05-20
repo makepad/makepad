@@ -362,9 +362,10 @@ impl LiveEditInfo {
             panic!();
         }
         if v == 0 {
-            return None
+            None
+        } else {
+            Some(Self(v))
         }
-        return Some(Self (v))
     }
 }
 
