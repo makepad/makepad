@@ -70,29 +70,29 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     }
     
     let cwd = std::env::current_dir().unwrap();
-    let sdk_dir = cwd.join(&sdk_path.unwrap());
+    let sdk_dir = cwd.join(sdk_path.unwrap());
     
     match args[0].as_ref() {
         "rustup-toolchain-install"=>{
             sdk::rustup_toolchain_install()
         }
         "adb"=>{
-            return compile::adb(&sdk_dir, host_os, &args[1..])
+            compile::adb(&sdk_dir, host_os, &args[1..])
         },
         "java"=>{
-            return compile::java(&sdk_dir, host_os, &args[1..])
+            compile::java(&sdk_dir, host_os, &args[1..])
         },
         "javac"=>{
-            return compile::javac(&sdk_dir, host_os, &args[1..])
+            compile::javac(&sdk_dir, host_os, &args[1..])
         },
         "download-sdk" => {
-            return sdk::download_sdk(&sdk_dir, host_os, &args[1..])
+            sdk::download_sdk(&sdk_dir, host_os, &args[1..])
         }
         "expand-sdk" => {
-            return sdk::expand_sdk(&sdk_dir, host_os, &args[1..])
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..])
         }
         "remove-sdk-sources" => {
-            return sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
+            sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
         }
         "toolchain-install" => {
             println!("Installing Android toolchain\n");
@@ -101,15 +101,13 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             sdk::expand_sdk(&sdk_dir, host_os, &args[1..])?;
             sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])?;
             println!("\nAndroid toolchain has been installed\n");
-            return Ok(())
+            Ok(())
         }
         /*"base-apk"=>{
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
         "build" =>{
-            if let Err(e) = compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..]){
-                return Err(e)
-            }
+            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..])?;
             Ok(())
         }
         "run" =>{

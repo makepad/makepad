@@ -66,18 +66,18 @@ fn main_java(url:&str)->String{
 }
 
 fn get_target_from_args(args: &[String]) -> Result<&str, String> {
-    if args.len()<1 {
+    if args.is_empty() {
         return Err("Not enough arguments to build".into());
     }
     if args[0] == "-p" {
         if args.len()<2 { 
             return Err("Not enough arguments to build".into());
         }
-        return Ok(&args[1])
+        Ok(&args[1])
     }
     else {
-        return Ok(&args[0])
-    };
+        Ok(&args[0])
+    }
 }
 
 fn get_target_crate_dir(target: &str) -> Result<PathBuf, String> {
@@ -85,7 +85,7 @@ fn get_target_crate_dir(target: &str) -> Result<PathBuf, String> {
     if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["pkgid", "-p", target]) {
         return Ok(output.trim_start_matches("file://").split('#').next().unwrap().into())
     } else {
-        return Err(format!("Failed to get crate dir for: {}", target))
+        Err(format!("Failed to get crate dir for: {}", target))
     }
 }
 
@@ -113,12 +113,12 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<(), St
     let mut args_out = Vec::new();
     args_out.extend_from_slice(base_args);
     for arg in args {
-        args_out.push(&arg);
+        args_out.push(arg);
     }
     
     shell_env(
         &[
-            ("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", &sdk_dir.join(linker).to_str().unwrap()),
+            ("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", (sdk_dir.join(linker).to_str().unwrap())),
             ("MAKEPAD", "lines"),
         ],
         &cwd,
@@ -141,17 +141,17 @@ fn prepare_build(underscore_target: &str, java_url: &str, app_label: &str) -> Re
     mkdir(&tmp_dir) ?; 
     mkdir(&out_dir) ?;
 
-    let manifest_xml = manifest_xml(&app_label, "MakepadApp", &java_url);
+    let manifest_xml = manifest_xml(app_label, "MakepadApp", java_url);
     let manifest_file = tmp_dir.join("AndroidManifest.xml");
     write_text(&manifest_file, &manifest_xml)?;
     
-    let main_java = main_java(&java_url);
-    let java_path = java_url.replace(".","/");
+    let main_java = main_java(java_url);
+    let java_path = java_url.replace('.',"/");
     let java_file = tmp_dir.join(&java_path).join("MakepadApp.java");
     let java_class = out_dir.join(&java_path).join("MakepadApp.class");
     write_text(&java_file, &main_java)?;
 
-    let apk_filename = to_snakecase(&app_label);
+    let apk_filename = to_snakecase(app_label);
     let dst_unaligned_apk = out_dir.join(format!("{apk_filename}.unaligned.apk"));
     let dst_apk = out_dir.join(format!("{apk_filename}.apk"));
 
@@ -175,24 +175,24 @@ fn build_r_class(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String>
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
 
     shell_env(
-        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &[("JAVA_HOME", (java_home.to_str().unwrap()))],
        &cwd,
-       &sdk_dir.join("android-13/aapt").to_str().unwrap(),
+       sdk_dir.join("android-13/aapt").to_str().unwrap(),
        &[
            "package",
            "-f",
            "-m",
            "-I",
-           &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
+           (sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap()),
            "-S",
-           &cargo_manifest_dir.join("src/android/res").to_str().unwrap(),
+           (cargo_manifest_dir.join("src/android/res").to_str().unwrap()),
            "-M",
-           &build_paths.manifest_file.to_str().unwrap(),
+           (build_paths.manifest_file.to_str().unwrap()),
            "-J",
-           &build_paths.tmp_dir.to_str().unwrap(),
+           (build_paths.tmp_dir.to_str().unwrap()),
            "--custom-package",
            "dev.makepad.android",
-           &build_paths.out_dir.to_str().unwrap(),
+           (build_paths.out_dir.to_str().unwrap()),
        ]
     ) ?;
 
@@ -205,24 +205,24 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
 
-    let r_class_path = build_paths.tmp_dir.join(&makepad_package_path).join("R.java");
-    let makepad_java_classes_dir = &cargo_manifest_dir.join("src/android/java/").join(&makepad_package_path);
+    let r_class_path = build_paths.tmp_dir.join(makepad_package_path).join("R.java");
+    let makepad_java_classes_dir = &cargo_manifest_dir.join("src/android/java/").join(makepad_package_path);
 
     shell_env(
-        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
-        &java_home.join("bin/javac").to_str().unwrap(),
+        java_home.join("bin/javac").to_str().unwrap(),
         &[
             "-classpath", 
-            &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
+            (sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap()),
             "-Xlint:deprecation",
             "-d", 
-            &build_paths.out_dir.to_str().unwrap(),
-            &r_class_path.to_str().unwrap(),
-            &makepad_java_classes_dir.join("Makepad.java").to_str().unwrap(),
-            &makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap(),
-            &makepad_java_classes_dir.join("MakepadSurfaceView.java").to_str().unwrap(),
-            &build_paths.java_file.to_str().unwrap()
+            (build_paths.out_dir.to_str().unwrap()),
+            (r_class_path.to_str().unwrap()),
+            (makepad_java_classes_dir.join("Makepad.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("MakepadActivity.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("MakepadSurfaceView.java").to_str().unwrap()),
+            (build_paths.java_file.to_str().unwrap())
         ]   
     ) ?; 
 
@@ -234,25 +234,25 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
 
-    let compiled_java_classes_dir = build_paths.out_dir.join(&makepad_package_path);
+    let compiled_java_classes_dir = build_paths.out_dir.join(makepad_package_path);
 
     shell_env_cap( 
-        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
-        &java_home.join("bin/java").to_str().unwrap(),
+        java_home.join("bin/java").to_str().unwrap(),
         &[ 
             "-cp",
-            &sdk_dir.join("android-13/lib/d8.jar").to_str().unwrap(),
+            (sdk_dir.join("android-13/lib/d8.jar").to_str().unwrap()),
             "com.android.tools.r8.D8",
             "--classpath",
-            &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
+            (sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap()),
             "--output",
-            &build_paths.out_dir.to_str().unwrap(),
-            &compiled_java_classes_dir.join("Makepad.class").to_str().unwrap(),
-            &compiled_java_classes_dir.join("MakepadActivity.class").to_str().unwrap(),
-            &compiled_java_classes_dir.join("MakepadSurfaceView.class").to_str().unwrap(),
-            &compiled_java_classes_dir.join("Makepad$Callback.class").to_str().unwrap(),
-            &build_paths.java_class.to_str().unwrap(),
+            (build_paths.out_dir.to_str().unwrap()),
+            (compiled_java_classes_dir.join("Makepad.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadActivity.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("MakepadSurfaceView.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("Makepad$Callback.class").to_str().unwrap()),
+            (build_paths.java_class.to_str().unwrap()),
         ]
     ) ?;
 
@@ -265,21 +265,21 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
 
     shell_env(
-        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &[("JAVA_HOME", (java_home.to_str().unwrap()))],
        &cwd,
-       &sdk_dir.join("android-13/aapt").to_str().unwrap(),
+       sdk_dir.join("android-13/aapt").to_str().unwrap(),
        &[
            "package",
            "-f",
            "-F",
-           &build_paths.dst_unaligned_apk.to_str().unwrap(),
+           (build_paths.dst_unaligned_apk.to_str().unwrap()),
            "-I",
-           &sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap(),
+           (sdk_dir.join("android-33-ext4/android.jar").to_str().unwrap()),
            "-M",
-           &build_paths.manifest_file.to_str().unwrap(),
+           (build_paths.manifest_file.to_str().unwrap()),
            "-S",
-           &cargo_manifest_dir.join("src/android/res").to_str().unwrap(),
-           &build_paths.out_dir.to_str().unwrap(),
+           (cargo_manifest_dir.join("src/android/res").to_str().unwrap()),
+           (build_paths.out_dir.to_str().unwrap()),
        ]
     ) ?;
 
@@ -291,13 +291,13 @@ fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &Build
 
     mkdir(&build_paths.out_dir.join("lib/arm64-v8a")) ?;
     
-    let src_lib = cwd.join("target/aarch64-linux-android/release/").join(&format!("lib{underscore_target}.so"));
+    let src_lib = cwd.join("target/aarch64-linux-android/release/").join(format!("lib{underscore_target}.so"));
     let dst_lib = build_paths.out_dir.join("lib/arm64-v8a").join("libmakepad.so");
     cp(&src_lib, &dst_lib, false) ?;
 
-    shell_env_cap(&[], &build_paths.out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
+    shell_env_cap(&[], &build_paths.out_dir, sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
         "add",
-        &build_paths.dst_unaligned_apk.to_str().unwrap(),
+        (build_paths.dst_unaligned_apk.to_str().unwrap()),
         "lib/arm64-v8a/libmakepad.so",
     ]) ?;
 
@@ -311,7 +311,7 @@ fn add_resources(sdk_dir: &Path, target: &str, build_paths: &BuildPaths) -> Resu
     let target_crate_dir = get_target_crate_dir(target) ?;
     let local_resources_path = target_crate_dir.join("resources");
     if local_resources_path.is_dir() {
-        let underscore_target = target.replace("-", "_");
+        let underscore_target = target.replace('-', "_");
         let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{underscore_target}/resources"));
         mkdir(&dst_dir) ?;
         cp_all(&local_resources_path, &dst_dir, false) ?;
@@ -338,7 +338,7 @@ fn add_resources(sdk_dir: &Path, target: &str, build_paths: &BuildPaths) -> Resu
     for (name, resources_path) in dependencies.iter() {
         let dst_dir = build_paths.out_dir.join(format!("assets/makepad/{name}/resources"));
         mkdir(&dst_dir) ?;
-        cp_all(&resources_path, &dst_dir, false) ?;
+        cp_all(resources_path, &dst_dir, false) ?;
 
         let assets = ls(&dst_dir) ?;
         for path in &assets {
@@ -349,24 +349,24 @@ fn add_resources(sdk_dir: &Path, target: &str, build_paths: &BuildPaths) -> Resu
 
     let mut aapt_args = vec![
         "add",
-        &build_paths.dst_unaligned_apk.to_str().unwrap(),
+        build_paths.dst_unaligned_apk.to_str().unwrap(),
     ];
     for asset in &assets_to_add {
         aapt_args.push(asset);
     }
 
-    shell_env_cap(&[], &build_paths.out_dir, &sdk_dir.join("android-13/aapt").to_str().unwrap(), &aapt_args) ?;
+    shell_env_cap(&[], &build_paths.out_dir, sdk_dir.join("android-13/aapt").to_str().unwrap(), &aapt_args) ?;
 
     Ok(())
 }
 
 fn build_zipaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
-    shell_env_cap(&[], &build_paths.out_dir, &sdk_dir.join("android-13/zipalign").to_str().unwrap(), &[
+    shell_env_cap(&[], &build_paths.out_dir, sdk_dir.join("android-13/zipalign").to_str().unwrap(), &[
        "-v",
        "-f",
        "4",
-       &build_paths.dst_unaligned_apk.to_str().unwrap(),
-       &build_paths.dst_apk.to_str().unwrap(),
+       (build_paths.dst_unaligned_apk.to_str().unwrap()),
+       (build_paths.dst_apk.to_str().unwrap()),
     ]) ?;
 
     Ok(())
@@ -378,21 +378,21 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     let java_home = sdk_dir.join("openjdk");
 
     shell_env_cap(
-        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
-        &java_home.join("bin/java").to_str().unwrap(),
+        java_home.join("bin/java").to_str().unwrap(),
         &[
             "-jar",
-            &sdk_dir.join("android-13/lib/apksigner.jar").to_str().unwrap(),
+            (sdk_dir.join("android-13/lib/apksigner.jar").to_str().unwrap()),
             "sign",
             "-v",
             "-ks",
-            &cargo_manifest_dir.join("debug.keystore").to_str().unwrap(),
+            (cargo_manifest_dir.join("debug.keystore").to_str().unwrap()),
             "--ks-key-alias",
             "androiddebugkey",
             "--ks-pass",
             "pass:android",
-            &build_paths.dst_apk.to_str().unwrap()
+            (build_paths.dst_apk.to_str().unwrap())
         ]
     ) ?;
 
@@ -401,7 +401,7 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
 
 pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String]) -> Result<BuildResult, String> {
     let target = get_target_from_args(args)?;
-    let underscore_target = target.replace("-", "_");
+    let underscore_target = target.replace('-', "_");
 
     let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_target}"));
     let app_label = app_label.unwrap_or_else(|| format!("{underscore_target}"));
@@ -433,13 +433,13 @@ pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_la
     
     let cwd = std::env::current_dir().unwrap();
     //println!("Installing android application");
-    shell_env_cap(&[], &cwd, &sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+    shell_env_cap(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
         "install",
         "-r",
-        &result.dst_apk.to_str().unwrap(),
+        (result.dst_apk.to_str().unwrap()),
     ]) ?;
     println!("Starting android application: {}", result.dst_apk.file_name().unwrap().to_str().unwrap());
-    shell_env_cap(&[], &cwd, &sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+    shell_env_cap(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
         "shell",
         "am",
         "start",
@@ -449,7 +449,7 @@ pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_la
     #[allow(unused_assignments)]
     let mut pid = None;
     loop{
-        if let Ok(thing) = shell_env_cap(&[], &cwd, &sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+        if let Ok(thing) = shell_env_cap(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
             "shell", 
             "pidof", 
             &result.java_url,
@@ -458,7 +458,7 @@ pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_la
             break;
         }
     }
-    shell_env(&[], &cwd, &sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
+    shell_env(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &[
         "logcat",
         "--pid",
         &pid.unwrap(),
@@ -473,7 +473,7 @@ pub fn adb(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), Stri
         args_out.push(arg.as_ref());
     }
     let cwd = std::env::current_dir().unwrap();
-    shell_env(&[], &cwd, &sdk_dir.join("platform-tools/adb").to_str().unwrap(), &args_out)?;
+    shell_env(&[], &cwd, sdk_dir.join("platform-tools/adb").to_str().unwrap(), &args_out)?;
     Ok(())
 }
 
@@ -485,9 +485,9 @@ pub fn java(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), Str
     let cwd = std::env::current_dir().unwrap();
     let java_home = sdk_dir.join("openjdk");
     shell_env(
-        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
-        &java_home.join("bin/java").to_str().unwrap(),
+        java_home.join("bin/java").to_str().unwrap(),
         &args_out
     ) ?;
     Ok(())
@@ -501,9 +501,9 @@ pub fn javac(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), St
     let cwd = std::env::current_dir().unwrap();
     let java_home = sdk_dir.join("openjdk");
     shell_env(
-        &[("JAVA_HOME", &java_home.to_str().unwrap())],
+        &[("JAVA_HOME", (java_home.to_str().unwrap()))],
         &cwd,
-        &java_home.join("bin/javac").to_str().unwrap(),
+        java_home.join("bin/javac").to_str().unwrap(),
         &args_out
     ) ?;
     Ok(())
@@ -519,7 +519,7 @@ fn extract_dependency_info(line: &str) -> Option<(String, String)> {
             if token == "(*)" || token == "(proc-macro)" {
                 continue;
             }
-            if token.starts_with("(") {
+            if token.starts_with('(') {
                 let path = token[1..token.len() - 1].to_owned();
                 return Some((name.to_string(), path))
             }
