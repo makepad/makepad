@@ -174,7 +174,7 @@ fn main() {
         match msg {
             RouterMessage::FetchFile {name} => {
                 // answer a fetch file with the file size in bytes
-                if name.contains("..") || name.contains("\\") || name.contains("/") {
+                if name.contains("..") || name.contains('\\') || name.contains('/') {
                     println!("Fetch file contains incorrect values {}", name);
                     continue
                 }

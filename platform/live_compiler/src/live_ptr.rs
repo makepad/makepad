@@ -29,7 +29,7 @@ impl LiveModuleId {
         let mut crate_id = LiveId(0);
         let mut i = 0;
         while i < len {
-            if bytes[i] == ':' as u8 {
+            if bytes[i] == b':' {
                 crate_id = LiveId::from_str(std::str::from_utf8(&bytes[0..i]).unwrap()) ?;
                 i += 2;
                 break
