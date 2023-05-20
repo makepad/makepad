@@ -11,24 +11,24 @@ use crate::{
     shell::*
 };
 
-const URL_PLATFORM_33: &'static str = "https://dl.google.com/android/repository/platform-33-ext4_r01.zip";
+const URL_PLATFORM_33: &str = "https://dl.google.com/android/repository/platform-33-ext4_r01.zip";
 
-const URL_BUILD_TOOLS_33_MACOS: &'static str = "https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip";
-const URL_BUILD_TOOLS_33_LINUX: &'static str = "https://dl.google.com/android/repository/build-tools_r33.0.1-linux.zip";
-const URL_BUILD_TOOLS_33_WINDOWS: &'static str = "https://dl.google.com/android/repository/build-tools_r33.0.1-windows.zip";
+const URL_BUILD_TOOLS_33_MACOS: &str = "https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip";
+const URL_BUILD_TOOLS_33_LINUX: &str = "https://dl.google.com/android/repository/build-tools_r33.0.1-linux.zip";
+const URL_BUILD_TOOLS_33_WINDOWS: &str = "https://dl.google.com/android/repository/build-tools_r33.0.1-windows.zip";
 
-const URL_PLATFORM_TOOLS_33_MACOS: &'static str = "https://dl.google.com/android/repository/platform-tools_r33.0.3-darwin.zip";
-const URL_PLATFORM_TOOLS_33_LINUX: &'static str = "https://dl.google.com/android/repository/platform-tools_r33.0.3-linux.zip";
-const URL_PLATFORM_TOOLS_33_WINDOWS: &'static str = "https://dl.google.com/android/repository/platform-tools_r33.0.3-windows.zip";
+const URL_PLATFORM_TOOLS_33_MACOS: &str = "https://dl.google.com/android/repository/platform-tools_r33.0.3-darwin.zip";
+const URL_PLATFORM_TOOLS_33_LINUX: &str = "https://dl.google.com/android/repository/platform-tools_r33.0.3-linux.zip";
+const URL_PLATFORM_TOOLS_33_WINDOWS: &str = "https://dl.google.com/android/repository/platform-tools_r33.0.3-windows.zip";
 
-const URL_NDK_33_MACOS: &'static str = "https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg";
-const URL_NDK_33_LINUX: &'static str = "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip";
-const URL_NDK_33_WINDOWS: &'static str = "https://dl.google.com/android/repository/android-ndk-r25c-windows.zip";
+const URL_NDK_33_MACOS: &str = "https://dl.google.com/android/repository/android-ndk-r25c-darwin.dmg";
+const URL_NDK_33_LINUX: &str = "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip";
+const URL_NDK_33_WINDOWS: &str = "https://dl.google.com/android/repository/android-ndk-r25c-windows.zip";
 
-const URL_OPENJDK_17_0_2_WINDOWS_X64: &'static str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_windows-x64_bin.zip";
-const URL_OPENJDK_17_0_2_MACOS_AARCH64: &'static str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-aarch64_bin.tar.gz";
-const URL_OPENJDK_17_0_2_MACOS_X64: &'static str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-x64_bin.tar.gz";
-const URL_OPENJDK_17_0_2_LINUX_X64: &'static str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_linux-x64_bin.tar.gz";
+const URL_OPENJDK_17_0_2_WINDOWS_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_windows-x64_bin.zip";
+const URL_OPENJDK_17_0_2_MACOS_AARCH64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-aarch64_bin.tar.gz";
+const URL_OPENJDK_17_0_2_MACOS_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-x64_bin.tar.gz";
+const URL_OPENJDK_17_0_2_LINUX_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_linux-x64_bin.tar.gz";
 
 fn url_file_name(url: &str) -> &str {
     url.rsplit_once("/").unwrap().1
@@ -211,10 +211,10 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 ("platform-tools/AdbWinApi.dll", false),
                 ("platform-tools/AdbWinUsbApi.dll", false),
             ]) ?;
-            const NDK_IN: &'static str = "android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64";
-            const SYS_IN: &'static str = "android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
-            const NDK_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/windows-x86_64";
-            const SYS_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
+            const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64";
+            const SYS_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
+            const NDK_OUT: &str = "NDK/toolchains/llvm/prebuilt/windows-x86_64";
+            const SYS_OUT: &str = "NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
             
             unzip(4, src_dir, sdk_dir, URL_NDK_33_WINDOWS, &[
                 (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang"), false),
@@ -239,8 +239,8 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 (&format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
                 (&format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
             ]) ?;
-            const JDK_IN: &'static str = "jdk-17.0.2";
-            const JDK_OUT: &'static str = "openjdk";
+            const JDK_IN: &str = "jdk-17.0.2";
+            const JDK_OUT: &str = "openjdk";
             unzip(5, src_dir, sdk_dir, URL_OPENJDK_17_0_2_WINDOWS_X64, &[
                 (&copy_map(JDK_IN, JDK_OUT, "bin/java.exe"), false),
                 (&copy_map(JDK_IN, JDK_OUT, "bin/jar.exe"), false),
@@ -279,10 +279,10 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
             unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_MACOS, &[
                 ("platform-tools/adb", true),
             ]) ?;
-            const NDK_IN: &'static str = "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64";
-            const NDK_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/darwin-x86_64";
-            const SYS_IN: &'static str = "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
-            const SYS_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
+            const NDK_IN: &str = "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64";
+            const NDK_OUT: &str = "NDK/toolchains/llvm/prebuilt/darwin-x86_64";
+            const SYS_IN: &str = "AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
+            const SYS_OUT: &str = "NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
             
             dmg_extract(4, src_dir, sdk_dir, URL_NDK_33_MACOS, &[
                 (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang"), true),
@@ -307,8 +307,8 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 (&format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
                 (&format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
             ]) ?;
-            const JDK_IN: &'static str = "jdk-17.0.2.jdk/Contents/Home";
-            const JDK_OUT: &'static str = "openjdk";
+            const JDK_IN: &str = "jdk-17.0.2.jdk/Contents/Home";
+            const JDK_OUT: &str = "openjdk";
             untar(5, src_dir, sdk_dir, if host_os == HostOs::MacosX64 {URL_OPENJDK_17_0_2_MACOS_X64}else {URL_OPENJDK_17_0_2_MACOS_AARCH64}, &[
                 (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
                 (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
@@ -348,10 +348,10 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
             unzip(3, src_dir, sdk_dir, URL_PLATFORM_TOOLS_33_LINUX, &[
                 ("platform-tools/adb", true),
             ]) ?;
-            const NDK_IN: &'static str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64";
-            const SYS_IN: &'static str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
-            const NDK_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/linux-x86_64";
-            const SYS_OUT: &'static str = "NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
+            const NDK_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64";
+            const SYS_IN: &str = "android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
+            const NDK_OUT: &str = "NDK/toolchains/llvm/prebuilt/linux-x86_64";
+            const SYS_OUT: &str = "NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/33";
             
             unzip(4, src_dir, sdk_dir, URL_NDK_33_LINUX, &[
                 (&copy_map(NDK_IN, NDK_OUT, "bin/aarch64-linux-android33-clang"), true),
@@ -382,8 +382,8 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String]) -> Result<(
                 (&format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
                 (&format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
             ]) ?;
-            const JDK_IN: &'static str = "jdk-17.0.2";
-            const JDK_OUT: &'static str = "openjdk";
+            const JDK_IN: &str = "jdk-17.0.2";
+            const JDK_OUT: &str = "openjdk";
             untar(5, src_dir, sdk_dir, URL_OPENJDK_17_0_2_LINUX_X64, &[
                 (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
                 (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
