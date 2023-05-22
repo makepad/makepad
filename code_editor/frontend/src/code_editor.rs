@@ -3,7 +3,7 @@ use {
         cursor_set, event, layout, state, state::ViewId, Cursor, Diff, Pos, Text,
     },
     makepad_widgets::*,
-    std::iter::Peekable,
+    std::{any::Any, cell::RefCell, iter::Peekable},
 };
 
 live_design! {
@@ -104,10 +104,50 @@ impl CodeEditor {
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, state: &mut State, view_id: ViewId, event: &Event) {
+        self.layout(state, view_id);
+        state.0.draw(view_id, |context| {
+            let user_data: &ViewUserData = context.user_data.as_any().downcast_ref().unwrap();
+            let lines = context.text.as_lines();
+            let mut layout_cache = user_data.layout_cache.borrow();
+            println!("{:#?}", layout_cache);
+        });
         if let Some(event) = convert_event(event) {
             state.0.handle_event(view_id, event);
         }
         cx.redraw_all();
+    }
+
+    fn layout(&mut self, state: &mut State, view_id: ViewId) {
+        use {std::ops::ControlFlow, makepad_code_editor_core::layout::ElemKind};
+
+        state.0.draw(view_id, |context| {
+            let user_data: &ViewUserData = context.user_data.as_any().downcast_ref().unwrap();
+            let lines = context.text.as_lines();
+            let mut layout_cache = user_data.layout_cache.borrow_mut();
+            let mut start_y = 0.0;
+            for (line, layout) in lines.iter().zip(layout_cache.iter_mut()) {
+                match layout {
+                    Some(layout) if layout.start_y == start_y => {},
+                    _ => {
+                        let mut height = 0.0;
+                        layout::layout(line, |elem| {
+                            match elem.kind {
+                                ElemKind::NewLine => {
+                                    height += self.cell_size.y;
+                                }
+                                _ => {}
+                            }
+                            ControlFlow::<()>::Continue(())
+                        });
+                        *layout = Some(Layout {
+                            start_y,
+                            height,
+                        });
+                        start_y += height;
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -120,8 +160,10 @@ impl State {
     }
 
     pub fn create_view(&mut self) -> ViewId {
+        use std::iter;
+
         self.0.create_view(|text| ViewUserData {
-            line_start_y_cache: vec![None; text.as_lines().len()],
+            layout_cache: RefCell::new(iter::repeat_with(|| None).take(text.as_lines().len()).collect()),
         })
     }
 
@@ -189,30 +231,31 @@ impl DrawSel {
 
 #[derive(Debug)]
 struct ViewUserData {
-    line_start_y_cache: Vec<Option<f64>>,
+    layout_cache: RefCell<Vec<Option<Layout>>>,
 }
 
 impl ViewUserData {
-    fn invalidate_line_start_y_cache(&mut self, diff: &Diff) {
+    fn invalidate_layout_cache(&mut self, diff: &Diff) {
         use makepad_code_editor_core::diff::LenOnlyOp;
 
+        let mut layout_cache = self.layout_cache.borrow_mut();
         let mut line_pos = 0;
         for op in diff {
             match op.len_only() {
                 LenOnlyOp::Retain(len) => line_pos += len.line,
                 LenOnlyOp::Insert(len) => {
-                    for line_start_y in &mut self.line_start_y_cache[line_pos..][..len.line] {
-                        *line_start_y = None;
+                    for layout in &mut layout_cache[line_pos..][..len.line] {
+                        *layout = None;
                     }
                     line_pos += len.line;
                     if len.byte > 0 {
-                        self.line_start_y_cache[line_pos] = None;
+                        layout_cache[line_pos] = None;
                     }
                 }
                 LenOnlyOp::Delete(len) => {
-                    self.line_start_y_cache.drain(line_pos..line_pos + len.line);
+                    layout_cache.drain(line_pos..line_pos + len.line);
                     if len.byte > 0 {
-                        self.line_start_y_cache[line_pos] = None;
+                        layout_cache[line_pos] = None;
                     }
                 }
             }
@@ -221,9 +264,19 @@ impl ViewUserData {
 }
 
 impl state::ViewUserData for ViewUserData {
-    fn update(&mut self, diff: &Diff, _local: bool) {
-        self.invalidate_line_start_y_cache(diff);
+    fn as_any(&self) -> &dyn Any {
+        self
     }
+
+    fn update(&mut self, diff: &Diff, _local: bool) {
+        self.invalidate_layout_cache(diff);
+    }
+}
+
+#[derive(Debug)]
+struct Layout {
+    start_y: f64,
+    height: f64,
 }
 
 struct Drawer<'a> {

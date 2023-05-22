@@ -3,6 +3,7 @@ use {
         arena::Id, buf::EditKind, move_ops, text::Text, Arena, Buf, CursorSet, Diff, Event, Pos,
     },
     std::{
+        any::Any,
         cell::{RefCell, RefMut},
         collections::HashSet,
         fmt,
@@ -54,6 +55,7 @@ impl State {
         f(DrawContext {
             text: &self.models[model_id].buf.text(),
             cursors: &view.cursors,
+            user_data: &*view.user_data,
         });
     }
 
@@ -82,6 +84,8 @@ impl State {
 pub struct ViewId(Id<RefCell<View>>);
 
 pub trait ViewUserData {
+    fn as_any(&self) -> &dyn Any;
+
     fn update(&mut self, diff: &Diff, local: bool);
 }
 
@@ -94,6 +98,7 @@ impl fmt::Debug for dyn ViewUserData {
 pub struct DrawContext<'a> {
     pub text: &'a Text,
     pub cursors: &'a CursorSet,
+    pub user_data: &'a dyn ViewUserData,
 }
 
 #[derive(Debug)]
