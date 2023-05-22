@@ -47,10 +47,11 @@ impl State {
     }
 
     pub fn draw(&self, ViewId(view_id): ViewId, f: impl FnOnce(&Text, &CursorSet)) {
-        let model_id = self.views[view_id].borrow().model_id;
+        let view = self.views[view_id].borrow();
+        let model_id = view.model_id;
         f(
             &self.models[model_id].buf.text(),
-            &self.views[view_id].borrow().cursors,
+            &view.cursors,
         );
     }
 
