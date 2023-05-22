@@ -5,14 +5,14 @@ use crate::makepad_micro_serde::{DeBin, SerBin};
 #[derive(PartialEq)]
 pub struct HttpRequest {
     pub url: String,
-    pub method: String,
+    pub method: Method,
     pub headers: HashMap<String, Vec<String>>,
     pub body: Option<Vec<u8>>,
 }
 
 impl HttpRequest { 
     // TODO: a good default
-    pub fn new(url: String, method: String) -> Self {
+    pub fn new(url: String, method: Method) -> Self {
         HttpRequest {
             url,
             method,
@@ -50,6 +50,34 @@ impl HttpResponse {
             Some(deserialized)
         } else {
             None
+        }
+    }
+}
+#[derive(PartialEq)]
+pub enum Method{
+    GET,
+    HEAD,
+    POST,
+    PUT,
+    DELETE,
+    CONNECT,
+    OPTIONS,
+    TRACE,
+    PATCH
+}
+
+impl Method {
+    fn to_string(&self) -> &str {
+        match self {
+            Method::GET => "GET",
+            Method::HEAD => "HEAD",
+            Method::POST => "POST",
+            Method::PUT => "PUT",
+            Method::DELETE => "DELETE",
+            Method::CONNECT => "CONNECT",
+            Method::OPTIONS => "OPTIONS",
+            Method::TRACE => "TRACE",
+            Method::PATCH => "PATCH",
         }
     }
 }
