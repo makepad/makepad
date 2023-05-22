@@ -5,6 +5,7 @@ use {
     std::{
         cell::{RefCell, RefMut},
         collections::HashSet,
+        fmt,
     },
 };
 
@@ -19,14 +20,20 @@ impl State {
         Self::default()
     }
 
-    pub fn create_view(&mut self) -> ViewId {
+    pub fn create_view<T>(&mut self, create_user_data: impl FnOnce(&Text) -> T) -> ViewId
+    where
+        T: ViewUserData + 'static,
+    {
+        let text: Text = include_str!("arena.rs").into();
+        let user_data = create_user_data(&text);
         let model = self.models.insert(Model {
             view_ids: HashSet::new(),
-            buf: Buf::new(include_str!("arena.rs").into()),
+            buf: Buf::new(text),
         });
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,
             cursors: CursorSet::new(),
+            user_data: Box::new(user_data),
         }));
         self.models[model].view_ids.insert(view_id);
         ViewId(view_id)
@@ -74,6 +81,16 @@ impl State {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ViewId(Id<RefCell<View>>);
 
+pub trait ViewUserData {
+    fn update(&mut self, diff: &Diff, local: bool);
+}
+
+impl fmt::Debug for dyn ViewUserData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ViewUserData").finish_non_exhaustive()
+    }
+}
+
 pub struct DrawContext<'a> {
     pub text: &'a Text,
     pub cursors: &'a CursorSet,
@@ -83,15 +100,17 @@ pub struct DrawContext<'a> {
 struct View {
     model_id: Id<Model>,
     cursors: CursorSet,
+    user_data: Box<dyn ViewUserData>,
 }
 
 impl View {
-    fn update(&mut self, cursors: Option<CursorSet>, diff: &Diff, local: bool) {
+    fn update(&mut self, cursors: Option<&CursorSet>, diff: &Diff, local: bool) {
         if let Some(cursors) = cursors {
-            self.cursors = cursors
+            self.cursors = cursors.clone()
         } else {
             self.cursors.apply_diff(diff, local);
         }
+        self.user_data.update(diff, local);
     }
 }
 
@@ -217,17 +236,17 @@ impl<'a> HandleEventContext<'a> {
 
     fn undo(&mut self) {
         if let Some((cursors, diff)) = self.model.buf.undo() {
-            self.update_views(Some(cursors), &diff);
+            self.update_views(Some(&cursors), &diff);
         }
     }
 
     fn redo(&mut self) {
         if let Some((cursors, diff)) = self.model.buf.redo() {
-            self.update_views(Some(cursors), &diff);
+            self.update_views(Some(&cursors), &diff);
         }
     }
 
-    fn update_views(&mut self, cursors: Option<CursorSet>, diff: &Diff) {
+    fn update_views(&mut self, cursors: Option<&CursorSet>, diff: &Diff) {
         self.view.update(cursors, diff, true);
         for sibling_view in &mut self.sibling_views {
             sibling_view.update(None, diff, false);
