@@ -1,5 +1,7 @@
 use {
-    makepad_code_editor_core::{cursor_set, event, layout, state::ViewId, Pos, Cursor, Text, State},
+    makepad_code_editor_core::{
+        cursor_set, event, layout, state::ViewId, Cursor, Pos, State,
+    },
     makepad_widgets::*,
     std::iter::Peekable,
 };
@@ -86,13 +88,13 @@ pub struct CodeEditor {
 
 impl CodeEditor {
     pub fn line_height(&self, state: &State, view_id: ViewId, line_pos: usize) -> f64 {
-        use {std::ops::ControlFlow, makepad_code_editor_core::layout::EventKind};
+        use {makepad_code_editor_core::layout::ElemKind, std::ops::ControlFlow};
 
         let mut height = 0.0;
-        state.draw(view_id, |text, _| {
-            layout::layout(&text.as_lines()[line_pos], |event| {
+        state.draw(view_id, |context| {
+            layout::layout(&context.text.as_lines()[line_pos], |event| {
                 match event.kind {
-                    EventKind::NewLine => {
+                    ElemKind::NewLine => {
                         height += self.cell_size.y;
                     }
                     _ => {}
@@ -106,19 +108,18 @@ impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d, state: &State, view_id: ViewId) {
         self.cell_size =
             self.draw_grapheme.text_style.font_size * self.draw_grapheme.get_monospace_base(cx);
-        state.draw(view_id, |text, cursors| {
-            Drawer {
-                draw_grapheme: &mut self.draw_grapheme,
-                draw_sel: &mut self.draw_sel,
-                draw_caret: &mut self.draw_caret,
-                cell_size: self.cell_size,
+        state.draw(view_id, |context| {
+            let mut cx = DrawCx {
+                cx,
                 text_pos: Pos::default(),
                 layout_pos: layout::Pos::default(),
                 screen_pos: DVec2::new(),
-                cursors: cursors.iter().peekable(),
+                cursors: context.cursors.iter().peekable(),
                 cursor: None,
+            };
+            for line in context.text.as_lines() {
+                self.draw_line(&mut cx, line);
             }
-            .draw(cx, text);
         });
     }
 
@@ -127,6 +128,96 @@ impl CodeEditor {
             state.handle_event(view_id, event);
         }
         cx.redraw_all();
+    }
+
+    fn draw_line(&mut self, cx: &mut DrawCx, line: &str) {
+        use {std::ops::ControlFlow, makepad_code_editor_core::layout::ElemKind};
+
+        let start_row = cx.layout_pos.row;
+        layout::layout(line, |event| {
+            cx.text_pos.byte = event.byte_pos;
+            cx.layout_pos.row = start_row + event.pos.row;
+            cx.layout_pos.column = event.pos.column;
+            match event.kind {
+                ElemKind::Grapheme(grapheme) => {
+                    self.draw_cursors(cx);
+                    self.draw_grapheme.draw_abs(&mut cx.cx, cx.screen_pos, grapheme);
+                    cx.screen_pos.x += event.column_len as f64 * self.cell_size.x;
+                }
+                _ => {}
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        self.draw_cursors(cx);
+        if let Some(cursor) = cx.cursor {
+            self.draw_sel_rect(cx, cursor.start_x(cx.layout_pos.row));
+        }
+        cx.text_pos.line += 1;
+        cx.text_pos.byte = 0;
+        cx.layout_pos.row += 1;
+        cx.layout_pos.column = 0;
+        cx.screen_pos.x = 0.0;
+        cx.screen_pos.y += self.cell_size.y;
+    }
+
+    fn draw_cursors(&mut self, cx: &mut DrawCx) {
+        if cx
+            .cursors
+            .peek()
+            .map_or(false, |cursor| cursor.start() == cx.text_pos)
+        {
+            let cursor = cx.cursors.next().unwrap();
+            self.draw_sel.begin();
+            if cursor.caret == cx.text_pos {
+                self.draw_caret(cx);
+            }
+            cx.cursor = Some(ActiveCursor {
+                cursor: cursor,
+                first_row: cx.layout_pos.row,
+                first_row_start_x: cx.screen_pos.x,
+            });
+        }
+        if cx
+            .cursor
+            .as_ref()
+            .map_or(false, |cursor| cursor.cursor.end() == cx.text_pos)
+        {
+            let cursor = cx.cursor.take().unwrap();
+            self.draw_sel_rect(cx, cursor.start_x(cx.layout_pos.row));
+            self.draw_sel.end(cx.cx);
+            if !cursor.cursor.is_empty() && cursor.cursor.caret == cx.text_pos {
+                self.draw_caret(cx);
+            }
+        }
+    }
+
+    fn draw_sel_rect(&mut self, cx: &mut DrawCx, start_x: f64) {
+        self.draw_sel.push_rect(
+            cx.cx,
+            Rect {
+                pos: DVec2 {
+                    x: start_x,
+                    y: cx.screen_pos.y,
+                },
+                size: DVec2 {
+                    x: cx.screen_pos.x - start_x,
+                    y: self.cell_size.y,
+                },
+            },
+        );
+    }
+
+    fn draw_caret(&mut self, cx: &mut DrawCx) {
+        self.draw_caret.draw_abs(
+            cx.cx,
+            Rect {
+                pos: cx.screen_pos,
+                size: DVec2 {
+                    x: 2.0,
+                    y: self.cell_size.y,
+                },
+            },
+        );
     }
 }
 
@@ -187,123 +278,13 @@ impl DrawSel {
     }
 }
 
-struct Drawer<'a> {
-    draw_grapheme: &'a mut DrawText,
-    draw_sel: &'a mut DrawSel,
-    draw_caret: &'a mut DrawColor,
-    cell_size: DVec2,
+struct DrawCx<'a, 'b> {
+    cx: &'a mut Cx2d<'b>,
     text_pos: Pos,
     layout_pos: layout::Pos,
     screen_pos: DVec2,
     cursors: Peekable<cursor_set::Iter<'a>>,
     cursor: Option<ActiveCursor>,
-}
-
-impl<'a> Drawer<'a> {
-    fn draw(&mut self, cx: &mut Cx2d, text: &Text) {
-        for line in text.as_lines() {
-            self.draw_line(cx, line);
-        }
-    }
-
-    fn draw_line(&mut self, cx: &mut Cx2d, line: &str) {
-        use {std::ops::ControlFlow, makepad_code_editor_core::layout::EventKind};
-
-        let start_row = self.layout_pos.row;
-        layout::layout(line, |event| {
-            self.text_pos.byte = event.byte_pos;
-            self.layout_pos.row = start_row + event.pos.row;
-            self.layout_pos.column = event.pos.column;
-            match event.kind {
-                EventKind::Grapheme(grapheme) => {
-                    self.handle_cursors(cx);
-                    self.draw_grapheme(cx, grapheme);
-                    self.screen_pos.x += event.column_len as f64 * self.cell_size.x;
-                }
-                _ => {}
-            }
-            ControlFlow::<()>::Continue(())
-        });
-        self.handle_cursors(cx);
-        if let Some(cursor) = self.cursor {
-            self.push_sel_rect(cx, cursor.start_x(self.layout_pos.row));
-        }
-        self.text_pos.line += 1;
-        self.text_pos.byte = 0;
-        self.layout_pos.row += 1;
-        self.layout_pos.column = 0;
-        self.screen_pos.x = 0.0;
-        self.screen_pos.y += self.cell_size.y;
-    }
-
-    fn handle_cursors(&mut self, cx: &mut Cx2d) {
-        if self
-            .cursors
-            .peek()
-            .map_or(false, |cursor| cursor.start() == self.text_pos)
-        {
-            let cursor = self.cursors.next().unwrap();
-            self.begin_sel();
-            if cursor.caret == self.text_pos {
-                self.draw_caret(cx);
-            }
-            self.cursor = Some(ActiveCursor {
-                cursor: cursor,
-                first_row: self.layout_pos.row,
-                first_row_start_x: self.screen_pos.x,
-            });
-        }
-        if self
-            .cursor
-            .as_ref()
-            .map_or(false, |cursor| cursor.cursor.end() == self.text_pos)
-        {
-            let cursor = self.cursor.take().unwrap();
-            self.push_sel_rect(cx, cursor.start_x(self.layout_pos.row));
-            self.end_sel(cx);
-            if !cursor.cursor.is_empty() && cursor.cursor.caret == self.text_pos {
-                self.draw_caret(cx);
-            }
-        }
-    }
-
-    fn draw_grapheme(&mut self, cx: &mut Cx2d, grapheme: &str) {
-        self.draw_grapheme.draw_abs(cx, self.screen_pos, grapheme);
-    }
-
-    fn begin_sel(&mut self) {
-        self.draw_sel.begin();
-    }
-
-    fn end_sel(&mut self, cx: &mut Cx2d) {
-        self.draw_sel.end(cx);
-    }
-
-    fn push_sel_rect(&mut self, cx: &mut Cx2d, start_x: f64) {
-        self.draw_sel.push_rect(cx, Rect {
-            pos: DVec2 {
-                x: start_x,
-                y: self.screen_pos.y,
-            },
-            size: DVec2 {
-                x: self.screen_pos.x - start_x,
-                y: self.cell_size.y,
-            },
-        });
-    }
-
-    fn draw_caret(&mut self, cx: &mut Cx2d) {
-        self.draw_caret.draw_abs(
-            cx,
-            Rect {
-                pos: self.screen_pos,
-                size: DVec2 {
-                    x: 2.0,
-                    y: self.cell_size.y,
-                },
-            },
-        );
-    }
 }
 
 #[derive(Clone, Copy, Debug)]

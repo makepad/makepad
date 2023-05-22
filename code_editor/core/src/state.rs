@@ -1,11 +1,6 @@
 use {
     crate::{
-        arena::Id,
-        buf::EditKind,
-        move_ops,
-        text::Text,
-        Diff, Pos,
-        Arena, Buf, CursorSet, Event,
+        arena::Id, buf::EditKind, move_ops, text::Text, Arena, Buf, CursorSet, Diff, Event, Pos,
     },
     std::{
         cell::{RefCell, RefMut},
@@ -46,13 +41,13 @@ impl State {
         self.views.remove(view_id);
     }
 
-    pub fn draw(&self, ViewId(view_id): ViewId, f: impl FnOnce(&Text, &CursorSet)) {
+    pub fn draw(&self, ViewId(view_id): ViewId, f: impl FnOnce(DrawContext<'_>)) {
         let view = self.views[view_id].borrow();
         let model_id = view.model_id;
-        f(
-            &self.models[model_id].buf.text(),
-            &view.cursors,
-        );
+        f(DrawContext {
+            text: &self.models[model_id].buf.text(),
+            cursors: &view.cursors,
+        });
     }
 
     pub fn handle_event(&mut self, ViewId(view_id): ViewId, event: Event) {
@@ -78,6 +73,11 @@ impl State {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ViewId(Id<RefCell<View>>);
+
+pub struct DrawContext<'a> {
+    pub text: &'a Text,
+    pub cursors: &'a CursorSet,
+}
 
 #[derive(Debug)]
 struct View {

@@ -17,6 +17,7 @@ pub mod str_ext;
 pub mod text;
 
 pub use self::{
-    arena::Arena, buf::Buf, diff::Diff, text::Text, len::Len, pos::Pos, range::Range, char_ext::CharExt, cursor::Cursor, cursor_set::CursorSet, event::Event,
-    hist::Hist, state::State, str_ext::StrExt,
+    arena::Arena, buf::Buf, char_ext::CharExt, cursor::Cursor, cursor_set::CursorSet, diff::Diff,
+    event::Event, hist::Hist, len::Len, pos::Pos, range::Range, state::State, str_ext::StrExt,
+    text::Text,
 };

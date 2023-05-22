@@ -1,5 +1,5 @@
 use {
-    crate::{Diff, Cursor},
+    crate::{Cursor, Diff},
     std::{iter::Peekable, slice},
 };
 

@@ -1,7 +1,4 @@
-use crate::{
-    Diff, Text,
-    Cursor,
-};
+use crate::{Cursor, Diff, Text};
 
 pub fn insert(text: &Text, cursors: impl IntoIterator<Item = Cursor>, replace_with: &Text) -> Diff {
     use crate::{diff, Pos};
@@ -19,10 +16,7 @@ pub fn insert(text: &Text, cursors: impl IntoIterator<Item = Cursor>, replace_wi
 }
 
 pub fn delete(text: &Text, cursors: impl IntoIterator<Item = Cursor>) -> Diff {
-    use crate::{
-        move_ops,
-        diff, Pos, Range,
-    };
+    use crate::{diff, move_ops, Pos, Range};
 
     let mut builder = diff::Builder::new();
     let mut prev_cursor_end = Pos::default();
