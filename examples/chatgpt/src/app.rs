@@ -1,4 +1,4 @@
-use crate::{makepad_error_log::*};
+use crate::{makepad_error_log::*, makepad_platform::network::*,};
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 
@@ -77,16 +77,18 @@ impl App{
     // EVENT-BASED: sends message, has no relationship with response. Response will be received as an event
     // and processed by handle_event.
     fn send_message(cx_ref:CxRef, ui:WidgetRef) {
-        let message = ui.get_text_input(id!(message_input)).get_text(); // TODO
-
+        //let message = ui.get_text_input(id!(message_input)).get_text(); // TODO
         let mut cx = cx_ref.0.borrow_mut(); // need to cleanup this
 
         // WIP
         let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
-        let mut request = HttpRequest::new(completion_url);
-        request.set_header("Content-Type", "application/json");
+        let mut request = HttpRequest::new(completion_url, Method::POST);
+        
+        request.set_header("Content-Type".to_string(), "application/json".to_string());
+        request.set_header("A".to_string(), "application/json".to_string());
+        
         request.set_body(ChatPrompt {
-            message,
+            message: "hi! tell me a joke".to_string().clone(),
         });
 
         cx.http_request(request);
@@ -109,16 +111,16 @@ impl AppMain for App{
             let chat_response = event.response.get_body::<ChatResponse>().unwrap();
 
             let label = self.ui.get_label(id!(message_label));
-            label.set_label(&chat_response.message); // iterate over choices and choose a message; 
+            label.set_label(&chat_response.choices[0].message.content);
             label.redraw(cx);
         }
         
         let actions = self.ui.handle_widget_event(cx, event);
         
         if self.ui.get_button(id!(send_button)).clicked(&actions) {
-            cx.spawner().spawn(async { // this doesn't have to be async you could just call send_message
-                Self::send_message(cx.get_ref(), self.ui.clone())
-            }).unwrap();
+            // cx.spawner().spawn(async { // if you want to make it async
+            Self::send_message(cx.get_ref(), self.ui.clone())
+            // }).unwrap();
         }
     }
 }
@@ -132,14 +134,20 @@ struct ChatPrompt {
 
 #[derive(DeBin, SerBin, PartialEq, Debug)]
 struct ChatResponse {
-    pub message: String,
-    // this actually looks like:
-    //   "choices": [{
-    //     "index": 0,
-    //     "message": {
-    //       "role": "assistant",
-    //       "content": "\n\nHello there, how may I assist you today?",
-    //     },
-    //     "finish_reason": "stop"
-    //   }],
+    pub choices: Vec<Choice>,
+    pub finish_reason: String
+}
+
+#[derive(DeBin, SerBin, PartialEq, Debug)]
+
+struct Choice {
+    index: i32,
+    message: Message,
+    finish_reason: String,
+}
+
+#[derive(DeBin, SerBin, PartialEq, Debug)]
+struct Message {
+    role: String,
+    content: String,
 }
