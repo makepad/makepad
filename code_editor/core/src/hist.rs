@@ -1,4 +1,4 @@
-use crate::{text::Diff, CursorSet};
+use crate::{Diff, CursorSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Hist {

@@ -1,4 +1,4 @@
-use crate::text::{Diff, Len, Pos, Range};
+use crate::{Diff, Len, Pos, Range};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Cursor {

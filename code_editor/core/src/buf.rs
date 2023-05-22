@@ -1,5 +1,5 @@
 use crate::{
-    text::{Diff, Text},
+    Diff, Text,
     CursorSet, Hist,
 };
 

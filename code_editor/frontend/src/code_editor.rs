@@ -1,5 +1,5 @@
 use {
-    makepad_code_editor_core::{cursor_set, event, layout, state::ViewId, Cursor, text, text::Text, State},
+    makepad_code_editor_core::{cursor_set, event, layout, state::ViewId, Pos, Cursor, Text, State},
     makepad_widgets::*,
     std::iter::Peekable,
 };
@@ -92,7 +92,7 @@ impl CodeEditor {
                 draw_sel: &mut self.draw_sel_rect,
                 draw_caret: &mut self.draw_caret,
                 cell_size,
-                text_pos: text::Pos::default(),
+                text_pos: Pos::default(),
                 layout_pos: layout::Pos::default(),
                 screen_pos: DVec2::new(),
                 cursors: cursors.iter().peekable(),
@@ -132,7 +132,7 @@ struct Drawer<'a> {
     draw_sel: &'a mut DrawSelRect,
     draw_caret: &'a mut DrawColor,
     cell_size: DVec2,
-    text_pos: text::Pos,
+    text_pos: Pos,
     layout_pos: layout::Pos,
     screen_pos: DVec2,
     cursors: Peekable<cursor_set::Iter<'a>>,

@@ -4,7 +4,7 @@ use {
         buf::EditKind,
         move_ops,
         text::Text,
-        text::{Diff, Pos},
+        Diff, Pos,
         Arena, Buf, CursorSet, Event,
     },
     std::{
