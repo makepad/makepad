@@ -10,6 +10,7 @@ use {
         event::*,
         cx::{Cx, AndroidParams},
         makepad_error_log::*,
+        makepad_platform::network::*,
     },
     std::{
         cell::Cell,
@@ -221,7 +222,7 @@ impl<'a> AndroidToJava<'a> {
         unsafe {
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
             let name = CString::new("requestHttp").unwrap();
-            let signature = CString::new("(Lyour/package/HttpRequest;)V").unwrap();
+            let signature = CString::new("(Ldev/makepad/android/HttpRequest;)V").unwrap();
             let method_id = ((**self.env).GetMethodID.unwrap())(
                 self.env,
                 class,
@@ -229,14 +230,17 @@ impl<'a> AndroidToJava<'a> {
                 signature.as_ptr(),
             );
     
+            // WIP - most of this doesn't work yet, 
+            // I wanted to get a rough idea of how much overhead it would take
+            
             // TODO: Move part of this to a generic method for converting objects
 
             // Convert Rust HttpRequest to Java HttpRequest
             // Convert method
             let url = CString::new(request.url.clone()).unwrap();
-            let method = CString::new(request.request_method.clone()).unwrap();
+            let method = CString::new(request.request_method.to_string().clone()).unwrap();
     
-            // Convert headers from HashMap to Map<String, List<String>>
+            // Convert headers from rust HashMap to Java Map<String, List<String>>
             let mut headers = ((**self.env).NewHashMap.unwrap())(self.env);
             for (key, values) in request.headers.iter() {
                 let key_str = CString::new(key.clone()).unwrap();
@@ -264,10 +268,10 @@ impl<'a> AndroidToJava<'a> {
                 );
             }
     
-            // TODO: this is a byte array not a sting
             // Convert body
-            let request_body = CString::new(request.request_body.clone()).unwrap();
-            let java_request_body = ((**self.env).NewStringUTF.unwrap())(self.env, request_body.as_ptr());
+            let request_body = request.request_body.clone();
+            let java_request_body = ((**self.env).NewByteArray.unwrap())(self.env, request_body.len() as i32);
+            ((**self.env).SetByteArrayRegion.unwrap())(self.env, java_request_body, 0, request_body.len() as i32, request_body.as_ptr() as *const jbyte);
     
             // Create the Java HttpRequest object
             let java_request = ((**self.env).AllocObject.unwrap())(self.env, request_class);
