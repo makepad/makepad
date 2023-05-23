@@ -1,6 +1,6 @@
 use {
     crate::{
-        arena::Id, buf::EditKind, move_ops, text::Text, Arena, Buf, CursorSet, Diff, Event, Pos,
+        arena::Id, buf::EditKind, move_ops, text::Text, Arena, Buf, CursorSet, Diff, Event, text::Pos,
     },
     std::{
         any::Any,
@@ -25,7 +25,7 @@ impl State {
     where
         T: ViewUserData + 'static,
     {
-        let text: Text = include_str!("arena.rs").into();
+        let text: Text = include_str!("arena.rs").lines().map(|string| string.to_string()).collect();
         let user_data = create_user_data(&text);
         let model = self.models.insert(Model {
             view_ids: HashSet::new(),
@@ -155,7 +155,7 @@ impl<'a> HandleEventContext<'a> {
                     edit_ops::insert(
                         self.model.buf.text(),
                         &self.view.cursors,
-                        &Text::from(["".to_string(), "".to_string()]),
+                        &Text::from(vec!["".to_string(), "".to_string()]),
                     ),
                 );
             }
@@ -210,12 +210,13 @@ impl<'a> HandleEventContext<'a> {
                 self.redo();
             }
             Event::Text(TextEvent { string }) => {
+                let text: Text = string.lines().map(|string| string.to_string()).collect();
                 self.edit(
                     EditKind::Insert,
                     edit_ops::insert(
                         self.model.buf.text(),
                         self.view.cursors.iter(),
-                        &Text::from(string),
+                        &text,
                     ),
                 );
             }

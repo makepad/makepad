@@ -1,6 +1,6 @@
 use {
     makepad_code_editor_core::{
-        cursor_set, event, layout, state, state::ViewId, Cursor, Diff, Pos, Text,
+        cursor_set, event, layout, state, state::ViewId, Cursor, Diff, text::Pos, Text,
     },
     makepad_widgets::*,
     std::{any::Any, cell::RefCell, iter::Peekable},
@@ -109,7 +109,6 @@ impl CodeEditor {
             let user_data: &ViewUserData = context.user_data.as_any().downcast_ref().unwrap();
             let lines = context.text.as_lines();
             let mut layout_cache = user_data.layout_cache.borrow();
-            println!("{:#?}", layout_cache);
         });
         if let Some(event) = convert_event(event) {
             state.0.handle_event(view_id, event);
@@ -242,19 +241,19 @@ impl ViewUserData {
         let mut line_pos = 0;
         for op in diff {
             match op.len_only() {
-                LenOnlyOp::Retain(len) => line_pos += len.line,
+                LenOnlyOp::Retain(len) => line_pos += len.lines,
                 LenOnlyOp::Insert(len) => {
-                    for layout in &mut layout_cache[line_pos..][..len.line] {
+                    for layout in &mut layout_cache[line_pos..][..len.lines] {
                         *layout = None;
                     }
-                    line_pos += len.line;
-                    if len.byte > 0 {
+                    line_pos += len.lines;
+                    if len.bytes > 0 {
                         layout_cache[line_pos] = None;
                     }
                 }
                 LenOnlyOp::Delete(len) => {
-                    layout_cache.drain(line_pos..line_pos + len.line);
-                    if len.byte > 0 {
+                    layout_cache.drain(line_pos..line_pos + len.lines);
+                    if len.bytes > 0 {
                         layout_cache[line_pos] = None;
                     }
                 }

@@ -1,6 +1,6 @@
 use {
-    super::{Diff, Len, Pos, Range},
-    std::ops::AddAssign,
+    crate::Diff,
+    std::ops::{Add, AddAssign, Sub, SubAssign},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,8 +19,8 @@ impl Text {
 
     pub fn len(&self) -> Len {
         Len {
-            line: self.lines.len() - 1,
-            byte: self.lines.last().unwrap().len(),
+            lines: self.lines.len() - 1,
+            bytes: self.lines.last().unwrap().len(),
         }
     }
 
@@ -46,25 +46,25 @@ impl Text {
     }
 
     pub fn take(&mut self, len: Len) -> Self {
-        let mut lines = self.lines.drain(..len.line as usize).collect::<Vec<_>>();
-        lines.push(self.lines.first().unwrap()[..len.byte].to_string());
+        let mut lines = self.lines.drain(..len.lines as usize).collect::<Vec<_>>();
+        lines.push(self.lines.first().unwrap()[..len.bytes].to_string());
         self.lines
             .first_mut()
             .unwrap()
-            .replace_range(..len.byte, "");
+            .replace_range(..len.bytes, "");
         Text { lines }
     }
 
     pub fn skip(&mut self, len: Len) {
-        self.lines.drain(..len.line);
+        self.lines.drain(..len.lines);
         self.lines
             .first_mut()
             .unwrap()
-            .replace_range(..len.byte, "");
+            .replace_range(..len.bytes, "");
     }
 
     pub fn insert(&mut self, pos: Pos, mut text: Self) {
-        if text.len().line == 0 {
+        if text.len().lines == 0 {
             self.lines[pos.line].replace_range(pos.byte..pos.byte, text.lines.first().unwrap());
         } else {
             text.lines
@@ -82,13 +82,13 @@ impl Text {
     pub fn delete(&mut self, pos: Pos, len: Len) {
         use std::iter;
 
-        if len.line == 0 {
-            self.lines[pos.line].replace_range(pos.byte..pos.byte + len.byte, "");
+        if len.lines == 0 {
+            self.lines[pos.line].replace_range(pos.byte..pos.byte + len.bytes, "");
         } else {
             let mut line = self.lines[pos.line][..pos.byte].to_string();
-            line.push_str(&self.lines[pos.line + len.line][len.byte..]);
+            line.push_str(&self.lines[pos.line + len.lines][len.bytes..]);
             self.lines
-                .splice(pos.line..pos.line + len.line + 1, iter::once(line));
+                .splice(pos.line..pos.line + len.lines + 1, iter::once(line));
         }
     }
 
@@ -143,29 +143,172 @@ impl From<Vec<String>> for Text {
     }
 }
 
-impl<const N: usize> From<[String; N]> for Text {
-    fn from(lines: [String; N]) -> Self {
-        lines.to_vec().into()
-    }
-}
-
-impl From<&str> for Text {
-    fn from(string: &str) -> Self {
-        string.split("\n").map(|string| string.into()).collect()
-    }
-}
-
-impl From<String> for Text {
-    fn from(string: String) -> Self {
-        string.as_str().into()
-    }
-}
-
 impl FromIterator<String> for Text {
     fn from_iter<I>(iter: I) -> Self
     where
         I: IntoIterator<Item = String>,
     {
         iter.into_iter().collect::<Vec<_>>().into()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Ord)]
+pub struct Pos {
+    pub line: usize,
+    pub byte: usize,
+}
+
+impl Pos {
+    pub fn apply_diff(self, diff: &Diff, after: bool) -> Pos {
+        use {super::diff::LenOnlyOp, std::cmp::Ordering};
+
+        let mut pos = Pos::default();
+        let mut rem_len = self - Pos::default();
+        let mut op_iter = diff.iter().map(|operation| operation.len_only());
+        let mut op_slot = op_iter.next();
+        loop {
+            match op_slot {
+                Some(LenOnlyOp::Retain(len)) => match len.cmp(&rem_len) {
+                    Ordering::Less | Ordering::Equal => {
+                        pos += len;
+                        rem_len -= len;
+                        op_slot = op_iter.next();
+                    }
+                    Ordering::Greater => {
+                        break pos + rem_len;
+                    }
+                },
+                Some(LenOnlyOp::Insert(len)) => {
+                    if after {
+                        break pos + len;
+                    }
+                    op_slot = op_iter.next();
+                }
+                Some(LenOnlyOp::Delete(len)) => match len.cmp(&rem_len) {
+                    Ordering::Less | Ordering::Equal => {
+                        rem_len -= len;
+                        op_slot = op_iter.next();
+                    }
+                    Ordering::Greater => {
+                        break pos;
+                    }
+                },
+                None => {
+                    break pos + rem_len;
+                }
+            }
+        }
+    }
+}
+
+impl Add<Len> for Pos {
+    type Output = Self;
+
+    fn add(self, len: Len) -> Self::Output {
+        if len.lines == 0 {
+            Self {
+                line: self.line,
+                byte: self.byte + len.bytes,
+            }
+        } else {
+            Self {
+                line: self.line + len.lines,
+                byte: len.bytes,
+            }
+        }
+    }
+}
+
+impl AddAssign<Len> for Pos {
+    fn add_assign(&mut self, len: Len) {
+        *self = *self + len;
+    }
+}
+
+impl Sub for Pos {
+    type Output = Len;
+
+    fn sub(self, other: Self) -> Self::Output {
+        if self.line == other.line {
+            Len {
+                lines: 0,
+                bytes: self.byte - other.byte,
+            }
+        } else {
+            Len {
+                lines: self.line - other.line,
+                bytes: self.byte,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Ord)]
+pub struct Len {
+    pub lines: usize,
+    pub bytes: usize,
+}
+
+impl Add for Len {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        if other.lines == 0 {
+            Self {
+                lines: self.lines,
+                bytes: self.lines + other.lines,
+            }
+        } else {
+            Self {
+                lines: self.lines + other.lines,
+                bytes: other.lines,
+            }
+        }
+    }
+}
+
+impl AddAssign for Len {
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+
+impl Sub for Len {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        if self.lines - other.lines == 0 {
+            Self {
+                lines: 0,
+                bytes: self.bytes - other.bytes,
+            }
+        } else {
+            Self {
+                lines: self.lines - other.lines,
+                bytes: self.bytes,
+            }
+        }
+    }
+}
+
+impl SubAssign for Len {
+    fn sub_assign(&mut self, other: Self) {
+        *self = *self - other;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Range {
+    pub start: Pos,
+    pub end: Pos,
+}
+
+impl Range {
+    pub fn is_empty(&self) -> bool {
+        self.len() == Len::default()
+    }
+
+    pub fn len(&self) -> Len {
+        self.end - self.start
     }
 }

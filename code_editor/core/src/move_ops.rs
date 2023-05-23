@@ -1,4 +1,4 @@
-use crate::{Pos, Text};
+use crate::{text::Pos, Text};
 
 pub fn move_left(text: &Text, pos: Pos) -> Pos {
     if !is_at_start_of_line(pos) {
