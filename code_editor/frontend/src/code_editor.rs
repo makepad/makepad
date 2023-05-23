@@ -205,20 +205,19 @@ impl<'a> Drawer<'a> {
         use {makepad_code_editor_core::layout::ElemKind, std::ops::ControlFlow};
 
         let start_row = self.layout_pos.row;
-        layout::layout(line, |elem| {
-            self.text_pos.byte = elem.byte;
+        layout::layout(&layout::Context { line }, |elem| {
+            self.text_pos.byte = elem.byte_pos;
             self.layout_pos.row = start_row + elem.pos.row;
             self.layout_pos.column = elem.pos.column;
             match elem.kind {
                 ElemKind::Grapheme(grapheme) => {
-                    self.draw_grapheme(cx, grapheme, elem.width);
+                    self.draw_grapheme(cx, grapheme, elem.column_width);
                 }
-                ElemKind::NewRow => {
-                    self.draw_newline(cx);
-                }
+                _ => {}
             }
             ControlFlow::<()>::Continue(())
         });
+        self.draw_line_break(cx);
     }
 
     fn draw_grapheme(&mut self, cx: &mut Cx2d, grapheme: &str, column_len: usize) {
@@ -229,7 +228,7 @@ impl<'a> Drawer<'a> {
         self.screen_pos.x += column_len as f64 * self.code_editor.cell_size.x;
     }
 
-    fn draw_newline(&mut self, cx: &mut Cx2d) {
+    fn draw_line_break(&mut self, cx: &mut Cx2d) {
         self.draw_sel(cx);
         if self.sel.is_some() {
             self.push_sel_rect(cx);
@@ -248,12 +247,12 @@ impl<'a> Drawer<'a> {
             .peek()
             .map_or(false, |cursor| cursor.start() == self.text_pos)
         {
-            let cursor = self.sels.next().unwrap();
-            if cursor.cursor == self.text_pos {
+            let sel = self.sels.next().unwrap();
+            if sel.cursor == self.text_pos {
                 self.draw_caret(cx);
             }
             self.sel = Some(ActiveSel {
-                sel: cursor,
+                sel,
                 first_row: self.layout_pos.row,
                 first_row_start_x: self.screen_pos.x,
             });

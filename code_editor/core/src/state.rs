@@ -1,6 +1,7 @@
 use {
     crate::{
-        arena::Id, buf::EditKind, move_ops, text::Pos, text::Text, Arena, Buf, Diff, Event, SelSet,
+        arena::Id, buf::EditKind, edit_ops, move_ops, text::Pos, text::Text, Arena, Buf, Diff,
+        Event, SelSet,
     },
     std::{
         cell::{RefCell, RefMut},
@@ -114,59 +115,53 @@ struct HandleEventContext<'a> {
 
 impl<'a> HandleEventContext<'a> {
     fn handle_event(&mut self, event: Event) {
-        use crate::{edit_ops, event::*};
+        use crate::event::*;
 
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Backspace,
                 ..
             }) => {
-                self.edit(
-                    EditKind::Delete,
-                    edit_ops::delete(self.model.buf.text(), &self.view.sels),
-                );
+                self.edit(|context| edit_ops::delete(context));
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
                 ..
             }) => {
-                self.edit(
-                    EditKind::Insert,
-                    edit_ops::insert(
-                        self.model.buf.text(),
-                        &self.view.sels,
-                        &Text::from(vec!["".to_string(), "".to_string()]),
-                    ),
-                );
+                self.edit(|context| {
+                    edit_ops::insert(context, &Text::from(vec!["".to_string(), "".to_string()]))
+                });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Left,
             }) => {
-                self.update_cursors(shift, |text, pos, _| (move_ops::move_left(text, pos), None));
+                self.update_cursors(shift, |context, pos, _| {
+                    (move_ops::move_left(context, pos), None)
+                });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Up,
             }) => {
-                self.update_cursors(shift, |text, pos, column| {
-                    move_ops::move_up(text, pos, column)
+                self.update_cursors(shift, |context, pos, column| {
+                    move_ops::move_up(context, pos, column)
                 });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Right,
             }) => {
-                self.update_cursors(shift, |text, pos, _| {
-                    (move_ops::move_right(text, pos), None)
+                self.update_cursors(shift, |context, pos, _| {
+                    (move_ops::move_right(context, pos), None)
                 });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Down,
             }) => {
-                self.update_cursors(shift, |text, pos, column| {
-                    move_ops::move_down(text, pos, column)
+                self.update_cursors(shift, |context, pos, column| {
+                    move_ops::move_down(context, pos, column)
                 });
             }
             Event::Key(KeyEvent {
@@ -190,11 +185,15 @@ impl<'a> HandleEventContext<'a> {
                 self.redo();
             }
             Event::Text(TextEvent { string }) => {
-                let text: Text = string.lines().map(|string| string.to_string()).collect();
-                self.edit(
-                    EditKind::Insert,
-                    edit_ops::insert(self.model.buf.text(), self.view.sels.iter(), &text),
-                );
+                self.edit(|context| {
+                    edit_ops::insert(
+                        context,
+                        &string
+                            .lines()
+                            .map(|string| string.to_string())
+                            .collect::<Text>(),
+                    )
+                });
             }
             _ => {}
         }
@@ -203,10 +202,18 @@ impl<'a> HandleEventContext<'a> {
     fn update_cursors(
         &mut self,
         select: bool,
-        mut f: impl FnMut(&Text, Pos, Option<usize>) -> (Pos, Option<usize>),
+        mut f: impl FnMut(&move_ops::Context<'_>, Pos, Option<usize>) -> (Pos, Option<usize>),
     ) {
         self.view.sels.update_all(|sel| {
-            let mut sel = sel.update_cursor(|pos, column| f(self.model.buf.text(), pos, column));
+            let mut sel = sel.update_cursor(|pos, column| {
+                f(
+                    &move_ops::Context {
+                        lines: self.model.buf.text().as_lines(),
+                    },
+                    pos,
+                    column,
+                )
+            });
             if !select {
                 sel = sel.reset_anchor();
             }
@@ -215,7 +222,11 @@ impl<'a> HandleEventContext<'a> {
         self.model.buf.flush();
     }
 
-    fn edit(&mut self, kind: EditKind, diff: Diff) {
+    fn edit(&mut self, f: impl FnOnce(&edit_ops::Context<'_>) -> (EditKind, Diff)) {
+        let (kind, diff) = f(&edit_ops::Context {
+            sels: &self.view.sels,
+            text: self.model.buf.text(),
+        });
         self.model.buf.edit(kind, &self.view.sels, diff.clone());
         self.update_views(None, &diff);
     }

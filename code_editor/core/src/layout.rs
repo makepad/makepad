@@ -1,10 +1,15 @@
 use std::ops::ControlFlow;
 
+#[derive(Debug)]
+pub struct Context<'a> {
+    pub line: &'a str,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Elem<'a> {
-    pub byte: usize,
+    pub byte_pos: usize,
     pub pos: Pos,
-    pub width: usize,
+    pub column_width: usize,
     pub kind: ElemKind<'a>,
 }
 
@@ -16,34 +21,38 @@ pub struct Pos {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ElemKind<'a> {
-    NewRow,
+    End,
+    LineBreak,
     Grapheme(&'a str),
 }
 
-pub fn layout<T>(line: &str, handle_elem: impl FnMut(Elem) -> ControlFlow<T>) -> ControlFlow<T> {
-    LayoutContext {
-        byte: 0,
+pub fn layout<T>(
+    context: &Context<'_>,
+    handle_elem: impl FnMut(Elem) -> ControlFlow<T>,
+) -> ControlFlow<T> {
+    Layouter {
+        byte_pos: 0,
         pos: Pos::default(),
         handle_elem,
     }
-    .layout(line)
+    .layout(context.line)
 }
 
-pub fn row_height(line: &str) -> usize {
-    let mut row_height = 0;
-    layout(line, |elem| {
-        match elem.kind {
-            ElemKind::NewRow => row_height += 1,
-            _ => {}
+pub fn row_height(context: &Context<'_>) -> usize {
+    match layout(context, |elem| {
+        if let ElemKind::End = elem.kind {
+            return ControlFlow::Break(elem.pos.row + 1);
         }
-        ControlFlow::<()>::Continue(())
-    });
-    row_height
+        ControlFlow::Continue(())
+    }) {
+        ControlFlow::Break(row_height) => row_height,
+        _ => unreachable!()
+    }
 }
 
-pub fn byte_to_pos(line: &str, byte: usize) -> Option<Pos> {
-    match layout(line, |elem| {
-        if elem.byte == byte {
+pub fn byte_pos_to_pos(context: &Context<'_>, byte_pos: usize) -> Option<Pos> {
+    match layout(context, |elem| {
+        if elem.byte_pos == byte_pos {
             return ControlFlow::Break(elem.pos);
         }
         ControlFlow::Continue(())
@@ -53,26 +62,26 @@ pub fn byte_to_pos(line: &str, byte: usize) -> Option<Pos> {
     }
 }
 
-pub fn pos_to_byte(line: &str, pos: Pos) -> Option<usize> {
-    match layout(line, |elem| {
+pub fn pos_to_byte_pos(context: &Context<'_>, pos: Pos) -> Option<usize> {
+    match layout(context, |elem| {
         if elem.pos == pos {
-            return ControlFlow::Break(elem.byte);
+            return ControlFlow::Break(elem.byte_pos);
         }
         ControlFlow::Continue(())
     }) {
-        ControlFlow::Break(byte) => Some(byte),
+        ControlFlow::Break(byte_pos) => Some(byte_pos),
         ControlFlow::Continue(()) => None,
     }
 }
 
 #[derive(Debug)]
-struct LayoutContext<F> {
-    byte: usize,
+struct Layouter<F> {
+    byte_pos: usize,
     pos: Pos,
     handle_elem: F,
 }
 
-impl<T, F> LayoutContext<F>
+impl<T, F> Layouter<F>
 where
     F: FnMut(Elem<'_>) -> ControlFlow<T>,
 {
@@ -82,9 +91,7 @@ where
         for grapheme in line.graphemes() {
             self.layout_grapheme(grapheme)?;
         }
-        self.emit_elem(0, ElemKind::NewRow)?;
-        self.pos.row += 1;
-        self.pos.column = 0;
+        self.emit_elem(0, ElemKind::End)?;
         ControlFlow::Continue(())
     }
 
@@ -93,16 +100,16 @@ where
 
         let column_len = grapheme.chars().next().unwrap().column_width();
         self.emit_elem(column_len, ElemKind::Grapheme(grapheme))?;
-        self.byte += grapheme.len();
+        self.byte_pos += grapheme.len();
         self.pos.column += column_len;
         ControlFlow::Continue(())
     }
 
     fn emit_elem(&mut self, width: usize, kind: ElemKind<'_>) -> ControlFlow<T> {
         (self.handle_elem)(Elem {
-            byte: self.byte,
+            byte_pos: self.byte_pos,
             pos: self.pos,
-            width,
+            column_width: width,
             kind,
         })?;
         ControlFlow::Continue(())

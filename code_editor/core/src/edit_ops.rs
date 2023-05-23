@@ -1,41 +1,66 @@
-use crate::{sel_set::Sel, Diff, Text};
+use crate::{buf::EditKind, Diff, SelSet, text::Pos, Text};
 
-pub fn insert(text: &Text, sels: impl IntoIterator<Item = Sel>, replace_with: &Text) -> Diff {
-    use crate::{diff, text::Pos};
+pub struct Context<'a> {
+    pub sels: &'a SelSet,
+    pub text: &'a Text,
+}
 
-    let sels = sels.into_iter();
+pub fn insert(context: &Context<'_>, replace_with: &Text) -> (EditKind, Diff) {
+    use crate::diff;
+    
     let mut builder = diff::Builder::new();
     let mut prev_sel_end = Pos::default();
-    for sel in sels {
+    for sel in context.sels {
         builder.retain(sel.start() - prev_sel_end);
-        builder.delete(text.get(sel.range()));
+        builder.delete(context.text.get(sel.range()));
         builder.insert(replace_with.clone());
         prev_sel_end = sel.end();
     }
-    builder.finish()
+    (EditKind::Insert, builder.finish())
 }
 
-pub fn delete(text: &Text, sels: impl IntoIterator<Item = Sel>) -> Diff {
+pub fn delete(context: &Context<'_>) -> (EditKind, Diff) {
     use crate::{
-        diff, move_ops,
-        text::{Pos, Range},
+        diff,
+        text::Range,
     };
 
     let mut builder = diff::Builder::new();
     let mut prev_sel_end = Pos::default();
-    for sel in sels {
+    for sel in context.sels {
         if sel.is_empty() {
-            let start = move_ops::move_left(text, sel.cursor);
+            let start = prev_pos(context, sel.cursor);
             builder.retain(start - prev_sel_end);
-            builder.delete(text.get(Range {
+            builder.delete(context.text.get(Range {
                 start,
                 end: sel.cursor,
             }));
         } else {
             builder.retain(sel.start() - prev_sel_end);
-            builder.delete(text.get(sel.range()));
+            builder.delete(context.text.get(sel.range()));
         }
         prev_sel_end = sel.end();
     }
-    builder.finish()
+    (EditKind::Delete, builder.finish())
+}
+
+fn prev_pos(context: &Context<'_>, pos: Pos) -> Pos {
+    use crate::StrExt;
+
+    if pos.byte > 0 {
+        Pos {
+            line: pos.line,
+            byte: context.text.as_lines()[pos.line]
+                .prev_grapheme_boundary(pos.byte)
+                .unwrap(),
+        }
+    } else if pos.line > 0 {
+        let prev_line_pos = pos.line - 1;
+        Pos {
+            line: prev_line_pos,
+            byte: context.text.as_lines()[prev_line_pos].len(),
+        }
+    } else {
+        pos
+    }
 }
