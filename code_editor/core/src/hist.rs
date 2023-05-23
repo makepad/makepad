@@ -34,10 +34,7 @@ impl Hist {
     pub fn commit(&mut self, sels_before: SelSet, diff: Diff) {
         self.rev_id += 1;
         self.revs.truncate(self.rev_id);
-        self.revs.push(Rev {
-            sels_before,
-            diff,
-        });
+        self.revs.push(Rev { sels_before, diff });
     }
 }
 

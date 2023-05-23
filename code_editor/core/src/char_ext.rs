@@ -1,9 +1,9 @@
 pub trait CharExt {
-    fn column_len(self) -> usize;
+    fn column_width(self) -> usize;
 }
 
 impl CharExt for char {
-    fn column_len(self) -> usize {
+    fn column_width(self) -> usize {
         1
     }
 }

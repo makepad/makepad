@@ -3,10 +3,8 @@ use {
         arena::Id, buf::EditKind, move_ops, text::Pos, text::Text, Arena, Buf, Diff, Event, SelSet,
     },
     std::{
-        any::Any,
         cell::{RefCell, RefMut},
         collections::HashSet,
-        fmt,
     },
 };
 
@@ -21,15 +19,11 @@ impl State {
         Self::default()
     }
 
-    pub fn create_view<T>(&mut self, create_user_data: impl FnOnce(&Text) -> T) -> ViewId
-    where
-        T: ViewUserData + 'static,
-    {
+    pub fn create_view(&mut self) -> ViewId {
         let text: Text = include_str!("arena.rs")
             .lines()
             .map(|string| string.to_string())
             .collect();
-        let user_data = create_user_data(&text);
         let model = self.models.insert(Model {
             view_ids: HashSet::new(),
             buf: Buf::new(text),
@@ -37,7 +31,6 @@ impl State {
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,
             sels: SelSet::new(),
-            user_data: Box::new(user_data),
         }));
         self.models[model].view_ids.insert(view_id);
         ViewId(view_id)
@@ -58,7 +51,6 @@ impl State {
         f(DrawContext {
             text: &self.models[model_id].buf.text(),
             sels: &view.sels,
-            user_data: &*view.user_data,
         });
     }
 
@@ -86,29 +78,15 @@ impl State {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ViewId(Id<RefCell<View>>);
 
-pub trait ViewUserData {
-    fn as_any(&self) -> &dyn Any;
-
-    fn update(&mut self, diff: &Diff, local: bool);
-}
-
-impl fmt::Debug for dyn ViewUserData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ViewUserData").finish_non_exhaustive()
-    }
-}
-
 pub struct DrawContext<'a> {
     pub text: &'a Text,
     pub sels: &'a SelSet,
-    pub user_data: &'a dyn ViewUserData,
 }
 
 #[derive(Debug)]
 struct View {
     model_id: Id<Model>,
     sels: SelSet,
-    user_data: Box<dyn ViewUserData>,
 }
 
 impl View {
@@ -118,7 +96,6 @@ impl View {
         } else {
             self.sels.apply_diff(diff, local);
         }
-        self.user_data.update(diff, local);
     }
 }
 

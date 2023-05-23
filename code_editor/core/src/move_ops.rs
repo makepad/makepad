@@ -92,24 +92,45 @@ fn move_to_end_of_prev_line(text: &Text, pos: Pos) -> Pos {
 }
 
 fn move_to_next_line(text: &Text, pos: Pos, column: Option<usize>) -> (Pos, usize) {
-    let column = column.unwrap_or_else(|| byte_to_column(text, pos.line, pos.byte));
+    use crate::layout;
+
+    let column = column.unwrap_or_else(|| {
+        layout::byte_to_pos(&text.as_lines()[pos.line], pos.byte)
+            .unwrap()
+            .column
+    });
     let next_line = pos.line + 1;
     (
         Pos {
             line: next_line,
-            byte: column_to_byte(text, next_line, column),
+            byte: layout::pos_to_byte(
+                &text.as_lines()[next_line],
+                layout::Pos {
+                    row: 0,
+                    column,
+                },
+            ).unwrap_or(text.as_lines()[next_line].len()),
         },
         column,
     )
 }
 
 fn move_to_prev_line(text: &Text, pos: Pos, column: Option<usize>) -> (Pos, usize) {
-    let column = column.unwrap_or_else(|| byte_to_column(text, pos.line, pos.byte));
+    use crate::layout;
+
+    let column = column.unwrap_or_else(|| {
+        layout::byte_to_pos(&text.as_lines()[pos.line], pos.byte)
+            .unwrap()
+            .column
+    });
     let prev_line = pos.line - 1;
     (
         Pos {
             line: prev_line,
-            byte: column_to_byte(text, prev_line, column),
+            byte: layout::pos_to_byte(&text.as_lines()[prev_line], layout::Pos {
+                row: 0,
+                column,
+            }).unwrap_or(text.as_lines()[prev_line].len()),
         },
         column,
     )
@@ -127,22 +148,4 @@ fn move_to_end_of_line(text: &Text, pos: Pos) -> Pos {
         line: pos.line,
         byte: text.as_lines()[pos.line].len(),
     }
-}
-
-fn byte_to_column(text: &Text, line: usize, byte: usize) -> usize {
-    use {crate::layout, std::ops::ControlFlow};
-
-    match layout::layout(&text.as_lines()[line], |event| {
-        if event.byte_pos == byte {
-            return ControlFlow::Break(event.pos.column);
-        }
-        ControlFlow::Continue(())
-    }) {
-        ControlFlow::Break(column) => column,
-        _ => panic!(),
-    }
-}
-
-fn column_to_byte(text: &Text, line: usize, column: usize) -> usize {
-    column.min(text.as_lines()[line].len())
 }
