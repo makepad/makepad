@@ -3,7 +3,7 @@ use {
     std::ops::{Add, AddAssign, Sub, SubAssign},
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Text {
     lines: Vec<String>,
 }
@@ -152,7 +152,7 @@ impl FromIterator<String> for Text {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct Pos {
     pub line: usize,
     pub byte: usize,
@@ -243,7 +243,7 @@ impl Sub for Pos {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct Len {
     pub lines: usize,
     pub bytes: usize,
@@ -297,7 +297,7 @@ impl SubAssign for Len {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Range {
     pub start: Pos,
     pub end: Pos,

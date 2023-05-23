@@ -1,9 +1,12 @@
 use {
-    crate::{text::{Len, Pos}, Text},
+    crate::{
+        text::{Len, Pos},
+        Text,
+    },
     std::{slice, vec},
 };
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Diff {
     ops: Vec<Op>,
 }
@@ -278,7 +281,7 @@ impl Iterator for IntoIter {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Op {
     Retain(Len),
     Insert(Text),
@@ -295,7 +298,7 @@ impl Op {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LenOnlyOp {
     Retain(Len),
     Insert(Len),

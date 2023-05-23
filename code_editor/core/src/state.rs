@@ -1,6 +1,6 @@
 use {
     crate::{
-        arena::Id, buf::EditKind, move_ops, text::Text, Arena, Buf, CursorSet, Diff, Event, text::Pos,
+        arena::Id, buf::EditKind, move_ops, text::Pos, text::Text, Arena, Buf, Diff, Event, SelSet,
     },
     std::{
         any::Any,
@@ -25,7 +25,10 @@ impl State {
     where
         T: ViewUserData + 'static,
     {
-        let text: Text = include_str!("arena.rs").lines().map(|string| string.to_string()).collect();
+        let text: Text = include_str!("arena.rs")
+            .lines()
+            .map(|string| string.to_string())
+            .collect();
         let user_data = create_user_data(&text);
         let model = self.models.insert(Model {
             view_ids: HashSet::new(),
@@ -33,7 +36,7 @@ impl State {
         });
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,
-            cursors: CursorSet::new(),
+            sels: SelSet::new(),
             user_data: Box::new(user_data),
         }));
         self.models[model].view_ids.insert(view_id);
@@ -54,7 +57,7 @@ impl State {
         let model_id = view.model_id;
         f(DrawContext {
             text: &self.models[model_id].buf.text(),
-            cursors: &view.cursors,
+            sels: &view.sels,
             user_data: &*view.user_data,
         });
     }
@@ -97,23 +100,23 @@ impl fmt::Debug for dyn ViewUserData {
 
 pub struct DrawContext<'a> {
     pub text: &'a Text,
-    pub cursors: &'a CursorSet,
+    pub sels: &'a SelSet,
     pub user_data: &'a dyn ViewUserData,
 }
 
 #[derive(Debug)]
 struct View {
     model_id: Id<Model>,
-    cursors: CursorSet,
+    sels: SelSet,
     user_data: Box<dyn ViewUserData>,
 }
 
 impl View {
-    fn update(&mut self, cursors: Option<&CursorSet>, diff: &Diff, local: bool) {
-        if let Some(cursors) = cursors {
-            self.cursors = cursors.clone()
+    fn update(&mut self, sels: Option<&SelSet>, diff: &Diff, local: bool) {
+        if let Some(sels) = sels {
+            self.sels = sels.clone()
         } else {
-            self.cursors.apply_diff(diff, local);
+            self.sels.apply_diff(diff, local);
         }
         self.user_data.update(diff, local);
     }
@@ -143,7 +146,7 @@ impl<'a> HandleEventContext<'a> {
             }) => {
                 self.edit(
                     EditKind::Delete,
-                    edit_ops::delete(self.model.buf.text(), &self.view.cursors),
+                    edit_ops::delete(self.model.buf.text(), &self.view.sels),
                 );
             }
             Event::Key(KeyEvent {
@@ -154,7 +157,7 @@ impl<'a> HandleEventContext<'a> {
                     EditKind::Insert,
                     edit_ops::insert(
                         self.model.buf.text(),
-                        &self.view.cursors,
+                        &self.view.sels,
                         &Text::from(vec!["".to_string(), "".to_string()]),
                     ),
                 );
@@ -163,13 +166,13 @@ impl<'a> HandleEventContext<'a> {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Left,
             }) => {
-                self.do_move(shift, |text, pos, _| (move_ops::move_left(text, pos), None));
+                self.update_cursors(shift, |text, pos, _| (move_ops::move_left(text, pos), None));
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Up,
             }) => {
-                self.do_move(shift, |text, pos, column| {
+                self.update_cursors(shift, |text, pos, column| {
                     move_ops::move_up(text, pos, column)
                 });
             }
@@ -177,7 +180,7 @@ impl<'a> HandleEventContext<'a> {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Right,
             }) => {
-                self.do_move(shift, |text, pos, _| {
+                self.update_cursors(shift, |text, pos, _| {
                     (move_ops::move_right(text, pos), None)
                 });
             }
@@ -185,7 +188,7 @@ impl<'a> HandleEventContext<'a> {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Down,
             }) => {
-                self.do_move(shift, |text, pos, column| {
+                self.update_cursors(shift, |text, pos, column| {
                     move_ops::move_down(text, pos, column)
                 });
             }
@@ -213,47 +216,47 @@ impl<'a> HandleEventContext<'a> {
                 let text: Text = string.lines().map(|string| string.to_string()).collect();
                 self.edit(
                     EditKind::Insert,
-                    edit_ops::insert(
-                        self.model.buf.text(),
-                        self.view.cursors.iter(),
-                        &text,
-                    ),
+                    edit_ops::insert(self.model.buf.text(), self.view.sels.iter(), &text),
                 );
             }
             _ => {}
         }
     }
 
-    fn do_move(
+    fn update_cursors(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Text, Pos, Option<usize>) -> (Pos, Option<usize>),
     ) {
-        self.view.cursors.update_all(|cursor| {
-            cursor.do_move(select, |pos, column| f(self.model.buf.text(), pos, column))
+        self.view.sels.update_all(|sel| {
+            let mut sel = sel.update_cursor(|pos, column| f(self.model.buf.text(), pos, column));
+            if !select {
+                sel = sel.reset_anchor();
+            }
+            sel
         });
         self.model.buf.flush();
     }
 
     fn edit(&mut self, kind: EditKind, diff: Diff) {
-        self.model.buf.edit(kind, &self.view.cursors, diff.clone());
+        self.model.buf.edit(kind, &self.view.sels, diff.clone());
         self.update_views(None, &diff);
     }
 
     fn undo(&mut self) {
-        if let Some((cursors, diff)) = self.model.buf.undo() {
-            self.update_views(Some(&cursors), &diff);
+        if let Some((sels, diff)) = self.model.buf.undo() {
+            self.update_views(Some(&sels), &diff);
         }
     }
 
     fn redo(&mut self) {
-        if let Some((cursors, diff)) = self.model.buf.redo() {
-            self.update_views(Some(&cursors), &diff);
+        if let Some((sels, diff)) = self.model.buf.redo() {
+            self.update_views(Some(&sels), &diff);
         }
     }
 
-    fn update_views(&mut self, cursors: Option<&CursorSet>, diff: &Diff) {
-        self.view.update(cursors, diff, true);
+    fn update_views(&mut self, sels: Option<&SelSet>, diff: &Diff) {
+        self.view.update(sels, diff, true);
         for sibling_view in &mut self.sibling_views {
             sibling_view.update(None, diff, false);
         }

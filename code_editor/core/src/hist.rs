@@ -1,4 +1,4 @@
-use crate::{CursorSet, Diff};
+use crate::{Diff, SelSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Hist {
@@ -11,31 +11,31 @@ impl Hist {
         Self::default()
     }
 
-    pub fn undo(&mut self) -> Option<(CursorSet, Diff)> {
+    pub fn undo(&mut self) -> Option<(SelSet, Diff)> {
         if self.rev_id == 0 {
             return None;
         }
         let rev = self.revs[self.rev_id].clone();
         self.rev_id -= 1;
-        Some((rev.cursors_before, rev.diff.revert()))
+        Some((rev.sels_before, rev.diff.revert()))
     }
 
-    pub fn redo(&mut self) -> Option<(CursorSet, Diff)> {
+    pub fn redo(&mut self) -> Option<(SelSet, Diff)> {
         if self.rev_id == self.revs.len() - 1 {
             return None;
         }
         self.rev_id += 1;
         let rev = self.revs[self.rev_id].clone();
-        let mut cursors_after = rev.cursors_before;
-        cursors_after.apply_diff(&rev.diff, true);
-        Some((cursors_after, rev.diff))
+        let mut sels_after = rev.sels_before;
+        sels_after.apply_diff(&rev.diff, true);
+        Some((sels_after, rev.diff))
     }
 
-    pub fn commit(&mut self, cursors_before: CursorSet, diff: Diff) {
+    pub fn commit(&mut self, sels_before: SelSet, diff: Diff) {
         self.rev_id += 1;
         self.revs.truncate(self.rev_id);
         self.revs.push(Rev {
-            cursors_before,
+            sels_before,
             diff,
         });
     }
@@ -52,6 +52,6 @@ impl Default for Hist {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Rev {
-    pub cursors_before: CursorSet,
+    pub sels_before: SelSet,
     pub diff: Diff,
 }
