@@ -25,8 +25,8 @@ impl State {
             .lines()
             .map(|string| string.to_string())
             .collect();
-        let heights_by_line: Vec<_> = (0..lines.len())
-            .map(|line_pos| layout::height(&lines[line_pos]))
+        let line_row_counts: Vec<_> = (0..lines.len())
+            .map(|line_index| layout::height(&lines[line_index]))
             .collect();
         let model = self.models.insert(Model {
             view_ids: HashSet::new(),
@@ -35,7 +35,8 @@ impl State {
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,
             sels: SelSet::new(),
-            line_heights: heights_by_line,
+            line_row_counts: line_row_counts,
+            line_row_indices: Vec::new(),
         }));
         self.models[model].view_ids.insert(view_id);
         ViewId(view_id)
@@ -92,13 +93,26 @@ pub struct DrawContext<'a> {
 struct View {
     model_id: Id<Model>,
     sels: SelSet,
-    line_heights: Vec<usize>,
+    line_row_counts: Vec<usize>,
+    line_row_indices: Vec<usize>,
 }
 
 impl View {
-    fn update(&mut self, lines: &[String], sels: Option<SelSet>, diff: &Diff, local: bool) {  
+    fn line_row_index(&mut self, line_index: usize) -> usize {
+        while self.line_row_indices.len() <= line_index {
+            self.line_row_indices.push(if self.line_row_indices.is_empty() {
+                0
+            } else {
+                let prev_line_index = self.line_row_indices.len() - 1;
+                self.line_row_indices[prev_line_index] + self.line_row_counts[prev_line_index]
+            });
+        }
+        self.line_row_indices[line_index]
+    }
+
+    fn update(&mut self, lines: &[String], sels: Option<SelSet>, diff: &Diff, local: bool) {
         self.update_sels(sels, diff, local);
-        self.update_line_heights(lines, diff);
+        self.update_line_row_counts(lines, diff);
     }
 
     fn update_sels(&mut self, sels: Option<SelSet>, diff: &Diff, local: bool) {
@@ -109,28 +123,29 @@ impl View {
         }
     }
 
-    fn update_line_heights(&mut self, lines: &[String], diff: &Diff) {
+    fn update_line_row_counts(&mut self, lines: &[String], diff: &Diff) {
         use crate::diff::LenOnlyOp;
 
-        let mut line_pos = 0;
+        let mut line_index = 0;
         for op in diff {
             match op.len_only() {
-                LenOnlyOp::Retain(len) => line_pos += len.lines,
+                LenOnlyOp::Retain(len) => line_index += len.line_count,
                 LenOnlyOp::Insert(len) => {
-                    self.line_heights.splice(
-                        line_pos..line_pos,
-                        (line_pos..line_pos + len.lines)
-                            .map(|line_pos| layout::height(&lines[line_pos])),
+                    self.line_row_counts.splice(
+                        line_index..line_index,
+                        (line_index..line_index + len.line_count)
+                            .map(|line_index| layout::height(&lines[line_index])),
                     );
-                    line_pos += len.lines;
-                    if len.bytes > 0 {
-                        self.line_heights[line_pos] = layout::height(&lines[line_pos]);
+                    line_index += len.line_count;
+                    if len.byte_count > 0 {
+                        self.line_row_counts[line_index] = layout::height(&lines[line_index]);
                     }
                 }
                 LenOnlyOp::Delete(len) => {
-                    self.line_heights.drain(line_pos..line_pos + len.lines);
-                    if len.bytes > 0 {
-                        self.line_heights[line_pos] = layout::height(&lines[line_pos]);
+                    self.line_row_counts
+                        .drain(line_index..line_index + len.line_count);
+                    if len.byte_count > 0 {
+                        self.line_row_counts[line_index] = layout::height(&lines[line_index]);
                     }
                 }
             }
@@ -186,8 +201,8 @@ impl<'a> HandleEventContext<'a> {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Up,
             }) => {
-                self.modify_sels(shift, |lines, pos, column| {
-                    move_ops::move_up(lines, pos, column)
+                self.modify_sels(shift, |lines, pos, col_index| {
+                    move_ops::move_up(lines, pos, col_index)
                 });
             }
             Event::Key(KeyEvent {
@@ -202,8 +217,8 @@ impl<'a> HandleEventContext<'a> {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Down,
             }) => {
-                self.modify_sels(shift, |lines, pos, column| {
-                    move_ops::move_down(lines, pos, column)
+                self.modify_sels(shift, |lines, pos, col_index| {
+                    move_ops::move_down(lines, pos, col_index)
                 });
             }
             Event::Key(KeyEvent {
@@ -248,10 +263,11 @@ impl<'a> HandleEventContext<'a> {
         mut f: impl FnMut(&[String], Pos, Option<usize>) -> (Pos, Option<usize>),
     ) {
         self.view.sels.modify_all(|sel| {
-            let mut sel =
-                sel.modify_cursor(|pos, column| f(self.model.buf.text().as_lines(), pos, column));
+            let mut sel = sel.modify_cursor_pos(|pos, col_index| {
+                f(self.model.buf.text().as_lines(), pos, col_index)
+            });
             if !select {
-                sel = sel.reset_anchor();
+                sel = sel.reset_anchor_pos();
             }
             sel
         });

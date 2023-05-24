@@ -39,27 +39,29 @@ pub fn move_down(lines: &[String], pos: Pos, column: Option<usize>) -> (Pos, Opt
 }
 
 fn is_at_first_line(pos: Pos) -> bool {
-    pos.line == 0
+    pos.line_index == 0
 }
 
 fn is_at_last_line(lines: &[String], pos: Pos) -> bool {
-    pos.line == lines.len()
+    pos.line_index == lines.len()
 }
 
 fn is_at_start_of_line(pos: Pos) -> bool {
-    pos.byte == 0
+    pos.byte_index == 0
 }
 
 fn is_at_end_of_line(lines: &[String], pos: Pos) -> bool {
-    pos.byte == lines[pos.line].len()
+    pos.byte_index == lines[pos.line_index].len()
 }
 
 fn move_to_next_grapheme(lines: &[String], pos: Pos) -> Pos {
     use crate::StrExt;
 
     Pos {
-        line: pos.line,
-        byte: lines[pos.line].next_grapheme_boundary(pos.byte).unwrap(),
+        line_index: pos.line_index,
+        byte_index: lines[pos.line_index]
+            .next_grapheme_boundary(pos.byte_index)
+            .unwrap(),
     }
 }
 
@@ -67,38 +69,46 @@ fn move_to_prev_grapheme(lines: &[String], pos: Pos) -> Pos {
     use crate::StrExt;
 
     Pos {
-        line: pos.line,
-        byte: lines[pos.line].prev_grapheme_boundary(pos.byte).unwrap(),
+        line_index: pos.line_index,
+        byte_index: lines[pos.line_index]
+            .prev_grapheme_boundary(pos.byte_index)
+            .unwrap(),
     }
 }
 
 fn move_to_start_of_next_line(pos: Pos) -> Pos {
     Pos {
-        line: pos.line + 1,
-        byte: 0,
+        line_index: pos.line_index + 1,
+        byte_index: 0,
     }
 }
 
 fn move_to_end_of_prev_line(lines: &[String], pos: Pos) -> Pos {
-    let prev_line_pos = pos.line - 1;
+    let prev_line_index = pos.line_index - 1;
     Pos {
-        line: prev_line_pos,
-        byte: lines[prev_line_pos].len(),
+        line_index: prev_line_index,
+        byte_index: lines[prev_line_index].len(),
     }
 }
 
 fn move_to_next_line(lines: &[String], pos: Pos, column: Option<usize>) -> (Pos, usize) {
     let column = column.unwrap_or_else(|| {
-        layout::byte_pos_to_pos(&lines[pos.line], pos.byte)
+        layout::byte_index_to_pos(&lines[pos.line_index], pos.byte_index)
             .unwrap()
-            .column
+            .col_index
     });
-    let next_line_pos = pos.line + 1;
+    let next_line_index = pos.line_index + 1;
     (
         Pos {
-            line: next_line_pos,
-            byte: layout::pos_to_byte_pos(&lines[next_line_pos], layout::Pos { row: 0, column })
-                .unwrap_or_else(|| lines[next_line_pos].len()),
+            line_index: next_line_index,
+            byte_index: layout::pos_to_byte_index(
+                &lines[next_line_index],
+                layout::Pos {
+                    row_index: 0,
+                    col_index: column,
+                },
+            )
+            .unwrap_or_else(|| lines[next_line_index].len()),
         },
         column,
     )
@@ -106,16 +116,22 @@ fn move_to_next_line(lines: &[String], pos: Pos, column: Option<usize>) -> (Pos,
 
 fn move_to_prev_line(lines: &[String], pos: Pos, column: Option<usize>) -> (Pos, usize) {
     let column = column.unwrap_or_else(|| {
-        layout::byte_pos_to_pos(&lines[pos.line], pos.byte)
+        layout::byte_index_to_pos(&lines[pos.line_index], pos.byte_index)
             .unwrap()
-            .column
+            .col_index
     });
-    let prev_line_pos = pos.line - 1;
+    let prev_line_index = pos.line_index - 1;
     (
         Pos {
-            line: prev_line_pos,
-            byte: layout::pos_to_byte_pos(&lines[prev_line_pos], layout::Pos { row: 0, column })
-                .unwrap_or_else(|| lines[prev_line_pos].len()),
+            line_index: prev_line_index,
+            byte_index: layout::pos_to_byte_index(
+                &lines[prev_line_index],
+                layout::Pos {
+                    row_index: 0,
+                    col_index: column,
+                },
+            )
+            .unwrap_or_else(|| lines[prev_line_index].len()),
         },
         column,
     )
@@ -123,14 +139,14 @@ fn move_to_prev_line(lines: &[String], pos: Pos, column: Option<usize>) -> (Pos,
 
 fn move_to_start_of_line(pos: Pos) -> Pos {
     Pos {
-        line: pos.line,
-        byte: 0,
+        line_index: pos.line_index,
+        byte_index: 0,
     }
 }
 
 fn move_to_end_of_line(lines: &[String], pos: Pos) -> Pos {
     Pos {
-        line: pos.line,
-        byte: lines[pos.line].len(),
+        line_index: pos.line_index,
+        byte_index: lines[pos.line_index].len(),
     }
 }

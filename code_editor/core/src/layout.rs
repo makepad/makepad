@@ -2,16 +2,16 @@ use std::ops::ControlFlow;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Elem<'a> {
-    pub byte_pos: usize,
+    pub byte_index: usize,
     pub pos: Pos,
-    pub width: usize,
+    pub col_count: usize,
     pub kind: ElemKind<'a>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Pos {
-    pub row: usize,
-    pub column: usize,
+    pub row_index: usize,
+    pub col_index: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,7 +23,7 @@ pub enum ElemKind<'a> {
 
 pub fn layout<T>(line: &str, handle_elem: impl FnMut(Elem) -> ControlFlow<T>) -> ControlFlow<T> {
     Layouter {
-        byte_pos: 0,
+        byte_index: 0,
         pos: Pos::default(),
         handle_elem,
     }
@@ -33,7 +33,7 @@ pub fn layout<T>(line: &str, handle_elem: impl FnMut(Elem) -> ControlFlow<T>) ->
 pub fn height(line: &str) -> usize {
     match layout(line, |elem| {
         if let ElemKind::End = elem.kind {
-            return ControlFlow::Break(elem.pos.row + 1);
+            return ControlFlow::Break(elem.pos.row_index + 1);
         }
         ControlFlow::Continue(())
     }) {
@@ -42,9 +42,9 @@ pub fn height(line: &str) -> usize {
     }
 }
 
-pub fn byte_pos_to_pos(line: &str, byte_pos: usize) -> Option<Pos> {
+pub fn byte_index_to_pos(line: &str, byte_pos: usize) -> Option<Pos> {
     match layout(line, |elem| {
-        if elem.byte_pos == byte_pos {
+        if elem.byte_index == byte_pos {
             return ControlFlow::Break(elem.pos);
         }
         ControlFlow::Continue(())
@@ -54,10 +54,10 @@ pub fn byte_pos_to_pos(line: &str, byte_pos: usize) -> Option<Pos> {
     }
 }
 
-pub fn pos_to_byte_pos(line: &str, pos: Pos) -> Option<usize> {
+pub fn pos_to_byte_index(line: &str, pos: Pos) -> Option<usize> {
     match layout(line, |elem| {
         if elem.pos == pos {
-            return ControlFlow::Break(elem.byte_pos);
+            return ControlFlow::Break(elem.byte_index);
         }
         ControlFlow::Continue(())
     }) {
@@ -68,7 +68,7 @@ pub fn pos_to_byte_pos(line: &str, pos: Pos) -> Option<usize> {
 
 #[derive(Debug)]
 struct Layouter<F> {
-    byte_pos: usize,
+    byte_index: usize,
     pos: Pos,
     handle_elem: F,
 }
@@ -90,18 +90,18 @@ where
     fn layout_grapheme(&mut self, grapheme: &str) -> ControlFlow<T> {
         use crate::CharExt;
 
-        let column_len = grapheme.chars().next().unwrap().width();
-        self.emit_elem(column_len, ElemKind::Grapheme(grapheme))?;
-        self.byte_pos += grapheme.len();
-        self.pos.column += column_len;
+        let col_count = grapheme.chars().next().unwrap().col_count();
+        self.emit_elem(col_count, ElemKind::Grapheme(grapheme))?;
+        self.byte_index += grapheme.len();
+        self.pos.col_index += col_count;
         ControlFlow::Continue(())
     }
 
     fn emit_elem(&mut self, width: usize, kind: ElemKind<'_>) -> ControlFlow<T> {
         (self.handle_elem)(Elem {
-            byte_pos: self.byte_pos,
+            byte_index: self.byte_index,
             pos: self.pos,
-            width,
+            col_count: width,
             kind,
         })?;
         ControlFlow::Continue(())

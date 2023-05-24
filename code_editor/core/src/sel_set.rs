@@ -136,14 +136,14 @@ impl<'a> Iterator for Iter<'a> {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Sel {
-    pub cursor: Pos,
-    pub anchor: Pos,
-    pub column: Option<usize>,
+    pub cursor_pos: Pos,
+    pub anchor_pos: Pos,
+    pub col_index: Option<usize>,
 }
 
 impl Sel {
     pub fn is_empty(self) -> bool {
-        self.cursor == self.anchor
+        self.cursor_pos == self.anchor_pos
     }
 
     pub fn len(self) -> Len {
@@ -151,11 +151,11 @@ impl Sel {
     }
 
     pub fn start(self) -> Pos {
-        self.cursor.min(self.anchor)
+        self.cursor_pos.min(self.anchor_pos)
     }
 
     pub fn end(self) -> Pos {
-        self.cursor.max(self.anchor)
+        self.cursor_pos.max(self.anchor_pos)
     }
 
     pub fn range(self) -> Range {
@@ -165,18 +165,21 @@ impl Sel {
         }
     }
 
-    pub fn modify_cursor(self, f: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>)) -> Self {
-        let (cursor, column) = f(self.cursor, self.column);
+    pub fn modify_cursor_pos(
+        self,
+        f: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>),
+    ) -> Self {
+        let (cursor, column) = f(self.cursor_pos, self.col_index);
         Self {
-            cursor,
-            column,
+            cursor_pos: cursor,
+            col_index: column,
             ..self
         }
     }
 
-    pub fn reset_anchor(self) -> Self {
+    pub fn reset_anchor_pos(self) -> Self {
         Self {
-            anchor: self.cursor,
+            anchor_pos: self.cursor_pos,
             ..self
         }
     }
@@ -190,27 +193,27 @@ impl Sel {
             mem::swap(&mut first, &mut second);
         }
         match (first.is_empty(), second.is_empty()) {
-            (true, true) if first.cursor == second.cursor => Some(self),
-            (false, true) if second.cursor <= first.end() => Some(Self {
-                cursor: first.cursor,
-                anchor: first.anchor,
+            (true, true) if first.cursor_pos == second.cursor_pos => Some(self),
+            (false, true) if second.cursor_pos <= first.end() => Some(Self {
+                cursor_pos: first.cursor_pos,
+                anchor_pos: first.anchor_pos,
                 ..self
             }),
-            (true, false) if first.cursor == second.start() => Some(Self {
-                cursor: second.cursor,
-                anchor: second.anchor,
+            (true, false) if first.cursor_pos == second.start() => Some(Self {
+                cursor_pos: second.cursor_pos,
+                anchor_pos: second.anchor_pos,
                 ..self
             }),
             (false, false) if first.end() > second.start() => {
-                Some(match self.cursor.cmp(&self.anchor) {
+                Some(match self.cursor_pos.cmp(&self.anchor_pos) {
                     Ordering::Less => Self {
-                        cursor: self.cursor.min(other.cursor),
-                        anchor: self.anchor.max(other.anchor),
+                        cursor_pos: self.cursor_pos.min(other.cursor_pos),
+                        anchor_pos: self.anchor_pos.max(other.anchor_pos),
                         ..self
                     },
                     Ordering::Greater => Self {
-                        cursor: self.cursor.max(other.cursor),
-                        anchor: self.anchor.min(other.anchor),
+                        cursor_pos: self.cursor_pos.max(other.cursor_pos),
+                        anchor_pos: self.anchor_pos.min(other.anchor_pos),
                         ..self
                     },
                     Ordering::Equal => unreachable!(),
@@ -225,25 +228,25 @@ impl Sel {
 
         if local {
             Self {
-                cursor: self.cursor.apply_diff(diff, true),
+                cursor_pos: self.cursor_pos.apply_diff(diff, true),
                 ..self
             }
-            .reset_anchor()
+            .reset_anchor_pos()
         } else {
-            match self.cursor.cmp(&self.anchor) {
+            match self.cursor_pos.cmp(&self.anchor_pos) {
                 Ordering::Less => Self {
-                    cursor: self.cursor.apply_diff(diff, false),
-                    anchor: self.anchor.apply_diff(diff, true),
+                    cursor_pos: self.cursor_pos.apply_diff(diff, false),
+                    anchor_pos: self.anchor_pos.apply_diff(diff, true),
                     ..self
                 },
                 Ordering::Equal => Self {
-                    cursor: self.cursor.apply_diff(diff, true),
+                    cursor_pos: self.cursor_pos.apply_diff(diff, true),
                     ..self
                 }
-                .reset_anchor(),
+                .reset_anchor_pos(),
                 Ordering::Greater => Self {
-                    cursor: self.cursor.apply_diff(diff, true),
-                    anchor: self.anchor.apply_diff(diff, false),
+                    cursor_pos: self.cursor_pos.apply_diff(diff, true),
+                    anchor_pos: self.anchor_pos.apply_diff(diff, false),
                     ..self
                 },
             }

@@ -26,11 +26,11 @@ pub fn delete(text: &Text, sels: &SelSet) -> (EditKind, Diff) {
     let mut prev_sel_end = Pos::default();
     for sel in sels {
         if sel.is_empty() {
-            let start = move_ops::move_left(text.as_lines(), sel.cursor);
+            let start = move_ops::move_left(text.as_lines(), sel.cursor_pos);
             builder.retain(start - prev_sel_end);
             builder.delete(text.get(Range {
                 start,
-                end: sel.cursor,
+                end: sel.cursor_pos,
             }));
         } else {
             builder.retain(sel.start() - prev_sel_end);

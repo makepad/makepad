@@ -204,14 +204,14 @@ impl<'a> Drawer<'a> {
     fn draw_line(&mut self, cx: &mut Cx2d, line: &str) {
         use {makepad_code_editor_core::layout::ElemKind, std::ops::ControlFlow};
 
-        let start_row = self.layout_pos.row;
+        let start_row = self.layout_pos.row_index;
         layout::layout(line, |elem| {
-            self.text_pos.byte = elem.byte_pos;
-            self.layout_pos.row = start_row + elem.pos.row;
-            self.layout_pos.column = elem.pos.column;
+            self.text_pos.byte_index = elem.byte_index;
+            self.layout_pos.row_index = start_row + elem.pos.row_index;
+            self.layout_pos.col_index = elem.pos.col_index;
             match elem.kind {
                 ElemKind::Grapheme(grapheme) => {
-                    self.draw_grapheme(cx, grapheme, elem.width);
+                    self.draw_grapheme(cx, grapheme, elem.col_count);
                 }
                 _ => {}
             }
@@ -233,10 +233,10 @@ impl<'a> Drawer<'a> {
         if self.sel.is_some() {
             self.push_sel_rect(cx);
         }
-        self.text_pos.line += 1;
-        self.text_pos.byte = 0;
-        self.layout_pos.row += 1;
-        self.layout_pos.column = 0;
+        self.text_pos.line_index += 1;
+        self.text_pos.byte_index = 0;
+        self.layout_pos.row_index += 1;
+        self.layout_pos.col_index = 0;
         self.screen_pos.x = 0.0;
         self.screen_pos.y += self.code_editor.cell_size.y;
     }
@@ -248,12 +248,12 @@ impl<'a> Drawer<'a> {
             .map_or(false, |cursor| cursor.start() == self.text_pos)
         {
             let sel = self.sels.next().unwrap();
-            if sel.cursor == self.text_pos {
+            if sel.cursor_pos == self.text_pos {
                 self.draw_caret(cx);
             }
             self.sel = Some(ActiveSel {
                 sel,
-                first_row: self.layout_pos.row,
+                first_row: self.layout_pos.row_index,
                 first_row_start_x: self.screen_pos.x,
             });
             self.begin_sel();
@@ -266,7 +266,7 @@ impl<'a> Drawer<'a> {
             self.push_sel_rect(cx);
             self.end_sel(cx);
             let sel = self.sel.take().unwrap();
-            if !sel.sel.is_empty() && sel.sel.cursor == self.text_pos {
+            if !sel.sel.is_empty() && sel.sel.cursor_pos == self.text_pos {
                 self.draw_caret(cx);
             }
         }
@@ -281,7 +281,11 @@ impl<'a> Drawer<'a> {
     }
 
     fn push_sel_rect(&mut self, cx: &mut Cx2d) {
-        let start_x = self.sel.as_ref().unwrap().start_x(self.layout_pos.row);
+        let start_x = self
+            .sel
+            .as_ref()
+            .unwrap()
+            .start_x(self.layout_pos.row_index);
         self.code_editor.draw_sel.push_rect(
             cx,
             Rect {
