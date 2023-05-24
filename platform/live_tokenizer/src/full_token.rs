@@ -45,38 +45,23 @@ pub enum FullToken {
 
 impl FullToken {
     pub fn is_whitespace(&self)-> bool {
-        match self {
-            FullToken::Whitespace => true,
-            _ => false
-        }
+        matches!(self, FullToken::Whitespace)
     }
 
     pub fn is_comment(&self) -> bool {
-        match self {
-            FullToken::Comment => true,
-            _ => false
-        }
+        matches!(self, FullToken::Comment)
     }
     
     pub fn is_ws_or_comment(&self)->bool{
-        match self {
-            FullToken::Whitespace | FullToken::Comment => true,
-            _ => false
-        }
+        matches!(self, FullToken::Whitespace | FullToken::Comment)
     }
         
     pub fn is_open(&self) -> bool {
-        match self {
-            FullToken::Open(_) => true,
-            _ => false
-        }
+        matches!(self, FullToken::Open(_))
     }
     
     pub fn is_close(&self) -> bool {
-        match self {
-            FullToken::Close(_) => true,
-            _ => false
-        }
+        matches!(self, FullToken::Close(_))
     }
     
     pub fn is_open_delim(&self, delim: Delim) -> bool {
@@ -94,65 +79,43 @@ impl FullToken {
     }
     
     pub fn is_int(&self) -> bool {
-        match self {
-            FullToken::Int(_) => true,
-            _ => false
-        }
+        matches!(self, FullToken::Int(_))
     }
     
     pub fn is_float(&self) -> bool {
-        match self {
-            FullToken::Float(_) => true,
-            _ => false
-        }
+        matches!(self, FullToken::Float(_))
     }
     
         
     pub fn is_color(&self) -> bool {
-        match self {
-            FullToken::Color(_) => true,
-            _ => false
-        }
+        matches!(self, FullToken::Color(_))
     }
 
     pub fn is_parsed_number(&self) -> bool {
-        match self {
-            FullToken::Int(_) => true,
-            FullToken::Float(_) => true,
-            _ => false
-        }
+        matches!(self, FullToken::Int(_) | FullToken::Float(_))
     }
 
 
     pub fn is_bool(&self) -> bool {
-        match self {
-            FullToken::Bool(_) => true,
-            _ => false
-        }
+        matches!(self, FullToken::Bool(_))
     }
     
     pub fn is_value_type(&self) -> bool {
-        match self {
-            FullToken::Color(_) => true,
-            FullToken::Bool(_) => true,
-            FullToken::Int(_) => true,
-            FullToken::Float(_) => true,
-            _ => false
-        }
+        matches!(
+            self,
+            FullToken::Color(_)
+                | FullToken::Bool(_)
+                | FullToken::Int(_)
+                | FullToken::Float(_)
+        )
     }
     
     pub fn is_ident(&self) -> bool {
-        match self {
-            FullToken::Ident(_) => true,
-            _ => false
-        }
+        matches!(self, FullToken::Ident(_))
     }
     
     pub fn is_punct(&self) -> bool {
-        match self {
-            FullToken::Punct(_) => true,
-            _ => false
-        }
+        matches!(self, FullToken::Punct(_))
     }
     
     pub fn is_punct_id(&self, id: LiveId) -> bool {

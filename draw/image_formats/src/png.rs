@@ -1,6 +1,8 @@
 // image_formats::png
 // by Desmond Germans, 2019
 
+use std::cmp::Ordering;
+
 use crate::ImageBuffer;
 
 // Inflate algorithm
@@ -28,7 +30,7 @@ const TYPE_LA16: u16 = 0x1004;
 const TYPE_RGBA16: u16 = 0x1006;
 
 // grayscale distributions
-const GRAY2: [f32; 4] = [0.0, 0.33333333, 0.66666667, 1.0];
+const GRAY2: [f32; 4] = [0.0, 0.33333333, 0.6666667, 1.0];
 
 const GRAY4: [f32; 16] = [
     0.0,
@@ -39,12 +41,12 @@ const GRAY4: [f32; 16] = [
     0.33333333,
     0.4,
     0.46666667,
-    0.53333333,
+    0.5333333,
     0.6,
-    0.66666667,
+    0.6666667,
     0.73333333,
     0.8,
-    0.86666667,
+    0.8666667,
     0.93333333,
     1.0
 ];
@@ -99,9 +101,9 @@ fn create_huffman_tables(lengths: &[u8]) -> Vec<[i16; TABLE_SIZE]> {
     tables.push([0i16; TABLE_SIZE]);
     let mut ofs: u64 = 0;
     for i in 1..25 {
-        for k in 0..lengths.len() {
-            if lengths[k] == i {
-                let size = insert_code(&mut tables, ofs as u32, k as u16, lengths[k]);
+        for (k, &length) in lengths.iter().enumerate() {
+            if length == i {
+                let size = insert_code(&mut tables, ofs as u32, k as u16, length);
                 ofs += size as u64;
             }
         }
@@ -119,10 +121,10 @@ struct ZipReader<'a> {
 impl<'a> ZipReader<'a> {
     fn new(block: &'a [u8]) -> ZipReader<'a> {
         ZipReader {
-            block: block,
+            block,
             rp: 6, // first 2 bytes a
             bit: 32,
-            cache: ((block[2] as u32) | ((block[3] as u32) << 8) | ((block[4] as u32) << 16) | ((block[5] as u32) << 24)) as u32,
+            cache: ((block[2] as u32) | ((block[3] as u32) << 8) | ((block[4] as u32) << 16) | ((block[5] as u32) << 24)),
         }
     }
     
@@ -161,7 +163,7 @@ impl<'a> ZipReader<'a> {
         Ok(result)
     }
     
-    fn read_symbol(&mut self, prefix: &Vec<[i16; TABLE_SIZE]>) -> Result<u32, String> {
+    fn read_symbol(&mut self, prefix: &[[i16; TABLE_SIZE]]) -> Result<u32, String> {
         
         let mut n: usize = 0;
         let mut index = (self.cache & (TABLE_SIZE - 1) as u32) as usize;
@@ -201,23 +203,23 @@ impl<'a> ZipReader<'a> {
 
 fn inflate(src: &[u8], inflated_size: usize) -> Result<Vec<u8>, String> {
     
-    let mut dst: Vec<u8> = vec![0; inflated_size as usize];
-    let mut reader = ZipReader::new(&src);
+    let mut dst: Vec<u8> = vec![0; inflated_size];
+    let mut reader = ZipReader::new(src);
     let mut dp: usize = 0;
     
     // create default litlen table
     let mut lengths: [u8; 288] = [0; 288];
-    for i in 0..144 {
-        lengths[i] = 8;
+    for length in &mut lengths[0..144] {
+        *length = 8;
     }
-    for i in 144..256 {
-        lengths[i] = 9;
+    for length in &mut lengths[144..256] {
+        *length = 9;
     }
-    for i in 256..280 {
-        lengths[i] = 7;
+    for length in &mut lengths[256..280] {
+        *length = 7;
     }
-    for i in 280..288 {
-        lengths[i] = 8;
+    for length in &mut lengths[280..288] {
+        *length = 8;
     }
     
     let default_hlitlen_tables = create_huffman_tables(&lengths);
@@ -239,7 +241,7 @@ fn inflate(src: &[u8], inflated_size: usize) -> Result<Vec<u8>, String> {
         
         // get final block and type bits
         match reader.read_bits(1) {
-            Ok(value) => {if value == 1 {is_final = true;} else {is_final = false;}},
+            Ok(value) => {is_final = value == 1;},
             Err(msg) => {return Err(msg);},
         }
         let block_type = match reader.read_bits(2) {
@@ -349,62 +351,63 @@ fn inflate(src: &[u8], inflated_size: usize) -> Result<Vec<u8>, String> {
         if (block_type == 1) || (block_type == 2) {
             // read them codes
             while dp < dst.len() {
-                let mut code = match reader.read_symbol(&hlitlen_tables) {
+                let mut code = match reader.read_symbol(hlitlen_tables) {
                     Ok(value) => {value},
                     Err(msg) => {return Err(msg);},
                 };
-                if code < 256 {
-                    dst[dp] = code as u8;
-                    dp += 1;
-                }
-                else if code == 256 {
-                    break;
-                }
-                else {
-                    // get lit/len length and extra bit entries
-                    code -= 257;
-                    let mut length = LITLEN_LENGTH[code as usize] as usize;
-                    let extra = LITLEN_EXTRA[code as usize] as u32;
-                    
-                    // read extra bits
-                    if extra > 0 {
-                        length += match reader.read_bits(extra) {
+
+                match code.cmp(&256) {
+                    Ordering::Less => {
+                        dst[dp] = code as u8;
+                        dp += 1;
+                    }
+                    Ordering::Equal => break,
+                    Ordering::Greater => {
+                        // get lit/len length and extra bit entries
+                        code -= 257;
+                        let mut length = LITLEN_LENGTH[code as usize] as usize;
+                        let extra = LITLEN_EXTRA[code as usize] as u32;
+                        
+                        // read extra bits
+                        if extra > 0 {
+                            length += match reader.read_bits(extra) {
+                                Ok(value) => {value},
+                                Err(msg) => {return Err(msg);},
+                            } as usize;
+                        }
+                        
+                        // get dist length and extra bit entries
+                        code = match reader.read_symbol(hdist_tables) {
                             Ok(value) => {value},
                             Err(msg) => {return Err(msg);},
-                        } as usize;
+                        };
+                        let mut dist = DIST_DIST[code as usize] as usize;
+                        let extra = DIST_EXTRA[code as usize] as u32;
+                        
+                        // read extra bits
+                        if extra > 0 {
+                            dist += match reader.read_bits(extra) {
+                                Ok(value) => {value},
+                                Err(msg) => {return Err(msg);},
+                            } as usize;
+                        }
+                        
+                        // copy block
+                        if dp + length > dst.len() {
+                            length = dst.len() - dp;
+                            //return Err(format!("data corrupt (dp ({}) + length ({}) exceeds dst ({}))",dp,length,dst.len()));
+                        }
+                        if dist > dp {
+                            return Err(format!("data corrupt (dp ({}) - dist ({}) negative)", dp, dist));
+                        }
+                        if dp + length - dist > dst.len() {
+                            return Err(format!("data corrupt (dp ({}) - dist ({}) + length ({}) exceeds dst ({}))", dp, dist, length, dst.len()));
+                        }
+                        for i in 0..length {
+                            dst[dp + i] = dst[dp - dist + i];
+                        }
+                        dp += length;
                     }
-                    
-                    // get dist length and extra bit entries
-                    code = match reader.read_symbol(&hdist_tables) {
-                        Ok(value) => {value},
-                        Err(msg) => {return Err(msg);},
-                    };
-                    let mut dist = DIST_DIST[code as usize] as usize;
-                    let extra = DIST_EXTRA[code as usize] as u32;
-                    
-                    // read extra bits
-                    if extra > 0 {
-                        dist += match reader.read_bits(extra) {
-                            Ok(value) => {value},
-                            Err(msg) => {return Err(msg);},
-                        } as usize;
-                    }
-                    
-                    // copy block
-                    if dp + length > dst.len() {
-                        length = dst.len() - dp;
-                        //return Err(format!("data corrupt (dp ({}) + length ({}) exceeds dst ({}))",dp,length,dst.len()));
-                    }
-                    if dist > dp {
-                        return Err(format!("data corrupt (dp ({}) - dist ({}) negative)", dp, dist));
-                    }
-                    if dp + length - dist > dst.len() {
-                        return Err(format!("data corrupt (dp ({}) - dist ({}) + length ({}) exceeds dst ({}))", dp, dist, length, dst.len()));
-                    }
-                    for i in 0..length {
-                        dst[dp + i] = dst[dp - dist + i];
-                    }
-                    dp += length;
                 }
             }
         }
@@ -466,7 +469,7 @@ fn clampf(v: f32, min: f32, max: f32) -> f32 {
 
 fn make_lf(l: f32, gamma: f32) -> u32 {
     let ul = (clampf(l.powf(gamma), 0.0, 1.0) * 255.0) as u32;
-    return 0xFF000000 | (ul << 16) | (ul << 8) | ul;
+    0xFF000000 | (ul << 16) | (ul << 8) | ul
 }
 
 fn make_rgbaf(r: f32, g: f32, b: f32, a: f32, gamma: f32) -> u32 {
@@ -474,7 +477,7 @@ fn make_rgbaf(r: f32, g: f32, b: f32, a: f32, gamma: f32) -> u32 {
     let ug = (clampf(g.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ub = (clampf(b.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ua = (clampf(a.powf(gamma), 0.0, 1.0) * 255.0) as u32;
-    return (ua << 24) | (ur << 16) | (ug << 8) | ub;
+    (ua << 24) | (ur << 16) | (ug << 8) | ub
 }
 
 fn make_c(c: u32, gamma: f32) -> u32 {
@@ -486,7 +489,7 @@ fn make_c(c: u32, gamma: f32) -> u32 {
     let ug = (clampf(g.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ub = (clampf(b.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ua = (clampf(a.powf(gamma), 0.0, 1.0) * 255.0) as u32;
-    return (ua << 24) | (ur << 16) | (ug << 8) | ub;
+    (ua << 24) | (ur << 16) | (ug << 8) | ub
 }
 
 fn decode_pixels(dst: &mut [u32], src: &[u8], width: usize, height: usize, stride: usize, x0: usize, y0: usize, dx: usize, dy: usize, itype: u16, palette: &[u32; 256], gamma: f32) {
@@ -840,12 +843,12 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                 if chunk_length > 768 {
                     return Err("Invalid PNG".to_string());
                 }
-                for i in 0..(chunk_length / 3) {
+                for color in &mut palette[..(chunk_length / 3)] {
                     let r = src[sp];
                     let g = src[sp + 1];
                     let b = src[sp + 2];
                     sp += 3;
-                    palette[i] = 0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                    *color = 0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                 }
             },
             0x624B4744 => { // bKGD
@@ -994,13 +997,12 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
         for i in 0..7 {
             if apresent[i] {
                 let raw_data = unfilter(&filtered_data[sp..sp + adsize[i]], aheight[i], astride[i], bpp);
-                decode_pixels(&mut result.data, &raw_data, awidth[i], aheight[i], width, ax0[i], ay0[i], adx[i], ady[i], itype as u16, &palette, gamma);
+                decode_pixels(&mut result.data, &raw_data, awidth[i], aheight[i], width, ax0[i], ay0[i], adx[i], ady[i], itype, &palette, gamma);
                 sp += adsize[i];
             }
         }
         Ok(result)
-    } else
-    {
+    } else {
         //let after0 = Instant::now();
         
         let filtered_data = match inflate(&zipped_data, (stride + 1) * height) {
@@ -1015,7 +1017,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
         //let after_unfilter = Instant::now();
         
         let mut result = ImageBuffer::new(width, height);
-        decode_pixels(&mut result.data, &raw_data, width, height, width, 0, 0, 1, 1, itype as u16, &palette, gamma);
+        decode_pixels(&mut result.data, &raw_data, width, height, width, 0, 0, 1, 1, itype, &palette, gamma);
         
         //let after_decode = Instant::now();
         

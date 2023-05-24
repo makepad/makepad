@@ -3208,6 +3208,7 @@ unsafe impl ::core::marker::Sync for WwwFormUrlDecoderEntry {}
 #[doc = "*Required features: `\"Foundation\"`*"]
 #[repr(transparent)]
 #[derive(::core::cmp::PartialEq, ::core::cmp::Eq)]
+#[derive(Default)]
 pub struct AsyncStatus(pub i32);
 impl AsyncStatus {
     pub const Canceled: Self = Self(2i32);
@@ -3221,11 +3222,7 @@ impl ::core::clone::Clone for AsyncStatus {
         *self
     }
 }
-impl ::core::default::Default for AsyncStatus {
-    fn default() -> Self {
-        Self(0)
-    }
-}
+
 unsafe impl ::windows::core::Abi for AsyncStatus {
     type Abi = Self;
 }
@@ -3244,6 +3241,7 @@ unsafe impl ::windows::core::RuntimeType for AsyncStatus {
 #[doc = "*Required features: `\"Foundation\"`*"]
 #[repr(transparent)]
 #[derive(::core::cmp::PartialEq, ::core::cmp::Eq)]
+#[derive(Default)]
 pub struct PropertyType(pub i32);
 impl PropertyType {
     pub const Empty: Self = Self(0i32);
@@ -3294,11 +3292,7 @@ impl ::core::clone::Clone for PropertyType {
         *self
     }
 }
-impl ::core::default::Default for PropertyType {
-    fn default() -> Self {
-        Self(0)
-    }
-}
+
 unsafe impl ::windows::core::Abi for PropertyType {
     type Abi = Self;
 }

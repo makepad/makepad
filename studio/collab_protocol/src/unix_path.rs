@@ -51,6 +51,12 @@ impl UnixPathBuf {
     }
 }
 
+impl Default for UnixPathBuf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: ?Sized + AsRef<UnixStr>> From<&T> for UnixPathBuf {
     fn from(s: &T) -> Self {
         Self::from(s.as_ref().to_unix_string())

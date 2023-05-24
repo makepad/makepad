@@ -93,7 +93,7 @@ pub fn derive_ser_bin_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 } 
 
 pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
@@ -192,5 +192,5 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }
