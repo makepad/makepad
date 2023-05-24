@@ -1,4 +1,6 @@
 package dev.makepad.android;
+import java.util.Map;
+import java.util.List;
 
 public class HttpResponse {
     private int statusCode;

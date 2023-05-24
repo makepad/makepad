@@ -16,6 +16,7 @@ use {
     },
     crate::{
         makepad_error_log::*,
+        network::*,
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
         thread::Signal,
@@ -325,12 +326,10 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_on_http_response(&mut self, content: Vec<u8>, to_java: AndroidToJava) {
+    pub fn from_java_on_http_response(&mut self, response: HttpResponse, to_java: AndroidToJava) {
         log!("HTTP RESPONSE: {:?}", content);
         let e = Event::HttpResponse(
-            HttpResponseEvent {
-                body: content,
-            }
+            HttpResponseEvent { response }
         );
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
@@ -483,7 +482,6 @@ impl Cx {
                     to_java.show_clipboard_actions(selected.as_str());
                 },
                 CxOsOp::HttpRequest(request) => {
-                    log!("HTTP REQUEST: {:?}", request);
                     to_java.http_request(request)
                 },
                 _ => ()
