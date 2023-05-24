@@ -1,7 +1,7 @@
 use {
     crate::{
         arena::Id, buf::EditKind, edit_ops, layout, move_ops, text::Pos, text::Text, Arena, Buf,
-        Diff, Event, SelSet,
+        Diff, Event, SelSet, text,
     },
     std::{
         cell::{RefCell, RefMut},
@@ -108,6 +108,21 @@ impl View {
             });
         }
         self.line_row_indices[line_index]
+    }
+
+    fn layout_pos_to_text_pos(&mut self, lines: &[String], pos: layout::Pos) -> text::Pos {
+        self.line_row_index(lines.len() - 1);
+        let line_index = match self.line_row_indices.binary_search(&pos.row_index) {
+            Ok(line_index) => line_index,
+            Err(line_index) => line_index - 1,
+        };
+        text::Pos {
+            line_index,
+            byte_index: layout::pos_to_byte_index(&lines[line_index], layout::Pos {
+                row_index: pos.row_index - self.line_row_indices[line_index],
+                col_index: pos.col_index
+            }).unwrap()
+        }
     }
 
     fn update(&mut self, lines: &[String], sels: Option<SelSet>, diff: &Diff, local: bool) {
