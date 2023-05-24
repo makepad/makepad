@@ -12,7 +12,6 @@ use std::{
     net::SocketAddr,
     sync::mpsc,
     io::prelude::*,
-    io::BufReader,
     fs::File,
     fs,
 };
@@ -105,17 +104,15 @@ fn main() {
                 let path = &headers.path;
                 
                 if path == "/$watch"{
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\n\
+                    let header = "HTTP/1.1 200 OK\r\n\
                             Cache-Control: max-age:0\r\n\
-                            Connection: close\r\n\r\n",
-                    );
+                            Connection: close\r\n\r\n".to_string();
                     let _ = response_sender.send(HttpResponse{header, body:vec![]});
                     continue
                 }
                 
                 if path == "/favicon.ico"{
-                    let header = format!("HTTP/1.1 200 OK\r\n\r\n");
+                    let header = "HTTP/1.1 200 OK\r\n\r\n".to_string();
                     let _ = response_sender.send(HttpResponse{header, body:vec![]});
                     continue
                 }
@@ -128,13 +125,11 @@ fn main() {
                 else if path.ends_with(".png") {"image/png"}
                 else {continue};
                 
-                if path.contains("..") || path.contains("\\"){
+                if path.contains("..") || path.contains('\\'){
                     continue
                 }
                 
-                let strip = if let Some(strip) = path.strip_prefix(&prefixes[0]){Some(strip)}
-                else if let Some(strip) = path.strip_prefix(&prefixes[1]){Some(strip)}
-                else {None};
+                let strip = path.strip_prefix(&prefixes[0]).or_else(|| path.strip_prefix(&prefixes[1]));
 
                 if let Some(base) = strip{
                     if let Ok(mut file_handle) = File::open(base) {

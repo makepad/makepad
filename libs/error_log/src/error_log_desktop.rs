@@ -3,14 +3,14 @@ use std::fmt::Write;
 #[macro_export]  
 macro_rules!log {
     ( $ ( $ t: tt) *) => {
-        crate::makepad_error_log::log_impl(file!(), line!(), column!(), column!()+4, &format!( $ ( $ t) *), crate::makepad_error_log::LogType::Log)
+        $crate::makepad_error_log::log_impl(file!(), line!(), column!(), column!()+4, &format!( $ ( $ t) *), $crate::makepad_error_log::LogType::Log)
     }
 }
 
 #[macro_export] 
 macro_rules!error {
     ( $ ( $ t: tt) *) => {
-        crate::makepad_error_log::log_impl(file!(), line!(), column!(), column!()+6, &format!( $ ( $ t) *), crate::makepad_error_log::LogType::Error)
+        $crate::makepad_error_log::log_impl(file!(), line!(), column!(), column!()+6, &format!( $ ( $ t) *), $crate::makepad_error_log::LogType::Error)
     }  
 }  
 
