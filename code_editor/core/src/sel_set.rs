@@ -33,7 +33,7 @@ impl SelSet {
         self.normalize_latest();
     }
 
-    pub fn update_all(&mut self, mut f: impl FnMut(Sel) -> Sel) {
+    pub fn modify_all(&mut self, mut f: impl FnMut(Sel) -> Sel) {
         for sel in &mut self.earlier {
             *sel = f(*sel);
         }
@@ -165,7 +165,7 @@ impl Sel {
         }
     }
 
-    pub fn update_cursor(self, f: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>)) -> Self {
+    pub fn modify_cursor(self, f: impl FnOnce(Pos, Option<usize>) -> (Pos, Option<usize>)) -> Self {
         let (cursor, column) = f(self.cursor, self.column);
         Self {
             cursor,

@@ -1,10 +1,5 @@
 use std::ops::ControlFlow;
 
-#[derive(Debug)]
-pub struct Context<'a> {
-    pub line: &'a str,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Elem<'a> {
     pub byte_pos: usize,
@@ -26,20 +21,17 @@ pub enum ElemKind<'a> {
     Grapheme(&'a str),
 }
 
-pub fn layout<T>(
-    context: &Context<'_>,
-    handle_elem: impl FnMut(Elem) -> ControlFlow<T>,
-) -> ControlFlow<T> {
+pub fn layout<T>(line: &str, handle_elem: impl FnMut(Elem) -> ControlFlow<T>) -> ControlFlow<T> {
     Layouter {
         byte_pos: 0,
         pos: Pos::default(),
         handle_elem,
     }
-    .layout(context.line)
+    .layout(line)
 }
 
-pub fn height(context: &Context<'_>) -> usize {
-    match layout(context, |elem| {
+pub fn height(line: &str) -> usize {
+    match layout(line, |elem| {
         if let ElemKind::End = elem.kind {
             return ControlFlow::Break(elem.pos.row + 1);
         }
@@ -50,8 +42,8 @@ pub fn height(context: &Context<'_>) -> usize {
     }
 }
 
-pub fn byte_pos_to_pos(context: &Context<'_>, byte_pos: usize) -> Option<Pos> {
-    match layout(context, |elem| {
+pub fn byte_pos_to_pos(line: &str, byte_pos: usize) -> Option<Pos> {
+    match layout(line, |elem| {
         if elem.byte_pos == byte_pos {
             return ControlFlow::Break(elem.pos);
         }
@@ -62,8 +54,8 @@ pub fn byte_pos_to_pos(context: &Context<'_>, byte_pos: usize) -> Option<Pos> {
     }
 }
 
-pub fn pos_to_byte_pos(context: &Context<'_>, pos: Pos) -> Option<usize> {
-    match layout(context, |elem| {
+pub fn pos_to_byte_pos(line: &str, pos: Pos) -> Option<usize> {
+    match layout(line, |elem| {
         if elem.pos == pos {
             return ControlFlow::Break(elem.byte_pos);
         }

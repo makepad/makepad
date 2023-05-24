@@ -205,7 +205,7 @@ impl<'a> Drawer<'a> {
         use {makepad_code_editor_core::layout::ElemKind, std::ops::ControlFlow};
 
         let start_row = self.layout_pos.row;
-        layout::layout(&layout::Context { line }, |elem| {
+        layout::layout(line, |elem| {
             self.text_pos.byte = elem.byte_pos;
             self.layout_pos.row = start_row + elem.pos.row;
             self.layout_pos.column = elem.pos.column;

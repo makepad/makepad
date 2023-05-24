@@ -26,11 +26,7 @@ impl State {
             .map(|string| string.to_string())
             .collect();
         let heights_by_line: Vec<_> = (0..lines.len())
-            .map(|line_pos| {
-                layout::height(&layout::Context {
-                    line: &lines[line_pos],
-                })
-            })
+            .map(|line_pos| layout::height(&lines[line_pos]))
             .collect();
         let model = self.models.insert(Model {
             view_ids: HashSet::new(),
@@ -39,7 +35,7 @@ impl State {
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,
             sels: SelSet::new(),
-            heights_by_line,
+            line_heights: heights_by_line,
         }));
         self.models[model].view_ids.insert(view_id);
         ViewId(view_id)
@@ -96,44 +92,45 @@ pub struct DrawContext<'a> {
 struct View {
     model_id: Id<Model>,
     sels: SelSet,
-    heights_by_line: Vec<usize>,
+    line_heights: Vec<usize>,
 }
 
 impl View {
-    fn update(&mut self, lines: &[String], sels: Option<&SelSet>, diff: &Diff, local: bool) {
-        use crate::diff::LenOnlyOp;
+    fn update(&mut self, lines: &[String], sels: Option<SelSet>, diff: &Diff, local: bool) {  
+        self.update_sels(sels, diff, local);
+        self.update_line_heights(lines, diff);
+    }
 
+    fn update_sels(&mut self, sels: Option<SelSet>, diff: &Diff, local: bool) {
         if let Some(sels) = sels {
             self.sels = sels.clone()
         } else {
             self.sels.apply_diff(diff, local);
         }
+    }
+
+    fn update_line_heights(&mut self, lines: &[String], diff: &Diff) {
+        use crate::diff::LenOnlyOp;
+
         let mut line_pos = 0;
         for op in diff {
             match op.len_only() {
                 LenOnlyOp::Retain(len) => line_pos += len.lines,
                 LenOnlyOp::Insert(len) => {
-                    self.heights_by_line.splice(
+                    self.line_heights.splice(
                         line_pos..line_pos,
-                        (line_pos..line_pos + len.lines).map(|line_pos| {
-                            layout::height(&layout::Context {
-                                line: &lines[line_pos],
-                            })
-                        }),
+                        (line_pos..line_pos + len.lines)
+                            .map(|line_pos| layout::height(&lines[line_pos])),
                     );
                     line_pos += len.lines;
                     if len.bytes > 0 {
-                        self.heights_by_line[line_pos] = layout::height(&layout::Context {
-                            line: &lines[line_pos],
-                        });
+                        self.line_heights[line_pos] = layout::height(&lines[line_pos]);
                     }
                 }
                 LenOnlyOp::Delete(len) => {
-                    self.heights_by_line.drain(line_pos..line_pos + len.lines);
+                    self.line_heights.drain(line_pos..line_pos + len.lines);
                     if len.bytes > 0 {
-                        self.heights_by_line[line_pos] = layout::height(&layout::Context {
-                            line: &lines[line_pos],
-                        });
+                        self.line_heights[line_pos] = layout::height(&lines[line_pos]);
                     }
                 }
             }
@@ -163,46 +160,50 @@ impl<'a> HandleEventContext<'a> {
                 code: KeyCode::Backspace,
                 ..
             }) => {
-                self.edit(|context| edit_ops::delete(context));
+                self.edit(|text, sels| edit_ops::delete(text, sels));
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
                 ..
             }) => {
-                self.edit(|context| {
-                    edit_ops::insert(context, &Text::from(vec!["".to_string(), "".to_string()]))
+                self.edit(|text, sels| {
+                    edit_ops::insert(
+                        text,
+                        sels,
+                        &Text::from(vec!["".to_string(), "".to_string()]),
+                    )
                 });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Left,
             }) => {
-                self.update_sels(shift, |context, pos, _| {
-                    (move_ops::move_left(context, pos), None)
+                self.modify_sels(shift, |lines, pos, _| {
+                    (move_ops::move_left(lines, pos), None)
                 });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Up,
             }) => {
-                self.update_sels(shift, |context, pos, column| {
-                    move_ops::move_up(context, pos, column)
+                self.modify_sels(shift, |lines, pos, column| {
+                    move_ops::move_up(lines, pos, column)
                 });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Right,
             }) => {
-                self.update_sels(shift, |context, pos, _| {
-                    (move_ops::move_right(context, pos), None)
+                self.modify_sels(shift, |lines, pos, _| {
+                    (move_ops::move_right(lines, pos), None)
                 });
             }
             Event::Key(KeyEvent {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Down,
             }) => {
-                self.update_sels(shift, |context, pos, column| {
-                    move_ops::move_down(context, pos, column)
+                self.modify_sels(shift, |lines, pos, column| {
+                    move_ops::move_down(lines, pos, column)
                 });
             }
             Event::Key(KeyEvent {
@@ -226,9 +227,10 @@ impl<'a> HandleEventContext<'a> {
                 self.redo();
             }
             Event::Text(TextEvent { string }) => {
-                self.edit(|context| {
+                self.edit(|text, sels| {
                     edit_ops::insert(
-                        context,
+                        text,
+                        sels,
                         &string
                             .lines()
                             .map(|string| string.to_string())
@@ -240,21 +242,14 @@ impl<'a> HandleEventContext<'a> {
         }
     }
 
-    fn update_sels(
+    fn modify_sels(
         &mut self,
         select: bool,
-        mut f: impl FnMut(&move_ops::Context<'_>, Pos, Option<usize>) -> (Pos, Option<usize>),
+        mut f: impl FnMut(&[String], Pos, Option<usize>) -> (Pos, Option<usize>),
     ) {
-        self.view.sels.update_all(|sel| {
-            let mut sel = sel.update_cursor(|pos, column| {
-                f(
-                    &move_ops::Context {
-                        lines: self.model.buf.text().as_lines(),
-                    },
-                    pos,
-                    column,
-                )
-            });
+        self.view.sels.modify_all(|sel| {
+            let mut sel =
+                sel.modify_cursor(|pos, column| f(self.model.buf.text().as_lines(), pos, column));
             if !select {
                 sel = sel.reset_anchor();
             }
@@ -263,28 +258,25 @@ impl<'a> HandleEventContext<'a> {
         self.model.buf.flush();
     }
 
-    fn edit(&mut self, f: impl FnOnce(&edit_ops::Context<'_>) -> (EditKind, Diff)) {
-        let (kind, diff) = f(&edit_ops::Context {
-            text: self.model.buf.text(),
-            sels: &self.view.sels,
-        });
+    fn edit(&mut self, f: impl FnOnce(&Text, &SelSet) -> (EditKind, Diff)) {
+        let (kind, diff) = f(self.model.buf.text(), &self.view.sels);
         self.model.buf.edit(kind, &self.view.sels, diff.clone());
         self.update_views(None, &diff);
     }
 
     fn undo(&mut self) {
         if let Some((sels, diff)) = self.model.buf.undo() {
-            self.update_views(Some(&sels), &diff);
+            self.update_views(Some(sels), &diff);
         }
     }
 
     fn redo(&mut self) {
         if let Some((sels, diff)) = self.model.buf.redo() {
-            self.update_views(Some(&sels), &diff);
+            self.update_views(Some(sels), &diff);
         }
     }
 
-    fn update_views(&mut self, sels: Option<&SelSet>, diff: &Diff) {
+    fn update_views(&mut self, sels: Option<SelSet>, diff: &Diff) {
         let lines = self.model.buf.text().as_lines();
         self.view.update(lines, sels, diff, true);
         for sibling_view in &mut self.sibling_views {
