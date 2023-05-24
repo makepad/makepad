@@ -72,17 +72,11 @@ impl LiveToken {
     }    
     
     pub fn is_open(&self) -> bool {
-        match self {
-            LiveToken::Open(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Open(_))
     }
     
     pub fn is_close(&self) -> bool {
-        match self {
-            LiveToken::Close(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Close(_))
     }
     
     pub fn is_open_delim(&self, delim: Delim) -> bool {
@@ -100,65 +94,37 @@ impl LiveToken {
     }
     
     pub fn is_int(&self) -> bool {
-        match self {
-            LiveToken::Int(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Int(_))
     }
     
     
     pub fn is_float(&self) -> bool {
-        match self {
-            LiveToken::Float(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Float(_))
     }
     
         
     pub fn is_color(&self) -> bool {
-        match self {
-            LiveToken::Color(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Color(_))
     }
 
     pub fn is_bool(&self) -> bool {
-        match self {
-            LiveToken::Bool(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Bool(_))
     }
 
     pub fn is_parsed_number(&self) -> bool {
-        match self {
-            LiveToken::Int(_) => true,
-            LiveToken::Float(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Int(_) | LiveToken::Float(_))
     }
     
     pub fn is_value_type(&self) -> bool {
-        match self {
-            LiveToken::Color(_) => true,
-            LiveToken::Bool(_) => true,
-            LiveToken::Int(_) => true,
-            LiveToken::Float(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Color(_) | LiveToken::Bool(_) | LiveToken::Int(_) | LiveToken::Float(_))
     }
         
     pub fn is_ident(&self) -> bool {
-        match self {
-            LiveToken::Ident(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Ident(_))
     }
     
     pub fn is_punct(&self) -> bool {
-        match self {
-            LiveToken::Punct(_) => true,
-            _ => false
-        }
+        matches!(self, LiveToken::Punct(_))
     }
     
     pub fn is_punct_id(&self, id: LiveId) -> bool {
@@ -175,11 +141,11 @@ impl LiveToken {
             LiveToken::Ident(p) => if let LiveToken::Ident(o) = other {*p == *o}else {false},
             LiveToken::Open(p) => if let LiveToken::Open(o) = other {*p == *o}else {false},
             LiveToken::Close(p) => if let LiveToken::Close(o) = other {*p == *o}else {false},
-            LiveToken::Bool(_) => if let LiveToken::Bool(_) = other {true}else {false},
-            LiveToken::Int(_) => if let LiveToken::Int(_) = other {true}else if let LiveToken::Float(_) = other {true} else {false},
-            LiveToken::Float(_) => if let LiveToken::Float(_) = other {true}else if let LiveToken::Int(_) = other {true} else {false},
-            LiveToken::Color(_) => if let LiveToken::Color(_) = other {true}else {false},
-            LiveToken::Eof => if let LiveToken::Eof = other {true}else {false},
+            LiveToken::Bool(_) => matches!(other, LiveToken::Bool(_)),
+            LiveToken::Int(_) => if let LiveToken::Int(_) = other {true} else { matches!(other, LiveToken::Float(_)) },
+            LiveToken::Float(_) => if let LiveToken::Float(_) = other {true} else { matches!(other, LiveToken::Int(_)) },
+            LiveToken::Color(_) => matches!(other, LiveToken::Color(_)),
+            LiveToken::Eof => matches!(other, LiveToken::Eof),
         }
     }
     
@@ -255,9 +221,10 @@ impl LiveTokenId {
             panic!();
         }
         if ((v >> 18) & 0x3ff) == 0 {
-            return None
+            None
+        } else {
+            Some(Self(v))
         }
-        return Some(Self (v))
     }
 }
 

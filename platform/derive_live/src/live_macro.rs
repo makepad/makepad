@@ -41,16 +41,16 @@ fn parse_object(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenS
             prop.stream(Some(live_id));
             // if we have a = its an instance assign
             parse_value(prop.end(), parser, tb)?;
-        }
+
         /*
-        else if parser.is_brace(){  // its an inline class
+        } else if parser.is_brace(){  // its an inline class
             parser.open_group();
             tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:LiveId(0),value:LiveValue::Class{");
             tb.add("class:").stream(Some(prop_id_ts)).add("}},");
             parse_object(parser,tb)?;
             tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:LiveId(0),value:LiveValue::Close},");
         }*/
-        else{
+        } else {
             return Err(parser.unexpected());
         }
         parser.eat_punct_alone(',');
@@ -127,24 +127,22 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
             parse_object(parser,tb)?;
             tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Close},");
         }
+        else if class == "true"{
+            tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Bool(true)},");
+        }
+        else if class == "false"{
+            tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Bool(false)},");
+        }
         else{
-            if class == "true"{
-                tb.add("LiveNode{").stream(Some(node_start.clone())).add(",value:LiveValue::Bool(true)},");
-            }
-            else if class == "false"{
-                tb.add("LiveNode{").stream(Some(node_start.clone())).add(",value:LiveValue::Bool(false)},");
-            }
-            else{
-                tb.add("LiveNode{").stream(Some(node_start.clone())).add(",value:LiveValue::Id(");
-                tb.add("LiveId(").suf_u64(class_id).add("))},");
-            }
+            tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Id(");
+            tb.add("LiveId(").suf_u64(class_id).add("))},");
         }
     }
     else if parser.eat_punct_alone('#'){ // coLor!
         // ok we now eat an ident
         let color = parser.expect_any_ident()?;
         let bytes = color.as_bytes();
-        let val = if bytes[0] == 'x' as u8{
+        let val = if bytes[0] == b'x'{
             hex_bytes_to_u32(&bytes[1..])
         }
         else{
@@ -161,29 +159,26 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
         // ok so.. bool float string or int..
         let s = lit.to_string();
         let bytes = s.as_bytes();
-        if bytes[0] == '"' as u8{ // its a string
+        if bytes[0] == b'"'{ // its a string
             let val = std::str::from_utf8(&bytes[1..bytes.len()-1]).unwrap();
             tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Str(").string(val).add(")},");
         }
         else if s == "true" || s == "false"{
             tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Bool(").ident(&s).add(")},");
         }
-        else{
-            if s.chars().position(|c| c == '.').is_some(){
-                if let Ok(value) = s.parse::<f64>(){
-                    tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Float64(").unsuf_f64(value).add(")},");
-                }
-                else{
-                    return Err(error("Value cant be parsed"));
-                }
-            }
-            else if let Ok(value) = s.parse::<i64>(){
-                tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Int64(").unsuf_i64(value).add(")},");
+        else if s.chars().any(|c| c == '.'){
+            if let Ok(value) = s.parse::<f64>(){
+                tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Float64(").unsuf_f64(value).add(")},");
             }
             else{
                 return Err(error("Value cant be parsed"));
             }
-            // has to be a number int or float
+        }
+        else if let Ok(value) = s.parse::<i64>(){
+            tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Int64(").unsuf_i64(value).add(")},");
+        }
+        else{
+            return Err(error("Value cant be parsed"));
         }  
     }
     Ok(())
@@ -233,16 +228,16 @@ pub fn live_array_impl(input:TokenStream)->TokenStream{
 
 pub fn hex_bytes_to_u32(buf: &[u8]) -> Result<u32, ()> {
     fn hex_to_int(c: u8) -> Result<u32, ()> {
-        if c >= 48 && c <= 57 {
+        if (48..=57).contains(&c) {
             return Ok((c - 48) as u32);
         }
-        if c >= 65 && c <= 70 {
+        if (65..=70).contains(&c) {
             return Ok((c - 65 + 10) as u32);
         }
-        if c >= 97 && c <= 102 {
+        if (97..=102).contains(&c) {
             return Ok((c - 97 + 10) as u32);
         }
-        return Err(());
+        Err(())
     }
     
     match buf.len() {
@@ -287,5 +282,5 @@ pub fn hex_bytes_to_u32(buf: &[u8]) -> Result<u32, ()> {
         }
         _ => (),
     }
-    return Err(());
+    Err(())
 } 
