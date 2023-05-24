@@ -6,7 +6,7 @@ use {
         range::Range,
         size::Size,
     },
-    std::{fmt, iter, mem, ops::AddAssign},
+    std::{fmt, iter, ops::AddAssign},
 };
 
 /// A type for representing text.
@@ -126,31 +126,16 @@ impl Text {
     pub fn copy(&self, range: Range) -> Text {
         Text {
             lines: if range.start.line == range.end.line {
-                vec![
-                    self.lines[range.start.line][range.start.column..range.end.column]
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                ]
+                vec![self.lines[range.start.line][range.start.column..range.end.column].to_vec()]
             } else {
                 let mut lines = Vec::with_capacity(range.end.line - range.start.line + 1);
-                lines.push(
-                    self.lines[range.start.line][range.start.column..]
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                );
+                lines.push(self.lines[range.start.line][range.start.column..].to_vec());
                 lines.extend(
                     self.lines[range.start.line + 1..range.end.line]
                         .iter()
                         .cloned(),
                 );
-                lines.push(
-                    self.lines[range.end.line][..range.end.column]
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                );
+                lines.push(self.lines[range.end.line][..range.end.column].to_vec());
                 lines
             },
         }
@@ -294,7 +279,7 @@ impl Text {
                 iter::empty(),
             );
         } else {
-            let mut line = mem::replace(&mut self.lines[position.line], Vec::new());
+            let mut line = std::mem::take(&mut self.lines[position.line]);
             line.splice(
                 position.column..,
                 self.lines[position.line + count.line as usize][count.column as usize..]

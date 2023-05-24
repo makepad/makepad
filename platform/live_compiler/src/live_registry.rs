@@ -99,7 +99,7 @@ impl LiveRegistry {
         if doc.generation != live_ptr.generation {
             panic!("ptr_to_node generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
         }
-        &doc.expanded.resolve_ptr(live_ptr.index as usize)
+        doc.expanded.resolve_ptr(live_ptr.index as usize)
     }
     
     pub fn file_name_to_file_id(&self, file_name:&str) -> Option<LiveFileId> {
@@ -146,7 +146,7 @@ impl LiveRegistry {
         if doc.generation != live_ptr.generation {
             panic!("ptr_to_doc_node generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
         }
-        (&doc.expanded, &doc.expanded.resolve_ptr(live_ptr.index as usize))
+        (&doc.expanded, doc.expanded.resolve_ptr(live_ptr.index as usize))
     }
     
     pub fn ptr_to_doc(&self, live_ptr: LivePtr) -> &LiveExpanded {
@@ -252,7 +252,7 @@ impl LiveRegistry {
             let live= &self.live_files[file_id.to_index()];
             let doc = &live.expanded;
             if name != LiveId::empty() {
-                if doc.nodes.len() == 0 {
+                if doc.nodes.is_empty() {
                     error!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
@@ -312,7 +312,7 @@ impl LiveRegistry {
             }
             if let Some(index) = file.expanded.nodes.child_by_name(0, item.as_instance()) {
                 return Some(LiveScopeTarget::LivePtr(
-                    LivePtr {file_id: file_id, index: index as u32, generation: file.generation}
+                    LivePtr {file_id, index: index as u32, generation: file.generation}
                 ))
             }
         }
@@ -325,16 +325,17 @@ impl LiveRegistry {
         }
         else{
             log!("Can't find scope target on rootnode without id_resolve");
-            return None
+            None
         }
     }
     
     
     pub fn find_scope_target_one_level_or_global(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
         if let Some(index) = nodes.scope_up_down_by_name(index, item.as_instance(), 1) {
-            return Some(LiveScopeTarget::LocalPtr(index))
+            Some(LiveScopeTarget::LocalPtr(index))
+        } else {
+            self.find_scope_target(item, nodes)
         }
-        return self.find_scope_target(item, nodes);
     }
     
     pub fn find_scope_ptr_via_expand_index(&self, file_id: LiveFileId, index: usize, item: LiveId) -> Option<LivePtr> {
@@ -344,7 +345,7 @@ impl LiveRegistry {
         //let file_id = token_id.file_id();
         let file = self.file_id_to_file(file_id);
         match self.find_scope_target_one_level_or_global(item, index, &file.expanded.nodes) {
-            Some(LiveScopeTarget::LocalPtr(index)) => Some(LivePtr {file_id: file_id, index: index as u32, generation: file.generation}),
+            Some(LiveScopeTarget::LocalPtr(index)) => Some(LivePtr {file_id, index: index as u32, generation: file.generation}),
             Some(LiveScopeTarget::LivePtr(ptr)) => Some(ptr),
             None => None
         }
@@ -406,15 +407,12 @@ impl LiveRegistry {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
                                 span: span.into(),
-                                message: format!("Error tokenizing")
+                                message: "Error tokenizing".to_string()
                             })
                         },
-                        _ => match LiveToken::from_full_token(&full_token.token) {
-                            Some(live_token) => {
-                                // lets build up the span info
-                                tokens.push(TokenWithSpan {span: span, token: live_token})
-                            },
-                            _ => ()
+                        _ => if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
+                            // lets build up the span info
+                            tokens.push(TokenWithSpan {span, token: live_token})
                         },
                     }
                     pos.column += full_token.len as u32;
@@ -458,7 +456,7 @@ impl LiveRegistry {
             let mut column = 0usize;
             for (token_index, full_token) in full_tokens.iter().enumerate() {
                 
-                if range.is_in_range(TokenPos {line: line, index: token_index}) {
+                if range.is_in_range(TokenPos {line, index: token_index}) {
                     // ok so. now we filter the token
                     let span = TextSpan {
                         file_id,
@@ -471,7 +469,7 @@ impl LiveRegistry {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
                                 span: span.into(),
-                                message: format!("Error tokenizing")
+                                message: "Error tokenizing".to_string()
                             })
                         },
                         FullToken::String(s) => {
@@ -482,7 +480,7 @@ impl LiveRegistry {
                                     live_tokens = &mut new_tokens;
                                     parse_changed = true;
                                 }
-                                live_tokens.push(TokenWithSpan {span: span, token: new_string});
+                                live_tokens.push(TokenWithSpan {span, token: new_string});
                             }
                             else if let LiveToken::String (_) = &live_tokens[live_index].token {
                                 todo!();
@@ -493,50 +491,47 @@ impl LiveRegistry {
                                     live_tokens = &mut new_tokens;
                                     parse_changed = true;
                                 }
-                                live_tokens[live_index] = TokenWithSpan {span: span, token: new_string};
+                                live_tokens[live_index] = TokenWithSpan {span, token: new_string};
                             }
                             live_index += 1;
                         },
-                        _ => match LiveToken::from_full_token(&full_token.token) {
-                            Some(live_token) => {
-                                if live_index >= live_tokens.len() { // just append
-                                    if !parse_changed {
-                                        new_tokens = live_tokens.clone();
-                                        live_tokens = &mut new_tokens;
-                                        parse_changed = true;
-                                    }
-                                    live_tokens.push(TokenWithSpan {span: span, token: live_token})
+                        _ => if let Some(live_token) = LiveToken::from_full_token(&full_token.token) {
+                            if live_index >= live_tokens.len() { // just append
+                                if !parse_changed {
+                                    new_tokens = live_tokens.clone();
+                                    live_tokens = &mut new_tokens;
+                                    parse_changed = true;
                                 }
-                                else {
-                                    if live_tokens[live_index].is_parse_equal(&live_token) { // token value changed
-                                        if live_tokens[live_index].token != live_token {
-                                            live_tokens[live_index].token = live_token;
-                                            mutated_tokens.push(LiveTokenId::new(file_id, live_index));
-                                        }
+                                live_tokens.push(TokenWithSpan {span, token: live_token})
+                            }
+                            else {
+                                if live_tokens[live_index].is_parse_equal(&live_token) { // token value changed
+                                    if live_tokens[live_index].token != live_token {
+                                        live_tokens[live_index].token = live_token;
+                                        mutated_tokens.push(LiveTokenId::new(file_id, live_index));
                                     }
-                                    else { // token value changed in a way that changes parsing
-                                        // lets special case the {{id}} situation
-                                        if live_index > 2
-                                            && live_tokens[live_index - 2].is_open_delim(Delim::Brace)
-                                            && live_tokens[live_index - 1].is_open_delim(Delim::Brace)
-                                            && live_tokens[live_index].is_ident()
-                                            && live_token.is_ident() {
-                                        }
-                                        else {
-                                            if !parse_changed {
-                                                new_tokens = live_tokens.clone();
-                                                live_tokens = &mut new_tokens;
-                                                parse_changed = true;
-                                            }
-                                            live_tokens[live_index].token = live_token;
-                                        }
-                                    }
-                                    // always update the spans
-                                    live_tokens[live_index].span = span;
                                 }
-                                live_index += 1;
-                            },
-                            _ => ()
+                                else { // token value changed in a way that changes parsing
+                                    // lets special case the {{id}} situation
+                                    if live_index > 2
+                                        && live_tokens[live_index - 2].is_open_delim(Delim::Brace)
+                                        && live_tokens[live_index - 1].is_open_delim(Delim::Brace)
+                                        && live_tokens[live_index].is_ident()
+                                        && live_token.is_ident() {
+                                    }
+                                    else {
+                                        if !parse_changed {
+                                            new_tokens = live_tokens.clone();
+                                            live_tokens = &mut new_tokens;
+                                            parse_changed = true;
+                                        }
+                                        live_tokens[live_index].token = live_token;
+                                    }
+                                }
+                                // always update the spans
+                                live_tokens[live_index].span = span;
+                            }
+                            live_index += 1;
                         },
                     }
                 }
@@ -566,8 +561,7 @@ impl LiveRegistry {
             };
             
             return Ok(Some(LiveEditEvent::ReparseDocument));
-        }
-        else if mutated_tokens.len()>0 { // its a hotpatch
+        } else if !mutated_tokens.is_empty() { // its a hotpatch
             // means if we had a next_original its now cancelled
             live_file.next_original = None;
            
@@ -591,10 +585,11 @@ impl LiveRegistry {
         let mut errors = Vec::new();
         self.expand_all_documents(&mut errors);
         
-        if errors.len()>0 {
-            return Err(errors);
+        if !errors.is_empty() {
+            Err(errors)
+        } else {
+            Ok(())
         }
-        return Ok(())
     }
     
     fn update_documents_from_mutated_tokens(
@@ -654,14 +649,11 @@ impl LiveRegistry {
                                 diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                                 path.pop();
                             }
-                        }
-                        else if reader.is_token_id_inside_dsl(token_id) {
-                            if is_main {
-                                // ok so. lets write by path here
-                                path.push(reader.prop());
-                                diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
-                                path.pop();
-                            }
+                        } else if reader.is_token_id_inside_dsl(token_id) && is_main {
+                            // ok so. lets write by path here
+                            path.push(reader.prop());
+                            diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
+                            path.pop();
                         }
                         reader.walk();
                     }
@@ -733,7 +725,7 @@ impl LiveRegistry {
                     }
                 }, */
                 LiveValue::Class {live_type, ..} => { // hold up. this is always own_module_path
-                    let infos = self.live_type_infos.get(&live_type).unwrap();
+                    let infos = self.live_type_infos.get(live_type).unwrap();
                     for sub_type in infos.fields.clone() {
                         let sub_module_id = sub_type.live_type_info.module_id;
                         if sub_module_id != own_module_id {
@@ -765,7 +757,7 @@ impl LiveRegistry {
         self.file_ids.insert(file_name.to_string(), file_id);
         self.live_files.push(live_file);
         
-        return Ok(file_id)
+        Ok(file_id)
     }
     
     pub fn expand_all_documents(&mut self, errors: &mut Vec<LiveError>) {
@@ -897,7 +889,7 @@ impl FileDepIter {
         for (file_index, live_file) in live_files.iter().enumerate() {
             if live_file.deps.contains(&module_id) {
                 let dep_id = LiveFileId::new(file_index);
-                if self.files_done.iter().position( | v | *v == dep_id).is_none() {
+                if !self.files_done.iter().any(|v| *v == dep_id) {
                     self.files_todo.push(dep_id);
                 }
             }

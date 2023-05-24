@@ -11,9 +11,7 @@ pub fn handle_wasm(args: &[String]) -> Result<(), String> {
             sdk::rustup_toolchain_install()
         }
         "build" =>{
-            if let Err(e) = compile::build(&args[1..]){
-                return Err(e)
-            }
+            compile::build(&args[1..])?;
             Ok(())
         }
         "run" =>{

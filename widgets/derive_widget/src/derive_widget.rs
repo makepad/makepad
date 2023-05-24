@@ -18,14 +18,15 @@ pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             tb.add("}");
             tb.add("impl").stream(generic.clone());
-            tb.add("Default for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("Default for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
             tb.add("    fn default()->Self{Self::None}");
             tb.add("}");
             
             return tb.end();
         }
     }
-    return parser.unexpected()
+
+    parser.unexpected()
 }
 /*
 pub fn derive_widget_impl(input: TokenStream) -> TokenStream {
@@ -96,7 +97,7 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             else{
                 return error("derive WidgetRef can only be done on a struct with ending name Ref")
             };
-            let snake_name = camel_case_to_snake_case(&clean_name);
+            let snake_name = camel_case_to_snake_case(clean_name);
             
             tb.add("impl std::ops::Deref for ").ident(&ref_name).add("{");
             tb.add("    type Target = WidgetRef;");
@@ -180,7 +181,8 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+
+    parser.unexpected()
 }
 
 
@@ -197,7 +199,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             else{
                 return error("derive WidgetRef can only be done on a struct with ending name Ref")
             };
-            let snake_name = camel_case_to_snake_case(&clean_name);
+            let snake_name = camel_case_to_snake_case(clean_name);
             
             tb.add("impl std::ops::Deref for ").ident(&set_name).add("{");
             tb.add("    type Target = WidgetSet;");
@@ -301,6 +303,7 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+
+    parser.unexpected()
 }
 

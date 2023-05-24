@@ -71,6 +71,7 @@ pub trait DeJson: Sized {
 }
 
 #[derive(PartialEq, Debug)]
+#[derive(Default)]
 pub enum DeJsonTok {
     Str,
     Char(char),
@@ -86,13 +87,12 @@ pub enum DeJsonTok {
     BlockOpen,
     BlockClose,
     Comma,
+    #[default]
     Bof,
     Eof
 }
 
-impl Default for DeJsonTok {
-    fn default() -> Self {DeJsonTok::Bof}
-}
+
 
 #[derive(Default)]
 pub struct DeJsonState {
@@ -335,32 +335,32 @@ impl DeJsonState {
             ':' => {
                 self.next(i);
                 self.tok = DeJsonTok::Colon;
-                return Ok(())
+                Ok(())
             }
             ',' => {
                 self.next(i);
                 self.tok = DeJsonTok::Comma;
-                return Ok(())
+                Ok(())
             }
             '[' => {
                 self.next(i);
                 self.tok = DeJsonTok::BlockOpen;
-                return Ok(())
+                Ok(())
             }
             ']' => {
                 self.next(i);
                 self.tok = DeJsonTok::BlockClose;
-                return Ok(())
+                Ok(())
             }
             '{' => {
                 self.next(i);
                 self.tok = DeJsonTok::CurlyOpen;
-                return Ok(())
+                Ok(())
             }
             '}' => {
                 self.next(i);
                 self.tok = DeJsonTok::CurlyClose;
-                return Ok(())
+                Ok(())
             }
             '-' | '0'..='9' => {
                 self.numbuf.clear();
@@ -385,10 +385,10 @@ impl DeJsonState {
                     }
                     if let Ok(num) = self.numbuf.parse() {
                         self.tok = DeJsonTok::F64(num);
-                        return Ok(())
+                        Ok(())
                     }
                     else {
-                        return Err(self.err_parse("number"));
+                        Err(self.err_parse("number"))
                     }
                 }
                 else {
@@ -403,10 +403,10 @@ impl DeJsonState {
                     }
                     if let Ok(num) = self.numbuf.parse() {
                         self.tok = DeJsonTok::U64(num);
-                        return Ok(())
+                        Ok(())
                     }
                     else {
-                        return Err(self.err_parse("number"));
+                        Err(self.err_parse("number"))
                     }
                 }
             },
@@ -431,7 +431,7 @@ impl DeJsonState {
                     return Ok(())
                 }
                 self.tok = DeJsonTok::BareIdent;
-                return Err(self.err_token(&format!("Got ##{}## needed true, false, null", self.identbuf)));
+                Err(self.err_token(&format!("Got ##{}## needed true, false, null", self.identbuf)))
             }
             '"' => {
                 self.strbuf.clear();
@@ -461,10 +461,10 @@ impl DeJsonState {
                 }
                 self.next(i);
                 self.tok = DeJsonTok::Str;
-                return Ok(())
+                Ok(())
             },
             _ => {
-                return Err(self.err_token("tokenizer"));
+                Err(self.err_token("tokenizer"))
             }
         }
     }
@@ -578,7 +578,7 @@ impl DeJson for bool {
     fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<bool, DeJsonErr> {
         let val = s.as_bool() ?;
         s.next_tok(i) ?;
-        return Ok(val);
+        Ok(val)
     }
 }
 
@@ -604,14 +604,14 @@ impl DeJson for String {
     fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<String, DeJsonErr> {
         let val = s.as_string() ?;
         s.next_tok(i) ?;
-        return Ok(val);
+        Ok(val)
     }
 }
 
 impl<T> SerJson for Vec<T> where T: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
         s.out.push('[');
-        if self.len() > 0{
+        if !self.is_empty(){
             let last = self.len() -1;
             for (index,item) in self.iter().enumerate() {
                 s.indent(d + 1);
@@ -671,7 +671,7 @@ macro_rules!de_json_array_impl {
             DeJsonErr> {
                 unsafe{
                     let mut to = std::mem::MaybeUninit::<[T; $count]>::uninit();
-                    let top: *mut T = std::mem::transmute(&mut to);
+                    let top: *mut T = &mut to as *mut _ as *mut T;
                     de_json_array_impl_inner(top, $count, s, i)?;
                     Ok(to.assume_init())
                 }
@@ -769,8 +769,7 @@ V: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
         s.out.push('{');
         let last = self.len() - 1;
-        let mut index = 0;
-        for (k, v) in self {
+        for (index, (k, v)) in self.iter().enumerate() {
             s.indent(d + 1);
             k.ser_json(d + 1, s);
             s.out.push(':');
@@ -778,7 +777,6 @@ V: SerJson {
             if index != last{
                 s.conl();
             }
-            index += 1;
         }
         s.indent(d);
         s.out.push('}');

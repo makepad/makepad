@@ -6,26 +6,20 @@
 /// character tables, which why we've held off from this for now. 
 pub trait CharExt {
     /// Checks if `char` is the start of an identifier.
-    fn is_identifier_start(self) -> bool;
+    fn is_identifier_start(&self) -> bool;
 
     /// Checks if `char` is the continuation of an identifier.
     /// 
     /// Note that this method assumes all identifiers are ASCII.
-    fn is_identifier_continue(self) -> bool;
+    fn is_identifier_continue(&self) -> bool;
 }
 
 impl CharExt for char {
-    fn is_identifier_start(self) -> bool {
-        match self {
-            'A'..='Z' | '_' | 'a'..='z' => true,
-            _ => false,
-        }
+    fn is_identifier_start(&self) -> bool {
+        matches!(*self, 'A'..='Z' | '_' | 'a'..='z')
     }
 
-    fn is_identifier_continue(self) -> bool {
-        match self {
-            '0'..='9' | 'A'..='Z' | '_' | 'a'..='z' => true,
-            _ => false,
-        }
+    fn is_identifier_continue(&self) -> bool {
+        matches!(*self, '0'..='9' | 'A'..='Z' | '_' | 'a'..='z')
     }
 }
