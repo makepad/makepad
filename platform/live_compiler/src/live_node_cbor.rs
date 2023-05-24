@@ -148,7 +148,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     out.push(CBOR_U16);
                     out.extend_from_slice(&(v as u16).to_be_bytes());
                 }
-                else if v <= std::u32::MAX {
+                else {
                     out.push(CBOR_U32);
                     out.extend_from_slice(&v.to_be_bytes());
                 }
