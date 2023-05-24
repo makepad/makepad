@@ -1,13 +1,13 @@
-use crate::{buf::EditKind, Diff, SelSet, text::Pos, Text};
+use crate::{buf::EditKind, text::Pos, Diff, SelSet, Text};
 
 pub struct Context<'a> {
-    pub sels: &'a SelSet,
     pub text: &'a Text,
+    pub sels: &'a SelSet,
 }
 
 pub fn insert(context: &Context<'_>, replace_with: &Text) -> (EditKind, Diff) {
     use crate::diff;
-    
+
     let mut builder = diff::Builder::new();
     let mut prev_sel_end = Pos::default();
     for sel in context.sels {
@@ -20,10 +20,7 @@ pub fn insert(context: &Context<'_>, replace_with: &Text) -> (EditKind, Diff) {
 }
 
 pub fn delete(context: &Context<'_>) -> (EditKind, Diff) {
-    use crate::{
-        diff,
-        text::Range,
-    };
+    use crate::{diff, text::Range};
 
     let mut builder = diff::Builder::new();
     let mut prev_sel_end = Pos::default();

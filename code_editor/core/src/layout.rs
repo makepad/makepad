@@ -9,7 +9,7 @@ pub struct Context<'a> {
 pub struct Elem<'a> {
     pub byte_pos: usize,
     pub pos: Pos,
-    pub column_width: usize,
+    pub width: usize,
     pub kind: ElemKind<'a>,
 }
 
@@ -38,7 +38,7 @@ pub fn layout<T>(
     .layout(context.line)
 }
 
-pub fn row_height(context: &Context<'_>) -> usize {
+pub fn height(context: &Context<'_>) -> usize {
     match layout(context, |elem| {
         if let ElemKind::End = elem.kind {
             return ControlFlow::Break(elem.pos.row + 1);
@@ -46,7 +46,7 @@ pub fn row_height(context: &Context<'_>) -> usize {
         ControlFlow::Continue(())
     }) {
         ControlFlow::Break(row_height) => row_height,
-        _ => unreachable!()
+        _ => unreachable!(),
     }
 }
 
@@ -98,7 +98,7 @@ where
     fn layout_grapheme(&mut self, grapheme: &str) -> ControlFlow<T> {
         use crate::CharExt;
 
-        let column_len = grapheme.chars().next().unwrap().column_width();
+        let column_len = grapheme.chars().next().unwrap().width();
         self.emit_elem(column_len, ElemKind::Grapheme(grapheme))?;
         self.byte_pos += grapheme.len();
         self.pos.column += column_len;
@@ -109,7 +109,7 @@ where
         (self.handle_elem)(Elem {
             byte_pos: self.byte_pos,
             pos: self.pos,
-            column_width: width,
+            width,
             kind,
         })?;
         ControlFlow::Continue(())

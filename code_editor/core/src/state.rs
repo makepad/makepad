@@ -1,7 +1,7 @@
 use {
     crate::{
-        arena::Id, buf::EditKind, edit_ops, move_ops, text::Pos, text::Text, Arena, Buf, Diff,
-        Event, SelSet,
+        arena::Id, buf::EditKind, edit_ops, layout, move_ops, text::Pos, text::Text, Arena, Buf,
+        Diff, Event, SelSet,
     },
     std::{
         cell::{RefCell, RefMut},
@@ -21,17 +21,25 @@ impl State {
     }
 
     pub fn create_view(&mut self) -> ViewId {
-        let text: Text = include_str!("arena.rs")
+        let lines: Vec<_> = include_str!("arena.rs")
             .lines()
             .map(|string| string.to_string())
             .collect();
+        let heights_by_line: Vec<_> = (0..lines.len())
+            .map(|line_pos| {
+                layout::height(&layout::Context {
+                    line: &lines[line_pos],
+                })
+            })
+            .collect();
         let model = self.models.insert(Model {
             view_ids: HashSet::new(),
-            buf: Buf::new(text),
+            buf: Buf::new(lines.into()),
         });
         let view_id = self.views.insert(RefCell::new(View {
             model_id: model,
             sels: SelSet::new(),
+            heights_by_line,
         }));
         self.models[model].view_ids.insert(view_id);
         ViewId(view_id)
@@ -88,14 +96,47 @@ pub struct DrawContext<'a> {
 struct View {
     model_id: Id<Model>,
     sels: SelSet,
+    heights_by_line: Vec<usize>,
 }
 
 impl View {
-    fn update(&mut self, sels: Option<&SelSet>, diff: &Diff, local: bool) {
+    fn update(&mut self, lines: &[String], sels: Option<&SelSet>, diff: &Diff, local: bool) {
+        use crate::diff::LenOnlyOp;
+
         if let Some(sels) = sels {
             self.sels = sels.clone()
         } else {
             self.sels.apply_diff(diff, local);
+        }
+        let mut line_pos = 0;
+        for op in diff {
+            match op.len_only() {
+                LenOnlyOp::Retain(len) => line_pos += len.lines,
+                LenOnlyOp::Insert(len) => {
+                    self.heights_by_line.splice(
+                        line_pos..line_pos,
+                        (line_pos..line_pos + len.lines).map(|line_pos| {
+                            layout::height(&layout::Context {
+                                line: &lines[line_pos],
+                            })
+                        }),
+                    );
+                    line_pos += len.lines;
+                    if len.bytes > 0 {
+                        self.heights_by_line[line_pos] = layout::height(&layout::Context {
+                            line: &lines[line_pos],
+                        });
+                    }
+                }
+                LenOnlyOp::Delete(len) => {
+                    self.heights_by_line.drain(line_pos..line_pos + len.lines);
+                    if len.bytes > 0 {
+                        self.heights_by_line[line_pos] = layout::height(&layout::Context {
+                            line: &lines[line_pos],
+                        });
+                    }
+                }
+            }
         }
     }
 }
@@ -136,7 +177,7 @@ impl<'a> HandleEventContext<'a> {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Left,
             }) => {
-                self.update_cursors(shift, |context, pos, _| {
+                self.update_sels(shift, |context, pos, _| {
                     (move_ops::move_left(context, pos), None)
                 });
             }
@@ -144,7 +185,7 @@ impl<'a> HandleEventContext<'a> {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Up,
             }) => {
-                self.update_cursors(shift, |context, pos, column| {
+                self.update_sels(shift, |context, pos, column| {
                     move_ops::move_up(context, pos, column)
                 });
             }
@@ -152,7 +193,7 @@ impl<'a> HandleEventContext<'a> {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Right,
             }) => {
-                self.update_cursors(shift, |context, pos, _| {
+                self.update_sels(shift, |context, pos, _| {
                     (move_ops::move_right(context, pos), None)
                 });
             }
@@ -160,7 +201,7 @@ impl<'a> HandleEventContext<'a> {
                 modifiers: KeyModifiers { shift, .. },
                 code: KeyCode::Down,
             }) => {
-                self.update_cursors(shift, |context, pos, column| {
+                self.update_sels(shift, |context, pos, column| {
                     move_ops::move_down(context, pos, column)
                 });
             }
@@ -199,7 +240,7 @@ impl<'a> HandleEventContext<'a> {
         }
     }
 
-    fn update_cursors(
+    fn update_sels(
         &mut self,
         select: bool,
         mut f: impl FnMut(&move_ops::Context<'_>, Pos, Option<usize>) -> (Pos, Option<usize>),
@@ -224,8 +265,8 @@ impl<'a> HandleEventContext<'a> {
 
     fn edit(&mut self, f: impl FnOnce(&edit_ops::Context<'_>) -> (EditKind, Diff)) {
         let (kind, diff) = f(&edit_ops::Context {
-            sels: &self.view.sels,
             text: self.model.buf.text(),
+            sels: &self.view.sels,
         });
         self.model.buf.edit(kind, &self.view.sels, diff.clone());
         self.update_views(None, &diff);
@@ -244,9 +285,10 @@ impl<'a> HandleEventContext<'a> {
     }
 
     fn update_views(&mut self, sels: Option<&SelSet>, diff: &Diff) {
-        self.view.update(sels, diff, true);
+        let lines = self.model.buf.text().as_lines();
+        self.view.update(lines, sels, diff, true);
         for sibling_view in &mut self.sibling_views {
-            sibling_view.update(None, diff, false);
+            sibling_view.update(lines, None, diff, false);
         }
     }
 }

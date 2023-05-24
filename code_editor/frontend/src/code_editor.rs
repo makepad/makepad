@@ -211,7 +211,7 @@ impl<'a> Drawer<'a> {
             self.layout_pos.column = elem.pos.column;
             match elem.kind {
                 ElemKind::Grapheme(grapheme) => {
-                    self.draw_grapheme(cx, grapheme, elem.column_width);
+                    self.draw_grapheme(cx, grapheme, elem.width);
                 }
                 _ => {}
             }
