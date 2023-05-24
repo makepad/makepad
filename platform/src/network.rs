@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::makepad_micro_serde::{DeBin, SerBin};
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub struct HttpRequest {
     pub url: String,
     pub method: Method,
@@ -53,7 +53,7 @@ impl HttpResponse {
         }
     }
 }
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum Method{
     GET,
     HEAD,
@@ -67,7 +67,7 @@ pub enum Method{
 }
 
 impl Method {
-    fn to_string(&self) -> &str {
+    pub fn to_string(&self) -> &str {
         match self {
             Method::GET => "GET",
             Method::HEAD => "HEAD",

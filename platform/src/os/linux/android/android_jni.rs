@@ -2,7 +2,7 @@
 
 use {
     self::super::{
-        jni_sys::{jclass, jsize, jint, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
+        jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT, jfieldID},
     },
     crate::{
         area::Area,
@@ -10,7 +10,7 @@ use {
         event::*,
         cx::{Cx, AndroidParams},
         makepad_error_log::*,
-        makepad_platform::network::*,
+        network::*,
     },
     std::{
         cell::Cell,
@@ -219,88 +219,67 @@ impl<'a> AndroidToJava<'a> {
     }
 
     pub fn http_request(&self, request: HttpRequest) {
-        unsafe {
+        unsafe {            
+            // Convert method
+            let url = CString::new(request.url.clone()).unwrap();
+            let method = CString::new(request.method.to_string().clone()).unwrap();
+    
+            // Convert headers to a single string
+            let mut headers_str = String::new();
+            for (key, values) in &request.headers {
+                for value in values {
+                    headers_str.push_str(&format!("{}: {}; ", key, value));
+                }
+            }
+            let java_headers = CString::new(headers_str).unwrap();
+    
+            // Convert body
+            let request_body = request.body.unwrap().clone(); // TODO: if Some(body)
+            let java_request_body = ((**self.env).NewByteArray.unwrap())(self.env, request_body.len() as i32);
+            ((**self.env).SetByteArrayRegion.unwrap())(self.env, java_request_body, 0, request_body.len() as i32, request_body.as_ptr() as *const jbyte);            
+
+            // Create the Java HttpRequest object
+            let request_class_name = CString::new("dev/makepad/android/HttpRequest").unwrap();
+            let request_class = (**self.env).FindClass.unwrap()(self.env, request_class_name.as_ptr());
+            let java_request = ((**self.env).AllocObject.unwrap())(self.env, request_class);
+            
+            // Set the fields:
+            ((**self.env).SetObjectField.unwrap())(
+                self.env,
+                java_request,
+                get_field_id(self.env, request_class, "url", "Ljava/lang/String;"),
+                url.into_raw() as jobject,
+            );
+            ((**self.env).SetObjectField.unwrap())(
+                self.env,
+                java_request,
+                get_field_id(self.env, request_class, "method", "Ljava/lang/String;"),
+                method.into_raw() as jobject,
+            );
+            ((**self.env).SetObjectField.unwrap())(
+                self.env,
+                java_request,
+                get_field_id(self.env, request_class, "headers", "Ljava/lang/String;"),
+                java_headers.into_raw() as jobject,
+            );
+            ((**self.env).SetObjectField.unwrap())(
+                self.env,
+                java_request,
+                get_field_id(self.env, request_class, "body", "[B"),
+                java_request_body as jobject,
+            );
+    
+            // Call the Java method with the Java HttpRequest object
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
             let name = CString::new("requestHttp").unwrap();
-            let signature = CString::new("(Ldev/makepad/android/HttpRequest;)V").unwrap();
+            let signature = CString::new("(dev/makepad/android/HttpRequest;)V").unwrap();
             let method_id = ((**self.env).GetMethodID.unwrap())(
                 self.env,
                 class,
                 name.as_ptr(),
                 signature.as_ptr(),
             );
-    
-            // WIP - most of this doesn't work yet, 
-            // I wanted to get a rough idea of how much overhead it would take
-            
-            // TODO: Move part of this to a generic method for converting objects
 
-            // Convert Rust HttpRequest to Java HttpRequest
-            // Convert method
-            let url = CString::new(request.url.clone()).unwrap();
-            let method = CString::new(request.request_method.to_string().clone()).unwrap();
-    
-            // Convert headers from rust HashMap to Java Map<String, List<String>>
-            let mut headers = ((**self.env).NewHashMap.unwrap())(self.env);
-            for (key, values) in request.headers.iter() {
-                let key_str = CString::new(key.clone()).unwrap();
-                let list = ((**self.env).NewArrayList.unwrap())(self.env, values.len() as i32);
-    
-                for value in values.iter() {
-                    let value_str = CString::new(value.clone()).unwrap();
-                    let java_value = ((**self.env).NewStringUTF.unwrap())(self.env, value_str.as_ptr());
-                    let add_method_id = ((**self.env).CallBooleanMethodID.unwrap())(
-                        self.env,
-                        list,
-                        add_method_name.as_ptr(),
-                        value_signature.as_ptr(),
-                        java_value,
-                    );
-                }
-    
-                let java_key = ((**self.env).NewStringUTF.unwrap())(self.env, key_str.as_ptr());
-                ((**self.env).CallObjectMethod.unwrap())(
-                    self.env,
-                    headers,
-                    put_method_id,
-                    java_key,
-                    list,
-                );
-            }
-    
-            // Convert body
-            let request_body = request.request_body.clone();
-            let java_request_body = ((**self.env).NewByteArray.unwrap())(self.env, request_body.len() as i32);
-            ((**self.env).SetByteArrayRegion.unwrap())(self.env, java_request_body, 0, request_body.len() as i32, request_body.as_ptr() as *const jbyte);
-    
-            // Create the Java HttpRequest object
-            let java_request = ((**self.env).AllocObject.unwrap())(self.env, request_class);
-            ((**self.env).SetObjectField.unwrap())(
-                self.env,
-                java_request,
-                url_field_id,
-                url.into_raw() as jobject,
-            );
-            ((**self.env).SetObjectField.unwrap())(
-                self.env,
-                java_request,
-                method_field_id,
-                method.into_raw() as jobject,
-            );
-            ((**self.env).SetObjectField.unwrap())(
-                self.env,
-                java_request,
-                headers_field_id,
-                headers.into_raw() as jobject,
-            );
-            ((**self.env).SetObjectField.unwrap())(
-                self.env,
-                java_request,
-                body_field_id,
-                java_request_body.into_raw() as jobject,
-            );
-    
-            // Call the Java method with the Java HttpRequest object
             ((**self.env).CallVoidMethod.unwrap())(
                 self.env,
                 self.callback,
@@ -310,6 +289,24 @@ impl<'a> AndroidToJava<'a> {
         }
     }
 }
+
+fn get_field_id(env: *mut JNIEnv, class: jclass, field_name: &str, field_type: &str) -> jfieldID {
+    let name = CString::new(field_name).unwrap();
+    let type_ = CString::new(field_type).unwrap();
+    let field_id = unsafe {
+        (**env).GetFieldID.unwrap()(
+            env,
+            class,
+            name.as_ptr(),
+            type_.as_ptr(),
+        )
+    };
+    if field_id.is_null() {
+        panic!("Failed to get field ID for {}: {}", field_name, field_type);
+    }
+    field_id
+}
+
 
 // The functions here correspond to the static functions on the `Makepad` class in Java.
 
@@ -746,68 +743,69 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpResponse(
     response: jobject,
     callback: jobject,
 ) {
-    let rust_response = convert_response(env, content);
+    log!("RESPONSE")
+    // let rust_response = convert_response(env, content);
     
-    (*(cx as *mut Cx)).from_java_on_http_response(
-        rust_response,
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
+    // (*(cx as *mut Cx)).from_java_on_http_response(
+    //     rust_response,
+    //     AndroidToJava {
+    //         env,
+    //         callback,
+    //         phantom: PhantomData,
+    //     },
+    // );
 }
 
 
-unsafe fn java_http_response_to_rust(env: *mut JNIEnv, response: jobject) -> HttpResponse {
-    let class = (**env).GetObjectClass.unwrap()(env, response);
+// unsafe fn java_http_response_to_rust(env: *mut JNIEnv, response: jobject) -> HttpResponse {
+//     let class = (**env).GetObjectClass.unwrap()(env, response);
     
-    let status_code_field_id = (**env).GetFieldID.unwrap()(env, class, "statusCode", "I");
-    let status_code = (**env).GetIntField.unwrap()(env, response, status_code_field_id) as u16;
+//     let status_code_field_id = (**env).GetFieldID.unwrap()(env, class, "statusCode", "I");
+//     let status_code = (**env).GetIntField.unwrap()(env, response, status_code_field_id) as u16;
     
-    let headers_field_id = (**env).GetFieldID.unwrap()(env, class, "headers", "Ljava/util/Map;");
-    let headers = convert_headers(env, response, headers_field_id);
+//     let headers_field_id = (**env).GetFieldID.unwrap()(env, class, "headers", "Ljava/util/Map;");
+//     let headers = convert_headers(env, response, headers_field_id);
     
-    let body_field_id = (**env).GetFieldID.unwrap()(env, class, "body", "[B");
-    let body = convert_body(env, response, body_field_id);
+//     let body_field_id = (**env).GetFieldID.unwrap()(env, class, "body", "[B");
+//     let body = convert_body(env, response, body_field_id);
     
-    HttpResponse {
-        status_code,
-        headers,
-        body,
-    }
-}
+//     HttpResponse {
+//         status_code,
+//         headers,
+//         body,
+//     }
+// }
 
-unsafe fn convert_headers(env: *mut JNIEnv, response: jobject, headers_field_id: jfieldID) -> Vec<(String, String)> {
-    // TOODO: move part of this logic to a generic function that does Java Map -> Rust HashMap conversion
-    let headers_map = (**env).GetObjectField.unwrap()(env, response, headers_field_id);
+// unsafe fn convert_headers(env: *mut JNIEnv, response: jobject, headers_field_id: jfieldID) -> Vec<(String, String)> {
+//     // TOODO: move part of this logic to a generic function that does Java Map -> Rust HashMap conversion
+//     let headers_map = (**env).GetObjectField.unwrap()(env, response, headers_field_id);
     
-    let entry_set_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Map"), "entrySet", "()Ljava/util/Set;");
-    let entry_set = (**env).CallObjectMethod.unwrap()(env, headers_map, entry_set_method_id);
+//     let entry_set_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Map"), "entrySet", "()Ljava/util/Set;");
+//     let entry_set = (**env).CallObjectMethod.unwrap()(env, headers_map, entry_set_method_id);
     
-    let iterator_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Set"), "iterator", "()Ljava/util/Iterator;");
-    let iterator = (**env).CallObjectMethod.unwrap()(env, entry_set, iterator_method_id);
+//     let iterator_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Set"), "iterator", "()Ljava/util/Iterator;");
+//     let iterator = (**env).CallObjectMethod.unwrap()(env, entry_set, iterator_method_id);
     
-    let has_next_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Iterator"), "hasNext", "()Z");
-    let next_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Iterator"), "next", "()Ljava/lang/Object;");
+//     let has_next_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Iterator"), "hasNext", "()Z");
+//     let next_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Iterator"), "next", "()Ljava/lang/Object;");
     
-    let mut headers = Vec::new();
+//     let mut headers = Vec::new();
     
-    while (**env).CallBooleanMethod.unwrap()(env, iterator, has_next_method_id) == JNI_TRUE {
-        let entry = (**env).CallObjectMethod.unwrap()(env, iterator, next_method_id);
-        let entry_class = (**env).GetObjectClass.unwrap()(env, entry);
+//     while (**env).CallBooleanMethod.unwrap()(env, iterator, has_next_method_id) == JNI_TRUE {
+//         let entry = (**env).CallObjectMethod.unwrap()(env, iterator, next_method_id);
+//         let entry_class = (**env).GetObjectClass.unwrap()(env, entry);
         
-        let get_key_method_id = (**env).GetMethodID.unwrap()(env, entry_class, "getKey", "()Ljava/lang/Object;");
-        let get_value_method_id = (**env).GetMethodID.unwrap()(env, entry_class, "getValue", "()Ljava/lang/Object;");
+//         let get_key_method_id = (**env).GetMethodID.unwrap()(env, entry_class, "getKey", "()Ljava/lang/Object;");
+//         let get_value_method_id = (**env).GetMethodID.unwrap()(env, entry_class, "getValue", "()Ljava/lang/Object;");
         
-        let key = (**env).CallObjectMethod.unwrap()(env, entry, get_key_method_id);
-        let value = (**env).CallObjectMethod.unwrap()(env, entry, get_value_method_id);
+//         let key = (**env).CallObjectMethod.unwrap()(env, entry, get_key_method_id);
+//         let value = (**env).CallObjectMethod.unwrap()(env, entry, get_value_method_id);
         
-        let key_string = jstring_to_string(env, key.into());
-        let value_string = jstring_to_string(env, value.into());
+//         let key_string = jstring_to_string(env, key.into());
+//         let value_string = jstring_to_string(env, value.into());
         
-        headers.push((key_string, value_string));
-    }
+//         headers.push((key_string, value_string));
+//     }
     
-    headers
-}
+//     headers
+// }

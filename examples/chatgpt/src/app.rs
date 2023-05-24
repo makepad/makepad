@@ -76,7 +76,7 @@ impl LiveHook for App {
 impl App{
     // EVENT-BASED: sends message, has no relationship with response. Response will be received as an event
     // and processed by handle_event.
-    fn send_message(cx_ref:CxRef, ui:WidgetRef) {
+    fn send_message(cx_ref:CxRef) {
         //let message = ui.get_text_input(id!(message_input)).get_text(); // TODO
         let mut cx = cx_ref.0.borrow_mut(); // need to cleanup this
 
@@ -85,7 +85,7 @@ impl App{
         let mut request = HttpRequest::new(completion_url, Method::POST);
         
         request.set_header("Content-Type".to_string(), "application/json".to_string());
-        request.set_header("A".to_string(), "application/json".to_string());
+        request.set_header("Authorization".to_string(), "Bearer <some-token-you-grab-from-your-env>".to_string());
         
         request.set_body(ChatPrompt {
             message: "hi! tell me a joke".to_string().clone(),
@@ -119,7 +119,7 @@ impl AppMain for App{
         
         if self.ui.get_button(id!(send_button)).clicked(&actions) {
             // cx.spawner().spawn(async { // if you want to make it async
-            Self::send_message(cx.get_ref(), self.ui.clone())
+            Self::send_message(cx.get_ref());
             // }).unwrap();
         }
     }

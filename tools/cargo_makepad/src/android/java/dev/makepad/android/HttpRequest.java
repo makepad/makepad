@@ -3,18 +3,18 @@ package dev.makepad.android;
 public class HttpRequest {
     private String url;
     private String method;
-    private Map<String, List<String>> headers;
+    private String headers;
     private byte[] body;
 
-    public int getUrl() {
+    public String getUrl() {
         return url;
     }
 
-    public int getMethod() {
+    public String getMethod() {
         return method;
     }
 
-    public Map<String, List<String>> getHeaders() {
+    public String getHeaders() {
         return headers;
     }
 

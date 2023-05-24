@@ -7,10 +7,14 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.Map;
+import java.util.List;
+import java.nio.charset.StandardCharsets;
 
 public class MakepadNetwork {
 
@@ -22,23 +26,26 @@ public class MakepadNetwork {
             HttpResponse response = null;
 
             try {
-                URL urlObj = new URL(request.get_url());
+                URL urlObj = new URL(request.getUrl());
                 connection = (HttpURLConnection) urlObj.openConnection();
-                connection.setRequestMethod(request.get_method());
+                connection.setRequestMethod(request.getMethod());
 
+                String[] headerPairs = request.getHeaders().split(";");
 
-                headers = request.get_headers();
-                if (headers != null) {
-                    for (Map.Entry<String, String> entry : headers.entrySet()) {
-                        connection.setRequestProperty(entry.getKey(), entry.getValue());
+                for (String headerPair : headerPairs) {
+                    String[] parts = headerPair.split(":");
+                    if (parts.length == 2) {
+                        String key = parts[0].trim();
+                        String value = parts[1].trim();
+                        connection.setRequestProperty(key, value);
                     }
                 }
 
-                body = request.get_body();
-                if (body != null && !body.isEmpty()) {
+                byte[] body = request.getBody();
+                if (body != null) {
                     connection.setDoOutput(true);
                     try (OutputStream outputStream = connection.getOutputStream()) {
-                        outputStream.write(body.getBytes(StandardCharsets.UTF_8));
+                        outputStream.write(body);
                     }
                 }
 
