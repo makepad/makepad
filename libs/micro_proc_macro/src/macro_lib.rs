@@ -108,16 +108,15 @@ impl TokenBuilder {
                 },
                 ('0', 'x') => { // this needs to be fancier but whatever.
                     let mut e = o + 2;
-                    let mut out = 0u64;
+                    let mut out: u64 = 0;
                     while e < b.len() {
-                        let c = b[e] as char;
-                        if c.is_ascii_digit() {out = (out << 4) | (b[e] - b'0') as u64}
-                        else if ('a'..='f').contains(&c) {out = (out << 4) | (b[e] - b'a' + 10) as u64}
-                        else if ('A'..'F').contains(&c) {out = (out << 4) | (b[e] - b'A' + 10) as u64}
-                        else if c == '_' {}
-                        else {
-                            break;
-                        }
+                        match b[e] {
+                            b'0'..=b'9' => out = (out << 4) | (b[e] - b'0') as u64,
+                            b'a'..=b'f' => out = (out << 4) | (b[e] - b'a' + 10) as u64,
+                            b'A'..=b'F' => out = (out << 4) | (b[e] - b'A' + 10) as u64,
+                            b'_' => (),
+                            _ => break,
+                        };
                         e += 1;
                     }
                     self.suf_u64(out);
@@ -126,12 +125,9 @@ impl TokenBuilder {
                 ('0'..='9', _) => {
                     let mut e = o + 1;
                     while e < b.len() {
-                        let c = b[e] as char;
-                        if c.is_ascii_digit() {
-                            e += 1;
-                        }
-                        else {
-                            break;
+                        match b[e] {
+                            b'0'..=b'9' => e += 1,
+                            _ => break,
                         }
                     }
                     let num = std::str::from_utf8(&b[o..e]).unwrap();
@@ -141,12 +137,9 @@ impl TokenBuilder {
                 ('"', _) => {
                     let mut e = o + 1;
                     while e < b.len() {
-                        let c = b[e] as char;
-                        if c == '"' {
-                            break;
-                        }
-                        else {
-                            e += 1;
+                        match b[e] {
+                            b'"' => break,
+                            _ => e += 1,
                         }
                     }
                     self.string(std::str::from_utf8(&b[o + 1..e]).unwrap());
@@ -155,15 +148,13 @@ impl TokenBuilder {
                 ('\'', _) => {
                     let mut e = o + 1;
                     while e < b.len() {
-                        let c = b[e] as char;
-                        if c.is_ascii_digit() || c.is_ascii_lowercase() || c.is_ascii_uppercase() || c == '_' {
-                            e += 1;
-                        } else {
-                            break;
+                        match b[e] {
+                            b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'_' => e += 1,
+                            _ => break,
                         }
                     }
                     if o == e {
-                        panic!("Unexpected character {}", b[e] as char);
+                        panic!("Unexpected character {:?}", b[e] as char);
                     }
                     let ident = std::str::from_utf8(&b[o + 1..e]).unwrap();
                     self.lifetime_mark();
@@ -173,15 +164,13 @@ impl TokenBuilder {
                 _ => {
                     let mut e = o;
                     while e < b.len() {
-                        let c = b[e] as char;
-                        if c.is_ascii_digit() || c.is_ascii_lowercase() || c.is_ascii_uppercase() || c == '_' {
-                            e += 1;
-                        } else {
-                            break;
+                        match b[e] {
+                            b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'_' => e += 1,
+                            _ => break,
                         }
                     }
                     if o == e {
-                        panic!("Unexpected character {}", b[e] as char);
+                        panic!("Unexpected character {:?}", b[e] as char);
                     }
                     let ident = std::str::from_utf8(&b[o..e]).unwrap();
                     self.ident(ident);
