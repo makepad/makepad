@@ -336,19 +336,19 @@ Makepad.Callback{
         }
     }
 
-    public void requestHttp(HttpRequest request) {
-        try {   
+    public void requestHttp(int id, String url, String method, String headers, byte[] body) {
+        try {
             MakepadNetwork network = new MakepadNetwork();
-    
-            CompletableFuture<HttpResponse> future = network.performNetworkRequest(request);
+
+            CompletableFuture<HttpResponse> future = network.performNetworkRequest(url, method, headers, body);
 
             future.thenAccept(response -> {
-                runOnUiThread(() -> Makepad.onHttpResponse(mCx, response, (Makepad.Callback) mView.getContext()));
+                runOnUiThread(() -> Makepad.onHttpResponse(mCx, id, response.getStatusCode(), response.getHeaders(), response.getBody(), (Makepad.Callback) mView.getContext()));
             }).exceptionally(ex -> {
                 return null;
             });
-        } catch (Exception e) { //TODO: Handle the exception
-            // something like Makepad.onHttpError ? 
+        } catch (Exception e) {
+            // Handle the exception
         }
     }
 

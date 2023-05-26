@@ -742,4 +742,12 @@ impl TextInputRef {
             inner.text.push_str(text);
         }
     }
+    // TODO: is this a hack or is this ok here?
+    pub fn get_text(&self) -> String {
+        if let Some(inner) = self.borrow(){
+            inner.text.clone()
+        } else {
+            "".to_string()
+        }
+    }
 }
