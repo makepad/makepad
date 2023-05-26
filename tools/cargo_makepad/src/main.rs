@@ -52,7 +52,7 @@ fn main() {
     if args.len()<3{
         return show_help("not enough arguments");
     }
-    let args = &args[2..];
+    let args = &args[1..];
    
     if args.len() == 0{
         return show_help("");

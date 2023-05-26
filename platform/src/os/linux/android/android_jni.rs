@@ -2,14 +2,13 @@
 
 use {
     self::super::{
-        jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT, jfieldID},
+        jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
     },
     crate::{
         area::Area,
         makepad_math::*,
         event::*,
         cx::{Cx, AndroidParams},
-        makepad_error_log::*,
         network::*,
     },
     std::{
@@ -18,6 +17,8 @@ use {
         marker::PhantomData,
     },
 };
+
+use std::collections::HashMap;
 
 /// This struct corresponds to the `Makepad.Callback` interface in Java (which is implemented by
 /// the `MakepadSurface` class) and enables us to call methods on that interface while hiding as
@@ -219,94 +220,64 @@ impl<'a> AndroidToJava<'a> {
     }
 
     pub fn http_request(&self, request: HttpRequest) {
-        unsafe {            
-            // Convert method
-            let url = CString::new(request.url.clone()).unwrap();
-            let method = CString::new(request.method.to_string().clone()).unwrap();
-    
-            // Convert headers to a single string
-            let mut headers_str = String::new();
-            for (key, values) in &request.headers {
-                for value in values {
-                    headers_str.push_str(&format!("{}: {}; ", key, value));
-                }
-            }
-            let java_headers = CString::new(headers_str).unwrap();
-    
-            // Convert body
-            let request_body = request.body.unwrap().clone(); // TODO: if Some(body)
-            let java_request_body = ((**self.env).NewByteArray.unwrap())(self.env, request_body.len() as i32);
-            ((**self.env).SetByteArrayRegion.unwrap())(self.env, java_request_body, 0, request_body.len() as i32, request_body.as_ptr() as *const jbyte);            
+        unsafe {
+            let url = CString::new(request.url).unwrap();
+            let url = ((**self.env).NewStringUTF.unwrap())(self.env, url.as_ptr());
 
-            // Create the Java HttpRequest object
-            let request_class_name = CString::new("dev/makepad/android/HttpRequest").unwrap();
-            let request_class = (**self.env).FindClass.unwrap()(self.env, request_class_name.as_ptr());
-            let java_request = ((**self.env).AllocObject.unwrap())(self.env, request_class);
-            
-            // Set the fields:
-            ((**self.env).SetObjectField.unwrap())(
-                self.env,
-                java_request,
-                get_field_id(self.env, request_class, "url", "Ljava/lang/String;"),
-                url.into_raw() as jobject,
-            );
-            ((**self.env).SetObjectField.unwrap())(
-                self.env,
-                java_request,
-                get_field_id(self.env, request_class, "method", "Ljava/lang/String;"),
-                method.into_raw() as jobject,
-            );
-            ((**self.env).SetObjectField.unwrap())(
-                self.env,
-                java_request,
-                get_field_id(self.env, request_class, "headers", "Ljava/lang/String;"),
-                java_headers.into_raw() as jobject,
-            );
-            ((**self.env).SetObjectField.unwrap())(
-                self.env,
-                java_request,
-                get_field_id(self.env, request_class, "body", "[B"),
-                java_request_body as jobject,
-            );
+            let method = CString::new(request.method.to_string()).unwrap();
+            let method = ((**self.env).NewStringUTF.unwrap())(self.env, method.as_ptr());
     
-            // Call the Java method with the Java HttpRequest object
-            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
+            let headers_string = convert_headers_to_string(request.headers);
+            let headers = CString::new(headers_string).unwrap();
+            let headers = ((**self.env).NewStringUTF.unwrap())(self.env, headers.as_ptr());
+    
+            let java_body = match &request.body {
+                Some(body) => {
+                    let java_body = (**self.env).NewByteArray.unwrap()(self.env, body.len() as i32);
+                    (**self.env).SetByteArrayRegion.unwrap()(
+                        self.env,
+                        java_body,
+                        0,
+                        body.len() as i32,
+                        body.as_ptr() as *const jbyte,
+                    );
+                    java_body
+                }
+                None => std::ptr::null_mut(),
+            };
+    
             let name = CString::new("requestHttp").unwrap();
-            let signature = CString::new("(dev/makepad/android/HttpRequest;)V").unwrap();
-            let method_id = ((**self.env).GetMethodID.unwrap())(
+            let signature = CString::new("(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V").unwrap();
+            let method_id = (**self.env).GetMethodID.unwrap()(
                 self.env,
-                class,
+                (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
                 name.as_ptr(),
                 signature.as_ptr(),
             );
-
-            ((**self.env).CallVoidMethod.unwrap())(
+    
+            (**self.env).CallVoidMethod.unwrap()(
                 self.env,
                 self.callback,
                 method_id,
-                java_request,
+                request.id,
+                url,
+                method,
+                headers,
+                java_body as jobject,
             );
         }
-    }
+    }    
 }
 
-fn get_field_id(env: *mut JNIEnv, class: jclass, field_name: &str, field_type: &str) -> jfieldID {
-    let name = CString::new(field_name).unwrap();
-    let type_ = CString::new(field_type).unwrap();
-    let field_id = unsafe {
-        (**env).GetFieldID.unwrap()(
-            env,
-            class,
-            name.as_ptr(),
-            type_.as_ptr(),
-        )
-    };
-    if field_id.is_null() {
-        panic!("Failed to get field ID for {}: {}", field_name, field_type);
+fn convert_headers_to_string(headers: HashMap<String, Vec<String>>) -> String {
+    let mut headers_str = String::new();
+    for (key, values) in headers.iter() {
+        for value in values {
+            headers_str.push_str(&format!("{}: {}\r\n ", key, value));
+        }
     }
-    field_id
+    headers_str
 }
-
 
 // The functions here correspond to the static functions on the `Makepad` class in Java.
 
@@ -740,72 +711,24 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpResponse(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
-    response: jobject,
+    request_id: jint,
+    status_code: jint,
+    headers: jstring,
+    body: jobject,
     callback: jobject,
 ) {
-    log!("RESPONSE")
-    // let rust_response = convert_response(env, content);
-    
-    // (*(cx as *mut Cx)).from_java_on_http_response(
-    //     rust_response,
-    //     AndroidToJava {
-    //         env,
-    //         callback,
-    //         phantom: PhantomData,
-    //     },
-    // );
+    let headers = jstring_to_string(env, headers);
+    let body = java_byte_array_to_vec(env, body);
+
+    (*(cx as *mut Cx)).from_java_on_http_response(
+        request_id as u64,
+        status_code as u16,
+        headers,
+        body,
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
 }
-
-
-// unsafe fn java_http_response_to_rust(env: *mut JNIEnv, response: jobject) -> HttpResponse {
-//     let class = (**env).GetObjectClass.unwrap()(env, response);
-    
-//     let status_code_field_id = (**env).GetFieldID.unwrap()(env, class, "statusCode", "I");
-//     let status_code = (**env).GetIntField.unwrap()(env, response, status_code_field_id) as u16;
-    
-//     let headers_field_id = (**env).GetFieldID.unwrap()(env, class, "headers", "Ljava/util/Map;");
-//     let headers = convert_headers(env, response, headers_field_id);
-    
-//     let body_field_id = (**env).GetFieldID.unwrap()(env, class, "body", "[B");
-//     let body = convert_body(env, response, body_field_id);
-    
-//     HttpResponse {
-//         status_code,
-//         headers,
-//         body,
-//     }
-// }
-
-// unsafe fn convert_headers(env: *mut JNIEnv, response: jobject, headers_field_id: jfieldID) -> Vec<(String, String)> {
-//     // TOODO: move part of this logic to a generic function that does Java Map -> Rust HashMap conversion
-//     let headers_map = (**env).GetObjectField.unwrap()(env, response, headers_field_id);
-    
-//     let entry_set_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Map"), "entrySet", "()Ljava/util/Set;");
-//     let entry_set = (**env).CallObjectMethod.unwrap()(env, headers_map, entry_set_method_id);
-    
-//     let iterator_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Set"), "iterator", "()Ljava/util/Iterator;");
-//     let iterator = (**env).CallObjectMethod.unwrap()(env, entry_set, iterator_method_id);
-    
-//     let has_next_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Iterator"), "hasNext", "()Z");
-//     let next_method_id = (**env).GetMethodID.unwrap()(env, (**env).FindClass.unwrap()(env, "java/util/Iterator"), "next", "()Ljava/lang/Object;");
-    
-//     let mut headers = Vec::new();
-    
-//     while (**env).CallBooleanMethod.unwrap()(env, iterator, has_next_method_id) == JNI_TRUE {
-//         let entry = (**env).CallObjectMethod.unwrap()(env, iterator, next_method_id);
-//         let entry_class = (**env).GetObjectClass.unwrap()(env, entry);
-        
-//         let get_key_method_id = (**env).GetMethodID.unwrap()(env, entry_class, "getKey", "()Ljava/lang/Object;");
-//         let get_value_method_id = (**env).GetMethodID.unwrap()(env, entry_class, "getValue", "()Ljava/lang/Object;");
-        
-//         let key = (**env).CallObjectMethod.unwrap()(env, entry, get_key_method_id);
-//         let value = (**env).CallObjectMethod.unwrap()(env, entry, get_value_method_id);
-        
-//         let key_string = jstring_to_string(env, key.into());
-//         let value_string = jstring_to_string(env, value.into());
-        
-//         headers.push((key_string, value_string));
-//     }
-    
-//     headers
-// }

@@ -20,17 +20,17 @@ public class MakepadNetwork {
 
     public MakepadNetwork() {} // TODO: this might just be a static class.
 
-    public CompletableFuture<HttpResponse> performNetworkRequest(HttpRequest request) {
+    public CompletableFuture<HttpResponse> performNetworkRequest(String url, String method, String headers, byte[] body) {
         return CompletableFuture.supplyAsync(() -> {
             HttpURLConnection connection = null;
             HttpResponse response = null;
 
             try {
-                URL urlObj = new URL(request.getUrl());
+                URL urlObj = new URL(url);
                 connection = (HttpURLConnection) urlObj.openConnection();
-                connection.setRequestMethod(request.getMethod());
+                connection.setRequestMethod(method);
 
-                String[] headerPairs = request.getHeaders().split(";");
+                String[] headerPairs = headers.split("\r\n");
 
                 for (String headerPair : headerPairs) {
                     String[] parts = headerPair.split(":");
@@ -41,7 +41,6 @@ public class MakepadNetwork {
                     }
                 }
 
-                byte[] body = request.getBody();
                 if (body != null) {
                     connection.setDoOutput(true);
                     try (OutputStream outputStream = connection.getOutputStream()) {
@@ -51,13 +50,18 @@ public class MakepadNetwork {
 
                 int statusCode = connection.getResponseCode();
 
-                byte[] responseBody = readBytesFromStream(connection.getInputStream());
+                byte[] responseBody;
+                if (statusCode >= 400) {
+                    responseBody = readBytesFromStream(connection.getErrorStream());
+                } else {
+                    responseBody = readBytesFromStream(connection.getInputStream());
+                }
 
-                Map<String, List<String>> responseHeaders = connection.getHeaderFields();
+                String responseHeaders = getHeadersAsString(connection.getHeaderFields());
 
                 response = new HttpResponse(statusCode, responseHeaders, responseBody);
             } catch (IOException e) {
-                e.printStackTrace(); // TODO: handle exception
+                e.printStackTrace(); // TODO: throw a meaningful exception
             } finally {
                 if (connection != null) {
                     connection.disconnect();
@@ -76,5 +80,17 @@ public class MakepadNetwork {
             outputStream.write(buffer, 0, bytesRead);
         }
         return outputStream.toByteArray();
+    }
+
+    private String getHeadersAsString(Map<String, List<String>> headers) {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
+            String key = entry.getKey();
+            List<String> values = entry.getValue();
+            for (String value : values) {
+                sb.append(key).append(": ").append(value).append("\r\n");
+            }
+        }
+        return sb.toString();
     }
 }
