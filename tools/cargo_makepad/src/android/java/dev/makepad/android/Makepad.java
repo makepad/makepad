@@ -15,7 +15,7 @@ public class Makepad {
         void showTextIME();
         void hideTextIME();
         void showClipboardActions(String selected);
-        void requestHttp(HttpRequest request);
+        void requestHttp(int id, String url, String method, String headers, byte[] body);
     }
 
     static {
@@ -40,5 +40,5 @@ public class Makepad {
     static native void copyToClipboard(long cx, Callback callback);
     static native void pasteFromClipboard(long cx, String content, Callback callback);
     static native void cutToClipboard(long cx, Callback callback);
-    static native void onHttpResponse(long cx, HttpResponse response, Callback callback);
+    static native void onHttpResponse(long cx, int id, int statusCode, String headers, byte[] body, Callback callback);
 }
