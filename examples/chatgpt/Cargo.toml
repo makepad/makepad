@@ -9,3 +9,5 @@ metadata.makepad-auto-version = "5POKajmZt90sjG2MIw5C9dizbBo="
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "0.3.0" }
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "0.3.0" }
+makepad-micro-serde-derive = { path = "../../libs/micro_serde/derive", version = "0.3.0" }
