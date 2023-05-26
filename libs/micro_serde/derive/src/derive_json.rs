@@ -30,17 +30,25 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                 tb.add("s . out . push (").chr(']').add(") ;");
             }
             else if let Some(fields) = parser.eat_all_struct_fields(){
+                let fields_len = fields.len();
                 tb.add("s . st_pre ( ) ;");
                 // named struct
-                for field in fields{
+                for (i, field) in fields.into_iter().enumerate() {
                     if field.ty.into_iter().next().unwrap().to_string() == "Option"{
                         tb.add("if let Some ( t ) = ").add("& self .").ident(&field.name).add("{");
                         tb.add("s . field ( d + 1 ,").string(&field.name).add(") ;");
-                        tb.add("t . ser_json ( d + 1 , s ) ; s . conl ( ) ; } ;");
+                        tb.add("t . ser_json ( d + 1 , s ) ;");
+                        if i != fields_len - 1 {
+                            tb.add("s . conl ( ) ;");
+                        }
+                        tb.add("} ;");
                     }
                     else{
                         tb.add("s . field ( d + 1 ,").string(&field.name).add(" ) ;");
-                        tb.add("self .").ident(&field.name).add(". ser_json ( d + 1 , s ) ; s . conl ( ) ;");
+                        tb.add("self .").ident(&field.name).add(". ser_json ( d + 1 , s ) ;");
+                        if i != fields_len - 1 {
+                            tb.add("s . conl ( ) ;");
+                        }
                     }
                 }
                 tb.add("s . st_post ( d ) ;");
@@ -102,7 +110,7 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                         tb.add("s . out . push (").chr(':').add(") ;");
                         tb.add("s . st_pre ( ) ;");
                         
-                        for field in fields{
+                        for field in fields{ // TODO: remove trailing commas from here also
                             if field.ty.into_iter().next().unwrap().to_string() == "Option"{
                                 tb.add("if let Some ( t ) = ").ident(&field.name).add("{");
                                 tb.add("s . field ( d + 1 ,").string(&field.name).add(") ;");
@@ -175,7 +183,7 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                 tb.add("match s . strbuf . as_ref ( ) {");
                 for field in &fields{
                     tb.string(&field.name).add("=> { s . next_colon ( i ) ? ;");
-                    tb.ident(&format!("_{}",field.name)).add("= Some ( crate::makepad_micro_serde ::DeJson :: de_json ( s , i ) ? ) ; } ,");
+                    tb.ident(&format!("_{}",field.name)).add("= Some (DeJson :: de_json ( s , i ) ? ) ; } ,");
                 }
                 tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
                 tb.add("} ; s . eat_comma_curly ( i ) ? ;");
