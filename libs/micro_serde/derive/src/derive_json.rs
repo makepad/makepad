@@ -16,8 +16,8 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
             let where_clause = parser.eat_where_clause(Some("SerJson"));
 
             tb.add("impl").stream(generic.clone());
-            tb.add("crate::makepad_micro_serde::SerJson for").ident(&name).stream(generic).stream(where_clause);
-            tb.add("{ fn ser_json ( & self , d : usize , s : & mut crate::makepad_micro_serde::SerJsonState ) {");
+            tb.add("SerJson for").ident(&name).stream(generic).stream(where_clause);
+            tb.add("{ fn ser_json ( & self , d : usize , s : & mut SerJsonState ) {");
             
             if let Some(types) = types{
                 tb.add("s . out . push (").chr('[').add(") ;");
@@ -66,8 +66,8 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
             let where_clause = parser.eat_where_clause(Some("SerJson"));
 
             tb.add("impl").stream(generic.clone());
-            tb.add("crate::makepad_micro_serde::SerJson for").ident(&name).stream(generic).stream(where_clause);
-            tb.add("{ fn ser_json ( & self , d : usize , s : & mut  crate::makepad_micro_serde::SerJsonState ) {");
+            tb.add("SerJson for").ident(&name).stream(generic).stream(where_clause);
+            tb.add("{ fn ser_json ( & self , d : usize , s : & mut SerJsonState ) {");
             tb.add("s . out . push (").chr('{').add(") ;");
             tb.add("match self {");
             
@@ -109,16 +109,24 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                         tb.add("s . label (").string(&variant).add(") ;");
                         tb.add("s . out . push (").chr(':').add(") ;");
                         tb.add("s . st_pre ( ) ;");
-                        
-                        for field in fields{ // TODO: remove trailing commas from here also
+
+                        let fields_len = fields.len();
+                        for (i, field) in fields.into_iter().enumerate() {
                             if field.ty.into_iter().next().unwrap().to_string() == "Option"{
                                 tb.add("if let Some ( t ) = ").ident(&field.name).add("{");
                                 tb.add("s . field ( d + 1 ,").string(&field.name).add(") ;");
-                                tb.add("t . ser_json ( d + 1 , s ) ; s . conl ( ) ; } ;");
+                                tb.add("t . ser_json ( d + 1 , s ) ;");
+                                if i != fields_len - 1 {
+                                    tb.add("s . conl ( ) ;");
+                                }
+                                tb.add("} ;");
                             }
                             else{
                                 tb.add("s . field ( d + 1 ,").string(&field.name).add(" ) ;");
-                                tb.ident(&field.name).add(". ser_json ( d + 1 , s ) ; s . conl ( ) ;");
+                                tb.ident(&field.name).add(". ser_json ( d + 1 , s ) ;");
+                                if i != fields_len - 1 {
+                                    tb.add("s . conl ( ) ;");
+                                }
                             }
                         }
                         tb.add("s . st_post ( d ) ; }");
@@ -159,8 +167,8 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
             let where_clause = parser.eat_where_clause(Some("DeJson"));
 
             tb.add("impl").stream(generic.clone());
-            tb.add("crate::makepad_micro_serde::DeJson for").ident(&name).stream(generic).stream(where_clause);
-            tb.add("{ fn de_json ( s : &  mut  crate::makepad_micro_serde::DeJsonState , i : & mut std :: str :: Chars )");
+            tb.add("DeJson for").ident(&name).stream(generic).stream(where_clause);
+            tb.add("{ fn de_json ( s : &  mut  DeJsonState , i : & mut std :: str :: Chars )");
             tb.add("-> std :: result :: Result < Self ,  DeJsonErr > { ");
 
             if let Some(types) = types{
@@ -218,9 +226,9 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
             let where_clause = parser.eat_where_clause(Some("DeJson"));
 
             tb.add("impl").stream(generic.clone());
-            tb.add("crate::makepad_micro_serde::DeJson for").ident(&name).stream(generic).stream(where_clause);
-            tb.add("{ fn de_json ( s : & mut  crate::makepad_micro_serde::DeJsonState , i : & mut std :: str :: Chars )");
-            tb.add("-> std :: result :: Result < Self , crate::makepad_micro_serde :: DeJsonErr > { ");
+            tb.add("DeJson for").ident(&name).stream(generic).stream(where_clause);
+            tb.add("{ fn de_json ( s : & mut  DeJsonState , i : & mut std :: str :: Chars )");
+            tb.add("-> std :: result :: Result < Self , DeJsonErr > { ");
             tb.add("s . curly_open ( i ) ? ;");
             tb.add("let _ = s . string ( i ) ? ;");
             tb.add("s . colon ( i ) ? ;");
@@ -253,7 +261,7 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                         tb.add("match s . strbuf . as_ref ( ) {");
                         for field in &fields{
                             tb.string(&field.name).add("=> { s . next_colon ( i ) ? ;");
-                            tb.ident(&format!("_{}",field.name)).add("= Some (crate::makepad_micro_serde ::DeJson :: de_json ( s , i ) ? ) ; } ,");
+                            tb.ident(&format!("_{}",field.name)).add("= Some (DeJson :: de_json ( s , i ) ? ) ; } ,");
                         }
                         tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
                         tb.add("} s . eat_comma_curly ( i ) ? ;");
