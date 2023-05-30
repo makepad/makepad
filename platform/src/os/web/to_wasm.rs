@@ -601,6 +601,14 @@ pub struct ToWasmAppGotFocus {}
 pub struct ToWasmAppLostFocus {}
 
 #[derive(ToWasm)]
+pub struct ToWasmHTTPResponse {
+    pub id: String,
+    pub status: u32,
+    pub headers: String,
+    pub body: WasmDataU8
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmWebSocketClose {
     pub web_socket_id: usize
 }

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Simple UI example</title>
     <script type='module'>
-        import {WasmWebGL} from "/makepad/platform/src/os/web_browser/web_gl.js"
+        import {WasmWebGL} from "/makepad/platform/src/os/web/web_gl.js"
         
         const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
             "/makepad/target/wasm32-unknown-unknown/release/makepad-example-chatgpt.wasm"
@@ -20,8 +20,8 @@
         
         let app = new MyWasmApp(wasm);
     </script>
-    <script type='module' src='/makepad/platform/src/os/web_browser/auto_reload.js'></script>
-    <link rel='stylesheet' type='text/css' href='/makepad/platform/src/os/web_browser/full_canvas.css'>
+    <script type='module' src='/makepad/platform/src/os/web/auto_reload.js'></script>
+    <link rel='stylesheet' type='text/css' href='/makepad/platform/src/os/web/full_canvas.css'>
 	</head> 
 	<body>
 		<canvas class='full_canvas'></canvas>
