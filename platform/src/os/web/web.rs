@@ -16,6 +16,7 @@ use {
         },
         event::{
             ToWasmMsgEvent,
+            HttpResponseEvent,
             WebSocket,
             WebSocketErrorEvent,
             WebSocketMessageEvent,
@@ -32,6 +33,7 @@ use {
             WindowGeom,
             WindowGeomChangeEvent
         },
+        network::HttpResponse,
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx},
@@ -217,6 +219,19 @@ impl Cx {
                     let main_pass_id = self.windows[CxWindowPool::id_zero()].main_pass_id.unwrap();
                     self.passes[main_pass_id].paint_dirty = true;
                 }
+
+                live_id!(ToWasmHTTPResponse) => {
+                    let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
+                    let response = HttpResponse::new(
+                        LiveId::from_str(&tw.id).unwrap(),
+                        tw.status as u16,
+                        tw.headers,
+                        Some(tw.body.into_vec_u8())
+                    );
+                    self.call_event_handler(&Event::HttpResponse(HttpResponseEvent {
+                        response
+                    }));
+                }
                 
                 live_id!(ToWasmWebSocketClose) => {
                     let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
@@ -382,7 +397,17 @@ impl Cx {
                 CxOsOp::StartDragging(_dragged_item) => {
                 }
                 CxOsOp::UpdateMenu(_menu) => {
-                }
+                },
+                CxOsOp::HttpRequest(request) => {
+                    let headers = request.get_headers_string();
+                    self.os.from_wasm(FromWasmHTTPRequest {
+                        id: format!("{}", request.id),
+                        url: request.url,
+                        method: request.method.to_string().into(),
+                        headers: headers,
+                        body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
+                    });
+                },
             }
         }
     }
@@ -417,6 +442,7 @@ impl CxOsApi for Cx {
             ToWasmXRUpdate::to_js_code(),
             ToWasmAppGotFocus::to_js_code(),
             ToWasmAppLostFocus::to_js_code(),
+            ToWasmHTTPResponse::to_js_code(),
             ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
@@ -440,6 +466,7 @@ impl CxOsApi for Cx {
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
             FromWasmCreateThread::to_js_code(),
+            FromWasmHTTPRequest::to_js_code(),
             FromWasmWebSocketOpen::to_js_code(),
             FromWasmWebSocketSend::to_js_code(),
             FromWasmXrStartPresenting::to_js_code(),
