@@ -18,8 +18,6 @@ use {
     },
 };
 
-use std::collections::HashMap;
-
 /// This struct corresponds to the `Makepad.Callback` interface in Java (which is implemented by
 /// the `MakepadSurface` class) and enables us to call methods on that interface while hiding as
 /// much of the Java native interface from our Rust code as possible.
@@ -221,13 +219,13 @@ impl<'a> AndroidToJava<'a> {
 
     pub fn http_request(&self, request: HttpRequest) {
         unsafe {
-            let url = CString::new(request.url).unwrap();
+            let url = CString::new(request.url.clone()).unwrap();
             let url = ((**self.env).NewStringUTF.unwrap())(self.env, url.as_ptr());
 
             let method = CString::new(request.method.to_string()).unwrap();
             let method = ((**self.env).NewStringUTF.unwrap())(self.env, method.as_ptr());
     
-            let headers_string = convert_headers_to_string(request.headers);
+            let headers_string = request.get_headers_string();
             let headers = CString::new(headers_string).unwrap();
             let headers = ((**self.env).NewStringUTF.unwrap())(self.env, headers.as_ptr());
     
@@ -267,16 +265,6 @@ impl<'a> AndroidToJava<'a> {
             );
         }
     }    
-}
-
-fn convert_headers_to_string(headers: HashMap<String, Vec<String>>) -> String {
-    let mut headers_str = String::new();
-    for (key, values) in headers.iter() {
-        for value in values {
-            headers_str.push_str(&format!("{}: {}\r\n ", key, value));
-        }
-    }
-    headers_str
 }
 
 // The functions here correspond to the static functions on the `Makepad` class in Java.

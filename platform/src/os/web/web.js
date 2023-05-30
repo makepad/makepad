@@ -480,6 +480,44 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }, 0.016 * 1000.0);
     }
+
+    parse_and_set_headers(request, headers_string) {
+        let lines = headers_string.split("\r\n");
+        for (let line of lines) {
+            let parts = line.split(": ");
+            if (parts.length == 2) {
+                request.setRequestHeader(parts[0], parts[1]);
+            }
+        }
+    }
+
+    FromWasmHTTPRequest(args) {
+        const req = new XMLHttpRequest();
+        req.open(args.method, args.url);
+        this.parse_and_set_headers(req, args.headers);
+
+        // TODO decode in appropiate format
+        const decoder = new TextDecoder('UTF-8', { fatal: true });
+        let body = decoder.decode(this.clone_data_u8(args.body));
+
+        req.addEventListener("load", event => {
+            // TODO support other response data types
+            const encoder = new TextEncoder();
+            let response = event.target;
+            let body = encoder.encode(response.responseText);
+
+            this.to_wasm.ToWasmHTTPResponse({
+                id: args.id,
+                status: response.status,
+                body: body,
+                headers: response.getAllResponseHeaders()
+            });
+            this.do_wasm_pump();
+        });
+
+        req.send(body);
+        this.free_data_u8(args.body);
+    }
     
     // calling into wasm
     
