@@ -29,6 +29,14 @@ impl HttpRequest {
         entry.push(value);
     }
 
+    pub fn get_headers_string(&self) -> String {
+        let mut headers_string = String::new();
+        for (key, value) in self.headers.iter() {
+            headers_string.push_str(&format!("{}: {}\n", key, value.join(",")));
+        }
+        headers_string
+    }
+
     // WIP - takes whatever the user sends like a struct and we serialize to a byte array.
     // if it's possible I'd always send the body as a byte array to java to avoid 
     // sending a generic body and doing parsing/serializing on that side.
@@ -50,6 +58,15 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
+    pub fn new(id: LiveId, status_code: u16, string_headers: String, body: Option<Vec<u8>>) -> Self {
+        HttpResponse {
+            id,
+            status_code,
+            headers: HttpResponse::parse_headers(string_headers),
+            body: body
+        }
+    }
+
     pub fn get_raw_body(&self) -> Option<&Vec<u8>> {
         self.body.as_ref()
     }
@@ -63,6 +80,20 @@ impl HttpResponse {
         } else {
             None
         }
+    }
+
+    fn parse_headers(headers_string: String) -> HashMap<String, Vec<String>> {
+        let mut headers = HashMap::new();
+        for line in headers_string.lines() {
+            let mut split = line.split(":");
+            let key = split.next().unwrap();
+            let values = split.next().unwrap().to_string();
+            for val in values.split(",") {
+                let entry = headers.entry(key.to_string()).or_insert(Vec::new());
+                entry.push(val.to_string());
+            }
+        }
+        headers
     }
 }
 

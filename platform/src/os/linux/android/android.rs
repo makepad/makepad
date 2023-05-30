@@ -45,8 +45,6 @@ use {
     }
 };
 
-use std::collections::HashMap;
-
 // Defined in https://developer.android.com/reference/android/view/KeyEvent#META_CTRL_MASK
 const ANDROID_META_CTRL_MASK: i32 = 28672;
 // Defined in  https://developer.android.com/reference/android/view/KeyEvent#META_SHIFT_MASK
@@ -330,12 +328,12 @@ impl Cx {
 
     pub fn from_java_on_http_response(&mut self, id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
         let e = Event::HttpResponse(
-            HttpResponseEvent { response: HttpResponse {
-                id: LiveId(id),
+            HttpResponseEvent { response: HttpResponse::new(
+                LiveId(id),
                 status_code,
-                headers: parse_headers(&headers),
-                body: Some(body)
-            } }
+                headers,
+                Some(body)
+            ) }
         );
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
@@ -550,20 +548,4 @@ impl CxOs {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
     }
-}
-
-fn parse_headers(headers: &str) -> HashMap<String, Vec<String>> {
-    let mut result = HashMap::new();
-
-    for header in headers.split_terminator("\r\n") {
-        let parts: Vec<&str> = header.split(":").collect();
-        if parts.len() == 2 {
-            let key = parts[0].trim().to_string();
-            let value = parts[1].trim().to_string();
-
-            result.entry(key).or_insert_with(Vec::new).push(value);
-        }
-    }
-
-    result
 }
