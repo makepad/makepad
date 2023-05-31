@@ -32,7 +32,7 @@ impl HttpRequest {
     pub fn get_headers_string(&self) -> String {
         let mut headers_string = String::new();
         for (key, value) in self.headers.iter() {
-            headers_string.push_str(&format!("{}: {}\n", key, value.join(",")));
+            headers_string.push_str(&format!("{}: {}\r\n", key, value.join(",")));
         }
         headers_string
     }
