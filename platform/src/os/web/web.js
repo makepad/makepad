@@ -494,6 +494,7 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmHTTPRequest(args) {
         const req = new XMLHttpRequest();
         req.open(args.method, args.url);
+        req.responseType = "arraybuffer";
         this.parse_and_set_headers(req, args.headers);
 
         // TODO decode in appropiate format
@@ -501,16 +502,13 @@ export class WasmWebBrowser extends WasmBridge {
         let body = decoder.decode(this.clone_data_u8(args.body));
 
         req.addEventListener("load", event => {
-            // TODO support other response data types
-            const encoder = new TextEncoder();
-            let response = event.target;
-            let body = encoder.encode(response.responseText);
+            let responseEvent = event.target;
 
             this.to_wasm.ToWasmHTTPResponse({
                 id: args.id,
-                status: response.status,
-                body: body,
-                headers: response.getAllResponseHeaders()
+                status: responseEvent.status,
+                body: responseEvent.response,
+                headers: responseEvent.getAllResponseHeaders()
             });
             this.do_wasm_pump();
         });
