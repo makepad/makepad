@@ -345,10 +345,11 @@ Makepad.Callback{
             future.thenAccept(response -> {
                 runOnUiThread(() -> Makepad.onHttpResponse(mCx, id, response.getStatusCode(), response.getHeaders(), response.getBody(), (Makepad.Callback) mView.getContext()));
             }).exceptionally(ex -> {
+                runOnUiThread(() -> Makepad.onHttpRequestError(mCx, id, ex.toString(), (Makepad.Callback) mView.getContext()));
                 return null;
             });
         } catch (Exception e) {
-            // Handle the exception
+            Makepad.onHttpRequestError(mCx, id, e.toString(), (Makepad.Callback) mView.getContext());
         }
     }
 
