@@ -41,4 +41,5 @@ public class Makepad {
     static native void pasteFromClipboard(long cx, String content, Callback callback);
     static native void cutToClipboard(long cx, Callback callback);
     static native void onHttpResponse(long cx, int id, int statusCode, String headers, byte[] body, Callback callback);
+    static native void onHttpRequestError(long cx, int id, String error, Callback callback);
 }

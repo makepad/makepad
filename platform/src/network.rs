@@ -63,7 +63,7 @@ impl HttpResponse {
             id,
             status_code,
             headers: HttpResponse::parse_headers(string_headers),
-            body: body
+            body
         }
     }
 
@@ -124,4 +124,10 @@ impl Method {
             Method::PATCH => "PATCH",
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct HttpRequestError {
+    pub id: LiveId,
+    pub error: String
 }

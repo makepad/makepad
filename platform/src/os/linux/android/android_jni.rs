@@ -720,3 +720,23 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpResponse(
         },
     );
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpRequestError(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    request_id: jint,
+    exception: jstring,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_http_request_error(
+        request_id as u64,
+        jstring_to_string(env, exception),
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
