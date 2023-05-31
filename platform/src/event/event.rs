@@ -78,6 +78,7 @@ pub enum Event {
     VideoInputs(VideoInputsEvent),
 
     HttpResponse(HttpResponseEvent),
+    HttpRequestError(HttpRequestErrorEvent),
 
     
     #[cfg(target_arch = "wasm32")]

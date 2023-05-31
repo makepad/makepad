@@ -102,17 +102,29 @@ impl AppMain for App{
         if let Event::Draw(event) = event {
             return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
         }
+
         if let Event::HttpResponse(event) = event { 
+            let label = self.ui.get_label(id!(message_label));
+
             event.response.id.as_string(|id: Option<&str>| {
                 match id {
-                    _ => { // match on "SendChatMessage", currently not working
-                        let chat_response = event.response.get_body::<ChatResponse>().unwrap();
-                        let label = self.ui.get_label(id!(message_label));
-                        label.set_label(&chat_response.choices[0].message.content);
+                     _ => { // match on "SendChatMessage", currently not working
+                        if event.response.status_code == 200 {
+                            let chat_response = event.response.get_body::<ChatResponse>().unwrap();
+                            label.set_label(&chat_response.choices[0].message.content);
+                        } else {
+                            label.set_label("Failed to connect with OpenAI");
+                        }
                         label.redraw(cx);
                     },
                 }
             })
+        } else if let Event::HttpRequestError(event) = event {
+            let label = self.ui.get_label(id!(message_label));
+
+            makepad_error_log::log!("HTTP request error: {:?}", event.request_error);
+            label.set_label("Failed to connect with OpenAI");
+            label.redraw(cx);
         }
         
         let actions = self.ui.handle_widget_event(cx, event);
