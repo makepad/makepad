@@ -61,7 +61,7 @@ public class MakepadNetwork {
 
                 response = new HttpResponse(statusCode, responseHeaders, responseBody);
             } catch (IOException e) {
-                e.printStackTrace(); // TODO: throw a meaningful exception
+               throw(new RuntimeException(e));
             } finally {
                 if (connection != null) {
                     connection.disconnect();

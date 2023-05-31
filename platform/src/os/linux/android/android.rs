@@ -35,6 +35,7 @@ use {
             Event,
             WindowGeom,
             HttpResponseEvent,
+            HttpRequestErrorEvent,
         },
         window::CxWindowPool,
         pass::CxPassParent,
@@ -334,6 +335,19 @@ impl Cx {
                 headers,
                 Some(body)
             ) }
+        );
+        self.call_event_handler(&e);
+        self.after_every_event(&to_java);
+    }
+
+    pub fn from_java_on_http_request_error(&mut self, id: u64, error: String, to_java: AndroidToJava) {
+        let e = Event::HttpRequestError(
+            HttpRequestErrorEvent { 
+                request_error: HttpRequestError {
+                    id: LiveId(id),
+                    error
+                }
+            }
         );
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
