@@ -47,6 +47,10 @@ impl HttpRequest {
        let serialized_body = json_body.into_bytes();
        self.body = Some(serialized_body); 
     }
+
+    pub fn set_string_body(&mut self, body: String) {
+        self.body = Some(body.into_bytes());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +73,15 @@ impl HttpResponse {
 
     pub fn get_raw_body(&self) -> Option<&Vec<u8>> {
         self.body.as_ref()
+    }
+
+    pub fn get_string_body(&self) -> Option<String> {
+        if let Some(body) = self.body.as_ref() {
+            let deserialized = String::from_utf8(body.to_vec()).unwrap();
+            Some(deserialized)
+        } else {
+            None
+        }
     }
 
     pub fn get_body<T: DeBin + SerJson + DeJson>(&self) -> Option<T> { 
