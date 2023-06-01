@@ -336,7 +336,7 @@ Makepad.Callback{
         }
     }
 
-    public void requestHttp(int id, String url, String method, String headers, byte[] body) {
+    public void requestHttp(long id, String url, String method, String headers, byte[] body) {
         try {
             MakepadNetwork network = new MakepadNetwork();
 
