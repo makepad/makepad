@@ -108,7 +108,7 @@ impl AppMain for App{
 
             event.response.id.as_string(|id: Option<&str>| {
                 match id {
-                     _ => { // match on "SendChatMessage", currently not working
+                     Some("SendChatMessage") => {
                         if event.response.status_code == 200 {
                             let chat_response = event.response.get_body::<ChatResponse>().unwrap();
                             label.set_label(&chat_response.choices[0].message.content);
@@ -117,6 +117,7 @@ impl AppMain for App{
                         }
                         label.redraw(cx);
                     },
+                    _ => (),
                 }
             })
         } else if let Event::HttpRequestError(event) = event {
