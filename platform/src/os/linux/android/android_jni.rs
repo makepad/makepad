@@ -245,7 +245,7 @@ impl<'a> AndroidToJava<'a> {
             };
     
             let name = CString::new("requestHttp").unwrap();
-            let signature = CString::new("(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V").unwrap();
+            let signature = CString::new("(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V").unwrap();
             let method_id = (**self.env).GetMethodID.unwrap()(
                 self.env,
                 (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
@@ -257,7 +257,7 @@ impl<'a> AndroidToJava<'a> {
                 self.env,
                 self.callback,
                 method_id,
-                request.id,
+                request.id.get_value() as jlong,
                 url,
                 method,
                 headers,
@@ -699,7 +699,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpResponse(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
-    request_id: jint,
+    request_id: jlong,
     status_code: jint,
     headers: jstring,
     body: jobject,
@@ -726,7 +726,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpRequestError(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
-    request_id: jint,
+    request_id: jlong,
     exception: jstring,
     callback: jobject,
 ) {
