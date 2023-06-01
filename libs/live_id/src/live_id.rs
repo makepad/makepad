@@ -127,6 +127,10 @@ impl LiveId {
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
+
+    pub fn get_value(&self) -> u64 {
+        self.0
+    }
     
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
