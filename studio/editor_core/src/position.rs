@@ -49,7 +49,8 @@ impl Position {
         let mut distance = *self - Position::origin();
         let mut operation_span_iter = delta.iter().map(|operation| operation.span());
         let mut operation_span_slot = operation_span_iter.next();
-        let new_position = loop {
+
+        loop {
             match operation_span_slot {
                 Some(OperationSpan::Retain(count)) => match count.cmp(&distance) {
                     Ordering::Less => {
@@ -78,8 +79,7 @@ impl Position {
                     break position + distance;
                 }
             }
-        };
-        new_position
+        }
     }
 }
 

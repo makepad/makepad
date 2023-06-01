@@ -125,7 +125,7 @@ impl ClassDecl {
         if cls.is_null() {
             None
         } else {
-            Some(ClassDecl { cls: cls })
+            Some(ClassDecl { cls })
         }
     }
 
@@ -261,7 +261,7 @@ impl ProtocolDecl {
         if proto.is_null() {
             None
         } else {
-            Some(ProtocolDecl { proto: proto })
+            Some(ProtocolDecl { proto })
         }
     }
 

@@ -36,7 +36,6 @@ impl HostOs {
 }
 
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
-    
     #[allow(unused)]
     let mut host_os = HostOs::Unsupported;
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))] let mut host_os = HostOs::WindowsX64;
@@ -44,6 +43,8 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))] let mut host_os = HostOs::MacosAarch64;
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))] let mut host_os = HostOs::LinuxX64;
     let mut sdk_path = None;
+    let mut package_name = None;
+    let mut app_label = None;
     // pull out options
     for i in 0..args.len() {
         let v = &args[i];
@@ -52,6 +53,12 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         }
         else if let Some(opt) = v.strip_prefix("--sdk-path=") {
             sdk_path = Some(opt.to_string());
+        }
+        else if let Some(opt) = v.strip_prefix("--package-name=") {
+            package_name = Some(opt.to_string());
+        }
+        else if let Some(opt) = v.strip_prefix("--app-label=") {
+            app_label = Some(opt.to_string());
         }
         else {
             args = &args[i..];
@@ -63,31 +70,29 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     }
     
     let cwd = std::env::current_dir().unwrap();
-    let sdk_dir = cwd.join(&sdk_path.unwrap());
-    // 
-    
+    let sdk_dir = cwd.join(sdk_path.unwrap());
     
     match args[0].as_ref() {
         "rustup-toolchain-install"=>{
             sdk::rustup_toolchain_install()
         }
         "adb"=>{
-            return compile::adb(&sdk_dir, host_os, &args[1..])
+            compile::adb(&sdk_dir, host_os, &args[1..])
         },
         "java"=>{
-            return compile::java(&sdk_dir, host_os, &args[1..])
+            compile::java(&sdk_dir, host_os, &args[1..])
         },
         "javac"=>{
-            return compile::javac(&sdk_dir, host_os, &args[1..])
+            compile::javac(&sdk_dir, host_os, &args[1..])
         },
         "download-sdk" => {
-            return sdk::download_sdk(&sdk_dir, host_os, &args[1..])
+            sdk::download_sdk(&sdk_dir, host_os, &args[1..])
         }
         "expand-sdk" => {
-            return sdk::expand_sdk(&sdk_dir, host_os, &args[1..])
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..])
         }
         "remove-sdk-sources" => {
-            return sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
+            sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
         }
         "toolchain-install" => {
             println!("Installing Android toolchain\n");
@@ -96,19 +101,17 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             sdk::expand_sdk(&sdk_dir, host_os, &args[1..])?;
             sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])?;
             println!("\nAndroid toolchain has been installed\n");
-            return Ok(())
+            Ok(())
         }
         /*"base-apk"=>{
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
         "build" =>{
-            if let Err(e) = compile::build(&sdk_dir, host_os, &args[1..]){
-                return Err(e)
-            }
+            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..])?;
             Ok(())
         }
         "run" =>{
-            compile::run(&sdk_dir, host_os, &args[1..])
+            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..])
         }
         _ => Err(format!("{} is not a valid command or option", args[0]))
     }

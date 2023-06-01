@@ -1507,9 +1507,9 @@ impl<T: ::windows::core::RuntimeType> VectorIterator<T> {
 impl<T: ::windows::core::RuntimeType> ::core::iter::Iterator for VectorIterator<T> {
     type Item = T;
     fn next(&mut self) -> ::core::option::Option<Self::Item> {
-        self.vector.as_ref().and_then(|vector| vector.GetAt(self.current).ok()).and_then(|result| {
+        self.vector.as_ref().and_then(|vector| vector.GetAt(self.current).ok()).map(|result| {
             self.current += 1;
-            Some(result)
+            result
         })
     }
 }
@@ -1739,9 +1739,9 @@ impl<T: ::windows::core::RuntimeType> VectorViewIterator<T> {
 impl<T: ::windows::core::RuntimeType> ::core::iter::Iterator for VectorViewIterator<T> {
     type Item = T;
     fn next(&mut self) -> ::core::option::Option<Self::Item> {
-        self.vector.as_ref().and_then(|vector| vector.GetAt(self.current).ok()).and_then(|result| {
+        self.vector.as_ref().and_then(|vector| vector.GetAt(self.current).ok()).map(|result| {
             self.current += 1;
-            Some(result)
+            result
         })
     }
 }
@@ -2362,6 +2362,7 @@ unsafe impl ::core::marker::Sync for ValueSet {}
 #[doc = "*Required features: `\"Foundation_Collections\"`*"]
 #[repr(transparent)]
 #[derive(::core::cmp::PartialEq, ::core::cmp::Eq)]
+#[derive(Default)]
 pub struct CollectionChange(pub i32);
 impl CollectionChange {
     pub const Reset: Self = Self(0i32);
@@ -2375,11 +2376,7 @@ impl ::core::clone::Clone for CollectionChange {
         *self
     }
 }
-impl ::core::default::Default for CollectionChange {
-    fn default() -> Self {
-        Self(0)
-    }
-}
+
 unsafe impl ::windows::core::Abi for CollectionChange {
     type Abi = Self;
 }

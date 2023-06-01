@@ -23,21 +23,21 @@ impl WasmJSOutput{
         if is_recur{ // call body
             self.push_ln(slot, &format!("{}({});", name, prop));
             // check if we already have the fn
-            if self.fns.iter().find(|p| p.name == name).is_some(){
+            if self.fns.iter().any(|p| p.name == name){
                 return None
             }
             self.fns.push(WasmJSOutputFn{name: name.to_string(), body:String::new(), temp});
-            return Some(self.fns.len() - 1)
+            Some(self.fns.len() - 1)
         }
         else{
             self.push_ln(slot, &format!("let t{} = {};", temp, prop));
-            return Some(slot)
+            Some(slot)
         }
     }
     
     pub fn push_ln(&mut self, slot:usize, s:&str){
         self.fns[slot].body.push_str(s);
-        self.fns[slot].body.push_str("\n");
+        self.fns[slot].body.push('\n');
     }
 }
 
@@ -67,7 +67,7 @@ pub trait ToWasm {
         Self::to_wasm_js_body(&mut out, 0, false, "t0", new_temp);
 
         for p in out.fns.iter().rev(){
-            if p.name == ""{
+            if p.name.is_empty(){
                 wrapper.push_str(&p.body);
             }
             else{
