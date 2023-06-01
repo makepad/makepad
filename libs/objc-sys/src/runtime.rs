@@ -153,7 +153,7 @@ impl Sel {
     #[inline]
     pub unsafe fn from_ptr(ptr: *const c_void) -> Sel {
         Sel {
-            ptr: ptr,
+            ptr,
         }
     }
 
@@ -199,10 +199,10 @@ impl Ivar {
 
     /// Returns the offset of self.
     pub fn offset(&self) -> isize {
-        let offset = unsafe {
+        
+        unsafe {
             ivar_getOffset(self)
-        };
-        offset as isize
+        }
     }
 
     /// Returns the `Encoding` of self.
@@ -313,7 +313,7 @@ impl Class {
     /// Returns the size of instances of self.
     pub fn instance_size(&self) -> usize {
         unsafe {
-            class_getInstanceSize(self) as usize
+            class_getInstanceSize(self)
         }
     }
 

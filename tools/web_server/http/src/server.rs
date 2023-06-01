@@ -49,7 +49,7 @@ pub fn start_http_server(
     http_server: HttpServer,
 ) -> Option<std::thread::JoinHandle<() >> {
     
-    let listener = if let Ok(listener) = TcpListener::bind(http_server.listen_address.clone()) {listener} else {println!("Cannot bind http server port"); return None};
+    let listener = if let Ok(listener) = TcpListener::bind(http_server.listen_address) {listener} else {println!("Cannot bind http server port"); return None};
     
     let listen_thread = {
         std::thread::spawn(move || {
@@ -81,7 +81,7 @@ pub fn start_http_server(
                     if headers.verb == "GET" {
                         return handle_get(http_server, tcp_stream, headers);
                     }
-                    return http_error_out(tcp_stream, 500);
+                    http_error_out(tcp_stream, 500)
                 });
             }
         })
@@ -145,12 +145,12 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
         loop{
             match rx_socket.recv_timeout(Duration::from_millis(2000)){
                 Ok(data)=>{
-                    if data.len() == 0{
+                    if data.is_empty(){
                         println!("Write socket closed");
                         break
                     }
                     let header = BinaryMessageHeader::from_len(data.len());
-                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &header.as_slice());
+                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, header.as_slice());
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
                 },
                 Err(RecvTimeoutError::Timeout)=>{ 

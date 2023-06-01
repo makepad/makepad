@@ -19,6 +19,6 @@ pub fn derive_from_live_id_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }
 

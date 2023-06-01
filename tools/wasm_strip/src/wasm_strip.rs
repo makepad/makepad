@@ -80,7 +80,7 @@ pub struct WasmSection{
 
 fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>,WasmParseError>{
     let mut sections = Vec::new();
-    let mut reader = Reader::new(&buf);
+    let mut reader = Reader::new(buf);
     if reader.read_u32()? != 0x6d736100{
         println!("Not a wasm file!");
         return Err(WasmParseError);
@@ -99,7 +99,7 @@ fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>,WasmParseError>{
                 if let Ok(name) = std::str::from_utf8(&reader.bytes[0..name_len]){
                     sections.push(WasmSection{
                         start: offset,
-                        type_id: type_id,
+                        type_id,
                         end: offset + payload_len + (start-offset),
                         name: name.to_string()
                     })
@@ -113,7 +113,7 @@ fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>,WasmParseError>{
             else{
                 sections.push(WasmSection{
                     start: offset,
-                    type_id: type_id,
+                    type_id,
                     end: offset + payload_len + (start-offset),
                     name: "".to_string()
                 });
@@ -124,13 +124,13 @@ fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>,WasmParseError>{
             break;
         }
     }
-    return Ok(sections);
+    Ok(sections)
 }
 
 pub fn wasm_strip_debug(buf: &[u8])->Result<Vec<u8>,WasmParseError>{
     let mut strip = Vec::new();
     strip.extend_from_slice(&[0, 97, 115, 109, 1, 0, 0, 0]);
-    let sections = read_wasm_sections(&buf)?;
+    let sections = read_wasm_sections(buf)?;
     // lets rewrite it
     for section in &sections{
         if section.type_id != 0{// !section.name.starts_with(".debug"){

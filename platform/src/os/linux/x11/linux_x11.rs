@@ -176,6 +176,9 @@ impl Cx {
             XlibEvent::TextCopy(e) => {
                 self.call_event_handler(&Event::TextCopy(e))
             }
+            XlibEvent::TextCut(e) => {
+                self.call_event_handler(&Event::TextCut(e))
+            }
             XlibEvent::Timer(e) => {
                 //println!("TIMER! {:?}", std::time::Instant::now());
                 if e.timer_id == 0{

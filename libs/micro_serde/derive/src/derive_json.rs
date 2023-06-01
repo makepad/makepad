@@ -151,7 +151,7 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }
 
 pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
@@ -301,5 +301,5 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }
