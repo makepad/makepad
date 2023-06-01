@@ -11,6 +11,7 @@
 //! Consequently, the only time the tokenizer can end up in a state other than the initial state is
 //! when it is in the middle of tokenizing a multiline token and runs into the end of the line
 //! before it finds the end of the token.
+#[allow(clippy::collapsible_if)]
 
 use {
     crate::{
@@ -90,6 +91,7 @@ impl State {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct InitialState;
 
+#[allow(clippy::collapsible_if)]
 impl InitialState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         match (cursor.peek(0), cursor.peek(1), cursor.peek(2)) {
@@ -237,7 +239,7 @@ impl InitialState {
         match cursor.peek(0) {
             'f' => {
                 cursor.skip(1);
-                if "alse".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) {
+                if "alse".chars().all(|expected| cursor.skip_if(|actual| actual == expected)) {
                     if !cursor.peek(0).is_identifier_continue() {
                         return (State::Initial(InitialState), FullToken::Bool(false));
                     }
@@ -246,7 +248,7 @@ impl InitialState {
             }
             't' => {
                 cursor.skip(1);
-                if "rue".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) {
+                if "rue".chars().all(|expected| cursor.skip_if(|actual| actual == expected)) {
                     if !cursor.peek(0).is_identifier_continue() {
                         return (State::Initial(InitialState), FullToken::Bool(true));
                     }

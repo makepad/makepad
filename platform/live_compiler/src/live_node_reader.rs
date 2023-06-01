@@ -31,17 +31,12 @@ impl<'a> LiveNodeReader<'a> {
     
     pub fn index_option(&self, index: Option<usize>, depth_change: isize) -> Option<Self> {
         if self.eot {panic!();}
-        if let Some(index) = index {
-            Some(Self {
-                eot: self.eot,
-                depth: (self.depth as isize + depth_change) as usize,
-                index: index,
-                nodes: self.nodes
-            })
-        }
-        else {
-            None
-        }
+        index.map(|index| Self {
+            eot: self.eot,
+            depth: (self.depth as isize + depth_change) as usize,
+            index,
+            nodes: self.nodes
+        })
     }
     
     pub fn node(&self) -> &LiveNode {
@@ -120,7 +115,7 @@ impl<'a> LiveNodeReader<'a> {
     }
     
     pub fn is_eot(&self) -> bool {
-        return self.eot
+        self.eot
     }
     
     pub fn index(&self) -> usize {
@@ -214,7 +209,7 @@ impl<'a> LiveNodeMutReader<'a> {
     }
     
     pub fn is_eot(&mut self) -> bool {
-        return self.eot
+        self.eot
     }
     
     pub fn index(&mut self) -> usize {

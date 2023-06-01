@@ -281,6 +281,9 @@ impl Cx {
             CocoaEvent::TextCopy(e) => {
                 self.call_event_handler(&Event::TextCopy(e))
             }
+            CocoaEvent::TextCut(e) => {
+                self.call_event_handler(&Event::TextCut(e))
+            }
             CocoaEvent::Timer(e) => {
                 self.call_event_handler(&Event::Timer(e))
             }

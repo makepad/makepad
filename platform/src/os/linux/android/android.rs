@@ -27,6 +27,7 @@ use {
             TimerEvent,
             TextInputEvent,
             TextCopyEvent,
+            TextCutEvent,
             KeyEvent,
             KeyModifiers,
             KeyCode,
@@ -230,7 +231,6 @@ impl Cx {
                     }
                 );
                 self.call_event_handler(&e);
-                self.after_every_event(&to_java);
             }
             None => {
                 let key_code = android_to_makepad_key_code(key_code_val);
@@ -245,11 +245,36 @@ impl Cx {
                         let input = ch.unwrap().to_string();
                         e = Event::TextInput(
                             TextInputEvent {
-                                input: input,
+                                input,
                                 replace_last: false,
                                 was_paste: false,
                             }
-                        )
+                        );
+                        self.call_event_handler(&e);
+                    } else if is_shortcut {
+                        if key_code == KeyCode::KeyC {  
+                            let response = Rc::new(RefCell::new(None));
+                            e = Event::TextCopy(TextCopyEvent {
+                                response: response.clone()
+                            });
+                            self.call_event_handler(&e);
+                            let response = response.borrow();
+                            if let Some(response) = response.as_ref(){
+                                to_java.copy_to_clipboard(response);
+                            }
+                        } else if key_code == KeyCode::KeyX {
+                            let response = Rc::new(RefCell::new(None));
+                            let e = Event::TextCut(TextCutEvent {
+                                response: response.clone()
+                            });
+                            self.call_event_handler(&e);
+                            let response = response.borrow();
+                            if let Some(response) = response.as_ref(){
+                                to_java.copy_to_clipboard(response);
+                            }
+                        } else if key_code == KeyCode::KeyV {  
+                            to_java.paste_from_clipboard();
+                        }
                     } else {
                         e = Event::KeyDown(
                             KeyEvent {
@@ -258,9 +283,9 @@ impl Cx {
                                 modifiers: KeyModifiers {shift, control, alt, ..Default::default()},
                                 time: self.os.time_now()
                             }
-                        )
+                        );
+                        self.call_event_handler(&e);
                     }
-                    self.call_event_handler(&e);
                     self.after_every_event(&to_java);
                 }
             }
@@ -306,21 +331,24 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_copy_to_clipboard(&mut self, to_java: AndroidToJava) {
-        let response = Rc::new(RefCell::new(None));
-        let e = Event::TextCopy(TextCopyEvent {
-            response: response.clone()
-        });
-        self.call_event_handler(&e);
-        self.after_every_event(&to_java);
+    pub fn from_java_on_paste_from_clipboard(&mut self, content: Option<String>, to_java: AndroidToJava) {
+        if let Some(text) = content {
+            let e = Event::TextInput(
+                TextInputEvent {
+                    input: text,
+                    replace_last: false,
+                    was_paste: true,
+                }
+            );
+            self.call_event_handler(&e);
+            self.after_every_event(&to_java);
+        }
     }
 
-    pub fn from_java_paste_from_clipboard(&mut self, content: String, to_java: AndroidToJava) {
-        let e = Event::TextInput(
-            TextInputEvent {
-                input: content,
-                replace_last: false,
-                was_paste: true,
+    pub fn from_java_on_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
+        let e = Event::TextCut(
+            TextCutEvent {
+                response: Rc::new(RefCell::new(None))
             }
         );
         self.call_event_handler(&e);
@@ -354,9 +382,9 @@ impl Cx {
     }
 
     pub fn from_java_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
-        let e = Event::TextCut;
-        self.call_event_handler(&e);
-        self.after_every_event(&to_java);
+        // let e = Event::TextCut;
+        // self.call_event_handler(&e);
+        // self.after_every_event(&to_java);
     }
 
     pub fn draw_pass_to_fullscreen(

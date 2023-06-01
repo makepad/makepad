@@ -17,7 +17,7 @@ const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize) -> u64 
         i += 1;
     }
     // mark high bit as meaning that this is a hash id
-    return (x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000
+    (x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000
 }
 
 const fn from_str_unchecked(id_str: &str) -> u64 {
@@ -108,7 +108,7 @@ pub fn ids(item: TokenStream) -> TokenStream {
             }
         }
         tb.add("]");
-        return Ok(())
+        Ok(())
     }
     if let Err(e) = parse(&mut parser, &mut tb){
         return e

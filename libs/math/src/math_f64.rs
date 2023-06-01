@@ -32,8 +32,8 @@ impl Rect {
     }
     
     pub fn contains(&self, pos: DVec2) -> bool {
-        return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
-        pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
+        pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
+        pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y
     }
     
     pub fn center(&self) -> DVec2 {
@@ -88,7 +88,7 @@ impl Rect {
         y1 = y1.max(clip.0.y).min(clip.1.y);
         x2 = x2.max(clip.0.x).min(clip.1.x);
         y2 = y2.max(clip.0.y).min(clip.1.y);
-        return Rect {pos: dvec2(x1, y1), size: dvec2(x2 - x1, y2 - y1)};
+        Rect {pos: dvec2(x1, y1), size: dvec2(x2 - x1, y2 - y1)}
     }
     
     pub fn from_lerp(a: Rect, b: Rect, f: f64) -> Rect {
@@ -106,7 +106,7 @@ impl Rect {
     }
     
     pub fn is_nan(&self)->bool{
-        return self.pos.is_nan() || self.size.is_nan()
+        self.pos.is_nan() || self.size.is_nan()
     }
 
 }
@@ -136,7 +136,7 @@ impl DVec2 {
     }
     
     pub fn all(x: f64) -> DVec2 {
-        DVec2 {x: x, y: x}
+        DVec2 {x, y: x}
     }
     
     pub fn into_vec2(self) -> Vec2 {
@@ -145,24 +145,24 @@ impl DVec2 {
     
     pub fn from_lerp(a: DVec2, b: DVec2, f: f64) -> DVec2 {
         let nf = 1.0 - f;
-        return DVec2 {
+        DVec2 {
             x: nf * a.x + f * b.x,
             y: nf * a.y + f * b.y,
-        };
+        }
     }
     
     pub fn floor(self) -> DVec2 {
-        return DVec2 {
+        DVec2 {
             x: self.x.floor(), 
             y: self.y.floor(),
-        };
+        }
     }
         
     pub fn ceil(self) -> DVec2 {
-        return DVec2 {
+        DVec2 {
             x: self.x.ceil(), 
             y: self.y.ceil(),
-        };
+        }
     }
     
     pub fn distance(&self, other: &DVec2) -> f64 {
@@ -176,7 +176,7 @@ impl DVec2 {
     }
     
     pub fn is_nan(&self)->bool{
-        return self.x.is_nan() || self.y.is_nan()
+        self.x.is_nan() || self.y.is_nan()
     }
 }
 

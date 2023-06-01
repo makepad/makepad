@@ -132,7 +132,7 @@ impl Cx {
     pub fn show_clipboard_actions(&mut self, selected: String) {
         self.platform_ops.push(CxOsOp::ShowClipboardActions(selected));
     }
-    
+
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
         self.platform_ops.iter().for_each( | p | {
             if let CxOsOp::StartDragging(_) = p {

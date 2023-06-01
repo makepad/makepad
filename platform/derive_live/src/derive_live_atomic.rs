@@ -12,7 +12,7 @@ pub fn derive_live_atomic_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     if let Err(err) = derive_live_atomic_impl_inner(&mut parser, &mut tb) {
-        return err
+        err
     }
     else {
         tb.end()
@@ -40,7 +40,7 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
         };
         
         for field in &mut fields {
-            if field.attrs.len() == 0 { // insert a default
+            if field.attrs.is_empty() { // insert a default
                 field.attrs.push(Attribute {name: "live".to_string(), args: None});
             }
         }
@@ -67,7 +67,7 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
 
         
         tb.add("impl").stream(generic.clone());
-        tb.add("LiveAtomic for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+        tb.add("LiveAtomic for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
 
         tb.add("    fn apply_atomic(&self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
         tb.add("        let index = start_index;");
@@ -119,30 +119,25 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
             let attributes = parser.eat_attributes();
             // check if we have a default attribute
             if let Some(name) = parser.eat_any_ident() {
-                if attributes.len() > 0 && attributes[0].name == "pick" {
+                if !attributes.is_empty() && attributes[0].name == "pick" {
                     if pick.is_some() {
-                        return error_result(&format!("Enum can only have a single field marked pick"));
+                        return error_result("Enum can only have a single field marked pick");
                     }
                     pick = Some(items.len())
                 }
-                if let Some(_) = parser.eat_all_types() {
+                if parser.eat_all_types().is_some() || parser.eat_all_struct_fields().is_some() { // named variant
                     return error_result("For atomic enums only bare values are supported");
-                }
-                else if let Some(_) = parser.eat_all_struct_fields() { // named variant
-                    return error_result("For atomic enums only bare values are supported");
-                }
-                else if parser.is_punct_alone(',') || parser.is_eot() { // bare variant
-                    items.push(EnumItem {name})
-                }
-                else {
-                    return error_result("unexpected whilst parsing enum")
+                } else if parser.is_punct_alone(',') || parser.is_eot() { // bare variant
+                    items.push(EnumItem {name});
+                } else {
+                    return error_result("unexpected whilst parsing enum");
                 }
             }
             parser.eat_punct_alone(',');
         }
         
         if pick.is_none() {
-            return error_result(&format!("Enum needs atleast one field marked pick"));
+            return error_result("Enum needs atleast one field marked pick");
         }
         
         tb.add("impl").stream(generic.clone());

@@ -35,12 +35,12 @@ pub fn live_design_impl(input: TokenStream) -> TokenStream {
         tb.add("    };");
         tb.add("    cx.register_live_body(live_body);");
         tb.add("}");
-        return tb.end();
+        tb.end()
     }
     else {
         tb.add("pub fn live_design(cx:&mut Cx) {");
         tb.add("}");
-        return tb.end();
+        tb.end()
     }
 }
 
@@ -104,6 +104,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
         }
         
         #[cfg(not(lines))]
+        #[allow(clippy::ptr_arg)]
         fn delta_whitespace(_now: Lc, _needed: Lc, _out: &mut String) {
         }
         
@@ -178,9 +179,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
                             false
                         }
                         if let Some(last_tt) = &last_tt {
-                            if is_ident(last_tt) && is_string_lit(tt) {}
-                            else if is_punct(last_tt) {}
-                            else {
+                            if !((is_ident(last_tt) && is_string_lit(tt)) || is_punct(last_tt)) {
                                 out.push(' ');
                             }
                         }
