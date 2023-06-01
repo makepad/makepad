@@ -157,6 +157,38 @@ impl<'a> AndroidToJava<'a> {
         }
     }
     
+    pub fn copy_to_clipboard(&self, selected: &str) {
+        unsafe {
+            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
+            let name = CString::new("copyToClipboard").unwrap();
+            let signature = CString::new("(Ljava/lang/String;)V").unwrap();
+            let selected = CString::new(selected).unwrap();
+            let selected = ((**self.env).NewStringUTF.unwrap())(self.env, selected.as_ptr());
+            let method_id = ((**self.env).GetMethodID.unwrap())(
+                self.env,
+                class,
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
+            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id, selected);
+        }
+    }
+
+    pub fn paste_from_clipboard(&self) {
+        unsafe {
+            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
+
+            let name = CString::new("pasteFromClipboard").unwrap();
+            let signature = CString::new("()V").unwrap();
+            let method_id = ((**self.env).GetMethodID.unwrap())(
+                self.env,
+                class,
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
+            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
+        }
+    }
     
     /// reads an asset
     ///
@@ -645,31 +677,21 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onResizeTextIME(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_copyToClipboard(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_copy_to_clipboard(
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_pasteFromClipboard(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onPasteFromClipboard(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
     content: jstring,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_paste_from_clipboard(
-        jstring_to_string(env, content),
+    let string_content = if content == std::ptr::null_mut() {
+        None
+    } else {
+        Some(jstring_to_string(env, content))
+    };
+
+    (*(cx as *mut Cx)).from_java_on_paste_from_clipboard(
+        string_content,
         AndroidToJava {
             env,
             callback,
@@ -679,13 +701,13 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_pasteFromClipboard(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_cutToClipboard(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onCutToClipboard(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_cut_to_clipboard(
+    (*(cx as *mut Cx)).from_java_on_cut_to_clipboard(
         AndroidToJava {
             env,
             callback,

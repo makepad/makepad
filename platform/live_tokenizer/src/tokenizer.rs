@@ -183,8 +183,8 @@ impl InitialState {
                     FullToken::Close(Delim::Brace),
                 )
             }
-            ('#', ch1, ch2) if ch1 == 'x' && ch2.is_digit(16) || ch1.is_digit(16) => self.color(cursor),
-            ('.', ch1, _) if ch1.is_digit(10) => self.number(cursor),
+            ('#', ch1, ch2) if ch1 == 'x' && ch2.is_ascii_hexdigit() || ch1.is_ascii_hexdigit() => self.color(cursor),
+            ('.', ch1, _) if ch1.is_ascii_digit() => self.number(cursor),
             ('!', _, _)
                 | ('#', _, _)
                 | ('$', _, _)
@@ -214,7 +214,7 @@ impl InitialState {
                 )
             }
             (ch, _, _) if ch.is_identifier_start() => self.identifier_or_bool(cursor),
-            (ch, _, _) if ch.is_digit(10) => self.number(cursor),
+            (ch, _, _) if ch.is_ascii_digit() => self.number(cursor),
             (ch, _, _) if ch.is_whitespace() => self.whitespace(cursor),
             _ => {
                 cursor.skip(1);
@@ -242,19 +242,15 @@ impl InitialState {
         match cursor.peek(0) {
             'f' => {
                 cursor.skip(1);
-                if "alse".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) {
-                    if !cursor.peek(0).is_identifier_continue() {
-                        return (State::Initial(InitialState), FullToken::Bool(false));
-                    }
+                if "alse".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) && !cursor.peek(0).is_identifier_continue() {
+                    return (State::Initial(InitialState), FullToken::Bool(false));
                 }
                 self.identifier_tail(start, cursor)
             }
             't' => {
                 cursor.skip(1);
-                if "rue".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) {
-                    if !cursor.peek(0).is_identifier_continue() {
-                        return (State::Initial(InitialState), FullToken::Bool(true));
-                    }
+                if "rue".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) && !cursor.peek(0).is_identifier_continue() {
+                    return (State::Initial(InitialState), FullToken::Bool(true));
                 }
                 self.identifier_tail(start, cursor)
             },
@@ -276,21 +272,21 @@ impl InitialState {
                 if !cursor.skip_digits(2) {
                     return (State::Initial(InitialState), FullToken::Unknown);
                 }
-                return (State::Initial(InitialState), FullToken::OtherNumber)
+                (State::Initial(InitialState), FullToken::OtherNumber)
             }
             ('0', 'o') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(8) {
                     return (State::Initial(InitialState), FullToken::Unknown);
                 }
-                return (State::Initial(InitialState), FullToken::OtherNumber)
+                (State::Initial(InitialState), FullToken::OtherNumber)
             }
             ('0', 'x') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(16) {
                     return (State::Initial(InitialState), FullToken::Unknown);
                 }
-                return (State::Initial(InitialState), FullToken::OtherNumber)
+                (State::Initial(InitialState), FullToken::OtherNumber)
             }
             _ => {
                 let start = cursor.index();
@@ -300,22 +296,18 @@ impl InitialState {
                 match cursor.peek(0) {
                     '.' if cursor.peek(1) != '.' && !cursor.peek(0).is_identifier_start() => {
                         cursor.skip(1);
-                        if cursor.skip_digits(10) {
-                            if cursor.peek(0) == 'E' || cursor.peek(0) == 'e' {
-                                if !cursor.skip_exponent() {
-                                    return (State::Initial(InitialState), FullToken::Unknown);
-                                }
-                            }
+                        if cursor.skip_digits(10) && (cursor.peek(0) == 'E' || cursor.peek(0) == 'e') && !cursor.skip_exponent() {
+                            return (State::Initial(InitialState), FullToken::Unknown);
                         }
                         if cursor.skip_suffix() {
                             return (State::Initial(InitialState), FullToken::OtherNumber)
                         }
                         // parse as float
                         if let Ok(value) = cursor.from_start_to_scratch(start).parse::<f64>() {
-                            return (State::Initial(InitialState), FullToken::Float(value))
+                            (State::Initial(InitialState), FullToken::Float(value))
                         }
                         else {
-                            return (State::Initial(InitialState), FullToken::Unknown)
+                            (State::Initial(InitialState), FullToken::Unknown)
                         }
                     }
                     'E' | 'e' => {
@@ -327,10 +319,10 @@ impl InitialState {
                         }
                         // parse as float
                         if let Ok(value) = cursor.from_start_to_scratch(start).parse::<f64>() {
-                            return (State::Initial(InitialState), FullToken::Float(value))
+                            (State::Initial(InitialState), FullToken::Float(value))
                         }
                         else {
-                            return (State::Initial(InitialState), FullToken::Unknown)
+                            (State::Initial(InitialState), FullToken::Unknown)
                         }
                     }
                     _ => {
@@ -339,15 +331,15 @@ impl InitialState {
                         }
                         // normal number
                         if let Ok(value) = cursor.from_start_to_scratch(start).parse::<i64>() {
-                            return (State::Initial(InitialState), FullToken::Int(value))
+                            (State::Initial(InitialState), FullToken::Int(value))
                         }
                         else {
-                            return (State::Initial(InitialState), FullToken::Unknown)
+                            (State::Initial(InitialState), FullToken::Unknown)
                         }
                     }
                 }
             }
-        };
+        }
     }
     
     fn color(self, cursor: &mut Cursor) -> (State, FullToken) {
@@ -628,7 +620,7 @@ impl<'a> Cursor<'a> {
         for i in start..self.index {
             self.scratch.push(self.chars[i]);
         }
-        &self.scratch
+        self.scratch
     }
     
     
@@ -638,20 +630,20 @@ impl<'a> Cursor<'a> {
     
     fn id_from_1(&self) -> LiveId {
         LiveId::from_bytes(LIVE_ID_SEED, &[
-            self.chars[self.index + 0] as u8,
+            self.chars[self.index] as u8,
         ], 0, 1)
     }
     
     fn id_from_2(&self) -> LiveId {
         LiveId::from_bytes(LIVE_ID_SEED, &[
-            self.chars[self.index + 0] as u8,
+            self.chars[self.index] as u8,
             self.chars[self.index + 1] as u8,
         ], 0, 2)
     }
     
     fn id_from_3(&self) -> LiveId {
         LiveId::from_bytes(LIVE_ID_SEED, &[
-            self.chars[self.index + 0] as u8,
+            self.chars[self.index] as u8,
             self.chars[self.index + 1] as u8,
             self.chars[self.index + 2] as u8,
         ], 0, 3)

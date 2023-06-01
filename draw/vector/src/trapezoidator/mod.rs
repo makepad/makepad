@@ -77,16 +77,11 @@ impl Trapezoidator {
         &mut self,
         pending_segments: &mut Vec<PendingSegment>,
     ) -> Option<Point> {
-        self.event_queue.pop().and_then(|event| {
+        self.event_queue.pop().map(|event| {
             if let Some(pending_segment) = event.pending_segment {
                 pending_segments.push(pending_segment)
             }
-            loop {
-                let next_event = if let Some(&next_event) = self.event_queue.peek() {
-                    next_event
-                } else {
-                    break;
-                };
+            while let Some(&next_event) = self.event_queue.peek() {
                 if next_event != event {
                     break;
                 }
@@ -95,7 +90,7 @@ impl Trapezoidator {
                     pending_segments.push(pending_segment);
                 }
             }
-            return Some(event.point);
+            event.point
         })
     }
 

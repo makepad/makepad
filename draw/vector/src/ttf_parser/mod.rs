@@ -69,7 +69,7 @@ impl<'a> GlyphsParser<'a> {
                 outline: Outline::new(),
             }
         } else {
-            let mut reader = Reader::new(&bytes);
+            let mut reader = Reader::new(bytes);
             let contour_count = reader.read_i16()?;
             let bounds = Rectangle::new(
                 Point::new(reader.read_i16()? as f64, reader.read_i16()? as f64),
@@ -85,7 +85,7 @@ impl<'a> GlyphsParser<'a> {
     }
 
     fn parse_offset(&self, index: usize) -> Result<usize> {
-        let mut reader = Reader::new(&self.loca_table_bytes);
+        let mut reader = Reader::new(self.loca_table_bytes);
         Ok(match self.index_to_loc_format {
             IndexToLocFormat::Short => {
                 reader.skip(index * 2)?;
@@ -317,12 +317,10 @@ impl<'a> OutlinePointReader<'a> {
                 } else {
                     -x
                 }
+            } else if flags.x_is_same_or_positive_x_short_vector() {
+                0.0
             } else {
-                if flags.x_is_same_or_positive_x_short_vector() {
-                    0.0
-                } else {
-                    self.x_coordinates_reader.read_i16()? as f64
-                }
+                self.x_coordinates_reader.read_i16()? as f64
             },
             if flags.y_short_vector() {
                 let y = self.y_coordinates_reader.read_u8()? as f64;
@@ -331,12 +329,10 @@ impl<'a> OutlinePointReader<'a> {
                 } else {
                     -y
                 }
+            } else if flags.y_is_same_or_positive_y_short_vector() {
+                0.0
             } else {
-                if flags.y_is_same_or_positive_y_short_vector() {
-                    0.0
-                } else {
-                    self.y_coordinates_reader.read_i16()? as f64
-                }
+                self.y_coordinates_reader.read_i16()? as f64
             },
         );
         Ok(OutlinePoint {
@@ -648,8 +644,7 @@ fn parse_char_code_to_glyph_index_map_format_4(bytes: &[u8]) -> Result<Vec<usize
                 pos = pos.wrapping_add(delta);
                 pos = pos.wrapping_add(id_range_offset);
                 let mut reader = Reader::new(&bytes[pos as usize..]);
-                let id = reader.read_u16()?;
-                id
+                reader.read_u16()?
             };
             char_code_to_glyph_index_map.resize(code as usize + 1, 0);
             char_code_to_glyph_index_map[code as usize] = id as usize;

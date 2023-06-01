@@ -10,7 +10,7 @@ pub struct Sha1 {
 impl Sha1 {
     pub fn new() -> Sha1 {
         Self {
-            state: SHA1_INIT_STATE.clone(),
+            state: SHA1_INIT_STATE,
             block: [0u8; U8_BLOCK_LEN],
             in_block: 0,
             total: 0
@@ -19,8 +19,8 @@ impl Sha1 {
     
     pub fn update(&mut self, bytes: &[u8]) {
         // first write bytes into block,
-        for i in 0..bytes.len() {
-            self.block[self.in_block] = bytes[i];
+        for &byte in bytes {
+            self.block[self.in_block] = byte;
             self.in_block += 1;
             if self.in_block == U8_BLOCK_LEN {
                 sha1_digest_bytes(&mut self.state, &self.block);
@@ -52,14 +52,20 @@ impl Sha1 {
     }
 }
 
+impl Default for Sha1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 const BASE64_TABLE: &[u8; 64] = &[65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 43, 47,];
 
 pub fn base64_encode(input: &[u8]) -> String {
     let mut out = String::new();
     let mut rem: usize = 0;
     let mut step = 0;
-    for i in 0..input.len() {
-        let inp = input[i] as usize;
+    for &inp in input {
+        let inp = inp as usize;
         if step == 0 {
             out.push(BASE64_TABLE[inp >> 2] as char);
             rem = inp & 3;
@@ -353,9 +359,9 @@ fn sha1_digest_block_u32(state: &mut [u32; 5], block: &[u32; 16]) {
 
 pub fn sha1_digest_bytes(state: &mut[u32; STATE_LEN], bytes: &[u8; U8_BLOCK_LEN]) {
     let mut block_u32 = [0u32; 16];
-    for i in 0..16 {
+    for (i, n) in block_u32.iter_mut().enumerate() {
         let off = i * 4;
-        block_u32[i] = (bytes[off + 3] as u32)
+        *n = (bytes[off + 3] as u32)
             | ((bytes[off + 2] as u32) << 8)
             | ((bytes[off + 1] as u32) << 16)
             | ((bytes[off] as u32) << 24);

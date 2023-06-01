@@ -38,7 +38,7 @@ fn main() {
     
     // skip over response, we don't care. either it works or it doesn't
     let mut data = [0u8; 65535];
-    tcp_stream.read(&mut data).unwrap();
+    let _ = tcp_stream.read(&mut data).unwrap();
     
     // create a new websocket parser instance 
     let mut web_socket = WebSocket::new();
@@ -52,7 +52,7 @@ fn main() {
                 let mut bytes = Vec::new();
                 msg.ser_bin(&mut bytes);
                 let header = BinaryMessageHeader::from_len(bytes.len());
-                if tcp_stream.write_all(&header.as_slice()).is_err() {
+                if tcp_stream.write_all(header.as_slice()).is_err() {
                     println!("tcp stream write error");
                     return
                 };
@@ -88,11 +88,9 @@ fn main() {
                             },
                             Ok(WebSocketMessage::Close) => {
                                 println!("Websocket Close message received");
-                                return
                             }
                             Err(e) => {
                                 println!("Websocket parse error {:?}", e);
-                                return
                             }
                         }
                     });
@@ -124,7 +122,7 @@ fn main() {
     
     fn get_file_len(name:&str)->u64{
         let path = get_file_path(name);
-        fs::metadata(path).unwrap().len() as u64        
+        fs::metadata(path).unwrap().len()
     }
     
     fn set_file_len(name: &str, len: u64) {
@@ -142,7 +140,7 @@ fn main() {
         data.resize(CHUNK_SIZE as usize, 0u8);
         if let Ok(len) = file.read(&mut data) {
             data.resize(len, 0u8);
-            return data
+            data
         }
         else {
             panic!("File read failed")
@@ -176,7 +174,7 @@ fn main() {
         match msg {
             RouterMessage::FetchFile {name} => {
                 // answer a fetch file with the file size in bytes
-                if name.contains("..") || name.contains("\\") || name.contains("/") {
+                if name.contains("..") || name.contains('\\') || name.contains('/') {
                     println!("Fetch file contains incorrect values {}", name);
                     continue
                 }
@@ -258,5 +256,6 @@ fn hash_bytes(id_bytes: &[u8]) -> u64 {
         x ^= x >> 32;
         i += 1;
     }
-    return x
+
+    x
 }

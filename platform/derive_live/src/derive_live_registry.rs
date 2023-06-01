@@ -29,7 +29,7 @@ pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             tb.add("}");
             
-            tb.add("impl ").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("impl ").ident(&struct_name).stream(generic).stream(where_clause).add("{");
             tb.add("    pub fn new(&self, cx: &mut Cx, ty: LiveType) -> Option<Box<dyn ").ident(&trait_name).add(" >> {");
             tb.add("        self.map.get(&ty).map( | (_, fac) | fac.new(cx))");
             tb.add("    }");
@@ -48,6 +48,6 @@ pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }
 

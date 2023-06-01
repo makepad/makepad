@@ -156,7 +156,7 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }
 
 
@@ -320,5 +320,5 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             return tb.end();
         }
     }
-    return parser.unexpected()
+    parser.unexpected()
 }

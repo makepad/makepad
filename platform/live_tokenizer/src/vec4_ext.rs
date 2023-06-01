@@ -15,7 +15,7 @@ impl Vec4Ext for Vec4{
             if d >= 10 {
                 return (d + 55) as char;
             }
-            return (d + 48) as char;
+            (d + 48) as char
         }
         
         let r = (self.x * 255.0) as u8;
@@ -39,7 +39,7 @@ impl Vec4Ext for Vec4{
     }
     
     fn from_hex_bytes(bytes: &[u8]) -> Result<Vec4, ()> {
-        let color = if bytes.len()>2 && bytes[0] == '#' as u8 {
+        let color = if bytes.len()>2 && bytes[0] == b'#' {
             colorhex::hex_bytes_to_u32(&bytes[1..])?
         }
         else {
@@ -49,7 +49,7 @@ impl Vec4Ext for Vec4{
             x: (((color >> 24)&0xff) as f32) / 255.0,
             y: (((color >> 16)&0xff) as f32) / 255.0,
             z: (((color >> 8)&0xff) as f32) / 255.0,
-            w: (((color >> 0)&0xff) as f32) / 255.0,
+            w: ((color&0xff) as f32) / 255.0,
         })
     }
 }

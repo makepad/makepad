@@ -10,7 +10,7 @@ pub struct Sha1 {
 impl Sha1 {
     pub fn new() -> Sha1 {
         Self {
-            state: SHA1_INIT_STATE.clone(),
+            state: SHA1_INIT_STATE,
             block: [0u8; U8_BLOCK_LEN],
             in_block: 0,
             total: 0
@@ -19,8 +19,8 @@ impl Sha1 {
     
     pub fn update(&mut self, bytes: &[u8]) {
         // first write bytes into block,
-        for i in 0..bytes.len() {
-            self.block[self.in_block] = bytes[i];
+        for &byte in bytes {
+            self.block[self.in_block] = byte;
             self.in_block += 1;
             if self.in_block == U8_BLOCK_LEN {
                 sha1_digest_bytes(&mut self.state, &self.block);
@@ -49,6 +49,12 @@ impl Sha1 {
         }
         
         sha1_state_to_bytes(&self.state)
+    }
+}
+
+impl Default for Sha1 {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -314,9 +320,9 @@ fn sha1_digest_block_u32(state: &mut [u32; 5], block: &[u32; 16]) {
 
 pub fn sha1_digest_bytes(state: &mut[u32; STATE_LEN], bytes: &[u8; U8_BLOCK_LEN]) {
     let mut block_u32 = [0u32; 16];
-    for i in 0..16 {
+    for (i, num) in block_u32.iter_mut().enumerate() {
         let off = i * 4;
-        block_u32[i] = (bytes[off + 3] as u32)
+        *num = (bytes[off + 3] as u32)
             | ((bytes[off + 2] as u32) << 8)
             | ((bytes[off + 1] as u32) << 16)
             | ((bytes[off] as u32) << 24);
