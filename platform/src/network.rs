@@ -13,7 +13,6 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest { 
-    // TODO: a good default
     pub fn new(id: LiveId, url: String, method: Method) -> Self {
         HttpRequest {
             id,
@@ -37,12 +36,11 @@ impl HttpRequest {
         headers_string
     }
 
-    // WIP - takes whatever the user sends like a struct and we serialize to a byte array.
-    // if it's possible I'd always send the body as a byte array to java to avoid 
-    // sending a generic body and doing parsing/serializing on that side.
-    // if we can't rely to always send byte array in the body,
-    // we could use the header's content-type and use that to know what to serialize into.
-    pub fn set_body<T: DeBin + SerBin + SerJson + DeJson>(&mut self, body: T) {
+    pub fn set_raw_body(&mut self, body: Vec<u8>) {
+        self.body = Some(body);
+    }
+
+    pub fn set_body<T: SerJson>(&mut self, body: T) {
        let json_body = body.serialize_json();
        let serialized_body = json_body.into_bytes();
        self.body = Some(serialized_body); 
@@ -84,7 +82,8 @@ impl HttpResponse {
         }
     }
 
-    pub fn get_body<T: DeBin + SerJson + DeJson>(&self) -> Option<T> { 
+    // Todo: a more generic function that supports serialization into rust structs from other MIME types
+    pub fn get_json_body_as<T: DeJson>(&self) -> Option<T> { 
         if let Some(body) = self.body.as_ref() {
             let json = str::from_utf8(&body).unwrap();
             let deserialized: T = DeJson::deserialize_json(&json).unwrap();

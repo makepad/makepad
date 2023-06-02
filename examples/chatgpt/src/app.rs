@@ -70,8 +70,8 @@ impl LiveHook for App {
 }
 
 impl App{
-    // EVENT-BASED: sends message, has no relationship with response. Response will be received as an event
-    // and processed by handle_event.
+    // This performs and event-based http request: it has no relationship with the response. 
+    // The response will be received and processed by AppMain's handle_event.
     fn send_message(cx: &mut Cx, ui: WidgetRef) {
         let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
         let request_id = LiveId::from_str("SendChatMessage").unwrap();
@@ -89,12 +89,6 @@ impl App{
 
         cx.http_request(request);
     }
-
-    // ASYNC: sends message, awaits for response and updates the text value.
-    async fn _send_message_async(_cx_ref: CxRef, _ui: WidgetRef){
-        // simulate delay
-        // std::thread::sleep(std::time::Duration::from_secs(4));
-    }
 }
 
 impl AppMain for App{
@@ -110,7 +104,7 @@ impl AppMain for App{
                 match id {
                      Some("SendChatMessage") => {
                         if event.response.status_code == 200 {
-                            let chat_response = event.response.get_body::<ChatResponse>().unwrap();
+                            let chat_response = event.response.get_json_body_as::<ChatResponse>().unwrap();
                             label.set_label(&chat_response.choices[0].message.content);
                         } else {
                             label.set_label("Failed to connect with OpenAI");
@@ -121,9 +115,9 @@ impl AppMain for App{
                 }
             })
         } else if let Event::HttpRequestError(event) = event {
+            crate::makepad_error_log::log!("Request failed {:?}", event);
             let label = self.ui.get_label(id!(message_label));
 
-            makepad_error_log::log!("HTTP request error: {:?}", event.request_error);
             label.set_label("Failed to connect with OpenAI");
             label.redraw(cx);
         }
@@ -131,7 +125,7 @@ impl AppMain for App{
         let actions = self.ui.handle_widget_event(cx, event);
         
         if self.ui.get_button(id!(send_button)).clicked(&actions) {
-            Self::send_message(cx, self.ui.clone()); // use cx.get_ref()?
+            Self::send_message(cx, self.ui.clone());
         }
     }
 }
