@@ -381,12 +381,6 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
-        let e = Event::TextCut;
-        self.call_event_handler(&e);
-        self.after_every_event(&to_java);
-    }
-
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,

@@ -18,9 +18,9 @@ import java.nio.charset.StandardCharsets;
 
 public class MakepadNetwork {
 
-    public MakepadNetwork() {} // TODO: this might just be a static class.
+    public MakepadNetwork() {}
 
-    public CompletableFuture<HttpResponse> performNetworkRequest(String url, String method, String headers, byte[] body) {
+    public CompletableFuture<HttpResponse> performHttpRequest(String url, String method, String headers, byte[] body) {
         return CompletableFuture.supplyAsync(() -> {
             HttpURLConnection connection = null;
             HttpResponse response = null;
