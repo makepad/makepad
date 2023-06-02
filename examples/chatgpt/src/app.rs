@@ -72,7 +72,7 @@ impl LiveHook for App {
 impl App{
     // This performs and event-based http request: it has no relationship with the response. 
     // The response will be received and processed by AppMain's handle_event.
-    fn send_message(cx: &mut Cx, ui: WidgetRef) {
+    fn send_message(cx: &mut Cx, message: String) {
         let completion_url = format!("{}/chat/completions", OPENAI_BASE_URL);
         let request_id = LiveId::from_str("SendChatMessage").unwrap();
         let mut request = HttpRequest::new(request_id, completion_url, Method::POST);
@@ -80,7 +80,6 @@ impl App{
         request.set_header("Content-Type".to_string(), "application/json".to_string());
         request.set_header("Authorization".to_string(), "Bearer <your-token>".to_string());
         
-        let message = ui.get_text_input(id!(message_input)).get_text();
         request.set_body(ChatPrompt {
             messages: vec![ Message { content: message, role: "user".to_string() } ],
             model: "gpt-3.5-turbo".to_string(),
@@ -125,7 +124,8 @@ impl AppMain for App{
         let actions = self.ui.handle_widget_event(cx, event);
         
         if self.ui.get_button(id!(send_button)).clicked(&actions) {
-            Self::send_message(cx, self.ui.clone());
+            let user_prompt = self.ui.get_text_input(id!(message_input)).get_text();
+            Self::send_message(cx, user_prompt);
         }
     }
 }
