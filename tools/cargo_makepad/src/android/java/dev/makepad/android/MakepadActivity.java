@@ -340,7 +340,7 @@ Makepad.Callback{
         try {
             MakepadNetwork network = new MakepadNetwork();
 
-            CompletableFuture<HttpResponse> future = network.performNetworkRequest(url, method, headers, body);
+            CompletableFuture<HttpResponse> future = network.performHttpRequest(url, method, headers, body);
 
             future.thenAccept(response -> {
                 runOnUiThread(() -> Makepad.onHttpResponse(mCx, id, response.getStatusCode(), response.getHeaders(), response.getBody(), (Makepad.Callback) mView.getContext()));
