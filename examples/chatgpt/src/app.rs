@@ -30,20 +30,22 @@ live_design!{
             draw_bg: {
                 
                 fn pixel(self) -> vec4 {
-                    return mix(#7, #3, self.geom_pos.y);
+                    return mix(#3, #1, self.geom_pos.y);
                 }
             }
-                        
-            message_input = <TextInput> {
-                walk: {width: 100, height: 30},
-                text: "Hi!"
-            }
             message_label = <Label> {
-                walk: {width: 200, height: 30},
+                walk: {width: 300, height: Fit},
                 draw_label: {
                     color: #f
                 },
                 label: "hi! how may I assist you today?",
+            }
+            message_input = <TextInput> {
+                text: "Hi!"
+                walk: {width: 300, height: Fit},
+                draw_bg: {
+                    color: #1
+                }
             }
             send_button = <Button> {
                icon_walk:{margin:{left:10}, width:16,height:Fit}
