@@ -17,6 +17,7 @@ use {
         event::{
             ToWasmMsgEvent,
             HttpResponseEvent,
+            HttpRequestErrorEvent,
             WebSocket,
             WebSocketErrorEvent,
             WebSocketMessageEvent,
@@ -33,7 +34,7 @@ use {
             WindowGeom,
             WindowGeomChangeEvent
         },
-        network::HttpResponse,
+        network::*,
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx},
@@ -230,6 +231,17 @@ impl Cx {
                     );
                     self.call_event_handler(&Event::HttpResponse(HttpResponseEvent {
                         response
+                    }));
+                }
+
+                live_id!(ToWasmHttpRequestError) => {
+                    let tw = ToWasmHttpRequestError::read_to_wasm(&mut to_wasm);
+                    let request_error = HttpRequestError {
+                        id: LiveId::from_str(&tw.id).unwrap(),
+                        error: tw.error
+                    };
+                    self.call_event_handler(&Event::HttpRequestError(HttpRequestErrorEvent {
+                        request_error
                     }));
                 }
                 
@@ -443,6 +455,7 @@ impl CxOsApi for Cx {
             ToWasmAppGotFocus::to_js_code(),
             ToWasmAppLostFocus::to_js_code(),
             ToWasmHTTPResponse::to_js_code(),
+            ToWasmHttpRequestError::to_js_code(),
             ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
