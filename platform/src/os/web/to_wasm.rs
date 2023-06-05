@@ -609,6 +609,12 @@ pub struct ToWasmHTTPResponse {
 }
 
 #[derive(ToWasm)]
+pub struct ToWasmHttpRequestError {
+    pub id: String,
+    pub error: String
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmWebSocketClose {
     pub web_socket_id: usize
 }
