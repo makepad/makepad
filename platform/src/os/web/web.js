@@ -514,8 +514,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("error", event => {
-            console.log("error", event);
-
             let errorMessage = "An error occurred with the HTTP request.";
             if (!navigator.onLine) {
                 errorMessage = "The browser is offline.";
@@ -524,6 +522,22 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmHttpRequestError({
                 id: args.id,
                 error: errorMessage,
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("timeout", event => {
+            this.to_wasm.ToWasmHttpRequestError({
+                id: args.id,
+                error: "The HTTP request timed out.",
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("abort", event => {
+            this.to_wasm.ToWasmHttpRequestError({
+                id: args.id,
+                error: "The HTTP request was aborted.",
             });
             this.do_wasm_pump();
         });
