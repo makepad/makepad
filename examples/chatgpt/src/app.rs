@@ -61,8 +61,6 @@ app_main!(App);
 
 pub struct App {
     #[live] ui: WidgetRef,
-    
-    #[rust] _user_message: String,
 }
 
 impl LiveHook for App {
@@ -132,20 +130,20 @@ impl AppMain for App{
     }
 }
 
-#[derive(DeBin, SerBin, SerJson, DeJson, PartialEq, Debug)]
+#[derive(SerJson, DeJson)]
 struct ChatPrompt {
     pub messages: Vec<Message>,
     pub model: String,
     pub max_tokens: i32
 }
 
-#[derive(DeBin, SerBin, SerJson, DeJson, PartialEq, Debug)]
+#[derive(SerJson, DeJson)]
 struct Message {
     pub content: String,
     pub role: String
 }
 
-#[derive(DeBin, SerBin, SerJson, DeJson, PartialEq, Debug)]
+#[derive(SerJson, DeJson)]
 struct ChatResponse {
     pub id: String,
     pub object: String,
@@ -155,15 +153,14 @@ struct ChatResponse {
     pub choices: Vec<Choice>,
 }
 
-#[derive(DeBin, SerBin, SerJson, DeJson, PartialEq, Debug)]
+#[derive(SerJson, DeJson)]
 pub struct Usage {
     prompt_tokens: i32,
     completion_tokens: i32,
     total_tokens: i32,
 }
 
-#[derive(DeBin, SerBin, SerJson, DeJson, PartialEq, Debug)]
-
+#[derive(SerJson, DeJson)]
 struct Choice {
     message: Message,
     finish_reason: String,
