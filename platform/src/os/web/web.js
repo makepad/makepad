@@ -513,6 +513,21 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
         });
 
+        req.addEventListener("error", event => {
+            console.log("error", event);
+
+            let errorMessage = "An error occurred with the HTTP request.";
+            if (!navigator.onLine) {
+                errorMessage = "The browser is offline.";
+            }
+
+            this.to_wasm.ToWasmHttpRequestError({
+                id: args.id,
+                error: errorMessage,
+            });
+            this.do_wasm_pump();
+        });
+
         req.send(body);
         this.free_data_u8(args.body);
     }
