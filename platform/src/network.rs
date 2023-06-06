@@ -139,12 +139,6 @@ impl Method {
 }
 
 #[derive(Clone, Debug)]
-pub struct HttpRequestError {
-    pub id: LiveId,
-    pub error: String
-}
-
-#[derive(Clone, Debug)]
 pub struct HttpResponseProgress {
     pub id: LiveId,
     pub loaded: u32,
