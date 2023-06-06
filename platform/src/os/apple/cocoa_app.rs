@@ -39,8 +39,7 @@ use {
             KeyCode,
             KeyEvent,
             TextInputEvent,
-            TextCopyEvent,
-            TextCutEvent,
+            TextClipboardEvent,
             TimerEvent,
             //Signal,
             //SignalEvent,
@@ -401,7 +400,7 @@ impl CocoaApp {
                         KeyCode::KeyC => if modifiers.logo || modifiers.control {
                             let response = Rc::new(RefCell::new(None));
                             self.do_callback(
-                                CocoaEvent::TextCopy(TextCopyEvent {
+                                CocoaEvent::TextCopy(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );
@@ -416,7 +415,7 @@ impl CocoaApp {
                         KeyCode::KeyX => if modifiers.logo || modifiers.control {
                             let response = Rc::new(RefCell::new(None));
                             self.do_callback(
-                                CocoaEvent::TextCut(TextCutEvent {
+                                CocoaEvent::TextCut(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );
