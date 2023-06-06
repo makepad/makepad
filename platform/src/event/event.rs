@@ -79,8 +79,8 @@ pub enum Event {
 
     HttpResponse(HttpResponseEvent),
     HttpRequestError(HttpRequestErrorEvent),
-    HttpResponseProgress(HttpResponseProgressEvent),
-    HttpUploadProgress(HttpUploadProgressEvent),
+    HttpResponseProgress(HttpProgressEvent),
+    HttpUploadProgress(HttpProgressEvent),
     
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
