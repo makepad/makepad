@@ -238,12 +238,9 @@ impl Cx {
 
                 live_id!(ToWasmHttpRequestError) => {
                     let tw = ToWasmHttpRequestError::read_to_wasm(&mut to_wasm);
-                    let request_error = HttpRequestError {
+                    self.call_event_handler(&Event::HttpRequestError(HttpRequestErrorEvent {
                         id: LiveId::from_str(&tw.id).unwrap(),
                         error: tw.error
-                    };
-                    self.call_event_handler(&Event::HttpRequestError(HttpRequestErrorEvent {
-                        request_error
                     }));
                 }
 
