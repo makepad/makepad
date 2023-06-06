@@ -542,6 +542,29 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
         });
 
+        req.addEventListener("progress", event => {
+            console.log("progress", event);
+            if (event.lengthComputable) {
+                this.to_wasm.ToWasmHttpResponseProgress({
+                    id: args.id,
+                    loaded: event.loaded,
+                    total: event.total,
+                });
+                this.do_wasm_pump();
+            }
+        });
+
+        req.upload.addEventListener("progress", (event) => {
+            if (event.lengthComputable) {
+                this.to_wasm.ToWasmHttpUploadProgress({
+                    id: args.id,
+                    loaded: event.loaded,
+                    total: event.total,
+                });
+                this.do_wasm_pump();
+            }
+          });
+
         req.send(body);
         this.free_data_u8(args.body);
     }
