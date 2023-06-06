@@ -119,6 +119,10 @@ impl AppMain for App{
 
             label.set_label("Failed to connect with OpenAI");
             label.redraw(cx);
+        } else if let Event::HttpResponseProgress(event) = event {
+            crate::makepad_error_log::log!("Request progress {:?}", event);
+        } else if let Event::HttpUploadProgress(event) = event {
+            crate::makepad_error_log::log!("Upload progress {:?}", event);
         }
         
         let actions = self.ui.handle_widget_event(cx, event);

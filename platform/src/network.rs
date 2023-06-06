@@ -137,18 +137,3 @@ impl Method {
         }
     }
 }
-
-#[derive(Clone, Debug)]
-pub struct HttpResponseProgress {
-    pub id: LiveId,
-    pub loaded: u32,
-    pub total: u32
-}
-
-
-#[derive(Clone, Debug)]
-pub struct HttpUploadProgress {
-    pub id: LiveId,
-    pub loaded: u32,
-    pub total: u32
-}

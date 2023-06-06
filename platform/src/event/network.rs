@@ -1,9 +1,5 @@
 use crate::makepad_live_id::*;
-use crate::network::{
-    HttpResponse,
-    HttpResponseProgress,
-    HttpUploadProgress
-};
+use crate::network::HttpResponse;
 
 #[derive(Clone, Debug)]
 pub struct HttpResponseEvent {
@@ -17,11 +13,8 @@ pub struct HttpRequestErrorEvent {
 }
 
 #[derive(Clone, Debug)]
-pub struct HttpResponseProgressEvent {
-    pub response_progress: HttpResponseProgress,
-}
-
-#[derive(Clone, Debug)]
-pub struct HttpUploadProgressEvent {
-    pub upload_progress: HttpUploadProgress,
+pub struct HttpProgressEvent {
+    pub id: LiveId,
+    pub loaded: u32,
+    pub total: u32
 }
