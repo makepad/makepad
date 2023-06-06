@@ -26,8 +26,7 @@ use {
             WindowGeomChangeEvent,
             TimerEvent,
             TextInputEvent,
-            TextCopyEvent,
-            TextCutEvent,
+            TextClipboardEvent,
             KeyEvent,
             KeyModifiers,
             KeyCode,
@@ -254,7 +253,7 @@ impl Cx {
                     } else if is_shortcut {
                         if key_code == KeyCode::KeyC {  
                             let response = Rc::new(RefCell::new(None));
-                            e = Event::TextCopy(TextCopyEvent {
+                            e = Event::TextCopy(TextClipboardEvent {
                                 response: response.clone()
                             });
                             self.call_event_handler(&e);
@@ -264,7 +263,7 @@ impl Cx {
                             }
                         } else if key_code == KeyCode::KeyX {
                             let response = Rc::new(RefCell::new(None));
-                            let e = Event::TextCut(TextCutEvent {
+                            let e = Event::TextCut(TextClipboardEvent {
                                 response: response.clone()
                             });
                             self.call_event_handler(&e);
@@ -347,7 +346,7 @@ impl Cx {
 
     pub fn from_java_on_cut_to_clipboard(&mut self, to_java: AndroidToJava) {
         let e = Event::TextCut(
-            TextCutEvent {
+            TextClipboardEvent {
                 response: Rc::new(RefCell::new(None))
             }
         );
