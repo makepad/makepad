@@ -18,8 +18,7 @@ use {
             ToWasmMsgEvent,
             HttpResponseEvent,
             HttpRequestErrorEvent,
-            HttpResponseProgressEvent,
-            HttpUploadProgressEvent,
+            HttpProgressEvent,
             WebSocket,
             WebSocketErrorEvent,
             WebSocketMessageEvent,
@@ -246,25 +245,19 @@ impl Cx {
 
                 live_id!(ToWasmHttpResponseProgress) => {
                     let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
-                    let response_progress = HttpResponseProgress {
+                    self.call_event_handler(&Event::HttpResponseProgress(HttpProgressEvent {
                         id: LiveId::from_str(&tw.id).unwrap(),
                         loaded: tw.loaded,
                         total: tw.total
-                    };
-                    self.call_event_handler(&Event::HttpResponseProgress(HttpResponseProgressEvent {
-                        response_progress
                     }));
                 }
 
                 live_id!(ToWasmHttpUploadProgress) => {
                     let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
-                    let upload_progress = HttpUploadProgress {
+                    self.call_event_handler(&Event::HttpUploadProgress(HttpProgressEvent {
                         id: LiveId::from_str(&tw.id).unwrap(),
                         loaded: tw.loaded,
                         total: tw.total
-                    };
-                    self.call_event_handler(&Event::HttpUploadProgress(HttpUploadProgressEvent {
-                        upload_progress
                     }));
                 }
                 
