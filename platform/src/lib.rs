@@ -171,7 +171,7 @@ pub use {
             KeyEvent,
             KeyFocusEvent,
             TextInputEvent,
-            TextCopyEvent,
+            TextClipboardEvent,
             WindowCloseRequestedEvent,
             WindowClosedEvent,
             WindowDragQueryResponse,
