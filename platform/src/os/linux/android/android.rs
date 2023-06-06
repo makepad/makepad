@@ -371,10 +371,8 @@ impl Cx {
     pub fn from_java_on_http_request_error(&mut self, id: u64, error: String, to_java: AndroidToJava) {
         let e = Event::HttpRequestError(
             HttpRequestErrorEvent { 
-                request_error: HttpRequestError {
-                    id: LiveId(id),
-                    error
-                }
+                id: LiveId(id),
+                error
             }
         );
         self.call_event_handler(&e);
