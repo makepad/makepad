@@ -20,28 +20,36 @@ live_design!{
             let nubbg_size = 18
             
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            
+
             let slider_bg_color = mix(#38, #30, self.focus);
-            
             let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
             let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
             let nubbg_color = mix(#eee0, #8, self.drag);
-            
-            sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
-            sdf.fill(slider_bg_color);
-            
-            sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
-            sdf.fill(slider_color);
-            
-            let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
-            sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
-            sdf.fill(nubbg_color);
-            
-            // the nub
-            let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
-            sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
-            sdf.fill(nub_color);
-            
+
+            match self.slider_type{
+                SliderType::Horizontal=>{
+                    sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
+                    sdf.fill(slider_bg_color);
+                    
+                    sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
+                    sdf.fill(slider_color);
+                    
+                    let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
+                    sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
+                    sdf.fill(nubbg_color);
+                    
+                    // the nub
+                    let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
+                    sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
+                    sdf.fill(nub_color);
+                }
+                SliderType::Vertical=>{
+                    
+                }
+                SliderType::Rotary=>{
+                    
+                }
+            }
             return sdf.result
         }
     }
@@ -138,10 +146,21 @@ live_design!{
 }
 
 #[derive(Live, LiveHook)]
+#[live_ignore]
+#[repr(u32)]
+pub enum SliderType {
+    #[pick] Horizontal = shader_enum(1),
+    Vertical = shader_enum(2),
+    Rotary = shader_enum(3),
+}
+
+
+#[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSlider {
     #[deref] draw_super: DrawQuad,
-    #[live] slide_pos: f32
+    #[live] slide_pos: f32,
+    #[live] slider_type: SliderType
 }
 
 #[derive(Live)]
