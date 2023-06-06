@@ -25,7 +25,7 @@ use {
             WebSocketAutoReconnect,
             Event,
             XRInput,
-            TextCopyEvent,
+            TextClipboardEvent,
             TimerEvent,
             MouseDownEvent,
             MouseMoveEvent,
@@ -173,7 +173,7 @@ impl Cx {
                 
                 live_id!(ToWasmTextCopy) => {
                     let response = Rc::new(RefCell::new(None));
-                    self.call_event_handler(&Event::TextCopy(TextCopyEvent {
+                    self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
                         response: response.clone()
                     }));
                     let response = response.borrow_mut().take();
