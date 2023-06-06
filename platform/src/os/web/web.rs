@@ -18,6 +18,8 @@ use {
             ToWasmMsgEvent,
             HttpResponseEvent,
             HttpRequestErrorEvent,
+            HttpResponseProgressEvent,
+            HttpUploadProgressEvent,
             WebSocket,
             WebSocketErrorEvent,
             WebSocketMessageEvent,
@@ -244,6 +246,30 @@ impl Cx {
                         request_error
                     }));
                 }
+
+                live_id!(ToWasmHttpResponseProgress) => {
+                    let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
+                    let response_progress = HttpResponseProgress {
+                        id: LiveId::from_str(&tw.id).unwrap(),
+                        loaded: tw.loaded,
+                        total: tw.total
+                    };
+                    self.call_event_handler(&Event::HttpResponseProgress(HttpResponseProgressEvent {
+                        response_progress
+                    }));
+                }
+
+                live_id!(ToWasmHttpUploadProgress) => {
+                    let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
+                    let upload_progress = HttpUploadProgress {
+                        id: LiveId::from_str(&tw.id).unwrap(),
+                        loaded: tw.loaded,
+                        total: tw.total
+                    };
+                    self.call_event_handler(&Event::HttpUploadProgress(HttpUploadProgressEvent {
+                        upload_progress
+                    }));
+                }
                 
                 live_id!(ToWasmWebSocketClose) => {
                     let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
@@ -456,6 +482,8 @@ impl CxOsApi for Cx {
             ToWasmAppLostFocus::to_js_code(),
             ToWasmHTTPResponse::to_js_code(),
             ToWasmHttpRequestError::to_js_code(),
+            ToWasmHttpResponseProgress::to_js_code(),
+            ToWasmHttpUploadProgress::to_js_code(),
             ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
