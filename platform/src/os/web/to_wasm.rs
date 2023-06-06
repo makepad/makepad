@@ -615,6 +615,20 @@ pub struct ToWasmHttpRequestError {
 }
 
 #[derive(ToWasm)]
+pub struct ToWasmHttpResponseProgress {
+    pub id: String,
+    pub loaded: u32,
+    pub total: u32
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmHttpUploadProgress {
+    pub id: String,
+    pub loaded: u32,
+    pub total: u32
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmWebSocketClose {
     pub web_socket_id: usize
 }
