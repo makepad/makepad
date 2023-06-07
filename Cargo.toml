@@ -1,6 +1,5 @@
 workspace.members = [
     "code_editor",
-    "examples/widgets",
     "examples/numbers", 
     "examples/fractal_zoom", 
     "examples/ironfish",
