@@ -301,8 +301,11 @@ impl Cx {
                     xlib_app.stop_timer(timer_id);
                 },
                 CxOsOp::StartDragging(_dragged_item) => {
-                }
+                },
                 CxOsOp::UpdateMenu(_menu) => {
+                },
+                CxOsOp::HttpRequest(_) => {
+                    //todo!()
                 }
             }
         }
