@@ -264,9 +264,9 @@ impl DesktopWindow {
         
         self.main_view.begin_always(cx);
         
-        let pass_size = cx.current_pass_size();
+        //let pass_size = cx.current_pass_size();
         
-        cx.begin_turtle(Walk::fixed_size(pass_size), Layout::flow_down());
+        cx.begin_overlay_turtle(Layout::flow_down());
         
         self.overlay.begin(cx);
         
