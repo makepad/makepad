@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_platform::*,
         nav::*,
-        cx_2d::Cx2d,
+        cx_2d::{Cx2d,AlignEntry},
         turtle::Walk,
     }
 };
@@ -285,7 +285,7 @@ impl<'a> Cx2d<'a> {
             return None;
         }
         li.as_mut().unwrap().aligned = Some(self.align_list.len());
-        self.align_list.push(Area::Empty);
+        self.align_list.push(AlignEntry::Unset);
         li
     }
     
@@ -299,7 +299,7 @@ impl<'a> Cx2d<'a> {
         std::mem::swap(&mut instances, &mut draw_item.instances);
         ia.instance_count = (draw_item.instances.as_ref().unwrap().len() - ia.instance_offset) / draw_call.total_instance_slots;
         if let Some(aligned) = many_instances.aligned {
-            self.align_list[aligned] = ia.clone().into();
+            self.align_list[aligned] = AlignEntry::Area(ia.clone().into());
         }
         ia.into()
     }
@@ -352,7 +352,7 @@ impl<'a> Cx2d<'a> {
             redraw_id: draw_item.redraw_id
         }).into();
         draw_item.instances.as_mut().unwrap().extend_from_slice(data);
-        self.align_list.push(ia.clone());
+        self.align_list.push(AlignEntry::Area(ia.clone()));
         ia
     }
     
