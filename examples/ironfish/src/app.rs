@@ -48,7 +48,7 @@ live_design!{
             <AppDesktop> {}
         }
         
-        
+        /*
         ui= <MultiWindow> {
             mobile =<DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000), dpi_override:2},
@@ -69,8 +69,8 @@ live_design!{
                 block_signal_event: true; 
                 <AppMobile> {}
             }
-        }
-/*
+        }*/
+
         ui=<DesktopWindow> {
             window: {inner_size: vec2(1920, 1080)},
             
@@ -211,7 +211,7 @@ live_design!{
                     <SlideBody> {label: "- SDK installer\n- Cargo makepad android\n"}
                 }                
             }
-        }*/
+        }
     }
 }
 app_main!(App);

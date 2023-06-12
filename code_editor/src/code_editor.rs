@@ -8,8 +8,8 @@ live_design!{
     import makepad_widgets::theme::*;
     
     CodeEditor = {{CodeEditor}} {
-        layout:{
-            flow:Down
+        layout: {
+            flow: Down
         }
         walk: {
             width: Fill,
@@ -36,10 +36,9 @@ impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d, state: &State, view_id: ViewId) {
         use crate::StrExt;
         
-        //self.draw_bg.begin(cx, self.walk, Layout::default().with_scroll(self.scroll_bars.get_scroll_pos()));
         self.scroll_bars.begin(cx, self.walk, self.layout);
-        let scroll_position =  cx.turtle().origin() ;
-
+        let scroll_position = cx.turtle().origin();
+        
         let glyph_size =
         self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         let mut max_line_size_x = 0.0;
@@ -54,10 +53,6 @@ impl CodeEditor {
         cx.turtle_mut().set_used(max_line_size_x, position.y);
         
         self.scroll_bars.end(cx);
-        //self.draw_bg.end(cx);
-        //self.scroll_bars.set_area(self.draw_bg.area());
-        //log!("{:?}", cx.turtle().rect());
-        //self.scroll_bars.end(cx);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
