@@ -34,6 +34,13 @@ pub struct PassStackItem {
     turtles_len: usize
 }
 
+pub enum AlignEntry{
+    Unset,
+    Area(Area),
+    BeginTurtle(DVec2,DVec2),
+    EndTurtle
+}
+
 pub struct Cx2d<'a> {
     pub cx: &'a mut Cx,
     pub (crate) draw_event: &'a DrawEvent,
@@ -43,7 +50,8 @@ pub struct Cx2d<'a> {
     pub draw_list_stack: Vec<DrawListId>,
     pub (crate) turtles: Vec<Turtle>,
     pub (crate) turtle_walks: Vec<TurtleWalk>,
-    pub (crate) align_list: Vec<Area>,
+    pub (crate) turtle_clips: Vec<(DVec2, DVec2)>,
+    pub (crate) align_list: Vec<AlignEntry>,
     pub fonts_atlas_rc: CxFontsAtlasRc,
     pub icon_atlas_rc: CxIconAtlasRc,
     pub nav_tree_rc: CxNavTreeRc,
@@ -88,6 +96,7 @@ impl<'a> Cx2d<'a> {
             // overlay_sweep_lock: None,
             pass_stack: Vec::new(),
             draw_list_stack: Vec::new(),
+            turtle_clips: Vec::new(),
             turtle_walks: Vec::new(),
             turtles: Vec::new(),
             align_list: Vec::new(),
