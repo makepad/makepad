@@ -471,7 +471,12 @@ impl DrawText {
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
         let measured_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
         let eval_width = cx.turtle().eval_width(walk.width, walk.margin, Flow::Right);
-        let eval_height = cx.turtle().eval_height(walk.height, walk.margin, Flow::Right);
+        
+        // I'd add something like this to adjust height so wrapping looks better
+        // let line_spacing_factor = 0.6; // Adjust this factor to control the line spacing
+        
+        // and then multiply this by the line spacing factor
+        let eval_height = cx.turtle().eval_height(walk.height, walk.margin, Flow::Right); //  * line_spacing_factor
         
         // if we have a fit width, we simply fit
         // if we have a fixed width, we can apply align + ellipsis
@@ -578,8 +583,15 @@ impl DrawText {
                         height: Size::Fixed(height)
                     });
                     
-                    self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..ellip]);
-                    self.draw_inner(cx, rect.pos + dvec2(at_x, y_align), &"..."[0..dots]);
+                    // this could be a part of compute_geom to have better performance, and have it return the wrapping_pt instead of ellip_pt
+                    let wrapping_pt = find_word_start(text, ellip).unwrap();
+
+                    self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..wrapping_pt]);
+                    
+                    // I'd say give the user the option to either do word-wrapping
+                    self.draw_walk(cx, walk, align, &text[wrapping_pt..]);
+                    // or draw the ellipsis:
+                    // self.draw_inner(cx, rect.pos + dvec2(at_x, y_align), &"..."[0..dots]);
                 }
                 else { // we might have space to h-align
                     let rect = cx.walk_turtle(Walk {
@@ -691,5 +703,26 @@ impl DrawText {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.units_per_em)),
             y: self.text_style.line_spacing
         }
+    }
+}
+
+fn find_word_start(text: &str, index: usize) -> Option<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    
+    if index >= chars.len() {
+        return None;
+    }
+    
+    // Check if the character at the index is part of a word
+    if chars[index].is_alphanumeric() {
+        // Find the start of the word by searching backwards until a non-alphanumeric character is found
+        let mut start = index;
+        while start > 0 && chars[start - 1].is_alphanumeric() {
+            start -= 1;
+        }
+        Some(start)
+    } else {
+        // If the character is not alphanumeric, it's not in the middle of a word
+        None
     }
 }
