@@ -36,6 +36,7 @@ use {
             CxPassRect,
             CxPassParent
         },
+        network::HttpRequest,
     }
 };
 
@@ -70,7 +71,8 @@ pub enum CxOsOp {
     StopTimer(u64),
     StartDragging(DraggedItem),
     UpdateMenu(Menu),
-    ShowClipboardActions(String)
+    ShowClipboardActions(String),
+    HttpRequest(HttpRequest),
 }
 
 impl Cx { 
@@ -130,7 +132,7 @@ impl Cx {
     pub fn show_clipboard_actions(&mut self, selected: String) {
         self.platform_ops.push(CxOsOp::ShowClipboardActions(selected));
     }
-    
+
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
         self.platform_ops.iter().for_each( | p | {
             if let CxOsOp::StartDragging(_) = p {
@@ -381,6 +383,10 @@ impl Cx {
 
     pub fn spawner(&self) -> &Spawner {
         &self.spawner
+    }
+
+    pub fn http_request(&mut self, request: HttpRequest) {
+        self.platform_ops.push(CxOsOp::HttpRequest(request));
     }
 }
 

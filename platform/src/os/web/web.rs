@@ -16,13 +16,16 @@ use {
         },
         event::{
             ToWasmMsgEvent,
+            HttpResponseEvent,
+            HttpRequestErrorEvent,
+            HttpProgressEvent,
             WebSocket,
             WebSocketErrorEvent,
             WebSocketMessageEvent,
             WebSocketAutoReconnect,
             Event,
             XRInput,
-            TextCopyEvent,
+            TextClipboardEvent,
             TimerEvent,
             MouseDownEvent,
             MouseMoveEvent,
@@ -32,6 +35,7 @@ use {
             WindowGeom,
             WindowGeomChangeEvent
         },
+        network::*,
         pass::CxPassParent,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx},
@@ -169,7 +173,7 @@ impl Cx {
                 
                 live_id!(ToWasmTextCopy) => {
                     let response = Rc::new(RefCell::new(None));
-                    self.call_event_handler(&Event::TextCopy(TextCopyEvent {
+                    self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
                         response: response.clone()
                     }));
                     let response = response.borrow_mut().take();
@@ -216,6 +220,45 @@ impl Cx {
                 live_id!(ToWasmPaintDirty) => {
                     let main_pass_id = self.windows[CxWindowPool::id_zero()].main_pass_id.unwrap();
                     self.passes[main_pass_id].paint_dirty = true;
+                }
+
+                live_id!(ToWasmHTTPResponse) => {
+                    let tw = ToWasmHTTPResponse::read_to_wasm(&mut to_wasm);
+                    let response = HttpResponse::new(
+                        LiveId::from_str(&tw.id).unwrap(),
+                        tw.status as u16,
+                        tw.headers,
+                        Some(tw.body.into_vec_u8())
+                    );
+                    self.call_event_handler(&Event::HttpResponse(HttpResponseEvent {
+                        response
+                    }));
+                }
+
+                live_id!(ToWasmHttpRequestError) => {
+                    let tw = ToWasmHttpRequestError::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&Event::HttpRequestError(HttpRequestErrorEvent {
+                        id: LiveId::from_str(&tw.id).unwrap(),
+                        error: tw.error
+                    }));
+                }
+
+                live_id!(ToWasmHttpResponseProgress) => {
+                    let tw = ToWasmHttpResponseProgress::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&Event::HttpResponseProgress(HttpProgressEvent {
+                        id: LiveId::from_str(&tw.id).unwrap(),
+                        loaded: tw.loaded,
+                        total: tw.total
+                    }));
+                }
+
+                live_id!(ToWasmHttpUploadProgress) => {
+                    let tw = ToWasmHttpUploadProgress::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&Event::HttpUploadProgress(HttpProgressEvent {
+                        id: LiveId::from_str(&tw.id).unwrap(),
+                        loaded: tw.loaded,
+                        total: tw.total
+                    }));
                 }
                 
                 live_id!(ToWasmWebSocketClose) => {
@@ -301,15 +344,15 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
-                    let dpi_factor = self.os.window_geom.dpi_factor;
-                    self.draw_pass_to_canvas(*pass_id, dpi_factor);
+                    //et dpi_factor = self.os.window_geom.dpi_factor;
+                    self.draw_pass_to_canvas(*pass_id);
                 }
-                CxPassParent::Pass(parent_pass_id) => {
-                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*pass_id, dpi_factor);
+                CxPassParent::Pass(_) => {
+                    //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    self.draw_pass_to_texture(*pass_id);
                 },
                 CxPassParent::None => {
-                    self.draw_pass_to_texture(*pass_id, 1.0);
+                    self.draw_pass_to_texture(*pass_id);
                 }
             }
         }    
@@ -382,7 +425,17 @@ impl Cx {
                 CxOsOp::StartDragging(_dragged_item) => {
                 }
                 CxOsOp::UpdateMenu(_menu) => {
-                }
+                },
+                CxOsOp::HttpRequest(request) => {
+                    let headers = request.get_headers_string();
+                    self.os.from_wasm(FromWasmHTTPRequest {
+                        id: format!("{}", request.id),
+                        url: request.url,
+                        method: request.method.to_string().into(),
+                        headers: headers,
+                        body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
+                    });
+                },
             }
         }
     }
@@ -417,6 +470,10 @@ impl CxOsApi for Cx {
             ToWasmXRUpdate::to_js_code(),
             ToWasmAppGotFocus::to_js_code(),
             ToWasmAppLostFocus::to_js_code(),
+            ToWasmHTTPResponse::to_js_code(),
+            ToWasmHttpRequestError::to_js_code(),
+            ToWasmHttpResponseProgress::to_js_code(),
+            ToWasmHttpUploadProgress::to_js_code(),
             ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
@@ -440,6 +497,7 @@ impl CxOsApi for Cx {
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
             FromWasmCreateThread::to_js_code(),
+            FromWasmHTTPRequest::to_js_code(),
             FromWasmWebSocketOpen::to_js_code(),
             FromWasmWebSocketSend::to_js_code(),
             FromWasmXrStartPresenting::to_js_code(),
@@ -466,8 +524,8 @@ impl CxOsApi for Cx {
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
-        let closure_ptr = Box::into_raw(Box::new(closure_box));
-        self.os.from_wasm(FromWasmCreateThread {closure_ptr: closure_ptr as u32});
+        let context_ptr = Box::into_raw(Box::new(closure_box));
+        self.os.from_wasm(FromWasmCreateThread {context_ptr: context_ptr as u32});
     }
     
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket {

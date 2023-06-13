@@ -39,7 +39,7 @@ use {
             KeyCode,
             KeyEvent,
             TextInputEvent,
-            TextCopyEvent,
+            TextClipboardEvent,
             TimerEvent,
             //Signal,
             //SignalEvent,
@@ -397,11 +397,25 @@ impl CocoaApp {
                                 })
                             );
                         },
-                        KeyCode::KeyX | KeyCode::KeyC => if modifiers.logo || modifiers.control {
-                            // cut or copy.
+                        KeyCode::KeyC => if modifiers.logo || modifiers.control {
                             let response = Rc::new(RefCell::new(None));
                             self.do_callback(
-                                CocoaEvent::TextCopy(TextCopyEvent {
+                                CocoaEvent::TextCopy(TextClipboardEvent {
+                                    response: response.clone()
+                                })
+                            );
+                            let response = response.borrow();
+                            if let Some(response) = response.as_ref(){
+                                let nsstring = str_to_nsstring(&response);
+                                let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
+                                let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
+                                let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
+                            }
+                        },
+                        KeyCode::KeyX => if modifiers.logo || modifiers.control {
+                            let response = Rc::new(RefCell::new(None));
+                            self.do_callback(
+                                CocoaEvent::TextCut(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );

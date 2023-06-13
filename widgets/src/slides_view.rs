@@ -11,11 +11,11 @@ live_design!{
     import makepad_widgets::label::Label;
     //registry Widget::*;
     
-    const SLIDE_WIDTH = 800
+    const SLIDE_WIDTH = 1920
     
     SlideBody = <Label> {
         draw_label: {
-            color: #f
+            color: #D
             text_style: {
                 font_size: 35
             }
@@ -24,14 +24,29 @@ live_design!{
     }
     
     Slide = <Box> {
-        draw_bg: {shape: Box, color: #2, radius: 10.0}
+        draw_bg: { color: #x1A, radius: 5.0 }
         walk: {width: (SLIDE_WIDTH), height: Fill}
-        layout: {align: {x: 0.5, y: 0.5}, flow: Down, spacing: 40}
+        layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
         title = <Label> {
             draw_label: {
                 color: #f
                 text_style: {
-                    font_size: 64
+                    font_size: 84
+                }
+            }
+            label: "SlideTitle"
+        }
+    }
+
+    SlideChapter = <Slide> {
+        draw_bg: { color: #xFF5C39, radius: 5.0 }
+        walk: {width: (SLIDE_WIDTH), height: Fill}
+        layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50 }
+        title = <Label> {
+            draw_label: {
+                color: #x181818
+                text_style: {
+                    font_size: 120
                 }
             }
             label: "SlideTitle"
@@ -42,7 +57,7 @@ live_design!{
         slide_width: (SLIDE_WIDTH)
         goal_pos: 0.0
         anim_speed: 0.9
-        frame: <ScrollX> {
+        <ScrollX> {
             walk: {width: Fill, height: Fill}
         }
     }
@@ -55,7 +70,7 @@ pub struct SlidesView {
     #[live] goal_pos: f64,
     #[live] current_pos: f64,
     #[live] anim_speed: f64,
-    #[live] frame: FrameRef,
+    #[deref] frame: Frame,
     #[rust] next_frame: NextFrame
 }
 
@@ -79,10 +94,10 @@ impl Widget for SlidesView {
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
         let uid = self.widget_uid();
+        self.frame.handle_widget_event_with(cx, event, dispatch_action);
         self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid));
         });
-        self.frame.handle_widget_event_with(cx, event, dispatch_action);
     }
     
     fn get_walk(&self) -> Walk {

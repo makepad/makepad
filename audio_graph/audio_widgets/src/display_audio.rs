@@ -173,3 +173,21 @@ impl DisplayAudioRef {
     pub fn voice_off(&self, _cx: &mut Cx, _voice: usize,) {
     }
 }
+
+// ImGUI convenience API for Piano
+#[derive(Clone, WidgetSet)]
+pub struct DisplayAudioSet(WidgetSet);
+
+impl DisplayAudioSet {
+    pub fn process_buffer(&self, cx: &mut Cx, chan: Option<usize>, voice: usize, buffer: &AudioBuffer) {
+        for item in self.iter(){
+            item.process_buffer(cx, chan, voice, buffer);
+        }
+    }
+    
+    pub fn voice_off(&self, cx: &mut Cx, voice: usize,) {
+        for item in self.iter(){
+            item.voice_off(cx, voice);
+        }
+    }
+}

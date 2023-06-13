@@ -495,11 +495,12 @@ impl TextInput {
             }
             Hit::TextCopy(ce) => {
                 self.undo_id += 1;
-                *ce.response.borrow_mut() = Some(self.selected_text())
+                *ce.response.borrow_mut() = Some(self.selected_text());
             }
-            Hit::TextCut => {
+            Hit::TextCut(tc) => {
                 self.undo_id += 1;
                 if self.cursor_head != self.cursor_tail {
+                    *tc.response.borrow_mut() = Some(self.selected_text());
                     self.create_undo(UndoGroup::Cut(self.undo_id));
                     self.change(cx, "", dispatch_action);
                 }
@@ -534,13 +535,6 @@ impl TextInput {
                     self.cursor_tail = 0;
                     self.cursor_head = self.text.chars().count();
                     self.draw_bg.redraw(cx);
-                }
-                KeyCode::KeyX if ke.modifiers.logo || ke.modifiers.control => {
-                    self.undo_id += 1;
-                    if self.cursor_head != self.cursor_tail {
-                        self.create_undo(UndoGroup::Cut(self.undo_id));
-                        self.change(cx, "", dispatch_action);
-                    }
                 }
                 KeyCode::ArrowLeft => {
                     self.undo_id += 1;
@@ -740,6 +734,14 @@ impl TextInputRef {
         if let Some(mut inner) = self.borrow_mut(){
             inner.text.clear();
             inner.text.push_str(text);
+        }
+    }
+    
+    pub fn get_text(&self) -> String {
+        if let Some(inner) = self.borrow(){
+            inner.text.clone()
+        } else {
+            "".to_string()
         }
     }
 }

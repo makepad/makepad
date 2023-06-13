@@ -18,6 +18,7 @@ use {
         event::*,
         cursor::MouseCursor,
         os::cx_native::EventFlow,
+        x11::x11_sys::XEvent
     },
 };
 
@@ -441,24 +442,24 @@ impl XlibApp {
                                         ]);
                                         */
                                     }
-                                    KeyCode::KeyX | KeyCode::KeyC => {
+                                    KeyCode::KeyC => {
                                         let response = Rc::new(RefCell::new(None));
-                                        self.do_callback(XlibEvent::TextCopy(TextCopyEvent {
+                                        self.do_callback(XlibEvent::TextCopy(TextClipboardEvent {
                                             response: response.clone()
                                         }));
                                         let response = response.borrow();
                                         if let Some(response) = response.as_ref() {
-                                            // store the text on the clipboard
-                                            self.clipboard = response.clone();
-                                            // lets set the owner
-                                            println!("Set selection owner");
-                                            x11_sys::XSetSelectionOwner(
-                                                self.display,
-                                                self.atoms.clipboard,
-                                                window.window.unwrap(),
-                                                event.xkey.time
-                                            );
-                                            x11_sys::XFlush(self.display);
+                                            self.copy_to_clipboard(response, &window, &event);
+                                        }
+                                    }
+                                    KeyCode::KeyX => {
+                                        let response = Rc::new(RefCell::new(None));
+                                        self.do_callback(XlibEvent::TextCut(TextClipboardEvent {
+                                            response: response.clone()
+                                        }));
+                                        let response = response.borrow();
+                                        if let Some(response) = response.as_ref() {
+                                            self.copy_to_clipboard(response, &window, &event);
                                         }
                                     }
                                     _ => ()
@@ -823,6 +824,19 @@ impl XlibApp {
             x11_sys::XK_Up => KeyCode::ArrowUp,
             _ => KeyCode::Unknown,
         }
+    }
+
+    unsafe fn copy_to_clipboard(&mut self, text: &String, window: &XlibWindow, event: &XEvent) {
+        // store the text on the clipboard
+        self.clipboard = text.clone();
+        // lets set the owner
+        x11_sys::XSetSelectionOwner(
+            self.display,
+            self.atoms.clipboard,
+            window.window.unwrap(),
+            event.xkey.time
+        );
+        x11_sys::XFlush(self.display);
     }
 }
 

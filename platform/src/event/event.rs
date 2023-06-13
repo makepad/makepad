@@ -14,6 +14,7 @@ use {
             window::*,
             xr::*,
             drag_drop::*,
+            network::*,
         },
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
@@ -60,8 +61,8 @@ pub enum Event {
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
-    TextCopy(TextCopyEvent),
-    TextCut,
+    TextCopy(TextClipboardEvent),
+    TextCut(TextClipboardEvent),
     
     Drag(DragEvent),
     Drop(DropEvent),
@@ -75,6 +76,11 @@ pub enum Event {
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
+
+    HttpResponse(HttpResponseEvent),
+    HttpRequestError(HttpRequestErrorEvent),
+    HttpResponseProgress(HttpProgressEvent),
+    HttpUploadProgress(HttpProgressEvent),
     
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
@@ -87,8 +93,8 @@ pub enum Hit{
     KeyUp(KeyEvent),
     Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
-    TextCopy(TextCopyEvent),
-    TextCut,
+    TextCopy(TextClipboardEvent),
+    TextCut(TextClipboardEvent),
     
     FingerScroll(FingerScrollEvent),
     FingerDown(FingerDownEvent),

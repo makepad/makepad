@@ -28,3 +28,5 @@ makepad_settings.ron
 makepad_state.ron
 key.ron
 .vscode
+
+/tools/cargo_makepad/android_33_macos_x64

@@ -45,6 +45,9 @@ import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+
 public class MakepadActivity extends Activity implements 
 MidiManager.OnDeviceOpenedListener,
 View.OnCreateContextMenuListener,
@@ -54,7 +57,14 @@ Makepad.Callback{
         // this causes a pause/resume cycle.
         if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED ||
             checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED){
-            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.CAMERA}, 123);
+            requestPermissions(
+                new String[]{
+                    Manifest.permission.BLUETOOTH_CONNECT, 
+                    Manifest.permission.CAMERA,
+                    Manifest.permission.INTERNET
+                    }, 
+                123
+            );
         }
 
         super.onCreate(savedInstanceState);
@@ -257,8 +267,18 @@ Makepad.Callback{
     }
 
     public void showClipboardActions(String selected) {
-        mSelectedContent = selected;
+        mSelectedText = selected;
         mView.showContextMenu();
+    }
+
+    public void copyToClipboard(String selected) {
+        mSelectedText = selected;
+        copySelectedTextToClipboard();
+    }
+
+    public void pasteFromClipboard(){
+        String text = getTextFromClipboard();
+        Makepad.onPasteFromClipboard(mCx, text, (Makepad.Callback)mView.getContext());
     }
 
     @Override
@@ -270,7 +290,7 @@ Makepad.Callback{
 
         MenuItem copyItem = menu.findItem(R.id.menu_copy);
         MenuItem cutItem = menu.findItem(R.id.menu_cut);
-        if (mSelectedContent == null || mSelectedContent.isEmpty()) {
+        if (mSelectedText == null || mSelectedText.isEmpty()) {
             copyItem.setVisible(false);
             cutItem.setVisible(false);
         } else {
@@ -298,31 +318,65 @@ Makepad.Callback{
         ClipData clip;
         switch (item.getItemId()) {
             case R.id.menu_copy:
-                clip = ClipData.newPlainText("Makepad", mSelectedContent);
-                clipboard.setPrimaryClip(clip);
-
-                // Will emit the internal Makepad TextCopy event, just in case
-                // widget developers want to do something else
-                Makepad.copyToClipboard(mCx, (Makepad.Callback)mView.getContext());
+                copySelectedTextToClipboard();
                 return true;
-            case R.id.menu_paste:
-                if (clipboard.hasPrimaryClip()) {
-                    ClipData.Item cb_item = clipboard.getPrimaryClip().getItemAt(0);
-                    String text = cb_item.getText().toString();
 
-                    // Will emit TextInput event with the was_paste flag in true
-                    Makepad.pasteFromClipboard(mCx, text, (Makepad.Callback)mView.getContext());
-                }
-                return true;
             case R.id.menu_cut:
-                clip = ClipData.newPlainText("Makepad", mSelectedContent);
-                clipboard.setPrimaryClip(clip);
-
-                // Will emit TextCut event so Makepad widgets can strip the selected content
-                Makepad.cutToClipboard(mCx, (Makepad.Callback)mView.getContext());
+                copySelectedTextToClipboard();
+                Makepad.onCutToClipboard(mCx, (Makepad.Callback)mView.getContext());
                 return true;
+
+            case R.id.menu_paste:
+                String text = getTextFromClipboard();
+                Makepad.onPasteFromClipboard(mCx, text, (Makepad.Callback)mView.getContext());
+                return true;
+                
             default:
                 return super.onContextItemSelected(item);
+        }
+    }
+
+    public void requestHttp(long id, String url, String method, String headers, byte[] body) {
+        try {
+            MakepadNetwork network = new MakepadNetwork();
+
+            CompletableFuture<HttpResponse> future = network.performHttpRequest(url, method, headers, body);
+
+            future.thenAccept(response -> {
+                runOnUiThread(() -> Makepad.onHttpResponse(mCx, id, response.getStatusCode(), response.getHeaders(), response.getBody(), (Makepad.Callback) mView.getContext()));
+            }).exceptionally(ex -> {
+                runOnUiThread(() -> Makepad.onHttpRequestError(mCx, id, ex.toString(), (Makepad.Callback) mView.getContext()));
+                return null;
+            });
+        } catch (Exception e) {
+            Makepad.onHttpRequestError(mCx, id, e.toString(), (Makepad.Callback) mView.getContext());
+        }
+    }
+
+    private void copySelectedTextToClipboard() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        ClipData clip = ClipData.newPlainText("Makepad", mSelectedText);
+        clipboard.setPrimaryClip(clip);
+    }
+        
+    private String getTextFromClipboard() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        try{
+            String text;
+            if (clipboard.hasPrimaryClip()) {
+                ClipData.Item cb_item = clipboard.getPrimaryClip().getItemAt(0);
+                text = cb_item.getText().toString();
+            } else {
+                text = null;
+            }
+
+            return text;
+        }
+        catch(Exception e){
+            Log.e("Makepad", "exception: " + e.getMessage());
+            Log.e("Makepad", "exception: " + e.toString());
+
+            return null;
         }
     }
 
@@ -330,5 +384,5 @@ Makepad.Callback{
     HashMap<Long, Runnable> mRunnables;
     MakepadSurfaceView mView;
     long mCx;
-    String mSelectedContent;
+    String mSelectedText;
 }

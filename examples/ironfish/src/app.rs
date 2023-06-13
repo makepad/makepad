@@ -23,7 +23,13 @@ live_design!{
     import makepad_audio_graph::instrument::Instrument;
     import makepad_synth_ironfish::ironfish::IronFish;
     import makepad_widgets::designer::Designer;
+    import makepad_widgets::slides_view::Slide;
+    import makepad_widgets::slides_view::SlideChapter;
+    import makepad_widgets::slides_view::SlideBody;
+    import makepad_widgets::slides_view::SlidesView;
     
+    //import makepad_example_fractal_zoom::mandelbrot::Mandelbrot;
+    //import makepad_example_numbers::number_grid::NumberGrid;
     // APP
     //ui: <AppMobile> {}
     App = {{App}} {
@@ -35,8 +41,15 @@ live_design!{
                 }
             }
         }
+        ui: <DesktopWindow> {
+            window: {inner_size: vec2(1280, 1000), dpi_override:2},
+            pass: {clear_color: #2A}
+            block_signal_event: true; 
+            <AppDesktop> {}
+        }
         
-        ui: <MultiWindow> {
+        /*
+        ui= <MultiWindow> {
             mobile =<DesktopWindow> {
                 window: {inner_size: vec2(1280, 1000), dpi_override:2},
                 pass: {clear_color: #2A}
@@ -55,6 +68,148 @@ live_design!{
                 pass: {clear_color: #2A}
                 block_signal_event: true; 
                 <AppMobile> {}
+            }
+        }*/
+
+        ui=<DesktopWindow> {
+            window: {inner_size: vec2(1920, 1080)},
+            
+            pass: {clear_color: #2A}
+            block_signal_event: true; 
+            <SlidesView> {
+                goal_pos: 0.0
+                
+                <SlideChapter> {
+                    title = {label: "MAKEPAD.\nDESIGNING MODERN\nUIs FOR RUST."},
+                    <SlideBody> {label: "Rik Arends\n"}
+                }
+                <Slide> {
+                    title = {label: "A long long time ago …"},
+                    <SlideBody> {label: "… in a galaxy nearby\n   Cloud9 IDE & ACE"}
+                }
+                <Slide> {
+                    title = {label: "HTML as an IDE UI?\nMadness!"},
+                    <SlideBody> {label: "- Integrating design and code was hard\n- Could not innovate editing\n- Too slow, too hard to control"}
+                }
+                <Slide> {
+                    title = {label: "Let's start over!"},
+                    <SlideBody> {label: "- JavaScript and WebGL for UI\n- Write shaders to style UI\n- A quick demo"}
+                }
+                <Slide> {
+                    title = {label: "Maybe JavaScript\nwas the problem?"},
+                    <SlideBody> {label: "- Great livecoding, but …\n- Chrome crashing tabs after 30 minutes\n- Too slow"}
+                }
+                <Slide> {
+                    title = {label: "Rust appears"},
+                    <SlideBody> {label: "- Let's try again: Native + Wasm\n- Makepad in Rust\n- Startup with Eddy and Sebastian"}
+                }
+                <Slide> {title = {label: "Rust is fast: SIMD Mandelbrot"}, 
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    draw_bg: { color: #x1A, radius: 5.0 }
+                    <Frame>{
+                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        <Box>{
+                            draw_bg: { color: #x2A } 
+                            walk: { margin: 0.0}
+                            layout:{ padding: 0.0 }
+                            <Mandelbrot> {walk:{width:Fill, height:Fill}}
+                        }
+                    }
+                }
+
+                <Slide> {title = {label: "Instanced rendering"}, 
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    draw_bg: { color: #x1A, radius: 5.0 }
+                    <Frame>{
+                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        <Box>{
+                            draw_bg: { color: #x2A }
+                            walk: { margin: 0.0}
+                            layout:{ padding: 0.0 }
+                            <NumberGrid> {walk:{width:Fill, height:Fill}}
+                        }
+                    }
+                }
+                
+                <Slide> {
+                    title = {label: "Our goal:\nUnify coding and UI design again."},
+                    <SlideBody> {label: "As it was in Visual Basic.\nNow with modern design."}
+                }
+
+                <Slide> {title = {label: "Ironfish Desktop"}, 
+                    <Box>{
+                        draw_bg: { color: #x2A }
+                        walk: { margin: 10.0, width: 1600 }
+                        layout:{ padding: 0.0 }
+                        <AppDesktop> {}
+                    }
+                }
+                
+                <Slide> {title = {label: "Ironfish Mobile"}, 
+                    <Frame>{
+                        layout:{padding: 0, align:{x:0.5}}
+                        walk: { margin: { top: 0 }}
+                        <AppMobile> {walk:{width:400, height: Fill}}
+                    }
+                }
+                
+                <Slide> {title = {label: "Multi modal"}, 
+                    <Frame>{
+                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+
+                        <AppMobile> {walk:{width:400, height: Fill}}
+
+                        <Box>{
+                            draw_bg: { color: #x2A }
+                            walk: { margin: 0.0}
+                            layout:{ padding: 0.0 }
+                            <AppDesktop> {
+                                walk:{width: Fill, height: Fill}
+                            }
+                        }
+                    }
+                }
+                
+                <Slide> {title = {label: "Visual design"}, 
+                    layout: {align: {x: 0.0, y: 0.5}, flow: Down, spacing: 10, padding: 50}
+                    <Frame>{
+                        layout:{padding: 0, align:{x:0.5}, spacing: 20}
+                        <Box>{
+                            draw_bg: { color: #x2A }
+                            walk: { margin: 0.0}
+                            layout:{ padding: 0.0 }
+                            <AppDesktop> {walk:{width:900}}
+                        }
+
+                        <Box>{
+                            draw_bg: { color: #x2A }
+                            walk: { margin: 0.0}
+                            layout:{ padding: 0.0 }
+                            <Designer> {walk:{width:900}}
+                        } 
+                    }
+                }
+                
+                <Slide> {
+                    title = {label: "Our UI language: Live."},
+                    <SlideBody> {label: "- Live editable\n- Design tool manipulates text\n- Inheritance structure\n- Rust-like module system"}
+                }
+                
+                <Slide> {
+                    title = {label: "These slides are a Makepad app"},
+                    <SlideBody> {label: "- Show source\n"}
+                    <SlideBody> {label: "- Show Rust API\n"}
+                }                
+                
+                <Slide> {
+                    title = {label: "Future"},
+                    <SlideBody> {label: "- Release of 0.4.0 soon\n- Windows, Linux, Mac, Web and Android\n- github.com/makepad/makepad\n- twitter: @rikarends @makepad"}
+                }                
+                
+                <Slide> {
+                    title = {label: "Build for Android"},
+                    <SlideBody> {label: "- SDK installer\n- Cargo makepad android\n"}
+                }                
             }
         }
     }
@@ -83,6 +238,8 @@ impl LiveHook for App {
         crate::sequencer::live_design(cx);
         crate::app_desktop::live_design(cx);
         crate::app_mobile::live_design(cx);
+       //makepad_example_fractal_zoom::mandelbrot::live_design(cx);
+        //makepad_example_numbers::number_grid::live_design(cx);
     }
 }
 
@@ -231,7 +388,7 @@ impl AppMain for App {
                 // check for actions inside the list item
                 if item.get_button(id!(delete)).clicked(&actions) {
                     // delete the item in the data
-                    list.redraw(cx);
+                    list.redraw(cx); 
                 }
             }
         }
@@ -277,7 +434,7 @@ impl AppMain for App {
             application_pages.tab3_frame,
         ));
         
-        let display_audio = ui.get_display_audio(id!(display_audio));
+        let display_audio = ui.get_display_audio_set(ids!(display_audio));
         
         let mut buffers = 0;
         self.audio_graph.handle_event_with(cx, event, &mut | cx, action | {
@@ -292,7 +449,7 @@ impl AppMain for App {
             };
         });
         
-        let piano = ui.get_piano(id!(piano));
+        let piano = ui.get_piano_set(ids!(piano));
         
         while let Some((_, data)) = self.midi_input.receive() {
             self.audio_graph.send_midi_data(data);

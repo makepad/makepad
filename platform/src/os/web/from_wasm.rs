@@ -138,15 +138,21 @@ impl DrawShaderTextureInput{
 
 #[derive(FromWasm)]
 pub struct FromWasmCreateThread {
-    pub closure_ptr: u32,
+    pub context_ptr: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmHTTPRequest {
+    pub id: String,
+    pub url: String,
+    pub method: String,
+    pub headers: String,
+    pub body: WasmDataU8,
 }
 
 
 
 // WebGL API
-
-
-
 
 #[derive(FromWasm)]
 pub struct FromWasmCompileWebGLShader {

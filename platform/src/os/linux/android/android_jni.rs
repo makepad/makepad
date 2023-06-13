@@ -2,13 +2,14 @@
 
 use {
     self::super::{
-        jni_sys::{jclass, jsize, jint, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
+        jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
     },
     crate::{
         area::Area,
         makepad_math::*,
         event::*,
         cx::{Cx, AndroidParams},
+        network::*,
     },
     std::{
         cell::Cell,
@@ -156,6 +157,38 @@ impl<'a> AndroidToJava<'a> {
         }
     }
     
+    pub fn copy_to_clipboard(&self, selected: &str) {
+        unsafe {
+            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
+            let name = CString::new("copyToClipboard").unwrap();
+            let signature = CString::new("(Ljava/lang/String;)V").unwrap();
+            let selected = CString::new(selected).unwrap();
+            let selected = ((**self.env).NewStringUTF.unwrap())(self.env, selected.as_ptr());
+            let method_id = ((**self.env).GetMethodID.unwrap())(
+                self.env,
+                class,
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
+            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id, selected);
+        }
+    }
+
+    pub fn paste_from_clipboard(&self) {
+        unsafe {
+            let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
+
+            let name = CString::new("pasteFromClipboard").unwrap();
+            let signature = CString::new("()V").unwrap();
+            let method_id = ((**self.env).GetMethodID.unwrap())(
+                self.env,
+                class,
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
+            ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
+        }
+    }
     
     /// reads an asset
     ///
@@ -215,6 +248,55 @@ impl<'a> AndroidToJava<'a> {
             ((**self.env).CallLongMethod.unwrap())(self.env, self.callback, method_id, delay);
         }
     }
+
+    pub fn http_request(&self, request: HttpRequest) {
+        unsafe {
+            let url = CString::new(request.url.clone()).unwrap();
+            let url = ((**self.env).NewStringUTF.unwrap())(self.env, url.as_ptr());
+
+            let method = CString::new(request.method.to_string()).unwrap();
+            let method = ((**self.env).NewStringUTF.unwrap())(self.env, method.as_ptr());
+    
+            let headers_string = request.get_headers_string();
+            let headers = CString::new(headers_string).unwrap();
+            let headers = ((**self.env).NewStringUTF.unwrap())(self.env, headers.as_ptr());
+    
+            let java_body = match &request.body {
+                Some(body) => {
+                    let java_body = (**self.env).NewByteArray.unwrap()(self.env, body.len() as i32);
+                    (**self.env).SetByteArrayRegion.unwrap()(
+                        self.env,
+                        java_body,
+                        0,
+                        body.len() as i32,
+                        body.as_ptr() as *const jbyte,
+                    );
+                    java_body
+                }
+                None => std::ptr::null_mut(),
+            };
+    
+            let name = CString::new("requestHttp").unwrap();
+            let signature = CString::new("(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V").unwrap();
+            let method_id = (**self.env).GetMethodID.unwrap()(
+                self.env,
+                (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
+    
+            (**self.env).CallVoidMethod.unwrap()(
+                self.env,
+                self.callback,
+                method_id,
+                request.id.get_value() as jlong,
+                url,
+                method,
+                headers,
+                java_body as jobject,
+            );
+        }
+    }    
 }
 
 // The functions here correspond to the static functions on the `Makepad` class in Java.
@@ -595,31 +677,21 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onResizeTextIME(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_copyToClipboard(
-    env: *mut JNIEnv,
-    _: jclass,
-    cx: jlong,
-    callback: jobject,
-) {
-    (*(cx as *mut Cx)).from_java_copy_to_clipboard(
-        AndroidToJava {
-            env,
-            callback,
-            phantom: PhantomData,
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_pasteFromClipboard(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onPasteFromClipboard(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
     content: jstring,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_paste_from_clipboard(
-        jstring_to_string(env, content),
+    let string_content = if content == std::ptr::null_mut() {
+        None
+    } else {
+        Some(jstring_to_string(env, content))
+    };
+
+    (*(cx as *mut Cx)).from_java_on_paste_from_clipboard(
+        string_content,
         AndroidToJava {
             env,
             callback,
@@ -629,13 +701,60 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_pasteFromClipboard(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_cutToClipboard(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onCutToClipboard(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_cut_to_clipboard(
+    (*(cx as *mut Cx)).from_java_on_cut_to_clipboard(
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpResponse(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    request_id: jlong,
+    status_code: jint,
+    headers: jstring,
+    body: jobject,
+    callback: jobject,
+) {
+    let headers = jstring_to_string(env, headers);
+    let body = java_byte_array_to_vec(env, body);
+
+    (*(cx as *mut Cx)).from_java_on_http_response(
+        request_id as u64,
+        status_code as u16,
+        headers,
+        body,
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpRequestError(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    request_id: jlong,
+    exception: jstring,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_http_request_error(
+        request_id as u64,
+        jstring_to_string(env, exception),
         AndroidToJava {
             env,
             callback,

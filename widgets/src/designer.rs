@@ -16,6 +16,7 @@ live_design!{
     import makepad_draw::shader::std::*
     
     Designer = {{Designer}} {
+        has_view: true,
         layout: {flow: Right},
         container: <Box> {
             draw_bg: {color: #3}
@@ -36,7 +37,7 @@ live_design!{
                 }
             },
             b: <CachedScrollXY> {
-                dpi_factor: 1.0
+                dpi_factor: 1.5
                 draw_bg: {color: #4}
                 walk: {width: Fill, height: Fill}
                 layout: {flow: Down},
@@ -124,8 +125,13 @@ impl Designer {
     
     fn draw_design(&mut self, cx: &mut Cx2d) {
         // alrigh so. lets draw the designs
+        let mut count = 0;
         for node in &self.outline_nodes {
             if let OutlineNode::Component {ptr, name, class, ..} = node {
+                count += 1;
+                if count > 5{
+                    break;
+                }
                 let container_ptr = self.container;
                 let (widget, container) = self.components.get_or_insert(cx, *ptr, | cx | {
                     (
@@ -149,7 +155,7 @@ impl Designer {
                 match child {
                     OutlineNode::Global {..} => {}
                     OutlineNode::Component {name, children, uid, class, prop_type, ..} => {
-                        if outline.begin_folder(cx, *uid, &if !name.is_empty(){
+                        if outline.begin_folder(cx, *uid, &if !name.is_unique(){
                             if let LivePropType::Field = prop_type {
                                 format!("{}: <{}>", name, class)
                             }

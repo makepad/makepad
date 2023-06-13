@@ -228,6 +228,7 @@ impl Cx {
                 // ok here we send out to all our childprocesses
                 
                 self.handle_repaint(metal_windows, metal_cx);
+                
             }
             CocoaEvent::MouseDown(e) => {
                 self.fingers.process_tap_count(
@@ -279,6 +280,9 @@ impl Cx {
             }
             CocoaEvent::TextCopy(e) => {
                 self.call_event_handler(&Event::TextCopy(e))
+            }
+            CocoaEvent::TextCut(e) => {
+                self.call_event_handler(&Event::TextCut(e))
             }
             CocoaEvent::Timer(e) => {
                 self.call_event_handler(&Event::Timer(e))

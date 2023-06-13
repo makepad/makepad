@@ -121,11 +121,15 @@ impl LiveId {
     }
     
     pub fn is_ident(&self) -> bool {
-        return !self.is_unique()
+        !self.is_unique()
     }
     
     pub fn is_empty(&self) -> bool {
         self.0 == 0
+    }
+
+    pub fn get_value(&self) -> u64 {
+        self.0
     }
     
     // from https://nullprogram.com/blog/2018/07/31/
@@ -143,7 +147,7 @@ impl LiveId {
             i += 1;
         }
         // mark high bit as meaning that this is a hash id
-        return Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
+        Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
     }
     
     pub const fn from_str_unchecked(id_str: &str) -> Self {
@@ -187,7 +191,7 @@ impl LiveId {
             else {
                 idmap.id_to_string.insert(id, id_str.to_string());
             }
-            return Ok(id)
+            Ok(id)
         })
     }
     
@@ -196,7 +200,7 @@ impl LiveId {
         let id = Self::from_str_num_unchecked(id_str, num);
         LiveIdInterner::with( | idmap | {
             idmap.id_to_string.insert(id, format!("{}{}",id_str, num));
-            return Ok(id)
+            Ok(id)
         })
     }
     
@@ -205,7 +209,7 @@ impl LiveId {
     {
         LiveIdInterner::with( | idmap | {
             match idmap.id_to_string.get(self){
-                Some(v)=>f(Some(&v)),
+                Some(v)=>f(Some(v)),
                 None=>f(None)
             }
         })
@@ -228,7 +232,7 @@ impl Ord for LiveId {
                     return id1.cmp(id2)
                 }
             }
-            return Ordering::Equal
+            Ordering::Equal
         })
     }
 }
@@ -368,7 +372,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug
             let new_id = LiveId::unique().into();
             if self.map.get(&new_id).is_none() && !self.alloc_set.contains(&new_id) {
                 self.alloc_set.insert(new_id);
-                return new_id.into()
+                return new_id
             }
         }
     }

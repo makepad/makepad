@@ -13,7 +13,7 @@ use {
             KeyEvent,
             DragEvent,
             DropEvent,
-            TextCopyEvent,
+            TextClipboardEvent,
             TimerEvent,
         },
     }
@@ -40,6 +40,7 @@ pub enum XlibEvent {
     DragEnd,
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
-    TextCopy(TextCopyEvent),
+    TextCopy(TextClipboardEvent),
+    TextCut(TextClipboardEvent),
     Timer(TimerEvent),
 }

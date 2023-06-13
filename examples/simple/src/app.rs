@@ -56,10 +56,10 @@ live_design!{
                 // syntax is *mostly* compatible with GLSL, although there are some differences as
                 // well.
                 fn pixel(self) -> vec4 {
-                    // Within a shader, the `self.geom_pos` syntax is used to access the `geom_pos`
-                    // attribute of the shader. In this case, the `geom_pos` attribute is built in,
-                    // and ranges from 0 to 1.
-                    return mix(#7, #3, self.geom_pos.y);
+                    // Within a shader, the `self.pos` syntax is used to access the `pos` varying.
+                    // this is a clipped version of geom_pos that ranges from 0,0..1,1 top-left..bottom-right 
+                    // over the quad
+                    return mix(#7, #3, self.pos.y);
                 }
             }
             
@@ -94,6 +94,7 @@ live_design!{
                 walk: {width: 100, height: 30},
                 label: "Click to count"
             }
+            
             // A label to display the counter.
             label1 = <Label> {
                 draw_label: {

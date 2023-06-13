@@ -14,7 +14,7 @@ use {
             KeyEvent,
             DragEvent,
             DropEvent,
-            TextCopyEvent,
+            TextClipboardEvent,
             TimerEvent,
         },
     }
@@ -43,7 +43,8 @@ pub enum Win32Event {
     DragEnd,
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
-    TextCopy(TextCopyEvent),
+    TextCopy(TextClipboardEvent),
+    TextCut(TextClipboardEvent),
     Timer(TimerEvent),
     Signal,
 }

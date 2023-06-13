@@ -22,7 +22,7 @@ pub fn main(){
             
             //let comp_len = if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
             
-            if let Err(_) = fs::write(&file_path, strip) {
+            if fs::write(file_path, strip).is_err() {
                 eprintln!("Cannot write stripped wasm {}", file_path);
             }
             else {
