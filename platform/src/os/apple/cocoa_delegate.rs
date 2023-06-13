@@ -25,9 +25,10 @@ use {
             },
             apple_util::{
                 nsstring_to_string,
+                str_to_nsstring,
                 get_event_key_modifier,
                 superclass,
-                load_mouse_cursor
+                load_mouse_cursor,
             },
         },
         menu::{
@@ -191,7 +192,6 @@ pub fn define_key_value_observing_delegate() -> *const Class {
     return decl.register();
 }
 
-
 pub fn define_cocoa_timer_delegate() -> *const Class {
     
     extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
@@ -269,6 +269,65 @@ pub fn define_menu_delegate() -> *const Class {
     decl.add_protocol(&Protocol::get("NSMenuDelegate").unwrap());
     return decl.register();
 }
+
+pub fn define_cocoa_networking_delegate() -> *const Class {
+    extern fn send_get_request(this: &Object, _sel: Sel) {
+        unsafe {
+            println!("increible");
+            let url: ObjcId =
+                msg_send![class!(NSURL), URLWithString: str_to_nsstring("http://example.com/api/resource")];
+            let session_configuration: ObjcId = msg_send![class!(NSURLSessionConfiguration), defaultSessionConfiguration];
+            let session: ObjcId = msg_send![class!(NSURLSession), sessionWithConfiguration: session_configuration delegate: this delegateQueue: nil];
+            let data_task: ObjcId = msg_send![session, dataTaskWithURL: url];
+
+            let () = msg_send![data_task, resume];
+        }
+    }
+
+    extern fn did_receive_data(
+        _this: &Object,
+        _: Sel,
+        _session: ObjcId,
+        _task: ObjcId,
+        data: ObjcId
+    ) {
+        unsafe {
+            let bytes: *const u8 = msg_send![data, bytes];
+            let length: usize = msg_send![data, length];
+            let received_data: &[u8] = std::slice::from_raw_parts(bytes, length);
+
+            let ca = get_cocoa_app_global();
+            ca.send_http_response_event(received_data.into());
+        }
+    }
+
+    extern fn did_complete_with_error(
+        _this: &Object,
+        _: Sel,
+        _session: ObjcId,
+        _task: ObjcId,
+        error: ObjcId
+    ) {
+        unsafe {
+            println!("did_complete_with_error");
+            println!("error_str: {:?}", error);
+        }
+    }
+
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("NetworkingDelegate", superclass).unwrap();
+
+    unsafe {
+        decl.add_method(sel!(sendGetRequest), send_get_request as extern fn(&Object, Sel));
+        decl.add_method(sel!(URLSession: dataTask: didReceiveData:), did_receive_data as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId));
+        decl.add_method(sel!(URLSession: task: didCompleteWithError:), did_complete_with_error as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId));
+    }
+
+    decl.add_protocol(&Protocol::get("NSURLSessionDelegate").unwrap());
+    decl.add_protocol(&Protocol::get("NSURLSessionDataDelegate").unwrap());
+    return decl.register();
+}
+
 /*
 struct CocoaPostInit {
     cocoa_app_ptr: *mut CocoaApp,
