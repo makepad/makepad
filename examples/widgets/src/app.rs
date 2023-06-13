@@ -44,14 +44,14 @@ live_design!{
                 walk:{width:100}
                 labels:["Item1","Item2"]
             }
-            
+            /*
             label1 = <Label> {
                 draw_label: {
                     color: #f
                 },
                 label: "Counter: 0"
             }
-            /*
+            
             slider1 = <Slider>{
                 walk:{width:100, height: 50}
             }*/
