@@ -3,7 +3,7 @@ use makepad_widgets::*;
 live_design!{
     import makepad_widgets::theme::*;
     import makepad_draw::shader::std::*;
-
+    
     import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
@@ -18,39 +18,39 @@ live_design!{
     
     ICO_FAV = dep("crate://self/resources/Icon_Favorite.svg")
     LOGO = dep("crate://self/resources/leap_logo.svg")
-
-    FONT_SIZE_SUB = 9.5 
+    
+    FONT_SIZE_SUB = 9.5
     FONT_SIZE_P = 16.0
-
+    
     TEXT_SUB = {
         font_size: (FONT_SIZE_SUB),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
-
+    
     TEXT_P = {
         font_size: (FONT_SIZE_P),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
-
-
+    
+    
     Logo = <Button> {
         draw_icon: {
             svg_file: (LOGO),
             fn get_color(self) -> vec4 {
                 return #FF8888
-            } 
-         }
-        icon_walk: { width: 7.5, height: Fit }
+            }
+        }
+        icon_walk: {width: 7.5, height: Fit}
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 return sdf.result
             }
         }
-        layout: { padding: 9.0 }
+        layout: {padding: 9.0}
         label: ""
     }
-
+    
     IconButton = <Button> {
         draw_icon: {
             svg_file: (ICO_FAV),
@@ -64,73 +64,83 @@ live_design!{
                     #000,
                     self.pressed
                 )
-            } 
-         }
-        icon_walk: { width: 7.5, height: Fit, margin: { left: 5.0 }}
+            }
+        }
+        icon_walk: {width: 7.5, height: Fit, margin: {left: 5.0}}
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 return sdf.result
             }
         }
-        layout: { padding: 9.0 }
+        layout: {padding: 9.0}
         label: "34"
     }
-
-
+    
+    
     Header = <Box> {
-        walk: { width: Fill, height: 100 }
-        layout: { flow: Right, padding: 10.0, spacing: 10.0 }
-        draw_bg: { color: #00000088 }
-
+        walk: {width: Fill, height: 100}
+        layout: {flow: Right, padding: 10.0, spacing: 10.0}
+        draw_bg: {color: #00000088}
+        
         <Logo> {
-            walk: { height: Fit, width: Fill, margin: { top: 30.0 }}
-            icon_walk: { width: Fit, height: 27.0 }
+            walk: {height: Fit, width: Fill, margin: {top: 30.0}}
+            icon_walk: {width: Fit, height: 27.0}
         }
-
+        
     }
- 
-
+    
+    
     LineH = <Box> {
-        walk: { width: Fill, height: 1, margin: 0.0 }
-        layout: { padding: 0.0, spacing: 0.0 }
-        draw_bg: { color: #00000066 }
+        walk: {width: Fill, height: 1, margin: 0.0}
+        layout: {padding: 0.0, spacing: 0.0}
+        draw_bg: {color: #00000066}
     }
-
- 
+    
+    
     Post = <Frame> {
-        walk: { width: Fill, height: Fit, margin: 0.0 }
-        layout: { flow: Down, padding: 0.0, spacing: 0.0 }
-
+        walk: {width: Fill, height: Fit, margin: 0.0}
+        layout: {flow: Down, padding: 0.0, spacing: 0.0}
+        
         <LineH> {}
-
+        
         <Frame> {
-            walk: {width: Fill, height: Fit }
-            layout: { flow: Right, padding: 10.0, spacing: 10.0 }
-
+            walk: {width: Fill, height: Fit}
+            layout: {flow: Right, padding: 10.0, spacing: 10.0}
+            
             <Frame> {
-                walk: {width: Fit, height: Fit }
-                layout: { flow: Down, padding: 0.0 }
+                walk: {width: Fit, height: Fit}
+                layout: {flow: Down, padding: 0.0}
                 profile = <Image> {
                     image: (IMG_PROFILE_A)
-                    walk: {width: 50.0, height: 50.0, margin: 0}
+                    draw_bg:{
+                        fn pixel(self) -> vec4 {
+                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                            let c = self.rect_size * 0.5;
+                            sdf.circle(c.x,c.y,c.x)
+                            sdf.fill(self.get_color());
+                            return sdf.result
+                        }
+                    }
+                    image_scale:0.5
+                    walk: {margin: 0}
                     layout: {padding: 0}
                 }
             }
-
+            
             <Frame> {
-                walk: {width: Fill, height: Fit }
-                layout: { flow: Down, padding: 0.0 }
-
+                walk: {width: Fill, height: Fit}
+                layout: {flow: Down, padding: 0.0}
+                
                 meta = <Label> {
-                    walk: { margin: {bottom: 15.0 }}
+                    walk: {margin: {bottom: 15.0}}
                     draw_label: {
                         text_style: <TEXT_SUB> {},
                         color: #000
                     }
                     label: "@username · 13h"
                 }
-
+                
                 text = <Label> {
                     draw_label: {
                         text_style: <TEXT_P> {},
@@ -138,39 +148,39 @@ live_design!{
                     }
                     label: "Never underestimate the resilience it."
                 }
-
+                
                 <LineH> {}
-
-                likes = <IconButton> { draw_icon: { svg_file: (ICO_FAV) } icon_walk: { width: 20.0, height: Fit } }
+                
+                likes = <IconButton> {draw_icon: {svg_file: (ICO_FAV)} icon_walk: {width: 20.0, height: Fit}}
             }
-
+            
         }
     }
-
-	PostImage = <Frame> {
-        walk: {width: Fill, height: Fit }
+    
+    PostImage = <Frame> {
+        walk: {width: Fill, height: Fit}
         layout: {flow: Down, padding: 0.0, spacing: 0.0}
-
+        
         hero = <Image> {
             image: (IMG_A),
             image_scale: 1.0,
             walk: {margin: 0}
             layout: {padding: 0}
         }
-
+        
         <Post> {
-            walk: { margin: { top: -32.0 } }
+            walk: {margin: {top: -32.0}}
         }
     }
-
-
+    
+    
     App = {{App}} {
-        ui: <DesktopWindow>{
+        ui: <DesktopWindow> {
             
-            window: {inner_size: vec2(428, 926), dpi_override:2},
+            window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
             layout: {
-                flow: Down,
+                flow: Overlay,
                 spacing: 0,
                 align: {
                     x: 0.0,
@@ -182,13 +192,11 @@ live_design!{
                     return #FFF8EE;
                 }
             }
-
-            <Header> {} 
-
+            
             <ScrollY> {
-                walk: {height: Fill, width: Fill }
-                layout: {flow: Down }
-
+                walk: {height: Fill, width: Fill}
+                layout: {flow: Down}
+                <Frame>{walk:{height:100}}
                 <PostImage> {}
                 <Post> {}
                 <PostImage> {}
@@ -196,6 +204,7 @@ live_design!{
                 <Post> {}
             }
             
+            <Header> {}
         }
     }
 }
@@ -213,7 +222,7 @@ impl LiveHook for App {
     }
 }
 
-impl AppMain for App{
+impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Draw(event) = event {
             return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
