@@ -264,9 +264,7 @@ impl DesktopWindow {
         
         self.main_view.begin_always(cx);
         
-        //let pass_size = cx.current_pass_size();
-        
-        cx.begin_overlay_turtle(Layout::flow_down());
+        cx.begin_pass_sized_turtle(Layout::flow_down());
         
         self.overlay.begin(cx);
         
@@ -288,8 +286,8 @@ impl DesktopWindow {
         }
         
         self.overlay.end(cx);
-        cx.end_overlay_turtle();
-        
+        cx.end_pass_sized_turtle();
+
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }

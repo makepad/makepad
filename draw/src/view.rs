@@ -2,8 +2,8 @@ use {
     crate::{
         makepad_platform::*,
         nav::*,
-        cx_2d::{Cx2d,AlignEntry},
-        turtle::Walk,
+        cx_2d::{Cx2d},
+        turtle::{Walk,AlignEntry}
     }
 };
 
@@ -356,14 +356,14 @@ impl<'a> Cx2d<'a> {
         ia
     }
     
-    pub fn add_aligned_rect_area(&mut self, area: &mut Area, rect: Rect, draw_clip: (DVec2, DVec2)) {
+    pub fn add_aligned_rect_area(&mut self, area: &mut Area, rect: Rect) {
         let draw_list_id = *self.draw_list_stack.last().unwrap();
         let draw_list = &mut self.cx.draw_lists[draw_list_id];
         // ok so we have to add
         let rect_id = draw_list.rect_areas.len();
         draw_list.rect_areas.push(CxRectArea {
             rect,
-            draw_clip,
+            draw_clip:Default::default(),
         });
         let new_area = Area::Rect(RectArea {
             draw_list_id,

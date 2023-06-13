@@ -178,8 +178,6 @@ impl DrawIcon {
                 subpixel: subpixel 
             }, path_hash);
             
-
-            self.draw_clip = cx.turtle().draw_clip().into();
             // lets snap the pos/size to actual pixels
             self.rect_pos = (snapped_pos / dpi_factor).into();
             self.rect_size = (snapped_size / dpi_factor).into();
