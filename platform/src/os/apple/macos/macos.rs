@@ -376,7 +376,11 @@ impl Cx {
                 }
                 CxOsOp::UpdateMenu(menu) => {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)
-                }
+                },
+                CxOsOp::HttpRequest(request) => {
+                    crate::log!("http request");
+                    cocoa_app.make_http_request(request);
+                },
                 _ => ()
             }
         }
