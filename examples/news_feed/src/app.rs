@@ -14,7 +14,8 @@ live_design!{
     
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_B = dep("crate://self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
-    IMG_PROFILE_A = dep("crate://self/resources/joseph-gonzalez-iFgRcqHznqg-unsplash.jpg")
+    IMG_PROFILE_A = dep("crate://self/resources/profile_1.png")
+    IMG_PROFILE_B = dep("crate://self/resources/profile_2.png")
     
     ICO_FAV = dep("crate://self/resources/Icon_Favorite.svg")
     ICO_COMMENT = dep("crate://self/resources/Icon_Comment.svg")
@@ -118,6 +119,7 @@ live_design!{
         }
     } 
 
+
     Post = <Frame> {
         walk: { width: Fill, height: Fit, margin: 0.0 }
         layout: { flow: Down, padding: 0.0, spacing: 0.0 }
@@ -131,7 +133,7 @@ live_design!{
             profile = <Frame> {
                 walk: {width: Fit, height: Fit }
                 layout: { flow: Down, padding: 0.0 }
-                profile = <Image> {
+                profile_img = <Image> {
                     image: (IMG_PROFILE_A)
                     walk: {width: 50.0, height: 50.0, margin: 0}
                     layout: {padding: 0}
@@ -177,7 +179,7 @@ live_design!{
             layout: {padding: 0}
         }
 
-        <Post> {
+        post = <Post> {
             walk: { margin: { top: -36.0 } }
             body= {
                 content= {
@@ -216,8 +218,36 @@ live_design!{
                 layout: {flow: Down }
 
                 <PostImage> {}
-                <Post> {}
-                <PostImage> {}
+                <Post> {
+                    body = {
+                        profile = {
+                            profile_img = <Image> {
+                                image: (IMG_PROFILE_B)
+                                walk: {width: 50.0, height: 50.0, margin: 0}
+                                layout: {padding: 0}
+                            }
+                        }
+                    }
+                }
+                <PostImage> {
+                    hero = <Image> {
+                        image: (IMG_B),
+                        image_scale: 1.0,
+                        walk: {margin: 0}
+                        layout: {padding: 0}
+                    }
+                    post = {
+                        body = {
+                            profile = {
+                                profile_img = <Image> {
+                                    image: (IMG_PROFILE_B)
+                                    walk: {width: 50.0, height: 50.0, margin: 0}
+                                    layout: {padding: 0}
+                                }
+                            }
+                        }
+                    } 
+                }
                 <Post> {}
                 <Post> {}
             }
