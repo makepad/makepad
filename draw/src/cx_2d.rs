@@ -23,7 +23,7 @@ use {
             CxFontsAtlasRc,
         },
         view::View,
-        turtle::{Turtle, TurtleWalk, Walk},
+        turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
     }
 };
 
@@ -34,12 +34,6 @@ pub struct PassStackItem {
     turtles_len: usize
 }
 
-pub enum AlignEntry{
-    Unset,
-    Area(Area),
-    BeginTurtle(DVec2,DVec2),
-    EndTurtle
-}
 
 pub struct Cx2d<'a> {
     pub cx: &'a mut Cx,
@@ -162,8 +156,6 @@ impl<'a> Cx2d<'a> {
         if self.turtles.len() != stack_item.turtles_len {
             panic!("Turtle stack disaligned, forgot an end_turtle()");
         }
-        
-        
     }
     
     pub fn set_pass_area(&mut self, pass: &Pass, area: Area) {
