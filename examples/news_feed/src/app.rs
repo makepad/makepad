@@ -92,7 +92,7 @@ live_design!{
  
 
     LineH = <Box> {
-        walk: { width: Fill, height: 1, margin: { top: 5.0, right: 0.0, bottom: 5.0, left: 0.0 } }
+        walk: { width: Fill, height: 1, margin: 0.0 }
         layout: { padding: 0.0, spacing: 0.0 }
         draw_bg: { color: #00000066 }
     }
@@ -110,7 +110,7 @@ live_design!{
 
             <Frame> {
                 walk: {width: Fit, height: Fit }
-                layout: { flow: Down, padding: 10.0 }
+                layout: { flow: Down, padding: 0.0 }
                 profile = <Image> {
                     image: (IMG_PROFILE_A)
                     walk: {width: 50.0, height: 50.0, margin: 0}
@@ -120,7 +120,7 @@ live_design!{
 
             <Frame> {
                 walk: {width: Fill, height: Fit }
-                layout: { flow: Down, padding: 10.0 }
+                layout: { flow: Down, padding: 0.0 }
 
                 meta = <Label> {
                     walk: { margin: {bottom: 15.0 }}
@@ -148,7 +148,7 @@ live_design!{
     }
 
 	PostImage = <Frame> {
-        walk: {width: Fill, height: Fit, margin: 0.0}
+        walk: {width: Fill, height: Fit }
         layout: {flow: Down, padding: 0.0, spacing: 0.0}
 
         hero = <Image> {
@@ -158,7 +158,9 @@ live_design!{
             layout: {padding: 0}
         }
 
-        <Post> {} 
+        <Post> {
+            walk: { margin: { top: -32.0 } }
+        }
     }
 
 
