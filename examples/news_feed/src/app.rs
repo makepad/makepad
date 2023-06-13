@@ -127,8 +127,9 @@ live_design!{
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                             let c = self.rect_size * 0.5;
-                            sdf.circle(c.x,c.y,c.x)
-                            sdf.fill(self.get_color());
+                            sdf.circle(c.x,c.y,c.x - 2.)
+                            sdf.fill_keep(self.get_color());
+                            sdf.stroke(#FFF8EE, 1);
                             return sdf.result
                         }
                     }
