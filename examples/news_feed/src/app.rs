@@ -17,6 +17,8 @@ live_design!{
     IMG_PROFILE_A = dep("crate://self/resources/joseph-gonzalez-iFgRcqHznqg-unsplash.jpg")
     
     ICO_FAV = dep("crate://self/resources/Icon_Favorite.svg")
+    ICO_COMMENT = dep("crate://self/resources/Icon_Comment.svg")
+    ICO_REPLY = dep("crate://self/resources/Icon_Reply.svg")
     LOGO = dep("crate://self/resources/leap_logo.svg")
 
     FONT_SIZE_SUB = 9.5 
@@ -32,6 +34,9 @@ live_design!{
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
 
+    FillerX = <Frame> {
+        walk: {width: Fill, height: Fit}
+    }
 
     Logo = <Button> {
         draw_icon: {
@@ -89,26 +94,41 @@ live_design!{
         }
 
     }
- 
-
+     
     LineH = <Box> {
         walk: { width: Fill, height: 1, margin: 0.0 }
         layout: { padding: 0.0, spacing: 0.0 }
         draw_bg: { color: #00000066 }
     }
 
- 
+    PostMenu = <Frame> {
+        walk: { width: Fill, height: Fit, margin: 0.0 }
+        layout: { flow: Down, padding: 0.0, spacing: 0.0 }
+
+        <LineH> {}
+        <Frame> {
+            walk: { width: Fill, height: Fit, margin: 0.0 }
+            layout: { flow: Right, padding: 0.0, spacing: 10.0 }
+
+            likes = <IconButton> { draw_icon: { svg_file: (ICO_FAV) } icon_walk: { width: 20.0, height: Fit } }
+            comments = <IconButton> { draw_icon: { svg_file: (ICO_COMMENT) } icon_walk: { width: 20.0, height: Fit }, label: "7"}
+
+            <FillerX> {}
+            reply = <IconButton> { draw_icon: { svg_file: (ICO_REPLY) } icon_walk: { width: 20.0, height: Fit }, label: "" }
+        }
+    } 
+
     Post = <Frame> {
         walk: { width: Fill, height: Fit, margin: 0.0 }
         layout: { flow: Down, padding: 0.0, spacing: 0.0 }
 
         <LineH> {}
 
-        <Frame> {
+        body = <Frame> {
             walk: {width: Fill, height: Fit }
             layout: { flow: Right, padding: 10.0, spacing: 10.0 }
 
-            <Frame> {
+            profile = <Frame> {
                 walk: {width: Fit, height: Fit }
                 layout: { flow: Down, padding: 0.0 }
                 profile = <Image> {
@@ -118,7 +138,7 @@ live_design!{
                 }
             }
 
-            <Frame> {
+            content = <Frame> {
                 walk: {width: Fill, height: Fit }
                 layout: { flow: Down, padding: 0.0 }
 
@@ -139,13 +159,12 @@ live_design!{
                     label: "Never underestimate the resilience it."
                 }
 
-                <LineH> {}
-
-                likes = <IconButton> { draw_icon: { svg_file: (ICO_FAV) } icon_walk: { width: 20.0, height: Fit } }
+                <PostMenu> {}
             }
 
         }
     }
+
 
 	PostImage = <Frame> {
         walk: {width: Fill, height: Fit }
@@ -159,7 +178,14 @@ live_design!{
         }
 
         <Post> {
-            walk: { margin: { top: -32.0 } }
+            walk: { margin: { top: -36.0 } }
+            body= {
+                content= {
+                   meta= {
+                        walk: { margin: {bottom: 15.0 }}
+                   } 
+                }
+            }
         }
     }
 
