@@ -480,6 +480,94 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }, 0.016 * 1000.0);
     }
+
+    parse_and_set_headers(request, headers_string) {
+        let lines = headers_string.split("\r\n");
+        for (let line of lines) {
+            let parts = line.split(": ");
+            if (parts.length == 2) {
+                request.setRequestHeader(parts[0], parts[1]);
+            }
+        }
+    }
+
+    FromWasmHTTPRequest(args) {
+        const req = new XMLHttpRequest();
+        req.open(args.method, args.url);
+        req.responseType = "arraybuffer";
+        this.parse_and_set_headers(req, args.headers);
+
+        // TODO decode in appropiate format
+        const decoder = new TextDecoder('UTF-8', { fatal: true });
+        let body = decoder.decode(this.clone_data_u8(args.body));
+
+        req.addEventListener("load", event => {
+            let responseEvent = event.target;
+
+            this.to_wasm.ToWasmHTTPResponse({
+                id: args.id,
+                status: responseEvent.status,
+                body: responseEvent.response,
+                headers: responseEvent.getAllResponseHeaders()
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("error", event => {
+            let errorMessage = "An error occurred with the HTTP request.";
+            if (!navigator.onLine) {
+                errorMessage = "The browser is offline.";
+            }
+
+            this.to_wasm.ToWasmHttpRequestError({
+                id: args.id,
+                error: errorMessage,
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("timeout", event => {
+            this.to_wasm.ToWasmHttpRequestError({
+                id: args.id,
+                error: "The HTTP request timed out.",
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("abort", event => {
+            this.to_wasm.ToWasmHttpRequestError({
+                id: args.id,
+                error: "The HTTP request was aborted.",
+            });
+            this.do_wasm_pump();
+        });
+
+        req.addEventListener("progress", event => {
+            console.log("progress", event);
+            if (event.lengthComputable) {
+                this.to_wasm.ToWasmHttpResponseProgress({
+                    id: args.id,
+                    loaded: event.loaded,
+                    total: event.total,
+                });
+                this.do_wasm_pump();
+            }
+        });
+
+        req.upload.addEventListener("progress", (event) => {
+            if (event.lengthComputable) {
+                this.to_wasm.ToWasmHttpUploadProgress({
+                    id: args.id,
+                    loaded: event.loaded,
+                    total: event.total,
+                });
+                this.do_wasm_pump();
+            }
+          });
+
+        req.send(body);
+        this.free_data_u8(args.body);
+    }
     
     // calling into wasm
     
