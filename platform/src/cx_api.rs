@@ -36,6 +36,7 @@ use {
             CxPassRect,
             CxPassParent
         },
+        network::HttpRequest,
     }
 };
 
@@ -71,6 +72,7 @@ pub enum CxOsOp {
     StartDragging(DraggedItem),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
+    HttpRequest(HttpRequest),
 }
 
 impl Cx { 
@@ -381,6 +383,10 @@ impl Cx {
 
     pub fn spawner(&self) -> &Spawner {
         &self.spawner
+    }
+
+    pub fn http_request(&mut self, request: HttpRequest) {
+        self.platform_ops.push(CxOsOp::HttpRequest(request));
     }
 }
 

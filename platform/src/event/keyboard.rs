@@ -108,12 +108,7 @@ pub struct TextInputEvent {
 }
 
 #[derive(Clone, Debug)]
-pub struct TextCopyEvent {
-    pub response: Rc<RefCell<Option<String>>>
-}
-
-#[derive(Clone, Debug)]
-pub struct TextCutEvent {
+pub struct TextClipboardEvent {
     pub response: Rc<RefCell<Option<String>>>
 }
 

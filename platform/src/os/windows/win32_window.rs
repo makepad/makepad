@@ -503,7 +503,7 @@ impl Win32Window {
                         KeyCode::KeyC => {
                             let response = Rc::new(RefCell::new(None));
                             window.do_callback(
-                                Win32Event::TextCut(TextCutEvent {
+                                Win32Event::TextCut(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );
@@ -515,7 +515,7 @@ impl Win32Window {
                         KeyCode::KeyX => {
                             let response = Rc::new(RefCell::new(None));
                             window.do_callback(
-                                Win32Event::TextCut(TextCutEvent {
+                                Win32Event::TextCut(TextClipboardEvent {
                                     response: response.clone()
                                 })
                             );
