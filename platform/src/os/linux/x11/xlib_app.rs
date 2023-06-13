@@ -444,7 +444,7 @@ impl XlibApp {
                                     }
                                     KeyCode::KeyC => {
                                         let response = Rc::new(RefCell::new(None));
-                                        self.do_callback(XlibEvent::TextCopy(TextCopyEvent {
+                                        self.do_callback(XlibEvent::TextCopy(TextClipboardEvent {
                                             response: response.clone()
                                         }));
                                         let response = response.borrow();
@@ -454,7 +454,7 @@ impl XlibApp {
                                     }
                                     KeyCode::KeyX => {
                                         let response = Rc::new(RefCell::new(None));
-                                        self.do_callback(XlibEvent::TextCut(TextCutEvent {
+                                        self.do_callback(XlibEvent::TextCut(TextClipboardEvent {
                                             response: response.clone()
                                         }));
                                         let response = response.borrow();

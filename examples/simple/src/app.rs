@@ -94,6 +94,7 @@ live_design!{
                 walk: {width: 100, height: 30},
                 label: "Click to count"
             }
+            
             // A label to display the counter.
             label1 = <Label> {
                 draw_label: {
