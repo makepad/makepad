@@ -13,6 +13,7 @@ use {
         makepad_math::{
             DVec2,
         },
+        network::HttpRequest,
         os::{
             apple::apple_sys::*,
             cocoa_delegate::*,
@@ -100,6 +101,7 @@ pub struct CocoaClasses {
     pub view: *const Class,
     pub key_value_observing_delegate: *const Class,
     pub video_callback_delegate: *const Class,
+    pub networking_delegate: *const Class,
     pub const_attributes_for_marked_text: ObjcId,
     pub const_empty_string: RcObjcId,
 }
@@ -119,6 +121,7 @@ impl CocoaClasses{
             app_delegate: define_app_delegate(),
             menu_target: define_menu_target_class(),
             video_callback_delegate: define_av_video_callback_delegate(),
+            networking_delegate: define_cocoa_networking_delegate(),
             view: define_cocoa_view_class(),
             key_value_observing_delegate: define_key_value_observing_delegate(),
             const_attributes_for_marked_text: unsafe{msg_send![
@@ -136,6 +139,7 @@ pub struct CocoaApp {
     //app_delegate_instance: ObjcId,
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
+    pub networking_delegate_instance: ObjcId,
     timers: Vec<CocoaTimer>,
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
@@ -165,6 +169,7 @@ impl CocoaApp {
                 time_start: Instant::now(),
                 timer_delegate_instance:msg_send![get_cocoa_class_global().timer_delegate, new],
                 menu_delegate_instance:msg_send![get_cocoa_class_global().menu_delegate, new],
+                networking_delegate_instance:msg_send![get_cocoa_class_global().networking_delegate, new],
                 //app_delegate_instance,
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
@@ -176,6 +181,12 @@ impl CocoaApp {
                 current_cursor: MouseCursor::Default,
                 ns_event: ptr::null_mut(),
             }
+        }
+    }
+
+    pub fn make_http_request(&mut self, request: HttpRequest) {
+        unsafe {
+            let () = msg_send![self.networking_delegate_instance, sendGetRequest];
         }
     }
     
@@ -724,5 +735,15 @@ impl CocoaApp {
         };
         
         cocoa_window.start_dragging(self.ns_event, dragged_item);
+    }
+
+    pub fn send_http_response_event(&mut self, data: Vec<u8>) {
+        let text = String::from_utf8_lossy(&data);
+        crate::log!("Data from server {}", text);
+        //self.do_callback(    
+            //CocoaEvent::HttpResponse(command)
+        //);
+        // Se precisa??
+        //self.do_callback(CocoaEvent::Paint);
     }
 }
