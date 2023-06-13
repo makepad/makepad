@@ -12,7 +12,7 @@ live_design!{
     
     DrawBg = {{DrawBg}} {
         instance color: #0
-        instance color_selected: #0ff
+        instance color_selected: #4
 
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -60,7 +60,7 @@ live_design!{
             padding: {left: 15, top: 5, bottom: 5},
         }
         walk: {
-            width: Fit,
+            width: Fill,
             height: Fit
         }
         state: {
@@ -293,22 +293,25 @@ impl PopupMenu {
     pub fn begin(&mut self, cx: &mut Cx2d) {
         self.view.begin_overlay_reuse(cx);
         
-        cx.begin_overlay_turtle(Layout::flow_down());
+        cx.begin_pass_sized_turtle(Layout::flow_down());
         
         // ok so. this thing needs a complete position reset
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.count = 0;
     }
     
-    pub fn end(&mut self, cx: &mut Cx2d, shift: DVec2) {
+    pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: DVec2) {
         // ok so.
-        let menu_rect1 = cx.turtle().padded_rect_used().translate(shift);
+        /*
+        let menu_rect1 = cx.turtle().padded_rect_used();
         let pass_rect = Rect {pos: dvec2(0.0, 0.0), size: cx.current_pass_size()};
         let menu_rect2 = pass_rect.add_margin(-dvec2(10.0, 10.0)).contain(menu_rect1);
-        cx.turtle_mut().set_shift(shift + (menu_rect2.pos - menu_rect1.pos));
+        */
+        //cx.turtle_mut().set_shift(shift + (menu_rect2.pos - menu_rect1.pos));
+        //let menu_rect1 = cx.turtle().padded_rect_used();
         self.draw_bg.end(cx);
-        
-        cx.end_overlay_turtle();
+
+        cx.end_pass_sized_turtle_with_shift(shift_area,shift);
         //cx.debug.rect_r(self.draw_bg.area().get_rect(cx));
         self.view.end(cx);
         self.menu_items.retain_visible();
@@ -333,7 +336,6 @@ impl PopupMenu {
         let menu_item = self.menu_items.get_or_insert(cx, item_id, | cx | {
             PopupMenuItem::new_from_ptr(cx, menu_item)
         });
-        
         menu_item.draw_item(cx, label);
     }
     
