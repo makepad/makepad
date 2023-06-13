@@ -19,6 +19,7 @@ live_design!{
                 self.draw_clip.xy,
                 self.draw_clip.zw
             )
+            clipped = self.geom_pos * rect_size + rect_pos;
             self.pos = (clipped - rect_pos) / rect_size
             // only pass the clipped position forward
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
@@ -75,7 +76,6 @@ impl LiveHook for DrawQuad{
 
 impl DrawQuad {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
-        self.draw_clip = cx.turtle().draw_clip().into();
         cx.begin_turtle(walk, layout);
         if self.draw_vars.draw_shader.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
@@ -90,7 +90,6 @@ impl DrawQuad {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> Rect {
         let rect = cx.walk_turtle(walk);
-        self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos.into();
         self.rect_size = rect.size.into();
         self.draw(cx);
@@ -114,7 +113,6 @@ impl DrawQuad {
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect) {
-        self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos.into();
         self.rect_size = rect.size.into();
         self.draw(cx);
@@ -122,7 +120,6 @@ impl DrawQuad {
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, rect: Rect) {
         let rect = rect.translate(cx.turtle().origin());
-        self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos.into();
         self.rect_size = rect.size.into();
         self.draw(cx);

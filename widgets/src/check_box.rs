@@ -329,4 +329,10 @@ impl CheckBoxRef {
             inner.label.push_str(text);
         }
     }
+
+    pub fn set_selected(&self, cx: &mut Cx, value:bool) {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.toggle_state(cx, value, Animate::Yes, id!(selected.on), id!(selected.off));
+        }
+    }
 }

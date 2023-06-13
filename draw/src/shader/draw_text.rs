@@ -225,7 +225,7 @@ impl DrawText {
             return
         }
         
-        self.draw_clip = cx.turtle().draw_clip().into();
+        //self.draw_clip = cx.turtle().draw_clip().into();
         
         let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
@@ -346,7 +346,7 @@ impl DrawText {
             || self.text_style.font.font_id.is_none() {
             return
         }
-        self.draw_clip = cx.turtle().draw_clip().into();
+        //self.draw_clip = cx.turtle().draw_clip().into();
         let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
         
