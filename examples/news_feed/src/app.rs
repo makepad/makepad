@@ -301,6 +301,18 @@ live_design!{
                 }
                 <Post> {}
                 <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
                 <Frame> {walk: {height: 100}}
             }
             
