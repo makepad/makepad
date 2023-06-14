@@ -13,7 +13,8 @@ use {
         makepad_math::{
             DVec2,
         },
-        network::HttpRequest,
+        network::*,
+        makepad_live_id::*,
         os::{
             apple::apple_sys::*,
             cocoa_delegate::*,
@@ -46,6 +47,7 @@ use {
             //SignalEvent,
             DraggedItem,
             KeyModifiers,
+            HttpResponseEvent,
         },
         cursor::MouseCursor,
         menu::{
@@ -139,7 +141,6 @@ pub struct CocoaApp {
     //app_delegate_instance: ObjcId,
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
-    pub networking_delegate_instance: ObjcId,
     timers: Vec<CocoaTimer>,
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
@@ -151,6 +152,8 @@ pub struct CocoaApp {
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
     ns_event: ObjcId,
+    pub networking_delegate_instance: ObjcId,
+    networking_buffer: HashMap<LiveId, Vec<u8>>,
 }
 
 impl CocoaApp {
@@ -169,7 +172,6 @@ impl CocoaApp {
                 time_start: Instant::now(),
                 timer_delegate_instance:msg_send![get_cocoa_class_global().timer_delegate, new],
                 menu_delegate_instance:msg_send![get_cocoa_class_global().menu_delegate, new],
-                networking_delegate_instance:msg_send![get_cocoa_class_global().networking_delegate, new],
                 //app_delegate_instance,
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
@@ -180,6 +182,8 @@ impl CocoaApp {
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
                 ns_event: ptr::null_mut(),
+                networking_delegate_instance:msg_send![get_cocoa_class_global().networking_delegate, new],
+                networking_buffer: HashMap::new(),
             }
         }
     }
@@ -737,13 +741,33 @@ impl CocoaApp {
         cocoa_window.start_dragging(self.ns_event, dragged_item);
     }
 
-    pub fn send_http_response_event(&mut self, data: Vec<u8>) {
-        let text = String::from_utf8_lossy(&data);
-        crate::log!("Data from server {}", text);
-        //self.do_callback(    
-            //CocoaEvent::HttpResponse(command)
-        //);
-        // Se precisa??
-        //self.do_callback(CocoaEvent::Paint);
+    pub fn http_response_data_received(&mut self, mut body: Vec<u8>) {
+        // TODO remove this
+        let request_id = LiveId::from_str("InitialTodoFetch").unwrap();
+
+        if let Some(buffered_body) = self.networking_buffer.get_mut(&request_id) {
+            buffered_body.append(&mut body);
+        } else {
+            self.networking_buffer.insert(request_id, body);
+        }
+    }
+
+    pub fn send_http_response_event(&mut self) {
+        // TODO remove this
+        let request_id = LiveId::from_str("InitialTodoFetch").unwrap();
+
+        if let Some(buffered_body) = self.networking_buffer.remove(&request_id) {
+            let response = HttpResponse::new(
+                request_id,
+                200,
+                "".to_string(),
+                Some(buffered_body.to_vec())
+            );
+
+            self.do_callback(
+                CocoaEvent::HttpResponse(HttpResponseEvent{ response })
+            );
+            self.do_callback(CocoaEvent::Paint);
+        }
     }
 }
