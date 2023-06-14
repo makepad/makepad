@@ -150,7 +150,10 @@ live_design!{
     LineH = <Box> {
         walk: {width: Fill, height: 2, margin: 0.0}
         layout: {padding: 0.0, spacing: 0.0}
-        draw_bg: {color: (COLOR_DIVIDER)}
+        draw_bg: {
+            color: (COLOR_DIVIDER)
+            radius: 0.5
+        }
     }
     
     PostMenu = <Frame> {
