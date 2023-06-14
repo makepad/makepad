@@ -5,7 +5,7 @@ live_design!{
     import crate::theme::*;
     
     DrawScrollBar= {{DrawScrollBar}} {
-        draw_depth: 5.0
+        //draw_depth: 5.0
         uniform border_radius: 1.5
         instance bar_width:6.0
         instance pressed: 0.0

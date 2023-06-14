@@ -23,32 +23,22 @@ pub mod fold_button;
 pub mod hook_widget;
 pub mod multi_window;
 pub mod designer;
-//#[cfg(ide_widgets)]
 pub mod dock;
-//#[cfg(ide_widgets)]
 pub mod tab;
-//#[cfg(ide_widgets)]
 pub mod tab_bar;
-//#[cfg(ide_widgets)]
 pub mod tab_close_button;
-
+pub mod infinite_list;
 pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
 
 pub mod swipe_list;
 
-//#[cfg(ide_widgets)]
 pub mod list_box;
-//#[cfg(ide_widgets)]
 pub mod file_tree;
-//#[cfg(ide_widgets)]
 pub mod slides_view;
-//#[cfg(ide_widgets)]
 pub mod log_list;
-//#[cfg(ide_widgets)]
 pub mod log_icon;
-//#[cfg(ide_widgets)]
 pub mod color_picker;
 
 #[macro_use]
