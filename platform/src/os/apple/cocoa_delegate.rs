@@ -273,9 +273,12 @@ pub fn define_menu_delegate() -> *const Class {
 pub fn define_cocoa_networking_delegate() -> *const Class {
     extern fn send_get_request(this: &Object, _sel: Sel) {
         unsafe {
-            println!("increible");
+            // let url: ObjcId =
+            //     msg_send![class!(NSURL), URLWithString: str_to_nsstring("https://cholee-todo-app.fly.dev/api/todos/")];
+
             let url: ObjcId =
-                msg_send![class!(NSURL), URLWithString: str_to_nsstring("http://example.com/api/resource")];
+                msg_send![class!(NSURL), URLWithString: str_to_nsstring("https://raw.githubusercontent.com/json-iterator/test-data/master/large-file.json")];
+
             let session_configuration: ObjcId = msg_send![class!(NSURLSessionConfiguration), defaultSessionConfiguration];
             let session: ObjcId = msg_send![class!(NSURLSession), sessionWithConfiguration: session_configuration delegate: this delegateQueue: nil];
             let data_task: ObjcId = msg_send![session, dataTaskWithURL: url];
@@ -285,7 +288,7 @@ pub fn define_cocoa_networking_delegate() -> *const Class {
     }
 
     extern fn did_receive_data(
-        _this: &Object,
+        this: &Object,
         _: Sel,
         _session: ObjcId,
         _task: ObjcId,
@@ -294,23 +297,23 @@ pub fn define_cocoa_networking_delegate() -> *const Class {
         unsafe {
             let bytes: *const u8 = msg_send![data, bytes];
             let length: usize = msg_send![data, length];
-            let received_data: &[u8] = std::slice::from_raw_parts(bytes, length);
+            let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
 
             let ca = get_cocoa_app_global();
-            ca.send_http_response_event(received_data.into());
+            ca.http_response_data_received(data_bytes.into());
         }
     }
 
     extern fn did_complete_with_error(
-        _this: &Object,
+        this: &Object,
         _: Sel,
         _session: ObjcId,
         _task: ObjcId,
         error: ObjcId
     ) {
         unsafe {
-            println!("did_complete_with_error");
-            println!("error_str: {:?}", error);
+            let ca = get_cocoa_app_global();
+            ca.send_http_response_event();
         }
     }
 
