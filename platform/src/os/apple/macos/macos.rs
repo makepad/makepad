@@ -132,6 +132,10 @@ impl Cx {
     ) -> EventFlow {
         
         self.handle_platform_ops(metal_windows, metal_cx, cocoa_app);
+
+        // if let CocoaEvent::HttpResponse(the_event) = &event {
+        //     crate::log!("HttpResponse: {:?}", the_event);
+        // }
         
         let mut paint_dirty = false;
         match &event {
@@ -289,6 +293,10 @@ impl Cx {
             }
             CocoaEvent::MenuCommand(e) => {
                 self.call_event_handler(&Event::MenuCommand(e))
+            }
+            CocoaEvent::HttpResponse(e) => {
+                crate::log!("aca pasaaa");
+                self.call_event_handler(&Event::HttpResponse(e))
             }
         }
         
