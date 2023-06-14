@@ -118,7 +118,7 @@ live_design!{
     Header = <Box> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: #000000CC}
+        draw_bg: {color: #000000CC,  inset:vec4(-0.5,-0.5,-1.0,-1.0), radius:4.5}
         
         <Logo> {
             walk: {height: Fit, width: Fill, margin: {top: 30.0}}
@@ -130,7 +130,7 @@ live_design!{
     Menu = <Box> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: #000000CC}
+        draw_bg: {color: #000000CC,inset:vec4(-0.5,-0.5,-1.0,-1.0), radius:4.5}
         
         <Frame> {
             walk: { width: Fill, height: Fit, margin: 0.0 }
