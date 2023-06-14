@@ -220,7 +220,7 @@ live_design!{
                         text_style: <TEXT_P> {},
                         color: (COLOR_P)
                     }
-                    label: "Never underestimate the resilience it\ntakes to live in a desert. It's a testament\nto life's adaptability, endurance, and\ntenacity. The cacti, creatures, and people\nwho call it home are nature's ultimate\nsurvivalists. #DesertStrong"
+                    label: "Never underestimate the resilience it takes to live in a desert. It's a testament\nto life's adaptability, endurance, and\ntenacity. The cacti, creatures, and people\nwho call it home are nature's ultimate\nsurvivalists. #DesertStrong"
                 }
 
                 <LineH> {
