@@ -28,7 +28,7 @@ live_design!{
     ICO_ADD = dep("crate://self/resources/icon_add.svg")
     
     FONT_SIZE_SUB = 9.5
-    FONT_SIZE_P = 13.0
+    FONT_SIZE_P = 12.5
     
     TEXT_SUB = {
         font_size: (FONT_SIZE_SUB),
@@ -37,23 +37,31 @@ live_design!{
     
     TEXT_P = {
         font_size: (FONT_SIZE_P),
-        height_factor: 1.6,
+        height_factor: 1.65,
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
 
-    FillerY = <Frame> {
-        walk: {width: Fill}
-    }
+    COLOR_BG = #xfff8ee
+    COLOR_BRAND = #xf88
+    COLOR_BRAND_HOVER = #xf66
+    COLOR_META_TEXT = #xaaa
+    COLOR_META = #xccc
+    COLOR_META_INV = #xfffa
+    COLOR_OVERLAY_BG = #x000000d8
+    COLOR_DIVIDER = #x00000018
+    COLOR_DIVIDER_DARK = #x00000044
+    COLOR_PROFILE_CIRCLE = #xfff8ee
+    COLOR_P = #x999
+
+    FillerY = <Frame> { walk: {width: Fill} }
     
-    FillerX = <Frame> {
-        walk: {height: Fill}
-    }
+    FillerX = <Frame> { walk: {height: Fill} }
 
     Logo = <Button> {
         draw_icon: {
             svg_file: (LOGO),
             fn get_color(self) -> vec4 {
-                return #FF8888
+                return (COLOR_BRAND)
             }
         }
         icon_walk: {width: 7.5, height: Fit}
@@ -80,11 +88,11 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #AAA,
-                        #666,
+                        (COLOR_META_TEXT),
+                        (COLOR_BRAND),
                         self.hover
                     ),
-                    #000,
+                    (COLOR_BRAND_HOVER),
                     self.pressed
                 )
             }
@@ -94,11 +102,11 @@ live_design!{
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
-                        #ccc,
-                        #FF8888,
+                        (COLOR_META),
+                        (COLOR_BRAND),
                         self.hover
                     ),
-                    #000,
+                    (COLOR_BRAND_HOVER),
                     self.pressed
                 )
             }
@@ -118,7 +126,7 @@ live_design!{
     Header = <Box> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: #000000CC,  inset:vec4(-0.5,-0.5,-1.0,0.0), radius:4.5}
+        draw_bg: {color: (COLOR_OVERLAY_BG), inset:vec4(-0.5,-0.5,-1.0,0.0), radius:4.5}
         
         <Logo> {
             walk: {height: Fit, width: Fill, margin: {top: 30.0}}
@@ -130,7 +138,7 @@ live_design!{
     Menu = <Box> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: #000000CC,inset:vec4(-0.5,0.0,-1.0,-1.0), radius:4.5}
+        draw_bg: {color: (COLOR_OVERLAY_BG), inset:vec4(-0.5,0.0,-1.0,-1.0), radius:4.5}
         
         <Frame> {
             walk: { width: Fill, height: Fit, margin: 0.0 }
@@ -147,7 +155,7 @@ live_design!{
     LineH = <Box> {
         walk: { width: Fill, height: 2, margin: 0.0 }
         layout: { padding: 0.0, spacing: 0.0 }
-        draw_bg: { color: #00000018 }
+        draw_bg: { color: (COLOR_DIVIDER) }
     }
 
     PostMenu = <Frame> {
@@ -158,11 +166,11 @@ live_design!{
             walk: { width: Fill, height: Fit, margin: 0.0 }
             layout: { flow: Right, padding: 0.0, spacing: 10.0 }
 
-            likes = <IconButton> { draw_icon: { svg_file: (ICO_FAV) } icon_walk: { width: 20.0, height: Fit } }
-            comments = <IconButton> { draw_icon: { svg_file: (ICO_COMMENT) } icon_walk: { width: 20.0, height: Fit }, label: "7"}
+            likes = <IconButton> { draw_icon: { svg_file: (ICO_FAV) } icon_walk: { width: 15.0, height: Fit } }
+            comments = <IconButton> { draw_icon: { svg_file: (ICO_COMMENT) } icon_walk: { width: 15.0, height: Fit }, label: "7"}
 
             <FillerX> {}
-            reply = <IconButton> { draw_icon: { svg_file: (ICO_REPLY) } icon_walk: { width: 20.0, height: Fit }, label: "" }
+            reply = <IconButton> { draw_icon: { svg_file: (ICO_REPLY) } icon_walk: { width: 15.0, height: Fit }, label: "" }
         }
     } 
 
@@ -175,7 +183,7 @@ live_design!{
             layout: { flow: Right, padding: 10.0, spacing: 10.0 }
 
             profile = <Frame> {
-                walk: {width: Fit, height: Fit }
+                walk: {width: Fit, height: Fit, margin: { top: 7.5 } }
                 layout: { flow: Down, padding: 0.0 }
                 profile_img = <Image> {
                     image: (IMG_PROFILE_A)
@@ -185,7 +193,7 @@ live_design!{
                             let c = self.rect_size * 0.5;
                             sdf.circle(c.x,c.y,c.x - 2.)
                             sdf.fill_keep(self.get_color());
-                            sdf.stroke(#FFF8EE, 1);
+                            sdf.stroke((COLOR_PROFILE_CIRCLE), 1);
                             return sdf.result
                         }
                     }
@@ -197,11 +205,12 @@ live_design!{
             content = <Frame> {
                 walk: {width: Fill, height: Fit }
                 layout: { flow: Down, padding: 0.0 }
+
                 meta = <Label> {
-                    walk: {margin: {bottom: 5.0}}
+                    walk: {margin: {bottom: 10.0, top: 10.0}}
                     draw_label: {
                         text_style: <TEXT_SUB> {},
-                        color: #000
+                        color: (COLOR_META_TEXT)
                     }
                     label: "@username · 13h"
                 }
@@ -209,7 +218,7 @@ live_design!{
                 text = <Label> {
                     draw_label: {
                         text_style: <TEXT_P> {},
-                        color: #999
+                        color: (COLOR_P)
                     }
                     label: "Never underestimate the resilience it\ntakes to live in a desert. It's a testament\nto life's adaptability, endurance, and\ntenacity. The cacti, creatures, and people\nwho call it home are nature's ultimate\nsurvivalists. #DesertStrong"
                 }
@@ -224,7 +233,7 @@ live_design!{
         }
 
         <LineH> {
-            draw_bg: { color: #00000044 }
+            draw_bg: { color: (COLOR_DIVIDER_DARK) }
         }
     }
 
@@ -240,13 +249,13 @@ live_design!{
         }
 
         post = <Post> {
-            walk: { margin: { top: -30.0 } }
+            walk: { margin: { top: -45.0 } }
             body = {
                 content = {
                     meta = {
-                        walk: { margin: {bottom: 15.0 }}
+                        walk: {margin: {bottom: 30.0, top: 10.0}}
                         draw_label: {
-                            color: #fff
+                            color: (COLOR_META_INV)
                         }
                     }
                 }
@@ -257,7 +266,6 @@ live_design!{
     
     App = {{App}} {
         ui: <DesktopWindow> {
-            
             window: {inner_size: vec2(428, 926), dpi_override: 2},
             show_bg: true
             layout: {
@@ -271,7 +279,7 @@ live_design!{
             },
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    return #FFF8EE;
+                    return (COLOR_BG);
                 }
             }
             
@@ -283,27 +291,14 @@ live_design!{
                 <Post> {
                     body = {
                         profile = {
-                            profile_img = <Image> {
+                            profile_img = {
                                 image: (IMG_PROFILE_B)
-                                draw_bg:{
-                                    fn pixel(self) -> vec4 {
-                                        let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                        let c = self.rect_size * 0.5;
-                                        sdf.circle(c.x,c.y,c.x - 2.)
-                                        sdf.fill_keep(self.get_color());
-                                        sdf.stroke(#FFF8EE, 1);
-                                        return sdf.result
-                                    }
-                                }
-                                image_scale: 0.65
-                                walk: {margin: 0}
-                                layout: {padding: 0}
                             }
                         }
                     }
                 }
                 <PostImage> {
-                    hero = <Image> {
+                    hero = {
                         image: (IMG_B),
                         image_scale: 1.0,
                         walk: {margin: 0}
@@ -312,21 +307,8 @@ live_design!{
                     post = {
                         body = {
                             profile = {
-                                profile_img = <Image> {
+                                profile_img = {
                                     image: (IMG_PROFILE_B)
-                                    draw_bg:{
-                                        fn pixel(self) -> vec4 {
-                                            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                                            let c = self.rect_size * 0.5;
-                                            sdf.circle(c.x,c.y,c.x - 2.)
-                                            sdf.fill_keep(self.get_color());
-                                            sdf.stroke(#FFF8EE, 1);
-                                            return sdf.result
-                                        }
-                                    }
-                                    image_scale: 0.65
-                                    walk: {margin: 0}
-                                    layout: {padding: 0}
                                 }
                             }
                         }
@@ -339,6 +321,7 @@ live_design!{
             <Frame> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
+
                 <Header> {}
                 <FillerY> {}
                 <Menu> {}
