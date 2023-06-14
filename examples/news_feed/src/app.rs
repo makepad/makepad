@@ -58,8 +58,8 @@ live_design!{
 
     FillerY = <Frame> { walk: {width: Fill} }
     
-    FillerX = <Frame> { walk: {height: Fill} }
-
+    FillerX = <Frame> {walk: {height: Fill}}
+    
     Logo = <Button> {
         draw_icon: {
             svg_file: (LOGO),
@@ -129,7 +129,7 @@ live_design!{
         }
         
     }
-
+    
     Menu = <Box> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
@@ -146,13 +146,13 @@ live_design!{
             <IconButton> { draw_icon: { svg_file: (ICO_USER) } icon_walk: { width: 15.0, height: Fit }, label: "" }
         }
     }
-
+    
     LineH = <Box> {
-        walk: { width: Fill, height: 2, margin: 0.0 }
-        layout: { padding: 0.0, spacing: 0.0 }
-        draw_bg: { color: (COLOR_DIVIDER) }
+        walk: {width: Fill, height: 2, margin: 0.0}
+        layout: {padding: 0.0, spacing: 0.0}
+        draw_bg: {color: (COLOR_DIVIDER)}
     }
-
+    
     PostMenu = <Frame> {
         walk: { width: Fill, height: Fit, margin: 0.0 }
         layout: { flow: Down, padding: 0.0 }
@@ -164,10 +164,10 @@ live_design!{
             likes = <IconButton> { draw_icon: { svg_file: (ICO_FAV) } icon_walk: { width: 15.0, height: Fit } }
             comments = <IconButton> { draw_icon: { svg_file: (ICO_COMMENT) } icon_walk: { width: 15.0, height: Fit }, label: "7"}
             <FillerX> {}
-            reply = <IconButton> { draw_icon: { svg_file: (ICO_REPLY) } icon_walk: { width: 15.0, height: Fit }, label: "" }
+            reply = <IconButton> {draw_icon: {svg_file: (ICO_REPLY)} icon_walk: {width: 15.0, height: Fit}, label: ""}
         }
-    } 
-
+    }
+    
     Post = <Frame> {
         walk: { width: Fill, height: Fit, margin: 0.0 }
         layout: { flow: Down, padding: 0.0 }        
@@ -177,15 +177,15 @@ live_design!{
             layout: { flow: Right, padding: 10.0, spacing: 10.0 }
 
             profile = <Frame> {
-                walk: {width: Fit, height: Fit, margin: { top: 7.5 } }
-                layout: { flow: Down, padding: 0.0 }
+                walk: {width: Fit, height: Fit, margin: {top: 7.5}}
+                layout: {flow: Down, padding: 0.0}
                 profile_img = <Image> {
                     image: (IMG_PROFILE_A)
-                    draw_bg:{
+                    draw_bg: {
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                             let c = self.rect_size * 0.5;
-                            sdf.circle(c.x,c.y,c.x - 2.)
+                            sdf.circle(c.x, c.y, c.x - 2.)
                             sdf.fill_keep(self.get_color());
                             sdf.stroke((COLOR_PROFILE_CIRCLE), 1);
                             return sdf.result
@@ -198,9 +198,9 @@ live_design!{
             }
 
             content = <Frame> {
-                walk: {width: Fill, height: Fit }
-                layout: { flow: Down, padding: 0.0 }
-
+                walk: {width: Fill, height: Fit}
+                layout: {flow: Down, padding: 0.0}
+                
                 meta = <Label> {
                     walk: {margin: {bottom: 10.0, top: 10.0}}
                     draw_label: {
@@ -227,9 +227,9 @@ live_design!{
 
         <LineH> { draw_bg: { color: (COLOR_DIVIDER_DARK) } }
     }
-
+    
     PostImage = <Frame> {
-        walk: {width: Fill, height: Fit }
+        walk: {width: Fill, height: Fit}
         layout: {flow: Down, padding: 0.0, spacing: 0.0}
         
         hero = <Image> {
@@ -238,9 +238,9 @@ live_design!{
             walk: {margin: 0}
             layout: {padding: 0}
         }
-
+        
         post = <Post> {
-            walk: { margin: { top: -45.0 } }
+            walk: {margin: {top: -45.0}}
             body = {
                 content = {
                     meta = {
@@ -280,43 +280,41 @@ live_design!{
                 <Frame> { walk: {height:(HEIGHT_HEADER)} }
                 <PostImage> {}
                 <Post> {
-                    body = {
-                        profile = {
-                            profile_img = {
-                                image: (IMG_PROFILE_B)
-                            }
-                        }
-                    }
+                    body = {profile = {profile_img = {
+                        image: (IMG_PROFILE_B)
+                    }}}
                 }
                 <PostImage> {
-                    hero = {
-                        image: (IMG_B),
-                        image_scale: 1.0,
-                        walk: {margin: 0}
-                        layout: {padding: 0}
-                    }
-                    post = {
-                        body = {
-                            profile = {
-                                profile_img = {
-                                    image: (IMG_PROFILE_B)
-                                }
-                            }
-                        }
-                    } 
+                    hero = {image: (IMG_B),}
+                    post = {body = {profile = {profile_img = {
+                        image: (IMG_PROFILE_B)
+                    }}}}
                 }
                 <Post> {}
                 <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Post> {}
+                <Frame> {walk: {height: 100}}
             }
-
+            
             <Frame> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
-
+                
                 <Header> {}
                 <FillerY> {}
                 <Menu> {}
-            }            
+            }
         }
     }
 }
@@ -343,6 +341,6 @@ impl AppMain for App {
         let actions = self.ui.handle_widget_event(cx, event);
         
         if self.ui.get_button(id!(button1)).clicked(&actions) {
-        } 
+        }
     }
 }
