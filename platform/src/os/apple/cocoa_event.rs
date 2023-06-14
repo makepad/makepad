@@ -17,6 +17,7 @@ use {
             DropEvent,
             TextClipboardEvent,
             TimerEvent,
+            HttpResponseEvent,
         },
     }
 };
@@ -48,4 +49,6 @@ pub enum CocoaEvent {
     TextCut(TextClipboardEvent),
     Timer(TimerEvent),
     MenuCommand(MenuCommand),
+
+    HttpResponse(HttpResponseEvent),
 }
