@@ -17,7 +17,7 @@ workspace.members = [
     "tools/wasm_strip",
 ]
 
-
+workspace.resolver = "2"
 [profile.release]
 #debug = true
 # opt-level = 'z'     # Optimize for size
