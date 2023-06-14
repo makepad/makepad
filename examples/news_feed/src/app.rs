@@ -40,7 +40,7 @@ live_design!{
         height_factor: 1.65,
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
-
+    
     COLOR_BG = #xfff8ee
     COLOR_BRAND = #xf88
     COLOR_BRAND_HOVER = #xf66
@@ -52,11 +52,11 @@ live_design!{
     COLOR_DIVIDER_DARK = #x00000044
     COLOR_PROFILE_CIRCLE = #xfff8ee
     COLOR_P = #x999
-
-    FillerY = <Frame> { walk: {width: Fill} }
     
-    FillerX = <Frame> { walk: {height: Fill} }
-
+    FillerY = <Frame> {walk: {width: Fill}}
+    
+    FillerX = <Frame> {walk: {height: Fill}}
+    
     Logo = <Button> {
         draw_icon: {
             svg_file: (LOGO),
@@ -126,7 +126,7 @@ live_design!{
     Header = <Box> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: (COLOR_OVERLAY_BG), inset:vec4(-0.5,-0.5,-1.0,0.0), radius:4.5}
+        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: 4.5}
         
         <Logo> {
             walk: {height: Fit, width: Fill, margin: {top: 30.0}}
@@ -134,64 +134,64 @@ live_design!{
         }
         
     }
-
+    
     Menu = <Box> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: (COLOR_OVERLAY_BG), inset:vec4(-0.5,0.0,-1.0,-1.0), radius:4.5}
+        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: 4.5}
         
         <Frame> {
-            walk: { width: Fill, height: Fit, margin: 0.0 }
-            layout: { flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}}
-
-            <IconButton> { draw_icon: { svg_file: (ICO_HOME) } icon_walk: { width: 20.0, height: Fit }, label: "" }
-            <IconButton> { draw_icon: { svg_file: (ICO_FIND) } icon_walk: { width: 18.0, height: Fit }, label: ""}
-            <IconButton> { draw_icon: { svg_file: (ICO_ADD) } icon_walk: { width: 40.0, height: Fit }, label: "" }
-            <IconButton> { draw_icon: { svg_file: (ICO_LIKES) } icon_walk: { width: 20.0, height: Fit }, label: "" }
-            <IconButton> { draw_icon: { svg_file: (ICO_USER) } icon_walk: { width: 15.0, height: Fit }, label: "" }
+            walk: {width: Fill, height: Fit, margin: 0.0}
+            layout: {flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}}
+            
+            <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 20.0, height: Fit}, label: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_FIND)} icon_walk: {width: 18.0, height: Fit}, label: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_ADD)} icon_walk: {width: 40.0, height: Fit}, label: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_LIKES)} icon_walk: {width: 20.0, height: Fit}, label: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_USER)} icon_walk: {width: 15.0, height: Fit}, label: ""}
         }
     }
-
+    
     LineH = <Box> {
-        walk: { width: Fill, height: 2, margin: 0.0 }
-        layout: { padding: 0.0, spacing: 0.0 }
-        draw_bg: { color: (COLOR_DIVIDER) }
+        walk: {width: Fill, height: 2, margin: 0.0}
+        layout: {padding: 0.0, spacing: 0.0}
+        draw_bg: {color: (COLOR_DIVIDER)}
     }
-
+    
     PostMenu = <Frame> {
-        walk: { width: Fill, height: Fit, margin: 0.0 }
-        layout: { flow: Down, padding: 0.0, spacing: 0.0 }
-
+        walk: {width: Fill, height: Fit, margin: 0.0}
+        layout: {flow: Down, padding: 0.0, spacing: 0.0}
+        
         <Frame> {
-            walk: { width: Fill, height: Fit, margin: 0.0 }
-            layout: { flow: Right, padding: 0.0, spacing: 10.0 }
-
-            likes = <IconButton> { draw_icon: { svg_file: (ICO_FAV) } icon_walk: { width: 15.0, height: Fit } }
-            comments = <IconButton> { draw_icon: { svg_file: (ICO_COMMENT) } icon_walk: { width: 15.0, height: Fit }, label: "7"}
-
+            walk: {width: Fill, height: Fit, margin: 0.0}
+            layout: {flow: Right, padding: 0.0, spacing: 10.0}
+            
+            likes = <IconButton> {draw_icon: {svg_file: (ICO_FAV)} icon_walk: {width: 15.0, height: Fit}}
+            comments = <IconButton> {draw_icon: {svg_file: (ICO_COMMENT)} icon_walk: {width: 15.0, height: Fit}, label: "7"}
+            
             <FillerX> {}
-            reply = <IconButton> { draw_icon: { svg_file: (ICO_REPLY) } icon_walk: { width: 15.0, height: Fit }, label: "" }
+            reply = <IconButton> {draw_icon: {svg_file: (ICO_REPLY)} icon_walk: {width: 15.0, height: Fit}, label: ""}
         }
-    } 
-
+    }
+    
     Post = <Frame> {
         walk: {width: Fill, height: Fit, margin: 0.0}
-        layout: {flow: Down, padding: 0.0, spacing: 0.0}        
-
+        layout: {flow: Down, padding: 0.0, spacing: 0.0}
+        
         body = <Frame> {
-            walk: {width: Fill, height: Fit }
-            layout: { flow: Right, padding: 10.0, spacing: 10.0 }
-
+            walk: {width: Fill, height: Fit}
+            layout: {flow: Right, padding: 10.0, spacing: 10.0}
+            
             profile = <Frame> {
-                walk: {width: Fit, height: Fit, margin: { top: 7.5 } }
-                layout: { flow: Down, padding: 0.0 }
+                walk: {width: Fit, height: Fit, margin: {top: 7.5}}
+                layout: {flow: Down, padding: 0.0}
                 profile_img = <Image> {
                     image: (IMG_PROFILE_A)
-                    draw_bg:{
+                    draw_bg: {
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                             let c = self.rect_size * 0.5;
-                            sdf.circle(c.x,c.y,c.x - 2.)
+                            sdf.circle(c.x, c.y, c.x - 2.)
                             sdf.fill_keep(self.get_color());
                             sdf.stroke((COLOR_PROFILE_CIRCLE), 1);
                             return sdf.result
@@ -203,9 +203,9 @@ live_design!{
                 }
             }
             content = <Frame> {
-                walk: {width: Fill, height: Fit }
-                layout: { flow: Down, padding: 0.0 }
-
+                walk: {width: Fill, height: Fit}
+                layout: {flow: Down, padding: 0.0}
+                
                 meta = <Label> {
                     walk: {margin: {bottom: 10.0, top: 10.0}}
                     draw_label: {
@@ -222,23 +222,23 @@ live_design!{
                     }
                     label: "Never underestimate the resilience it takes to live in a desert. It's a testament\nto life's adaptability, endurance, and\ntenacity. The cacti, creatures, and people\nwho call it home are nature's ultimate\nsurvivalists. #DesertStrong"
                 }
-
+                
                 <LineH> {
-                    walk: { margin: {top: 10.0, bottom: 5.0} }
+                    walk: {margin: {top: 10.0, bottom: 5.0}}
                 }
                 
                 <PostMenu> {}
             }
             
         }
-
+        
         <LineH> {
-            draw_bg: { color: (COLOR_DIVIDER_DARK) }
+            draw_bg: {color: (COLOR_DIVIDER_DARK)}
         }
     }
-
+    
     PostImage = <Frame> {
-        walk: {width: Fill, height: Fit }
+        walk: {width: Fill, height: Fit}
         layout: {flow: Down, padding: 0.0, spacing: 0.0}
         
         hero = <Image> {
@@ -247,9 +247,9 @@ live_design!{
             walk: {margin: 0}
             layout: {padding: 0}
         }
-
+        
         post = <Post> {
-            walk: { margin: { top: -45.0 } }
+            walk: {margin: {top: -45.0}}
             body = {
                 content = {
                     meta = {
@@ -286,46 +286,32 @@ live_design!{
             <ScrollY> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
-                <Frame> { walk: {height:100} }
+                <Frame> {walk: {height: 100}}
                 <PostImage> {}
                 <Post> {
-                    body = {
-                        profile = {
-                            profile_img = {
-                                image: (IMG_PROFILE_B)
-                            }
-                        }
-                    }
+                    body = {profile = {profile_img = {
+                        image: (IMG_PROFILE_B)
+                    }}}
                 }
                 <PostImage> {
-                    hero = {
-                        image: (IMG_B),
-                        image_scale: 1.0,
-                        walk: {margin: 0}
-                        layout: {padding: 0}
-                    }
-                    post = {
-                        body = {
-                            profile = {
-                                profile_img = {
-                                    image: (IMG_PROFILE_B)
-                                }
-                            }
-                        }
-                    } 
+                    hero = {image: (IMG_B),}
+                    post = {body = {profile = {profile_img = {
+                        image: (IMG_PROFILE_B)
+                    }}}}
                 }
                 <Post> {}
                 <Post> {}
+                <Frame> {walk: {height: 100}}
             }
-
+            
             <Frame> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
-
+                
                 <Header> {}
                 <FillerY> {}
                 <Menu> {}
-            }            
+            }
         }
     }
 }
@@ -352,6 +338,6 @@ impl AppMain for App {
         let actions = self.ui.handle_widget_event(cx, event);
         
         if self.ui.get_button(id!(button1)).clicked(&actions) {
-        } 
+        }
     }
 }
