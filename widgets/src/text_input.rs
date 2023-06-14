@@ -744,4 +744,13 @@ impl TextInputRef {
             "".to_string()
         }
     }
+
+    pub fn changed(&self, actions:&WidgetActions) -> String {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let TextInputAction::Change(val) = item.action() {
+                return val;
+            }
+        }
+        "".to_string()
+    }
 }
