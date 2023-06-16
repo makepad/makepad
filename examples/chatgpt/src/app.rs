@@ -97,7 +97,6 @@ impl AppMain for App{
         }
 
         if let Event::HttpResponse(event) = event { 
-            log!("Request completed {:?}", event);
             let label = self.ui.get_label(id!(message_label));
 
             event.response.id.as_string(|id: Option<&str>| {
