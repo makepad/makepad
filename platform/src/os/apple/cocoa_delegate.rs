@@ -25,7 +25,6 @@ use {
             },
             apple_util::{
                 nsstring_to_string,
-                str_to_nsstring,
                 get_event_key_modifier,
                 superclass,
                 load_mouse_cursor,
@@ -267,67 +266,6 @@ pub fn define_menu_delegate() -> *const Class {
     }
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
     decl.add_protocol(&Protocol::get("NSMenuDelegate").unwrap());
-    return decl.register();
-}
-
-pub fn define_cocoa_networking_delegate() -> *const Class {
-    extern fn send_get_request(this: &Object, _sel: Sel) {
-        unsafe {
-            // let url: ObjcId =
-            //     msg_send![class!(NSURL), URLWithString: str_to_nsstring("https://cholee-todo-app.fly.dev/api/todos/")];
-
-            let url: ObjcId =
-                msg_send![class!(NSURL), URLWithString: str_to_nsstring("https://raw.githubusercontent.com/json-iterator/test-data/master/large-file.json")];
-
-            let session_configuration: ObjcId = msg_send![class!(NSURLSessionConfiguration), defaultSessionConfiguration];
-            let session: ObjcId = msg_send![class!(NSURLSession), sessionWithConfiguration: session_configuration delegate: this delegateQueue: nil];
-            let data_task: ObjcId = msg_send![session, dataTaskWithURL: url];
-
-            let () = msg_send![data_task, resume];
-        }
-    }
-
-    extern fn did_receive_data(
-        this: &Object,
-        _: Sel,
-        _session: ObjcId,
-        _task: ObjcId,
-        data: ObjcId
-    ) {
-        unsafe {
-            let bytes: *const u8 = msg_send![data, bytes];
-            let length: usize = msg_send![data, length];
-            let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
-
-            let ca = get_cocoa_app_global();
-            ca.http_response_data_received(data_bytes.into());
-        }
-    }
-
-    extern fn did_complete_with_error(
-        this: &Object,
-        _: Sel,
-        _session: ObjcId,
-        _task: ObjcId,
-        error: ObjcId
-    ) {
-        unsafe {
-            let ca = get_cocoa_app_global();
-            ca.send_http_response_event();
-        }
-    }
-
-    let superclass = class!(NSObject);
-    let mut decl = ClassDecl::new("NetworkingDelegate", superclass).unwrap();
-
-    unsafe {
-        decl.add_method(sel!(sendGetRequest), send_get_request as extern fn(&Object, Sel));
-        decl.add_method(sel!(URLSession: dataTask: didReceiveData:), did_receive_data as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId));
-        decl.add_method(sel!(URLSession: task: didCompleteWithError:), did_complete_with_error as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId));
-    }
-
-    decl.add_protocol(&Protocol::get("NSURLSessionDelegate").unwrap());
-    decl.add_protocol(&Protocol::get("NSURLSessionDataDelegate").unwrap());
     return decl.register();
 }
 
