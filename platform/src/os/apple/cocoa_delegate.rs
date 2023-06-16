@@ -27,7 +27,7 @@ use {
                 nsstring_to_string,
                 get_event_key_modifier,
                 superclass,
-                load_mouse_cursor,
+                load_mouse_cursor
             },
         },
         menu::{
@@ -191,6 +191,7 @@ pub fn define_key_value_observing_delegate() -> *const Class {
     return decl.register();
 }
 
+
 pub fn define_cocoa_timer_delegate() -> *const Class {
     
     extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
@@ -268,7 +269,6 @@ pub fn define_menu_delegate() -> *const Class {
     decl.add_protocol(&Protocol::get("NSMenuDelegate").unwrap());
     return decl.register();
 }
-
 /*
 struct CocoaPostInit {
     cocoa_app_ptr: *mut CocoaApp,

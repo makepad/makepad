@@ -203,20 +203,31 @@ impl CocoaApp {
                 let () = msg_send![ns_request, setHTTPBody: nsdata];
             }
 
-
             // Build the NSURLSessionDataTask instance
             let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, _error: ObjcId | {
                 let bytes: *const u8 = msg_send![data, bytes];
                 let length: usize = msg_send![data, length];
                 let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
                 let response_code: u16 = msg_send![response, statusCode];
+                let headers: ObjcId = msg_send![response, allHeaderFields];
 
-                let response = HttpResponse::new(
+                let mut response = HttpResponse::new(
                     request.id.clone(),
                     response_code,
                     "".to_string(),
                     Some(data_bytes.to_vec()),
                 );
+
+                let key_enumerator: ObjcId = msg_send![headers, keyEnumerator];
+                let mut key: ObjcId = msg_send![key_enumerator, nextObject];
+                while key != ptr::null_mut() {
+                    let value: ObjcId = msg_send![headers, objectForKey: key];
+                    let key_str = nsstring_to_string(key);
+                    let value_str = nsstring_to_string(value);
+                    response.set_header(key_str, value_str);
+
+                    key = msg_send![key_enumerator, nextObject];
+                }
 
                 let ca = get_cocoa_app_global();
                 ca.do_callback(
