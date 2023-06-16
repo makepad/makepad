@@ -295,7 +295,6 @@ impl Cx {
                 self.call_event_handler(&Event::MenuCommand(e))
             }
             CocoaEvent::HttpResponse(e) => {
-                crate::log!("aca pasaaa");
                 self.call_event_handler(&Event::HttpResponse(e))
             }
         }
@@ -386,7 +385,6 @@ impl Cx {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)
                 },
                 CxOsOp::HttpRequest(request) => {
-                    crate::log!("http request");
                     cocoa_app.make_http_request(request);
                 },
                 _ => ()
