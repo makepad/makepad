@@ -132,10 +132,6 @@ impl Cx {
     ) -> EventFlow {
         
         self.handle_platform_ops(metal_windows, metal_cx, cocoa_app);
-
-        // if let CocoaEvent::HttpResponse(the_event) = &event {
-        //     crate::log!("HttpResponse: {:?}", the_event);
-        // }
         
         let mut paint_dirty = false;
         match &event {
