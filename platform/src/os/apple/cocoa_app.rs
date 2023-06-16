@@ -9,12 +9,12 @@ use {
         os::raw::{c_void}
     },
     crate::{
+        makepad_objc_sys::objc_block,
         makepad_objc_sys::runtime::{ObjcId,nil},
         makepad_math::{
             DVec2,
         },
         network::*,
-        makepad_live_id::*,
         os::{
             apple::apple_sys::*,
             cocoa_delegate::*,
@@ -103,7 +103,6 @@ pub struct CocoaClasses {
     pub view: *const Class,
     pub key_value_observing_delegate: *const Class,
     pub video_callback_delegate: *const Class,
-    pub networking_delegate: *const Class,
     pub const_attributes_for_marked_text: ObjcId,
     pub const_empty_string: RcObjcId,
 }
@@ -123,7 +122,6 @@ impl CocoaClasses{
             app_delegate: define_app_delegate(),
             menu_target: define_menu_target_class(),
             video_callback_delegate: define_av_video_callback_delegate(),
-            networking_delegate: define_cocoa_networking_delegate(),
             view: define_cocoa_view_class(),
             key_value_observing_delegate: define_key_value_observing_delegate(),
             const_attributes_for_marked_text: unsafe{msg_send![
@@ -152,8 +150,6 @@ pub struct CocoaApp {
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
     ns_event: ObjcId,
-    pub networking_delegate_instance: ObjcId,
-    networking_buffer: HashMap<LiveId, Vec<u8>>,
 }
 
 impl CocoaApp {
@@ -182,15 +178,57 @@ impl CocoaApp {
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
                 ns_event: ptr::null_mut(),
-                networking_delegate_instance:msg_send![get_cocoa_class_global().networking_delegate, new],
-                networking_buffer: HashMap::new(),
             }
         }
     }
 
     pub fn make_http_request(&mut self, request: HttpRequest) {
         unsafe {
-            let () = msg_send![self.networking_delegate_instance, sendGetRequest];
+            // Prepare the NSMutableURLRequest instance
+            let url: ObjcId =
+                msg_send![class!(NSURL), URLWithString: str_to_nsstring(&request.url)];
+
+            let mut ns_request: ObjcId = msg_send![class!(NSMutableURLRequest), alloc];
+            ns_request = msg_send![ns_request, initWithURL: url];
+            let () = msg_send![ns_request, setHTTPMethod: str_to_nsstring(&request.method.to_string())];
+
+            for (key, values) in request.headers.iter() {
+                for value in values {
+                    let () = msg_send![ns_request, addValue: str_to_nsstring(value) forHTTPHeaderField: str_to_nsstring(key)];
+                }
+            }
+
+            if let Some(body) = request.body.as_ref() {
+                let nsdata: ObjcId = msg_send![class!(NSData), dataWithBytes: body.as_ptr() length: body.len()];
+                let () = msg_send![ns_request, setHTTPBody: nsdata];
+            }
+
+
+            // Build the NSURLSessionDataTask instance
+            let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, _error: ObjcId | {
+                let bytes: *const u8 = msg_send![data, bytes];
+                let length: usize = msg_send![data, length];
+                let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+                let response_code: u16 = msg_send![response, statusCode];
+
+                let response = HttpResponse::new(
+                    request.id.clone(),
+                    response_code,
+                    "".to_string(),
+                    Some(data_bytes.to_vec()),
+                );
+
+                let ca = get_cocoa_app_global();
+                ca.do_callback(
+                    CocoaEvent::HttpResponse(HttpResponseEvent{ response })
+                );
+            });
+
+            let session: ObjcId = msg_send![class!(NSURLSession), sharedSession];
+            let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request completionHandler: &response_handler];
+
+            // Run the request task
+            let () = msg_send![data_task, resume];
         }
     }
     
@@ -739,35 +777,5 @@ impl CocoaApp {
         };
         
         cocoa_window.start_dragging(self.ns_event, dragged_item);
-    }
-
-    pub fn http_response_data_received(&mut self, mut body: Vec<u8>) {
-        // TODO remove this
-        let request_id = LiveId::from_str("InitialTodoFetch").unwrap();
-
-        if let Some(buffered_body) = self.networking_buffer.get_mut(&request_id) {
-            buffered_body.append(&mut body);
-        } else {
-            self.networking_buffer.insert(request_id, body);
-        }
-    }
-
-    pub fn send_http_response_event(&mut self) {
-        // TODO remove this
-        let request_id = LiveId::from_str("InitialTodoFetch").unwrap();
-
-        if let Some(buffered_body) = self.networking_buffer.remove(&request_id) {
-            let response = HttpResponse::new(
-                request_id,
-                200,
-                "".to_string(),
-                Some(buffered_body.to_vec())
-            );
-
-            self.do_callback(
-                CocoaEvent::HttpResponse(HttpResponseEvent{ response })
-            );
-            self.do_callback(CocoaEvent::Paint);
-        }
     }
 }
