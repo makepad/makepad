@@ -11,6 +11,8 @@ live_design!{
     import crate::tab_bar::TabBar
     import makepad_widgets::splitter::Splitter
     import makepad_widgets::theme::*;
+
+    const BORDER_SIZE = 6.0
     
     DrawRoundCorner = {{DrawRoundCorner}} {
         draw_depth: 6.0
@@ -38,7 +40,6 @@ live_design!{
     }
     
     Dock= {{Dock}} {
-        const BORDER_SIZE: 6.0
         border_size: (BORDER_SIZE)
         layout: {
             flow: Down
