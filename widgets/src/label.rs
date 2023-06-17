@@ -15,7 +15,8 @@ live_design!{
             height:Fit
         }
         draw_label:{
-            color:#8
+            color:#8,
+            wrap: Word
         }
     }
 }
@@ -48,12 +49,12 @@ impl Widget for Label {
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk)->WidgetDraw{
-        let lines = self.label.split("\\n");
+        /*let lines = self.label.split("\\n");
         for line in lines{
             // lets debugdraw the cliprect
-            
-            self.draw_label.draw_walk(cx, walk, self.align, line);
-        }
+          */  
+            self.draw_label.draw_walk(cx, walk, self.align, &self.label);
+        //}
         WidgetDraw::done()
     }
 }

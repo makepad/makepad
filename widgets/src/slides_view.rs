@@ -85,7 +85,6 @@ pub enum SlidesViewAction {
     None,
 }
 
-
 impl Widget for SlidesView {
     fn handle_widget_event_with(
         &mut self,

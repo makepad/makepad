@@ -5,6 +5,7 @@ workspace.members = [
     "examples/news_feed", 
     "examples/ironfish",
     "examples/simple",
+    "examples/widgets",
     "examples/chatgpt",
     "libs/futures",
     "libs/wasm_bridge/test",

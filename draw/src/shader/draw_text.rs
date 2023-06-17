@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_platform::*,
         turtle::{Walk, Size, Flow, Align},
-        font_atlas::{CxFontsAtlasTodo, CxFontsAtlas, Font},
+        font_atlas::{CxFontsAtlasTodo, CxFont, CxFontsAtlas, Font},
         view::ManyInstances,
         geometry::GeometryQuad2D,
         cx_2d::Cx2d
@@ -14,7 +14,6 @@ live_design!{
     
     DrawText = {{DrawText}} {
         //debug: true;
-        wrapping: None
         text_style: {
             font: {
                 path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")
@@ -124,6 +123,98 @@ pub struct TextStyle {
     #[live(1.1)] pub top_drop: f64,
     #[live(1.3)] pub height_factor: f64,
 }
+
+#[derive(Clone, Live, LiveHook)]
+#[live_ignore]
+pub enum TextWrap {
+    #[pick] Ellipsis,
+    Word,
+    None
+}
+
+struct WordIterator<'a> {
+    char_iter: Option<std::str::CharIndices<'a >>,
+    eval_width: f64,
+    word_width: f64,
+    word_start: usize,
+    last_is_whitespace: bool,
+    last_index: usize,
+    font_size_total: f64,
+}
+
+struct WordIteratorItem {
+    start: usize,
+    end: usize,
+    width: f64,
+    with_newline: bool
+}
+
+impl<'a> WordIterator<'a> {
+    fn new(char_iter: std::str::CharIndices<'a>, eval_width: f64, font_size_total: f64) -> Self {
+        Self {
+            eval_width,
+            char_iter: Some(char_iter),
+            last_is_whitespace: false,
+            word_width: 0.0,
+            word_start: 0,
+            last_index: 0,
+            font_size_total
+        }
+    }
+    fn next_word(&mut self, font: &CxFont) -> Option<WordIteratorItem> {
+        if let Some(char_iter) = &mut self.char_iter {
+            while let Some((i, c)) = char_iter.next() {
+                self.last_index = i;
+                let ret = WordIteratorItem {
+                    start: self.word_start,
+                    end: i,
+                    width: self.word_width,
+                    with_newline: false
+                };
+                
+                let adv = if let Some(glyph) = font.ttf_font.get_glyph(c) {
+                    glyph.horizontal_metrics.advance_width * self.font_size_total
+                }else {0.0};
+                
+                if c == '\r' {
+                    continue;
+                }
+                if c == '\n' {
+                    self.last_is_whitespace = false;
+                    self.word_start = i;
+                    self.word_width = 0.0;
+                    return Some(WordIteratorItem {with_newline: true, end:i, ..ret})
+                }
+                else if c.is_whitespace() { // we only return words where whitespace turns to word
+                    self.last_is_whitespace = true;
+                }
+                else if self.last_is_whitespace {
+                    self.last_is_whitespace = false;
+                    self.word_start = i;
+                    self.word_width = adv;
+                    return Some(ret);
+                }
+                // this causes a character-based split if the word doesnt fit at all
+                if self.word_width + adv >= self.eval_width {
+                    self.word_start = i;
+                    self.word_width = adv;
+                    return Some(ret);
+                }
+                self.word_width += adv;
+            }
+            self.char_iter = None;
+            return Some(WordIteratorItem {
+                start: self.word_start,
+                end: self.last_index + 1,
+                width: self.word_width,
+                with_newline: false
+            });
+        }
+        else {
+            None
+        }
+    }
+}
 /*
 #[derive(Debug, Clone, Copy, Live, LiveHook)]
 pub enum Overflow {
@@ -147,7 +238,7 @@ pub struct DrawText {
     
     #[live] pub geometry: GeometryQuad2D,
     #[live] pub text_style: TextStyle,
-    #[live] pub word_wrap: bool,
+    #[live] pub wrap: TextWrap,
     
     #[live(1.0)] pub font_scale: f64,
     #[live(1.0)] pub draw_depth: f32,
@@ -178,15 +269,15 @@ impl LiveHook for DrawText {
 impl DrawText {
     
     pub fn draw(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
-        self.draw_inner(cx, pos, val);
+        self.draw_inner(cx, pos, val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
-        self.draw_inner(cx, pos + cx.turtle().origin(), val);
+        self.draw_inner(cx, pos + cx.turtle().origin(), val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
-        self.draw_inner(cx, pos, val);
+        self.draw_inner(cx, pos, val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
@@ -218,7 +309,7 @@ impl DrawText {
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
     
-    pub fn draw_inner(&mut self, cx: &mut Cx2d, pos: DVec2, chunk: &str) {
+    pub fn draw_inner(&mut self, cx: &mut Cx2d, pos: DVec2, chunk: &str, fonts_atlas: &mut CxFontsAtlas) {
         if !self.draw_vars.can_instance()
             || pos.x.is_nan()
             || pos.y.is_nan()
@@ -228,11 +319,11 @@ impl DrawText {
         //self.draw_clip = cx.turtle().draw_clip().into();
         let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
-        
+        /*
         let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
-        
+        */
         if fonts_atlas.fonts[font_id].is_none() {
             return
         }
@@ -339,19 +430,20 @@ impl DrawText {
             self.end_many_instances(cx)
         }
     }
+    pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str, fonts_atlas: &mut CxFontsAtlas) -> Option<TextGeom> {
+        self.compute_geom_inner(cx, walk, text, &mut *cx.fonts_atlas_rc.0.borrow_mut())
+    }
     
-    pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str) -> Option<TextGeom> {
+    fn compute_geom_inner(&self, cx: &Cx2d, walk: Walk, text: &str, fonts_atlas: &mut CxFontsAtlas) -> Option<TextGeom> {
         // we include the align factor and the width/height
         let font_id = self.text_style.font.font_id.unwrap();
-        
-        let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
         
         if fonts_atlas.fonts[font_id].is_none() {
             return None
         }
         
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
-        let measured_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
+        let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
         let eval_width = cx.turtle().eval_width(walk.width, walk.margin, Flow::Right);
         let eval_height = cx.turtle().eval_height(walk.height, walk.margin, Flow::Right);
         
@@ -365,72 +457,121 @@ impl DrawText {
                     measured_width += adv;
                 }
             }
-            Some(TextGeom {
+            return Some(TextGeom {
                 eval_width,
                 eval_height,
                 measured_width,
-                measured_height,
+                measured_height: line_height,
                 ellip_pt: None
             })
         }
-        else {
-            
-            let ellip_width = if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph('.') {
-                glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale
-            }
-            else {
-                0.0
-            };
-            
-            let mut measured_width = 0.0;
-            let mut ellip_pt = None;
-            for (i, c) in text.chars().enumerate() {
+        match self.wrap {
+            TextWrap::Ellipsis => {
+                let ellip_width = if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph('.') {
+                    glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale
+                }
+                else {
+                    0.0
+                };
                 
-                if measured_width + ellip_width * 3.0 < eval_width {
-                    ellip_pt = Some((i, measured_width, 3));
-                }
-                if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
-                    let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
-                    // ok so now what.
-                    if measured_width + adv >= eval_width { // we have to drop back to ellip_pt
-                        // if we don't have an ellip_pt, set it to 0
-                        if ellip_pt.is_none() {
-                            let dots = if ellip_width * 3.0 < eval_width {3}
-                            else if ellip_width * 2.0 < eval_width {2}
-                            else if ellip_width < eval_width {1}
-                            else {0};
-                            ellip_pt = Some((0, 0.0, dots));
-                        }
-                        return Some(TextGeom {
-                            eval_width,
-                            eval_height,
-                            measured_width: ellip_pt.unwrap().1 + ellip_width,
-                            measured_height,
-                            ellip_pt
-                        })
+                let mut measured_width = 0.0;
+                let mut ellip_pt = None;
+                for (i, c) in text.chars().enumerate() {
+                    
+                    if measured_width + ellip_width * 3.0 < eval_width {
+                        ellip_pt = Some((i, measured_width, 3));
                     }
-                    measured_width += adv;
+                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
+                        let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
+                        // ok so now what.
+                        if measured_width + adv >= eval_width { // we have to drop back to ellip_pt
+                            // if we don't have an ellip_pt, set it to 0
+                            if ellip_pt.is_none() {
+                                let dots = if ellip_width * 3.0 < eval_width {3}
+                                else if ellip_width * 2.0 < eval_width {2}
+                                else if ellip_width < eval_width {1}
+                                else {0};
+                                ellip_pt = Some((0, 0.0, dots));
+                            }
+                            return Some(TextGeom {
+                                eval_width,
+                                eval_height,
+                                measured_width: ellip_pt.unwrap().1 + ellip_width,
+                                measured_height: line_height,
+                                ellip_pt
+                            })
+                        }
+                        measured_width += adv;
+                    }
                 }
+                
+                Some(TextGeom {
+                    eval_width,
+                    eval_height,
+                    measured_width,
+                    measured_height: line_height,
+                    ellip_pt: None
+                })
             }
-            
-            Some(TextGeom {
-                eval_width,
-                eval_height,
-                measured_width,
-                measured_height,
-                ellip_pt: None
-            })
+            TextWrap::Word => {
+                let mut max_width = 0.0;
+                let mut measured_width = 0.0;
+                let mut measured_height = line_height;
+                
+                let mut iter = WordIterator::new(text.char_indices(), eval_width, font_size_logical * self.font_scale);
+                while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_ref().unwrap()) {
+                    if measured_width + word.width >= eval_width {
+                        measured_height += line_height;
+                        measured_width = word.width;
+                    }
+                    else {
+                        measured_width += word.width;
+                    }
+                    if measured_width > max_width {max_width = measured_width}
+                    if word.with_newline {
+                        measured_height += line_height;
+                        measured_width = 0.0;
+                    }
+                }
+                
+                Some(TextGeom {
+                    eval_width,
+                    eval_height,
+                    measured_width: max_width,
+                    measured_height,
+                    ellip_pt: None
+                })
+            }
+            TextWrap::None => {
+                let mut measured_width = 0.0;
+                for c in text.chars() {
+                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
+                        let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
+                        measured_width += adv;
+                    }
+                }
+                Some(TextGeom {
+                    eval_width,
+                    eval_height,
+                    measured_width,
+                    measured_height: line_height,
+                    ellip_pt: None
+                })
+            }
         }
     }
     
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) {
-        
+        let font_id = self.text_style.font.font_id.unwrap();
+        let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
+        let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
+        let fonts_atlas = &mut*fonts_atlas;
         // lets compute the geom
         if text.len() == 0 {
             return
         }
-        if let Some(geom) = self.compute_geom(cx, walk, text) {
+        if let Some(geom) = self.compute_geom_inner(cx, walk, text, fonts_atlas) {
             let height = if walk.height.is_fit() {
                 geom.measured_height
             } else {
@@ -447,37 +588,68 @@ impl DrawText {
                     height: Size::Fixed(height)
                 });
                 // lets do our y alignment
-                self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), text);
+                self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), text, fonts_atlas);
             }
-            else {
-                // otherwise we should check the ellipsis
-                if let Some((ellip, at_x, dots)) = geom.ellip_pt {
-                    // ok so how do we draw this
-                    let rect = cx.walk_turtle(Walk {
-                        abs_pos: walk.abs_pos,
-                        margin: walk.margin,
-                        width: Size::Fixed(geom.eval_width),
-                        height: Size::Fixed(height)
-                    });
-                    
-                    self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..ellip]);
-                    self.draw_inner(cx, rect.pos + dvec2(at_x, y_align), &"..."[0..dots]);
+            match self.wrap {
+                TextWrap::Ellipsis => {
+                    // otherwise we should check the ellipsis
+                    if let Some((ellip, at_x, dots)) = geom.ellip_pt {
+                        // ok so how do we draw this
+                        let rect = cx.walk_turtle(Walk {
+                            abs_pos: walk.abs_pos,
+                            margin: walk.margin,
+                            width: Size::Fixed(geom.eval_width),
+                            height: Size::Fixed(height)
+                        });
+                        
+                        self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..ellip], fonts_atlas);
+                        self.draw_inner(cx, rect.pos + dvec2(at_x, y_align), &"..."[0..dots], fonts_atlas);
+                    }
+                    else { // we might have space to h-align
+                        let rect = cx.walk_turtle(Walk {
+                            abs_pos: walk.abs_pos,
+                            margin: walk.margin,
+                            width: Size::Fixed(geom.eval_width),
+                            height: Size::Fixed(
+                                if walk.height.is_fit() {
+                                    geom.measured_height
+                                } else {
+                                    geom.eval_height
+                                }
+                            )
+                        });
+                        let x_align = (geom.eval_width - geom.measured_width) * align.x;
+                        self.draw_inner(cx, rect.pos + dvec2(x_align, y_align), text, fonts_atlas);
+                    }
                 }
-                else { // we might have space to h-align
+                TextWrap::Word => {
+                    let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
+                    let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
+                    
                     let rect = cx.walk_turtle(Walk {
                         abs_pos: walk.abs_pos,
                         margin: walk.margin,
                         width: Size::Fixed(geom.eval_width),
-                        height: Size::Fixed(
-                            if walk.height.is_fit() {
-                                geom.measured_height
-                            } else {
-                                geom.eval_height
-                            }
-                        )
+                        height: Size::Fixed(geom.measured_height)
                     });
-                    let x_align = (geom.eval_width - geom.measured_width) * align.x;
-                    self.draw_inner(cx, rect.pos + dvec2(x_align, y_align), text);
+                    let mut pos = dvec2(0.0, 0.0);
+                    
+                    let mut iter = WordIterator::new(text.char_indices(), geom.eval_width, font_size_logical * self.font_scale);
+                    while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_ref().unwrap()) {
+                        if pos.x + word.width >= geom.eval_width {
+                            pos.y += line_height;
+                            pos.x = 0.0;
+                        }
+                        self.draw_inner(cx, rect.pos + pos, &text[word.start..word.end], fonts_atlas);
+                        pos.x += word.width;
+                        
+                        if word.with_newline {
+                            pos.y += line_height;
+                            pos.x = 0.0;
+                        }
+                    }
+                }
+                TextWrap::None => {
                 }
             }
         }
