@@ -5,21 +5,21 @@ live_design!{
     import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
-    import makepad_widgets::frame::Image;
+    import makepad_widgets::frame::*;
     import makepad_widgets::slider::Slider;
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::drop_down::DropDown;
     
     App = {{App}} {
-        ui: <DesktopWindow>{
+        ui: <DesktopWindow> {
             
             show_bg: true
             layout: {
                 flow: Down,
                 spacing: 20,
                 align: {
-                    x: 1.0,
-                    y: 1.0
+                    x: 0.0,
+                    y: 0.0
                 }
             },
             draw_bg: {
@@ -40,18 +40,24 @@ live_design!{
                 walk: {width: 100, height: 30},
             }
             */
-            dropdown1 = <DropDown>{
-                walk:{width:100}
-                labels:["Item1","Item2"]
-            }
-            /*
-            label1 = <Label> {
-                draw_label: {
-                    color: #f
-                },
-                label: "Counter: 0"
+            dropdown1 = <DropDown> {
+                walk: {width: 100}
+                labels: ["Item1", "Item2"]
             }
             
+            <Box> {
+                walk:{width:Fill, height:Fit}
+                draw_bg:{color:#f00}
+                label1 = <Label> {
+                    walk: {width: Fill}
+                    draw_label: {
+                        wrap: Word,
+                        color: #f
+                    },
+                    label: "12341234123412341234\n multilineeeee"
+                }
+            }
+            /*
             slider1 = <Slider>{
                 walk:{width:100, height: 50}
             }*/
@@ -72,7 +78,7 @@ impl LiveHook for App {
     }
 }
 
-impl AppMain for App{
+impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Draw(event) = event {
             return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));

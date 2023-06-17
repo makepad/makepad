@@ -36,9 +36,10 @@ live_design!{
             return sdf.fill(COLOR_BG_APP);
         }
     }
+
+    const BORDER_SIZE: 6.0
     
     Dock= {{Dock}} {
-        const BORDER_SIZE: 6.0
         border_size: (BORDER_SIZE)
         layout: {
             flow: Down
