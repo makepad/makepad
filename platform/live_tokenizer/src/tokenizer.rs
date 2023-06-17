@@ -517,7 +517,18 @@ impl DoubleQuotedStringTailState {
                         FullToken::String(Rc::new(s)),
                     );
                 }
-                ('\\', '"') => cursor.skip(2),
+                ('\\', '\\') => {
+                    s.push('\\');
+                    cursor.skip(2);
+                },
+                ('\\', '"') => {
+                    s.push('"');
+                    cursor.skip(2);
+                },
+                ('\\', 'n') => {
+                    s.push('\n');
+                    cursor.skip(2);
+                },
                 (x,_) => {
                     s.push(x);
                     cursor.skip(1);
