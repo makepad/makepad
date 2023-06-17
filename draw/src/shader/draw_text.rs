@@ -319,11 +319,7 @@ impl DrawText {
         //self.draw_clip = cx.turtle().draw_clip().into();
         let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
-        /*
-        let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
-        let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
-        let fonts_atlas = &mut*fonts_atlas;
-        */
+
         if fonts_atlas.fonts[font_id].is_none() {
             return
         }
@@ -430,7 +426,7 @@ impl DrawText {
             self.end_many_instances(cx)
         }
     }
-    pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str, fonts_atlas: &mut CxFontsAtlas) -> Option<TextGeom> {
+    pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str) -> Option<TextGeom> {
         self.compute_geom_inner(cx, walk, text, &mut *cx.fonts_atlas_rc.0.borrow_mut())
     }
     
