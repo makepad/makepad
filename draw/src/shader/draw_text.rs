@@ -129,7 +129,7 @@ pub struct TextStyle {
 pub enum TextWrap {
     #[pick] Ellipsis,
     Word,
-    None
+    Line
 }
 
 struct WordIterator<'a> {
@@ -538,19 +538,28 @@ impl DrawText {
                     ellip_pt: None
                 })
             }
-            TextWrap::None => {
+            TextWrap::Line => {
+                let mut max_width = 0.0;
                 let mut measured_width = 0.0;
+                let mut measured_height = line_height;
+                
                 for c in text.chars() {
+                    if c == '\n'{
+                        measured_height += line_height;
+                    }
                     if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                         measured_width += adv;
+                    }
+                    if measured_width > max_width{
+                        max_width = measured_width;
                     }
                 }
                 Some(TextGeom {
                     eval_width,
                     eval_height,
-                    measured_width,
-                    measured_height: line_height,
+                    measured_width: max_width,
+                    measured_height: measured_height,
                     ellip_pt: None
                 })
             }
@@ -645,7 +654,22 @@ impl DrawText {
                         }
                     }
                 }
-                TextWrap::None => {
+                TextWrap::Line => {
+                    let line_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
+                    // lets just output it and walk it
+                    let rect = cx.walk_turtle(Walk {
+                        abs_pos: walk.abs_pos,
+                        margin: walk.margin,
+                        width: Size::Fixed(geom.measured_width),
+                        height: Size::Fixed(height)
+                    });
+                    // lets do our y alignment
+                    let mut ypos = 0.0;
+                    for line in text.split('\n'){
+                        self.draw_inner(cx, rect.pos + dvec2(0.0, y_align + ypos), line, fonts_atlas);
+                        ypos += line_height;
+                    }
+                    
                 }
             }
         }
