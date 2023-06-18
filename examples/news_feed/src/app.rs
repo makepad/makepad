@@ -215,13 +215,15 @@ live_design!{
                     label: "@username · 13h"
                 }
                 
-                text = <Label> {
+                text = <Frame>{walk:{width:Fill,height:Fit},<Label> {
+                    walk:{width:Fill},
                     draw_label: {
+                        wrap: Word,
                         text_style: <TEXT_P> {},
                         color: (COLOR_P)
                     }
-                    label: "Never underestimate the resilience it takes to live in a desert. It's a testament to life's adaptability, endurance, and\ntenacity. The cacti, creatures, and people\nwho call it home are nature's ultimate\nsurvivalists. #DesertStrong"
-                }
+                    label: "Never underestimate the resilience it takes to live in a desert. It's a testament to life's adaptability, endurance, and tenacity. The cacti, creatures, and people who call it home are nature's ultimate survivalists. #DesertStrong"
+                }}
                 
                 <LineH> {
                     walk: {margin: {top: 10.0, bottom: 5.0}}
