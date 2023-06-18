@@ -672,6 +672,9 @@ impl Turtle {
     pub fn set_shift(&mut self, shift: DVec2) {
         self.shift = Some(shift);
     }*/
+    pub fn layout(&self)->&Layout{
+        &self.layout
+    }
     
     pub fn used(&self) -> DVec2 {
         dvec2(self.width_used, self.height_used)
