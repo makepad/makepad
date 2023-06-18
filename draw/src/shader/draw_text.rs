@@ -594,6 +594,7 @@ impl DrawText {
                 });
                 // lets do our y alignment
                 self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), text, fonts_atlas);
+                return
             }
             match self.wrap {
                 TextWrap::Ellipsis => {
