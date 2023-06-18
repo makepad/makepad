@@ -26,6 +26,13 @@ live_design!{
         }
     }}
     
+    Debug = <Frame> {show_bg: true, draw_bg: {
+        color: #f00
+        fn pixel(self) -> vec4 {
+            return self.color
+        }
+    }}
+    
     Rect = <Frame> {show_bg: true, draw_bg: {
         instance border_width: 0.0
         instance border_color: #0000
