@@ -17,7 +17,7 @@ live_design!{
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
     IMG_PROFILE_B = dep("crate://self/resources/profile_2.jpg")
     
-    LOGO = dep("crate://self/resources/leap_logo.svg")
+    LOGO = dep("crate://self/resources/logo.svg")
     ICO_FAV = dep("crate://self/resources/icon_favorite.svg")
     ICO_COMMENT = dep("crate://self/resources/icon_comment.svg")
     ICO_REPLY = dep("crate://self/resources/icon_reply.svg")
