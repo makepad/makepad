@@ -6,7 +6,8 @@ use {
         ptr,
         time::Instant,
         collections::{HashMap},
-        os::raw::{c_void}
+        os::raw::{c_void},
+        sync::mpsc::Sender,
     },
     crate::{
         makepad_objc_sys::objc_block,
@@ -182,7 +183,7 @@ impl CocoaApp {
         }
     }
 
-    pub fn make_http_request(&mut self, request: HttpRequest) {
+    pub fn make_http_request(&mut self, request: HttpRequest, networking_sender: Sender<HttpResponseEvent>) {
         unsafe {
             // Prepare the NSMutableURLRequest instance
             let url: ObjcId =
@@ -229,10 +230,7 @@ impl CocoaApp {
                     key = msg_send![key_enumerator, nextObject];
                 }
 
-                let ca = get_cocoa_app_global();
-                ca.do_callback(
-                    CocoaEvent::HttpResponse(HttpResponseEvent{ response })
-                );
+                networking_sender.send(HttpResponseEvent{ response }).unwrap();
             });
 
             let session: ObjcId = msg_send![class!(NSURLSession), sharedSession];
