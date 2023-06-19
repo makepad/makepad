@@ -2,9 +2,9 @@ use {
     std::{
         rc::Rc,
         cell::{RefCell},
+        sync::mpsc::{channel, Receiver, Sender},
     },
     makepad_objc_sys::{
-        
         msg_send,
         sel,
         sel_impl,
@@ -33,6 +33,7 @@ use {
             WebSocket,
             WebSocketAutoReconnect,
             Event,
+            HttpResponseEvent,
         },
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx, OsType},
@@ -122,6 +123,15 @@ impl Cx {
             }
         }
     }
+
+    fn handle_networking_events(&mut self) {
+        match self.os.networking_channel.receiver.try_recv() {
+            Ok(event) => {
+                self.call_event_handler(&Event::HttpResponse(event))
+            },
+            Err(_) => ()
+        }
+    }
     
     fn cocoa_event_callback(
         &mut self,
@@ -150,11 +160,15 @@ impl Cx {
                         self.os.keep_alive_counter -= 1;
                         self.repaint_windows();
                     }
-                    // chheck signals
+
+                    // check signals
                     if Signal::check_and_clear_ui_signal(){
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
+
+                    self.handle_networking_events();
+
                     return EventFlow::Poll;
                 }
             }
@@ -290,9 +304,6 @@ impl Cx {
             CocoaEvent::MenuCommand(e) => {
                 self.call_event_handler(&Event::MenuCommand(e))
             }
-            CocoaEvent::HttpResponse(e) => {
-                self.call_event_handler(&Event::HttpResponse(e))
-            }
         }
         
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
@@ -381,7 +392,7 @@ impl Cx {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)
                 },
                 CxOsOp::HttpRequest(request) => {
-                    cocoa_app.make_http_request(request);
+                    cocoa_app.make_http_request(request, self.os.networking_channel.sender.clone());
                 },
                 _ => ()
             }
@@ -409,11 +420,27 @@ impl CxOsApi for Cx {
     }
 }
 
+pub struct NetworkingChannel {
+    receiver: Receiver<HttpResponseEvent>,
+    sender: Sender<HttpResponseEvent>,
+}
+
+impl Default for NetworkingChannel {
+    fn default() -> Self {
+        let (sender, receiver) = channel();
+        Self {
+            sender,
+            receiver
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CxOs {
     pub (crate) keep_alive_counter: usize,
     pub (crate) media: CxAppleMedia,
     pub (crate) bytes_written: usize,
     pub (crate) draw_calls_done: usize,
+    pub (crate) networking_channel: NetworkingChannel,
 }
 
