@@ -34,6 +34,7 @@ use {
             WebSocketAutoReconnect,
             Event,
             HttpResponseEvent,
+            HttpRequestErrorEvent,
         },
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx, OsType},
@@ -126,8 +127,15 @@ impl Cx {
 
     fn handle_networking_events(&mut self) {
         match self.os.networking_channel.receiver.try_recv() {
-            Ok(event) => {
-                self.call_event_handler(&Event::HttpResponse(event))
+            Ok(message) => {
+                match message {
+                    NetworkingMessage::HttpResponse(event) => {
+                        self.call_event_handler(&Event::HttpResponse(event))
+                    },
+                    NetworkingMessage::HttpRequestError(event) => {
+                        self.call_event_handler(&Event::HttpRequestError(event))
+                    },
+                }
             },
             Err(_) => ()
         }
@@ -420,9 +428,14 @@ impl CxOsApi for Cx {
     }
 }
 
+pub enum NetworkingMessage {
+    HttpResponse(HttpResponseEvent),
+    HttpRequestError(HttpRequestErrorEvent),
+}
+
 pub struct NetworkingChannel {
-    receiver: Receiver<HttpResponseEvent>,
-    sender: Sender<HttpResponseEvent>,
+    receiver: Receiver<NetworkingMessage>,
+    sender: Sender<NetworkingMessage>,
 }
 
 impl Default for NetworkingChannel {
