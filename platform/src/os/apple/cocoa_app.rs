@@ -49,12 +49,14 @@ use {
             DraggedItem,
             KeyModifiers,
             HttpResponseEvent,
+            HttpRequestErrorEvent,
         },
         cursor::MouseCursor,
         menu::{
             Menu,
             MenuCommand
-        }
+        },
+        NetworkingMessage,
     }
 };
 
@@ -183,7 +185,7 @@ impl CocoaApp {
         }
     }
 
-    pub fn make_http_request(&mut self, request: HttpRequest, networking_sender: Sender<HttpResponseEvent>) {
+    pub fn make_http_request(&mut self, request: HttpRequest, networking_sender: Sender<NetworkingMessage>) {
         unsafe {
             // Prepare the NSMutableURLRequest instance
             let url: ObjcId =
@@ -205,7 +207,17 @@ impl CocoaApp {
             }
 
             // Build the NSURLSessionDataTask instance
-            let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, _error: ObjcId | {
+            let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, error: ObjcId | {
+                if error != ptr::null_mut() {
+                    let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
+                    let message = NetworkingMessage::HttpRequestError(HttpRequestErrorEvent{
+                        id: request.id.clone(),
+                        error: error_str
+                    });
+                    networking_sender.send(message).unwrap();
+                    return;
+                }
+
                 let bytes: *const u8 = msg_send![data, bytes];
                 let length: usize = msg_send![data, length];
                 let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
@@ -230,7 +242,8 @@ impl CocoaApp {
                     key = msg_send![key_enumerator, nextObject];
                 }
 
-                networking_sender.send(HttpResponseEvent{ response }).unwrap();
+                let message = NetworkingMessage::HttpResponse(HttpResponseEvent{ response });
+                networking_sender.send(message).unwrap();
             });
 
             let session: ObjcId = msg_send![class!(NSURLSession), sharedSession];
