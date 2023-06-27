@@ -2,6 +2,7 @@ use {
     std::{
         io::prelude::*,
         fs::File,
+        rc::Rc,
     },
     crate::{
         cx::{Cx},
@@ -22,7 +23,7 @@ impl Cx {
             if let Ok(mut file_handle) = File::open(path) {
                 let mut buffer = Vec::<u8>::new();
                 if file_handle.read_to_end(&mut buffer).is_ok() {
-                    dep.data = Some(Ok(buffer));
+                    dep.data = Some(Ok(Rc::new(buffer)));
                 }
                 else{
                     dep.data = Some(Err("read_to_end failed".to_string()));

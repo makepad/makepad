@@ -172,7 +172,7 @@ impl<'a> WordIterator<'a> {
                     with_newline: false
                 };
                 
-                let adv = if let Some(glyph) = font.ttf_font.get_glyph(c) {
+                let adv = if let Some(glyph) = font.get_glyph(c) {
                     glyph.horizontal_metrics.advance_width * self.font_size_total
                 }else {0.0};
                 
@@ -341,6 +341,7 @@ impl DrawText {
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.text_style.font_size);
         
         let font = &mut cxfont.ttf_font;
+        let owned_font_face = &cxfont.owned_font_face;
         
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * font.units_per_em);
         let font_size_pixels = font_size_logical * dpi_factor;
@@ -352,8 +353,7 @@ impl DrawText {
         let mut char_depth = self.draw_depth;
         for wc in chunk.chars() {
             
-            let unicode = wc as usize;
-            let glyph_id = font.char_code_to_glyph_index_map[unicode];
+            let glyph_id = owned_font_face.with_ref(|face| face.glyph_index(wc).map_or(0, |id| id.0 as usize));
             
             let glyph = &font.glyphs[glyph_id];
             
@@ -445,7 +445,7 @@ impl DrawText {
         
         match if walk.width.is_fit() {&TextWrap::Line}else{ &self.wrap} {
             TextWrap::Ellipsis => {
-                let ellip_width = if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph('.') {
+                let ellip_width = if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().get_glyph('.') {
                     glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale
                 }
                 else {
@@ -459,7 +459,7 @@ impl DrawText {
                     if measured_width + ellip_width * 3.0 < eval_width {
                         ellip_pt = Some((i, measured_width, 3));
                     }
-                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
+                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                         // ok so now what.
                         if measured_width + adv >= eval_width { // we have to drop back to ellip_pt
@@ -529,7 +529,7 @@ impl DrawText {
                     if c == '\n'{
                         measured_height += line_height;
                     }
-                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
+                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                         measured_width += adv;
                     }
@@ -727,13 +727,13 @@ impl DrawText {
         if fonts_atlas.fonts[font_id].is_none() {
             return DVec2::default();
         }
-        let font = &fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font;
-        let slot = font.char_code_to_glyph_index_map[33];
-        let glyph = &font.glyphs[slot];
+        let font = fonts_atlas.fonts[font_id].as_ref().unwrap();
+        let slot = font.owned_font_face.with_ref(|face| face.glyph_index('!').map_or(0, |id| id.0 as usize));
+        let glyph = &font.ttf_font.glyphs[slot];
         
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         DVec2 {
-            x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.units_per_em)),
+            x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.ttf_font.units_per_em)),
             y: self.text_style.line_spacing
         }
     }
