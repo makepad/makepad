@@ -132,7 +132,7 @@ pub struct Cx {
 pub struct CxRef(pub Rc<RefCell<Cx>>); //TODO: I probably shouldn't remove the (crate)
 
 pub struct CxDependency {
-    pub data: Option<Result<Vec<u8>, String >>
+    pub data: Option<Result<Rc<Vec<u8>>, String >>
 }
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
