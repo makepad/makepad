@@ -16,7 +16,7 @@ pub use {
         makepad_vector::font::Glyph,
         makepad_vector::trapezoidator::Trapezoidator,
         makepad_vector::geometry::{AffineTransformation, Transform, Vector},
-        makepad_vector::internal_iter::*,
+        makepad_vector::internal_iter::ExtendFromInternalIterator,
         makepad_vector::path::PathIterator,
     }
 };
@@ -109,7 +109,9 @@ impl CxFontsAtlas {
         self.path_to_font_id.insert(path.to_string(), font_id);
         
         match cx.get_dependency(path) {
-            Ok(data) => match CxFont::load_from_ttf_bytes(&data) {
+            // FIXME(eddyb) this clones the `data` `Vec<u8>`, in order to own it
+            // inside a `owned_font_face::OwnedFace`.
+            Ok(data) => match CxFont::load_from_ttf_bytes(data) {
                 Err(_) => {
                     error!("Error loading font {} ", path);
                 }
@@ -160,9 +162,10 @@ impl DrawTrapezoidVector {
                 let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
                 let glyph = &font.glyphs[todo.glyph_id];
                 
-                if todo.glyph_id == font.char_code_to_glyph_index_map[10] ||
-                todo.glyph_id == font.char_code_to_glyph_index_map[9] ||
-                todo.glyph_id == font.char_code_to_glyph_index_map[13] {
+                let is_one_of_tab_lf_cr = ['\t', '\n', '\r'].iter().any(|&c| {
+                    Some(todo.glyph_id) == cxfont.owned_font_face.with_ref(|face| face.glyph_index(c).map(|id| id.0 as usize))
+                });
+                if is_one_of_tab_lf_cr {
                     return
                 }
                 
@@ -177,7 +180,7 @@ impl DrawTrapezoidVector {
                 let trapezoidate = self.trapezoidator.trapezoidate(
                     glyph
                         .outline
-                        .commands()
+                        .iter()
                         .map({
                         move | command | {
                             let cmd = command.transform(
@@ -305,9 +308,9 @@ impl<'a> Cx2d<'a> {
     }
 }
 
-#[derive(Clone)]
 pub struct CxFont {
     pub ttf_font: makepad_vector::font::TTFFont,
+    pub owned_font_face: crate::owned_font_face::OwnedFace,
     pub atlas_pages: Vec<CxFontAtlasPage>,
 }
 
@@ -337,10 +340,12 @@ pub struct CxFontsAtlasTodo {
 }
 
 impl CxFont {
-    pub fn load_from_ttf_bytes(bytes: &[u8]) -> makepad_vector::ttf_parser::Result<Self> {
-        let ttf_font = makepad_vector::ttf_parser::parse_ttf(bytes) ?;
+    pub fn load_from_ttf_bytes(bytes: Rc<Vec<u8>>) -> makepad_vector::ttf_parser::Result<Self> {
+        let owned_font_face = crate::owned_font_face::OwnedFace::parse(bytes, 0).map_err(|_| makepad_vector::ttf_parser::Error)?;
+        let ttf_font = owned_font_face.with_ref(|face| makepad_vector::ttf_parser::from_ttf_parser_face(face))?;
         Ok(Self {
             ttf_font,
+            owned_font_face,
             atlas_pages: Vec::new()
         })
     }
@@ -362,5 +367,13 @@ impl CxFont {
             }
         });
         self.atlas_pages.len() - 1
+    }
+
+    pub fn get_glyph(&self, c:char)->Option<&Glyph>{
+        if c < '\u{10000}' {
+            Some(&self.ttf_font.glyphs[self.owned_font_face.with_ref(|face| face.glyph_index(c))?.0 as usize])
+        } else {
+            None
+        }
     }
 }
