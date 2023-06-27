@@ -12,6 +12,7 @@ pub mod font_atlas;
 pub mod geometry;
 pub mod nav;
 pub mod icon_atlas;
+mod owned_font_face;
  
 pub use crate::{
     font_atlas::Font,
