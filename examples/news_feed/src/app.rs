@@ -11,7 +11,7 @@ live_design!{
     import makepad_widgets::slider::Slider;
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::drop_down::DropDown;
-    
+    import makepad_widgets::infinite_list::InfiniteList;
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_B = dep("crate://self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
@@ -284,7 +284,7 @@ live_design!{
                 }
             }
             
-            <ScrollY> {
+            <InfiniteList> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
                 <Frame> {walk: {height: 100}}
