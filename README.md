@@ -9,6 +9,8 @@ Sebastian Michailidis: @SebMichailidis on twitter
 Our discord channel for Makepad:
 https://discord.gg/adqBRq7Ece
 
+Most recent talk about makepad: https://www.youtube.com/watch?v=rC4FCS-oMpg
+
 # Makepad
 
 ## Overview
