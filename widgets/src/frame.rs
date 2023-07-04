@@ -831,10 +831,6 @@ impl Frame {
         self.area
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d,) -> WidgetDraw {
-        self.draw_walk(cx, self.get_walk())
-    }
-    
     pub fn walk_from_previous_size(&self, walk: Walk) -> Walk {
         let view_size = self.view_size.unwrap_or(DVec2::default());
         Walk {
