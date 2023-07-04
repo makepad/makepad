@@ -56,6 +56,7 @@ fn main() {
     
     let prefixes = [
         format!("/makepad/{}/",std::env::current_dir().unwrap().display()),
+        "/makepad//".to_string(),
         "/makepad/".to_string()
     ];
     while let Ok(message) = rx_request.recv() {
@@ -123,13 +124,14 @@ fn main() {
                 else if path.ends_with(".js") {"text/javascript"}
                 else if path.ends_with(".ttf") {"application/ttf"}
                 else if path.ends_with(".png") {"image/png"}
+                else if path.ends_with(".svg") {"image/svg+xml"}
                 else {continue};
-                
+
                 if path.contains("..") || path.contains('\\'){
                     continue
                 }
                 
-                let strip = path.strip_prefix(&prefixes[0]).or_else(|| path.strip_prefix(&prefixes[1]));
+                let strip = path.strip_prefix(&prefixes[0]).or_else(|| path.strip_prefix(&prefixes[1])).or_else(|| path.strip_prefix(&prefixes[2]));;
 
                 if let Some(base) = strip{
                     if let Ok(mut file_handle) = File::open(base) {
