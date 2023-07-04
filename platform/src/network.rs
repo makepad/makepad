@@ -69,6 +69,11 @@ impl HttpResponse {
         }
     }
 
+    pub fn set_header(&mut self, name: String, value: String) {
+        let entry = self.headers.entry(name).or_insert(Vec::new());
+        entry.push(value);
+    }
+
     pub fn get_raw_body(&self) -> Option<&Vec<u8>> {
         self.body.as_ref()
     }
