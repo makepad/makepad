@@ -157,7 +157,7 @@ impl TileCache {
             textures.push(texture);
         }
         // preallocate buffers otherwise safari barfs in the worker
-        let use_cores = cx.cpu_cores().min(3) - 2;
+        let use_cores = cx.cpu_cores().max(3) - 2;
         Self {
             textures,
             current: Vec::new(),
@@ -604,6 +604,7 @@ impl Mandelbrot {
         
         // check if we click/touch the mandelbrot view in multitouch mode
         // in this mode we get fingerdown events for each finger.
+
         match event.hits(cx, self.view_area) {
             Hit::FingerDown(fe) => {
                 // ok so we get multiple finger downs
@@ -655,6 +656,7 @@ impl Mandelbrot {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // checks if our view is dirty, exits here if its clean
         cx.begin_turtle(walk, Layout::flow_right());
+        // lets check our clip
         
         self.had_first_draw = true;
         // store the view information here as its the only place it's known in the codeflow
