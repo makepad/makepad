@@ -252,7 +252,7 @@ impl App {
         db.bind(id!(sequencer.rootnote), ids!(rootnote.dropdown));
         db.bind(id!(sequencer.scale), ids!(scaletype.dropdown));
         db.bind(id!(arp.enabled), ids!(arp.checkbox));
-        //db.bind(id!(arp.octaves), ids!(arp.octaves.slider));
+        db.bind(id!(arp.octaves), ids!(arpoctaves.slider));
         
         // Mixer panel
         db.bind(id!(osc_balance), ids!(balance.slider));
