@@ -1125,12 +1125,12 @@ live_design!{
         }
     }
     
-    SequencerPanel = <Box> {
+    SequencerPanel = <ScrollY> {
         layout: {flow: Down}
         walk: {margin: <SPACING_0> {}}
         
         <FishPanel> {
-            walk: {width: Fill, height: Fill}
+            walk: {width: Fill, height: Fit}
             layout: {flow: Down, spacing: (SSPACING_0), padding: {top: (SSPACING_2)}}
             draw_bg: {color: (COLOR_UP_3), color2: (COLOR_UP_1)}
             
@@ -1737,11 +1737,11 @@ live_design!{
     }
     
     FishPanelSoundSources = <FishPanelContainer> {
-        walk: {width: Fill, height: Fill}
+        walk: {width: Fill, height: Fit}
         layout: {padding: <SPACING_0> {}, spacing: (SSPACING_0), flow: Down}
         
         <FishPanel> {
-            walk: {height: Fill}
+            walk: {height: Fit}
             
             <FishHeader> {
                 title = {
@@ -1805,7 +1805,7 @@ live_design!{
                             text_style: <H2_TEXT_NORMAL>{font_size: 18},
                             color: (COLOR_UP_6)
                         }
-                        label: "Wide Strings"
+                        label: "Preset"
                     }
                 }
                 <Frame> {
@@ -1857,11 +1857,11 @@ live_design!{
     
     // TABS
     FishPanelEnvelopes = <FishPanelContainer> {
-        walk: {width: Fill, height: Fill}
+        walk: {width: Fill, height: Fit}
         layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
         
         <FishPanel> {
-            walk: {height: Fill}
+            walk: {height: Fit}
             
             <FishHeader> {
                 title = {
@@ -1895,7 +1895,7 @@ live_design!{
     }
     
     FishPanelEffects = <FishPanelContainer> {
-        walk: {width: Fill, height: Fill}
+        walk: {width: Fill, height: Fit}
         layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
         
         <FishPanel> {
@@ -1909,7 +1909,7 @@ live_design!{
                 }
             }
             
-            walk: {width: Fill, height: Fill}
+            walk: {width: Fill, height: Fit}
             <CrushFXPanel> {}
             <ChorusFXPanel> {}
             <DelayToyFXPanel> {}
@@ -2114,9 +2114,9 @@ live_design!{
         layout:{flow:Right}
         walk: {width: Fill, height: Fill}
         // layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
-        
+        /*
         <Presets> {}
-        
+        */
         <Frame> {
             walk: {width: Fill, height: Fill}
             layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
@@ -2140,13 +2140,13 @@ live_design!{
                     layout: {flow: Down, spacing: (SSPACING_1)}
                     walk: {height: Fill, width: Fill}
                     oscillators = <FishPanelSoundSources> {}
+                    <FishPanelFilter> {}
                 }
                 
                 <ScrollY> {
                     layout: {flow: Down, spacing: (SSPACING_1)}
                     walk: {height: Fill, width: Fill}
                     envelopes = <FishPanelEnvelopes> {}
-                    <FishPanelFilter> {}
                 }
                 
                 <ScrollY> {
