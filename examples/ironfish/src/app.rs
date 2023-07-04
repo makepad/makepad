@@ -247,7 +247,7 @@ impl App {
     
     pub fn data_bind(&mut self, mut db: DataBindingMap) {
         // sequencer
-        db.bind(id!(sequencer.playing), ids!(playpause.checkbox));
+        db.bind(id!(sequencer.playing), ids!(playpause));
         db.bind(id!(sequencer.bpm), ids!(speed.slider));
         db.bind(id!(sequencer.rootnote), ids!(rootnote.dropdown));
         db.bind(id!(sequencer.scale), ids!(scaletype.dropdown));

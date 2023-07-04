@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg width="100%" height="100%" viewBox="0 0 286 286" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <rect id="Icon_Play" x="0.605" y="0.575" width="284.734" height="284.734" style="fill:none;"/>
+<svg width="100%" height="100%" viewBox="0 0 111 111" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g transform="matrix(1,0,0,1,-3102.52,-530.361)">
+        <rect id="ArtBoard1" x="3102.52" y="530.361" width="110.655" height="110.655" style="fill:none;"/>
+        <clipPath id="_clip1">
+            <rect id="ArtBoard11" serif:id="ArtBoard1" x="3102.52" y="530.361" width="110.655" height="110.655"/>
+        </clipPath>
+        <g clip-path="url(#_clip1)">
+            <g transform="matrix(2.08333,0,0,2.08333,-3360.54,-574.197)">
+                <path d="M3129.07,530.361C3143.73,530.361 3155.63,542.261 3155.63,556.918C3155.63,571.575 3143.73,583.475 3129.07,583.475C3114.42,583.475 3102.52,571.575 3102.52,556.918C3102.52,542.261 3114.42,530.361 3129.07,530.361ZM3129.07,534.361C3116.62,534.361 3106.52,544.468 3106.52,556.918C3106.52,569.368 3116.62,579.475 3129.07,579.475C3141.52,579.475 3151.63,569.368 3151.63,556.918C3151.63,544.468 3141.52,534.361 3129.07,534.361ZM3138.08,557.324L3123.39,565.819L3123.39,548.829L3138.08,557.324Z"/>
+            </g>
+        </g>
+    </g>
 </svg>
