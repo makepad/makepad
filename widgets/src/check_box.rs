@@ -52,6 +52,9 @@ live_design!{
                     sdf.blend(self.selected)
                     sdf.fill(#f);
                 }
+                CheckType::None=>{
+                    return #0000
+                }
             }
             return sdf.result
         }
@@ -94,7 +97,7 @@ live_design!{
                         #c,
                         self.hover
                     ),
-                    #9,
+                    #f,
                     self.selected
                 )
             }
@@ -197,6 +200,7 @@ pub enum CheckType {
     #[pick] Check = shader_enum(1),
     Radio = shader_enum(2),
     Toggle = shader_enum(3),
+    None
 }
 
 #[derive(Live)]
