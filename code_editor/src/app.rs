@@ -1,17 +1,15 @@
 use {
-    makepad_code_editor::{code_editor, CodeEditor},
+    makepad_code_editor::{code_editor, state::SessionId, CodeEditor},
     makepad_widgets::*,
 };
 
 live_design! {
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::hook_widget::HookWidget;
-    import makepad_widgets::frame::ScrollXY;
-    import makepad_widgets::frame::Box;
 
     App = {{App}} {
         ui: <DesktopWindow> {
-            editor = <HookWidget> {}
+            code_editor = <HookWidget> {}
         }
     }
 }
@@ -31,15 +29,21 @@ impl AppMain for App {
         if let Event::Draw(event) = event {
             let mut cx = Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(&mut cx).hook_widget() {
-                if next == self.ui.get_widget(id!(editor)) {
-                    self.code_editor
-                        .draw(&mut cx, &self.state.code_editor, self.state.view_id);
+                if next == self.ui.get_widget(id!(code_editor)) {
+                    self.code_editor.draw(
+                        &mut cx,
+                        &mut self.state.code_editor.view_mut(self.state.session_id),
+                    );
                 }
             }
             return;
         }
         self.ui.handle_widget_event(cx, event);
-        self.code_editor.handle_event(cx, event);
+        self.code_editor.handle_event(
+            cx,
+            &mut self.state.code_editor.view_mut(self.state.session_id),
+            event,
+        );
     }
 }
 
@@ -52,22 +56,16 @@ impl LiveHook for App {
 
 struct State {
     code_editor: makepad_code_editor::State,
-    view_id: makepad_code_editor::state::ViewId,
+    session_id: SessionId,
 }
 
 impl Default for State {
     fn default() -> Self {
-        use std::env;
-
         let mut code_editor = makepad_code_editor::State::new();
-        let view_id = code_editor
-            .create_view(Some(
-                env::current_dir().unwrap().join("code_editor/src/state.rs"),
-            ))
-            .unwrap();
+        let session_id = code_editor.open_session();
         Self {
             code_editor,
-            view_id,
+            session_id,
         }
     }
 }
