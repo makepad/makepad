@@ -39,7 +39,7 @@ live_design!{
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
     }
-    H2_TEXT_NORMAL = {
+    H2_TEXT_REGULAR = {
         font_size: (FONT_SIZE_H2),
         font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
     }
@@ -214,7 +214,7 @@ live_design!{
         layout: {padding: {top: (SSPACING_2), right: (SSPACING_4), bottom: (SSPACING_2), left: (SSPACING_2)}}
         
         draw_label: {
-            text_style: <H2_TEXT_NORMAL> {},
+            text_style: <H2_TEXT_REGULAR> {},
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -636,7 +636,7 @@ live_design!{
         }
         
         draw_label: {
-            text_style: <H2_TEXT_NORMAL>{},
+            text_style: <H2_TEXT_REGULAR>{},
             fn get_color(self) -> vec4 {
                 return mix(
                     (COLOR_UP_4),
@@ -864,7 +864,7 @@ live_design!{
             }
         },
         draw_label: {
-            text_style:<H2_TEXT_NORMAL>{},
+            text_style:<H2_TEXT_REGULAR>{},
         }
     }
     
@@ -1022,8 +1022,7 @@ live_design!{
     
     SequencerControls = <Frame> {
         walk: {height: Fit, width: Fill, margin: <SPACING_1> {}}
-        layout: {flow: Down, padding: <SPACING_2> {}}
-        
+        layout: {flow: Down, padding: <SPACING_2> {}}    
         
         <Frame> {
             walk: {height: Fit, width: Fill}
@@ -1201,8 +1200,33 @@ live_design!{
                     walk: {height: Fit, width: Fill}
                     layout: {flow: Right, align: {x: 0.0, y: 0.5}, spacing: (SSPACING_4), padding: {top: (SSPACING_1), right: (SSPACING_3), bottom: (SSPACING_0), left: (SSPACING_0)}}
                     
-                    playpause = <PlayPause> {}
+                    // playpause = <PlayPause> {}
                     
+                    playpause = <IconButton> {
+                        draw_icon: { svg_file: (ICO_PLAY) }
+                        icon_walk: {
+                            width: 25.0,
+                            height: Fit,
+                            margin: 0,
+                        }
+                        walk: {
+                            margin: {
+                                top: 0,
+                                right: -10,
+                                bottom: 0,
+                                left: 0,
+                            }
+                         }
+                        layout: {
+                            padding: {
+                                top: 2,
+                                right: 0,
+                                bottom: 0,
+                                left: 15,
+                            }
+                        }
+                    }
+
                     speed = <InstrumentSlider> {
                         walk: {width: Fill}
                         slider = {
@@ -1477,7 +1501,7 @@ live_design!{
                         values: [LowPass, HighPass, BandPass, BandReject]
                         
                         draw_label: {
-                            text_style: <H2_TEXT_NORMAL>{},
+                            text_style: <H2_TEXT_REGULAR>{},
                             fn get_color(self) -> vec4 {
                                 return mix(
                                     mix(
@@ -1808,7 +1832,7 @@ live_design!{
                     
                     <Label> {
                         draw_label: {
-                            text_style: <H2_TEXT_NORMAL>{font_size: 18},
+                            text_style: <H2_TEXT_REGULAR>{font_size: 18},
                             color: (COLOR_UP_6)
                         }
                         label: "Wide Strings"
@@ -1829,7 +1853,7 @@ live_design!{
             <FillerV> {}
             
             <Frame> {
-                walk: {width: Fill, height: 30}
+                walk: {width: Fill, height: 35}
                 layout: {spacing: (SSPACING_1)}
                 
 
@@ -1839,6 +1863,12 @@ live_design!{
 
                 panic = <IconButton> { draw_icon: { svg_file: (ICO_PANIC) } icon_walk: { width: Fit, height: 17.0 }, walk: {margin: {left: 5.0, right: -10.0}} }
                 platformtoggle = <IconButton> { draw_icon: { svg_file: (ICO_PLAT_MOBILE) } icon_walk: { width: Fit, height: 18.5 } }
+
+                gitlink = <Label> {
+                    draw_label: { text_style: <H2_TEXT_REGULAR> {}, color: (COLOR_UP_5) }
+                    label: "Made with\nMakepad (github)"
+                    walk: {margin: {top: 7.5, left: 5.0 }}
+                }
                 
                 <FillerH> {}
 
@@ -1971,7 +2001,7 @@ live_design!{
                                 self.pressed
                             )
                         }
-                        text_style: <H2_TEXT_NORMAL>{},
+                        text_style: <H2_TEXT_REGULAR>{},
                         color: (COLOR_UP_6)
                     }
                     draw_bg: {
@@ -2122,7 +2152,7 @@ live_design!{
         walk: {width: Fill, height: Fill}
         // layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
         
-        <Presets> {}
+        // <Presets> {}
         
         <Frame> {
             walk: {width: Fill, height: Fill}
