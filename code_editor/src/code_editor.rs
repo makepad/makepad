@@ -120,7 +120,7 @@ impl CodeEditor {
         }
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::FingerDown(event) => {
-                let point = (event.abs - event.rect.pos) + self.viewport_rect.pos / self.cell_size;
+                let point = ((event.abs - event.rect.pos) + self.viewport_rect.pos) / self.cell_size;
                 println!(
                     "{:?}",
                     view.as_view().pick(
