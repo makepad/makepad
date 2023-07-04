@@ -7,6 +7,7 @@ live_design!{
     
     import makepad_widgets::scroll_bars::ScrollBars;
     import makepad_widgets::label::Label;
+    import makepad_widgets::link_label::LinkLabel;
     import makepad_widgets::drop_down::DropDown;
     import makepad_widgets::button::Button;
     import makepad_widgets::slider::Slider;
@@ -1867,7 +1868,7 @@ live_design!{
 
                 gitlink = <Label> {
                     draw_label: { text_style: <H2_TEXT_REGULAR> {}, color: (COLOR_UP_5) }
-                    label: "Made with\nMakepad (github)"
+                    label: "Made with Makepad\ngithub.com/makepad/makepad"
                     walk: {margin: {top: 7.5, left: 5.0 }}
                 }
                 

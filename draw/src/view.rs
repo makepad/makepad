@@ -370,6 +370,7 @@ impl<'a> Cx2d<'a> {
             redraw_id: self.redraw_id,
             rect_id
         });
+        self.align_list.push(AlignEntry::Area(new_area));
         self.update_area_refs(*area, new_area);
         *area = new_area;
     }
