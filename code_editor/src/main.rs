@@ -1,5 +1,5 @@
-pub mod app;
+mod app;
 
 fn main() {
-    crate::app::app_main();
+    app::app_main();
 }
