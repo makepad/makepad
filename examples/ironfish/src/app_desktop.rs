@@ -1811,7 +1811,7 @@ live_design!{
                             text_style: <H2_TEXT_NORMAL>{font_size: 18},
                             color: (COLOR_UP_6)
                         }
-                        label: "Wide Strings"
+                        label: "Ironfish"
                     }
                 }
                 <Frame> {
@@ -2121,9 +2121,9 @@ live_design!{
         layout:{flow:Right}
         walk: {width: Fill, height: Fill}
         // layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
-        
+        /*
         <Presets> {}
-        
+        */
         <Frame> {
             walk: {width: Fill, height: Fill}
             layout: {padding: <SPACING_0> {}, align: {x: 0.0, y: 0.0}, spacing: (SSPACING_0), flow: Down}
