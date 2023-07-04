@@ -118,6 +118,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::multi_window::live_design(cx);
     crate::designer::live_design(cx);
     crate::hook_widget::live_design(cx);
+    crate::infinite_list::live_design(cx);
     //#[cfg(ide_widgets)]{
         crate::log_list::live_design(cx);
         crate::log_icon::live_design(cx);

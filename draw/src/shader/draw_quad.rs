@@ -19,7 +19,7 @@ live_design!{
                 self.draw_clip.xy,
                 self.draw_clip.zw
             )
-            clipped = self.geom_pos * rect_size + rect_pos;
+            //clipped = self.geom_pos * rect_size + rect_pos;
             self.pos = (clipped - rect_pos) / rect_size
             // only pass the clipped position forward
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(

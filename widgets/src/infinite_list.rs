@@ -4,14 +4,14 @@ use {
         widget::*,
         makepad_derive_widget::*,
         makepad_draw::*,
-        //scroll_bars::ScrollBars
+        scroll_bars::ScrollBars
     }
 };
 
 live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
-    
+    import makepad_widgets::frame::Frame;
     InfiniteList = {{InfiniteList}} {
         walk: {
             width: Fill
@@ -30,6 +30,7 @@ pub struct InfiniteList {
     #[rust] area: Area,
     #[live] walk: Walk,
     #[live] layout: Layout,
+    #[live] scroll_bars: ScrollBars,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] entries: ComponentMap<(InfiniteListEntryId, LiveId), WidgetRef>,
@@ -67,11 +68,13 @@ impl LiveHook for InfiniteList {
 impl InfiniteList {
     
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
-        cx.begin_turtle(walk, self.layout);
+        self.scroll_bars.begin(cx, walk, self.layout);
+        //cx.begin_turtle(walk, self.layout);
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        cx.end_turtle();
+        self.scroll_bars.end(cx);
+        //cx.end_turtle();
         self.entries.retain_visible();
     }
     
@@ -92,7 +95,7 @@ impl InfiniteList {
         event: &Event,
         //_dispatch_action: &mut dyn FnMut(&mut Cx, SwipeListAction),
     ) {
-        //self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
+        self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
         
         match event.hits(cx, self.area) {
             Hit::KeyFocus(_) => {
