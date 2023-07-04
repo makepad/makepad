@@ -200,7 +200,7 @@ pub enum CheckType {
     #[pick] Check = shader_enum(1),
     Radio = shader_enum(2),
     Toggle = shader_enum(3),
-    None
+    None = shader_enum(4),
 }
 
 #[derive(Live)]
