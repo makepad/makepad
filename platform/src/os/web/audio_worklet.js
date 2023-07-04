@@ -32,7 +32,6 @@ class AudioWorklet extends AudioWorkletProcessor {
                 });
             },
         };
-        
         WebAssembly.instantiate(thread_info.module, {env}).then(wasm => {
             
             wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
