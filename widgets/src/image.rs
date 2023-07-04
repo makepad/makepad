@@ -1,6 +1,5 @@
 use {
     crate::{
-        makepad_derive_widget::*,
         makepad_image_formats::jpeg,
         makepad_image_formats::png,
         makepad_draw::*,
@@ -17,15 +16,100 @@ live_design!{
             width:Fit
             height:Fit
         }
+        layout: {
+            // This is important to avoid clipping the image, specially when it is rotated.
+            // In any case, it can be override by the app developer.
+            clip_x: false,
+            clip_y: false
+        }
         draw_bg: {
             texture image: texture2d
-            instance scale: vec2(1.0, 1.0)
-            fn get_color(self) -> vec4 {
-                return sample2d(self.image, self.pos * self.scale).xyzw;
+
+            instance angle: 0.0
+            instance fade_factor: 1.0
+            instance scale_factor: 1.0
+
+            fn rotation_vertex_expansion(angle: float, w: float, h: float) -> vec2 {
+                let horizontal_expansion = (abs(cos(angle)) * w + abs(sin(angle)) * h) / w - 1.0;
+                let vertical_expansion = (abs(sin(angle)) * w + abs(cos(angle)) * h) / h - 1.0;
+
+                return vec2(horizontal_expansion, vertical_expansion);
             }
-            
+
+            fn rotate_2d_from_center(coord: vec2, a: float, size: vec2) -> vec2 {
+                let cos_a = cos(-a);
+                let sin_a = sin(-a);
+
+                let centered_coord = coord - vec2(0.5, 0.5);
+
+                // Denormalize the coordinates to use original proportions (between height and width)
+                let denorm_coord = vec2(centered_coord.x, centered_coord.y * size.y / size.x);
+                let demorm_rotated = vec2(denorm_coord.x * cos_a - denorm_coord.y * sin_a, denorm_coord.x * sin_a + denorm_coord.y * cos_a);
+
+                // Restore the coordinates to use the texture coordinates proportions (between 0 and 1 in both axis)
+                let rotated = vec2(demorm_rotated.x, demorm_rotated.y * size.x / size.y);
+
+                return rotated + vec2(0.5, 0.5);
+            }
+
+            fn get_color(self, rot_padding: vec2) -> vec4 {
+                // Current position is a traslated one, so let's get the original position
+                let current_pos = self.pos.xy - rot_padding;
+                let original_pos = rotate_2d_from_center(current_pos, self.angle, self.rect_size);
+
+                // Scale the current position by the scale factor
+                let scaled_pos = (original_pos - vec2(0.5, 0.5)) / self.scale_factor + vec2(0.5, 0.5);
+
+                // Take pixel color from the original image
+                let color = sample2d(self.image, scaled_pos).xyzw;
+
+                let faded_color = color * vec4(1.0, 1.0, 1.0, self.fade_factor);
+                return faded_color;
+            }
+
             fn pixel(self) -> vec4 {
-                return Pal::premul(self.get_color())
+                let rot_expansion = rotation_vertex_expansion(self.angle, self.rect_size.x, self.rect_size.y);
+
+                // Debug
+                // let line_width = 0.01;
+                // if self.pos.x < line_width || self.pos.x > (1. + rot_expansion.x - line_width) || self.pos.y < line_width || self.pos.y > (1. + rot_expansion.y - line_width) {
+                //     return #c86;
+                // }
+
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+
+                let translation_offset = vec2(self.rect_size.x * rot_expansion.x / 2.0, self.rect_size.y * rot_expansion.y / 2.0);
+                sdf.translate(translation_offset.x, translation_offset.y);
+
+                let center = self.rect_size * 0.5;
+                sdf.rotate(self.angle, center.x, center.y);
+
+                let scaled_size = self.rect_size * self.scale_factor;
+                let offset = (self.rect_size - scaled_size) * 0.5;
+                sdf.box(offset.x, offset.y, scaled_size.x, scaled_size.y, 1);
+
+                sdf.fill_premul(Pal::premul(self.get_color(rot_expansion / 2.0)));
+                return sdf.result
+            }
+
+            fn vertex(self) -> vec4 {
+                let rot_expansion = rotation_vertex_expansion(self.angle, self.rect_size.x, self.rect_size.y);
+                let adjusted_pos = vec2(
+                    self.rect_pos.x - self.rect_size.x * rot_expansion.x / 2.0,
+                    self.rect_pos.y - self.rect_size.y * rot_expansion.y / 2.0
+                );
+
+                let expanded_size = vec2(self.rect_size.x * (1.0 + rot_expansion.x), self.rect_size.y * (1.0 + rot_expansion.y));
+                let clipped: vec2 = clamp(
+                    self.geom_pos * expanded_size + adjusted_pos,
+                    self.draw_clip.xy,
+                    vec2(self.draw_clip.zw.x * (1.0 + rot_expansion.x), self.draw_clip.zw.y * (1.0 + rot_expansion.y))
+                );
+
+                self.pos = (clipped - adjusted_pos) / self.rect_size;
+                return self.camera_projection * (self.camera_view * (
+                    self.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_zbias, 1.)
+                ));
             }
             
             shape: Solid,
@@ -117,18 +201,17 @@ impl Widget for Image {
         self.walk
     }
     
-    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk:Walk) -> WidgetDraw {
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk)
     }
 }
 
 impl Image {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) -> WidgetDraw {        
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
         }
-        self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_bg.end(cx);
+        self.draw_bg.draw_walk(cx, walk);
 
         WidgetDraw::done()
     }
