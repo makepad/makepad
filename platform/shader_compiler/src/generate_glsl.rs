@@ -962,7 +962,15 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     }
     
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, _arg_exprs: &[Expr]) {
-        write!(string, "{}", ident).unwrap();
+         match ident {
+            #[cfg(target_os = "android")]
+            Ident(live_id!(abs)) => {
+                write!(string, "android_abs_fix").unwrap();
+            }
+            _ => {
+                write!(string, "{}", ident).unwrap()
+            }
+        }
     }
     
 }

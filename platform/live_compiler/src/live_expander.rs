@@ -126,7 +126,7 @@ impl<'a> LiveExpander<'a> {
                         // do nothing
                     }
                     // replacing object types
-                    else if out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
+                    else if out_value.is_expr() || in_value.is_expr() && out_value.is_single_node() {
                         // replace range
                         let next_index = out_doc.nodes.skip_node(overwrite);
                         
