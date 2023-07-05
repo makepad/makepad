@@ -1,11 +1,8 @@
-
-pub use makepad_widgets::makepad_platform;
-pub use makepad_platform::makepad_math;
-pub use makepad_widgets::makepad_draw;
-pub use makepad_platform::makepad_error_log;
-
+pub mod char;
 pub mod code_editor;
+pub mod geometry;
 pub mod state;
-pub mod str_ext;
+pub mod str;
+pub mod text;
 
-pub use self::{code_editor::CodeEditor, state::State, str_ext::StrExt};
+pub use self::{code_editor::CodeEditor, state::State};
