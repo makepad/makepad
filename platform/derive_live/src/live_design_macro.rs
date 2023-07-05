@@ -89,7 +89,6 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
     }
     
     fn tp_to_str(parser: &mut TokenParser, span: Span, out: &mut String, live_types: &mut Vec<TokenStream>, last_end: &mut Option<Lc>) {
-        #[cfg(lines)]
         fn lc_from_start(span: Span) -> Lc {
             Lc {
                 line: span.start().line(),
@@ -97,27 +96,10 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
             }
         }
         
-        #[cfg(lines)]
         fn lc_from_end(span: Span) -> Lc {
             Lc {
                 line: span.end().line(),
                 column: span.end().column()
-            }
-        }
-
-        #[cfg(not(lines))]
-        fn lc_from_start(_span: Span) -> Lc {
-            Lc {
-                line: 1,
-                column: 1
-            }
-        }
-        
-        #[cfg(not(lines))]
-        fn lc_from_end(_span: Span) -> Lc {
-            Lc {
-                line: 1,
-                column: 1
             }
         }
         
@@ -222,11 +204,17 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
 
 #[cfg(not(lines))]
 use proc_macro::TokenTree;
-/*
+
 #[cfg(not(lines))]
 struct SpanFallbackApiInfo {
     line: usize,
     column: usize
+}
+
+#[cfg(not(lines))]
+impl SpanFallbackApiInfo{
+    fn line(&self)->usize{self.line}
+    fn column(&self)->usize{self.column}
 }
 
 #[cfg(not(lines))]
@@ -240,4 +228,4 @@ trait SpanFallbackApi {
 }
 
 #[cfg(not(lines))]
-impl SpanFallbackApi for Span {}*/
+impl SpanFallbackApi for Span {}
