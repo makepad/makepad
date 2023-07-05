@@ -8,6 +8,7 @@ live_design!{
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
     import makepad_widgets::frame::*;
+    import makepad_widgets::image::Image;
     import makepad_widgets::slider::Slider;
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::drop_down::DropDown;
@@ -186,7 +187,7 @@ live_design!{
                 walk: {width: Fit, height: Fit, margin: {top: 7.5}}
                 layout: {flow: Down, padding: 0.0}
                 profile_img = <Image> {
-                    image: (IMG_PROFILE_A)
+                    source: (IMG_PROFILE_A)
                     draw_bg: {
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -197,7 +198,7 @@ live_design!{
                             return sdf.result
                         }
                     }
-                    image_scale: .65
+                    scale_factor: 0.65
                     walk: {margin: 0}
                     layout: {padding: 0}
                 }
@@ -243,9 +244,8 @@ live_design!{
         layout: {flow: Down, padding: 0.0, spacing: 0.0}
         
         hero = <Image> {
-            image: (IMG_A),
-            //image_scale: 1.0,
-            walk: {margin: 0, width: Fill, height: 250}
+            source: (IMG_A),
+            walk: {margin: 0, width:Fill, height:250}
             layout: {padding: 0}
         }
         
