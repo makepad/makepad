@@ -1,13 +1,9 @@
 use {
-    crate::{
-        geometry::{Point, Rect, Size},
-        text::Position,
-    },
+    crate::{Point, Position, RangeSet, Rect, Selection, Size},
     std::{
-        cell::RefCell,
         collections::{HashMap, HashSet},
         ops::ControlFlow,
-        slice::Iter,
+        slice,
     },
 };
 
@@ -34,7 +30,9 @@ impl State {
             scale: &session.scale,
             pivot: &session.pivot,
             block_inlays: &document.block_inlays,
-            summed_scaled_heights: &session.summed_scaled_heights,
+            summed_heights: &session.summed_heights,
+            selections: &session.selections,
+            normalized_selections: &session.normalized_selections,
         }
     }
 
@@ -48,7 +46,9 @@ impl State {
             scale: &mut session.scale,
             pivot: &mut session.pivot,
             block_inlays: &mut document.block_inlays,
-            summed_scaled_heights: &mut session.summed_scaled_heights,
+            summed_heights: &mut session.summed_heights,
+            selections: &mut session.selections,
+            normalized_selections: &mut session.normalized_selections,
             folding_lines: &mut session.folding_lines,
             unfolding_lines: &mut session.unfolding_lines,
         }
@@ -57,6 +57,7 @@ impl State {
     pub fn open_session(&mut self) -> SessionId {
         let document_id = self.open_document();
         let session_id = SessionId(self.session_id);
+        self.session_id += 1;
         let line_count = self.documents[&document_id].text.len();
         self.sessions.insert(
             session_id,
@@ -65,12 +66,16 @@ impl State {
                 soft_breaks: (0..line_count).map(|_| [].into()).collect(),
                 pivot: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
-                summed_scaled_heights: RefCell::new(Vec::new()),
+                summed_heights: Vec::new(),
+                selections: vec![Selection::new(Position::new(1, 4), Position::new(12, 22))],
+                normalized_selections: RangeSet::new(),
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
         );
-        self.session_id += 1;
+        let mut view = self.view_mut(session_id);
+        view.update_summed_height();
+        view.update_normalized_selections();
         session_id
     }
 
@@ -98,10 +103,12 @@ impl State {
                     })
                     .collect(),
                 block_inlays: [
+                    /*
                     (10, BlockInlay::Line(LineInlay::new("UVW XYZ".into()))),
                     (20, BlockInlay::Line(LineInlay::new("UVW XYZ".into()))),
                     (30, BlockInlay::Line(LineInlay::new("UVW XYZ".into()))),
                     (40, BlockInlay::Line(LineInlay::new("UVW XYZ".into()))),
+                    */
                 ]
                 .into(),
             },
@@ -117,8 +124,10 @@ pub struct View<'a> {
     soft_breaks: &'a [Vec<usize>],
     pivot: &'a [usize],
     scale: &'a [f64],
+    summed_heights: &'a [f64],
     block_inlays: &'a [(usize, BlockInlay)],
-    summed_scaled_heights: &'a RefCell<Vec<f64>>,
+    selections: &'a [Selection],
+    normalized_selections: &'a RangeSet,
 }
 
 impl<'a> View<'a> {
@@ -139,10 +148,10 @@ impl<'a> View<'a> {
     pub fn lines(&self, start_line_index: usize, end_line_index: usize) -> Lines<'a> {
         Lines {
             text: self.text[start_line_index..end_line_index].iter(),
-            inline_inlays: self.inline_inlays.iter(),
-            soft_breaks: self.soft_breaks.iter(),
-            pivot: self.pivot.iter(),
-            scale: self.scale.iter(),
+            inline_inlays: self.inline_inlays[start_line_index..end_line_index].iter(),
+            soft_breaks: self.soft_breaks[start_line_index..end_line_index].iter(),
+            pivot: self.pivot[start_line_index..end_line_index].iter(),
+            scale: self.scale[start_line_index..end_line_index].iter(),
         }
     }
 
@@ -159,50 +168,39 @@ impl<'a> View<'a> {
         }
     }
 
-    pub fn scaled_width(&self, tab_width: usize) -> f64 {
-        let mut max_width = 0.0f64;
+    pub fn width(&self, tab_column_count: usize) -> f64 {
+        let mut max_column_count = 0.0f64;
         for block in self.blocks(0, self.line_count()) {
-            max_width = max_width.max(block.scaled_width(tab_width));
+            max_column_count = max_column_count.max(block.width(tab_column_count));
         }
-        max_width
+        max_column_count
     }
 
-    pub fn summed_scaled_height(&self, line_index: usize) -> f64 {
-        self.update_summed_scaled_heights();
-        self.summed_scaled_heights.borrow()[line_index]
+    pub fn height(&self) -> f64 {
+        self.summed_heights[self.line_count() - 1]
     }
 
-    pub fn scaled_height(&self) -> f64 {
-        self.summed_scaled_height(self.line_count() - 1)
-    }
-
-    pub fn find_first_line_ending_after(&self, scaled_y: f64) -> usize {
-        self.update_summed_scaled_heights();
+    pub fn find_first_line_ending_after(&self, y: f64) -> usize {
         match self
-            .summed_scaled_heights
-            .borrow()
-            .binary_search_by(|summed_scaled_heights| {
-                summed_scaled_heights.partial_cmp(&scaled_y).unwrap()
-            }) {
-            Ok(index) => index + 1,
-            Err(index) => index,
+            .summed_heights
+            .binary_search_by(|summed_heights| summed_heights.partial_cmp(&y).unwrap())
+        {
+            Ok(line_index) => line_index + 1,
+            Err(line_index) => line_index,
         }
     }
 
-    pub fn find_first_line_starting_after(&self, scaled_y: f64) -> usize {
-        self.update_summed_scaled_heights();
+    pub fn find_first_line_starting_after(&self, y: f64) -> usize {
         match self
-            .summed_scaled_heights
-            .borrow()
-            .binary_search_by(|summed_scaled_height| {
-                summed_scaled_height.partial_cmp(&scaled_y).unwrap()
-            }) {
-            Ok(index) => index + 1,
-            Err(index) => {
-                if index == self.line_count() {
-                    index
+            .summed_heights
+            .binary_search_by(|summed_height| summed_height.partial_cmp(&y).unwrap())
+        {
+            Ok(line_index) => line_index + 1,
+            Err(line_index) => {
+                if line_index == self.line_count() {
+                    line_index
                 } else {
-                    index + 1
+                    line_index + 1
                 }
             }
         }
@@ -212,42 +210,43 @@ impl<'a> View<'a> {
         &self,
         start_line_index: usize,
         end_line_index: usize,
-        tab_width: usize,
+        tab_column_count: usize,
         mut handle_event: impl FnMut(LayoutEvent<'_>) -> ControlFlow<T, bool>,
     ) -> ControlFlow<T, bool> {
         use crate::str::StrExt;
 
-        let mut scaled_y = if start_line_index == 0 {
+        let mut y = if start_line_index == 0 {
             0.0
         } else {
-            self.summed_scaled_height(start_line_index - 1)
+            self.summed_heights[start_line_index - 1]
         };
         for block in self.blocks(start_line_index, end_line_index) {
             match block {
                 Block::Line { is_inlay, line } => {
                     if !handle_event(LayoutEvent {
-                        scaled_rect: Rect::new(
-                            Point::new(0.0, scaled_y),
-                            Size::new(line.scaled_width(tab_width), line.scaled_height()),
+                        rect: Rect::new(
+                            Point::new(0.0, y),
+                            Size::new(line.width(tab_column_count), line.height()),
                         ),
                         kind: LayoutEventKind::Line { is_inlay, line },
                     })? {
-                        scaled_y += line.scaled_height();
+                        y += line.height();
                         continue;
                     }
-                    let mut x = 0;
+                    let mut column_index = 0;
                     for wrapped_inline in line.wrapped_inlines() {
                         match wrapped_inline {
                             WrappedInline::Inline(inline) => match inline {
                                 Inline::Text { is_inlay, text } => {
                                     for grapheme in text.graphemes() {
-                                        let scaled_x = line.scaled_x(x);
-                                        let next_x = x + grapheme.width(tab_width);
+                                        let x = line.x(column_index);
+                                        let next_column_index =
+                                            column_index + grapheme.column_count(tab_column_count);
                                         handle_event(LayoutEvent {
-                                            scaled_rect: Rect::new(
-                                                Point::new(scaled_x, scaled_y),
+                                            rect: Rect::new(
+                                                Point::new(x, y),
                                                 Size::new(
-                                                    line.scaled_x(next_x) - scaled_x,
+                                                    line.x(next_column_index) - x,
                                                     line.scale(),
                                                 ),
                                             ),
@@ -256,83 +255,93 @@ impl<'a> View<'a> {
                                                 text: grapheme,
                                             },
                                         })?;
-                                        x = next_x;
+                                        column_index = next_column_index;
                                     }
                                 }
                                 Inline::Widget(widget) => {
-                                    let scaled_x = line.scaled_x(x);
-                                    let next_x = x + widget.width;
+                                    let x = line.x(column_index);
+                                    let next_column_index = column_index + widget.column_count;
                                     handle_event(LayoutEvent {
-                                        scaled_rect: Rect::new(
-                                            Point::new(line.scaled_x(x), scaled_y),
-                                            Size::new(
-                                                line.scaled_x(next_x) - scaled_x,
-                                                line.scale(),
-                                            ),
+                                        rect: Rect::new(
+                                            Point::new(x, y),
+                                            Size::new(line.x(next_column_index) - x, line.scale()),
                                         ),
                                         kind: LayoutEventKind::Widget { id: widget.id },
                                     })?;
-                                    x = next_x;
+                                    column_index = next_column_index;
                                 }
                             },
                             WrappedInline::SoftBreak => {
+                                let x = line.x(column_index);
                                 handle_event(LayoutEvent {
-                                    scaled_rect: Rect::new(
-                                        Point::new(line.scaled_x(x), scaled_y),
-                                        Size::new(0.0, line.scale()),
+                                    rect: Rect::new(
+                                        Point::new(x, y),
+                                        Size::new(line.x(column_index + 1) - x, line.scale()),
                                     ),
-                                    kind: LayoutEventKind::SoftBreak,
+                                    kind: LayoutEventKind::Break { is_soft: true },
                                 })?;
-                                scaled_y += line.scale();
-                                x = 0;
+                                y += line.scale();
+                                column_index = 0;
                             }
                         }
                     }
+                    let x = line.x(column_index);
                     handle_event(LayoutEvent {
-                        scaled_rect: Rect::new(
-                            Point::new(line.scaled_x(x), scaled_y),
-                            Size::new(0.0, line.scale()),
+                        rect: Rect::new(
+                            Point::new(x, y),
+                            Size::new(line.x(column_index + 1) - x, line.scale()),
                         ),
-                        kind: LayoutEventKind::Break,
+                        kind: LayoutEventKind::Break { is_soft: false },
                     })?;
-                    scaled_y += line.scale();
+                    y += line.scale();
                 }
                 Block::Widget(widget) => {
                     handle_event(LayoutEvent {
-                        scaled_rect: Rect::new(Point::new(0.0, scaled_y), widget.scaled_size),
+                        rect: Rect::new(Point::new(0.0, y), widget.size),
                         kind: LayoutEventKind::Widget { id: widget.id },
                     })?;
-                    scaled_y += widget.scaled_size.height;
+                    y += widget.size.height;
                 }
             }
         }
         ControlFlow::Continue(true)
     }
 
-    pub fn pick(&self, scaled_point: Point, tab_width: usize) -> Option<Position> {
-        let mut position = Position::origin();
-        match self.layout(0, self.line_count(), tab_width, |event| {
+    pub fn pick(&self, point: Point, tab_column_count: usize) -> Option<Position> {
+        let line_index = self.find_first_line_ending_after(point.y);
+        let mut position = Position::new(line_index, 0);
+        match self.layout(line_index, line_index + 1, tab_column_count, |event| {
             match event.kind {
                 LayoutEventKind::Line { is_inlay: true, .. } => {
-                    if event.scaled_rect.contains(scaled_point) {
+                    if event.rect.contains(point) {
                         return ControlFlow::Break(Some(position));
                     }
                     return ControlFlow::Continue(false);
                 }
-                LayoutEventKind::Widget { .. } => {
-                    return ControlFlow::Break(None);
-                }
                 LayoutEventKind::Grapheme { is_inlay, text } => {
-                    if event.scaled_rect.contains(scaled_point) {
+                    let half_width = event.rect.size.width / 2.0;
+                    let half_width_size = Size::new(half_width, event.rect.size.height);
+                    if Rect::new(event.rect.origin, half_width_size).contains(point) {
                         return ControlFlow::Break(Some(position));
                     }
                     if !is_inlay {
                         position.byte_index += text.len();
                     }
+                    if Rect::new(
+                        Point::new(event.rect.origin.x + half_width, event.rect.origin.y),
+                        half_width_size,
+                    )
+                    .contains(point)
+                    {
+                        return ControlFlow::Break(Some(position));
+                    }
                 }
-                LayoutEventKind::Break => {
+                LayoutEventKind::Break { is_soft: false } => {
                     position.line_index += 1;
                     position.byte_index = 0;
+                }
+                LayoutEventKind::Widget { .. } => {
+                    return ControlFlow::Break(None);
                 }
                 _ => {}
             }
@@ -343,24 +352,12 @@ impl<'a> View<'a> {
         }
     }
 
-    fn update_summed_scaled_heights(&self) {
-        let start_line_index = self.summed_scaled_heights.borrow().len();
-        let mut summed_scaled_height = if start_line_index == 0 {
-            0.0
-        } else {
-            self.summed_scaled_heights.borrow()[start_line_index - 1]
-        };
-        for block in self.blocks(start_line_index, self.line_count()) {
-            summed_scaled_height += block.scaled_height();
-            if let Block::Line {
-                is_inlay: false, ..
-            } = block
-            {
-                self.summed_scaled_heights
-                    .borrow_mut()
-                    .push(summed_scaled_height);
-            }
-        }
+    pub fn selections(&self) -> &[Selection] {
+        &self.selections
+    }
+
+    pub fn normalized_selections(&self) -> &RangeSet {
+        &self.normalized_selections
     }
 }
 
@@ -371,8 +368,10 @@ pub struct ViewMut<'a> {
     soft_breaks: &'a mut Vec<Vec<usize>>,
     scale: &'a mut Vec<f64>,
     pivot: &'a mut Vec<usize>,
-    summed_scaled_heights: &'a mut RefCell<Vec<f64>>,
     block_inlays: &'a mut Vec<(usize, BlockInlay)>,
+    summed_heights: &'a mut Vec<f64>,
+    selections: &'a mut Vec<Selection>,
+    normalized_selections: &'a mut RangeSet,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -385,40 +384,59 @@ impl<'a> ViewMut<'a> {
             soft_breaks: &self.soft_breaks,
             scale: self.scale,
             pivot: self.pivot,
+            summed_heights: &self.summed_heights,
             block_inlays: &self.block_inlays,
-            summed_scaled_heights: &self.summed_scaled_heights,
+            selections: &self.selections,
+            normalized_selections: &self.normalized_selections,
         }
     }
 
-    pub fn wrap_line(&mut self, line_index: usize, max_width: usize, tab_width: usize) {
+    pub fn wrap_lines(&mut self, max_column_count: usize, tab_column_count: usize) {
         use std::mem;
 
-        self.soft_breaks[line_index].clear();
-        let mut soft_breaks = mem::take(&mut self.soft_breaks[line_index]);
-        let mut offset = 0;
-        let mut width = 0;
-        for inline in self.as_view().line(line_index).inlines() {
-            let mut next_width = width + inline.width(tab_width);
-            if next_width > max_width {
-                next_width = 0;
-                soft_breaks.push(offset);
+        for line_index in 0..self.as_view().line_count() {
+            let old_soft_break_count = self.soft_breaks[line_index].len();
+            self.soft_breaks[line_index].clear();
+            let mut soft_breaks = mem::take(&mut self.soft_breaks[line_index]);
+            let mut byte_index = 0;
+            let mut column_count = 0;
+            for inline in self.as_view().line(line_index).inlines() {
+                let mut next_column_count = column_count + inline.column_count(tab_column_count);
+                if next_column_count > max_column_count {
+                    next_column_count = 0;
+                    soft_breaks.push(byte_index);
+                }
+                if let Inline::Text { text, .. } = inline {
+                    byte_index += text.len();
+                }
+                column_count = next_column_count;
             }
-            if let Inline::Text { text, .. } = inline {
-                offset += text.len();
+            self.soft_breaks[line_index] = soft_breaks;
+            if self.soft_breaks[line_index].len() != old_soft_break_count {
+                self.summed_heights.truncate(line_index);
             }
-            width = next_width;
         }
-        self.soft_breaks[line_index] = soft_breaks;
-        self.summed_scaled_heights.borrow_mut().truncate(line_index);
+        self.update_summed_height();
     }
 
-    pub fn unwrap_line(&mut self, line_index: usize) {
-        self.soft_breaks[line_index].clear();
-        self.summed_scaled_heights.borrow_mut().truncate(line_index);
+    pub fn set_cursor(&mut self, cursor: Position) {
+        self.selections.truncate(1);
+        let last_selection = self.selections.last_mut().unwrap();
+        last_selection.cursor = cursor;
+        last_selection.anchor = cursor;
+        self.update_normalized_selections();
     }
 
-    pub fn fold_line(&mut self, line_index: usize, pivot: usize) {
-        self.pivot[line_index] = pivot;
+    pub fn move_cursor_to(&mut self, select: bool, cursor: Position) {
+        let last_selection = self.selections.last_mut().unwrap();
+        last_selection.cursor = cursor;
+        if !select {
+            last_selection.anchor = cursor;
+        }
+        self.update_normalized_selections();
+    }
+
+    pub fn fold_line(&mut self, line_index: usize) {
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -436,39 +454,73 @@ impl<'a> ViewMut<'a> {
         }
         let folding_lines = mem::take(self.folding_lines);
         let mut new_folding_lines = HashSet::new();
-        for index in folding_lines {
-            self.scale[index] *= 0.9;
-            if self.scale[index] < 0.001 {
-                self.scale[index] = 0.0;
+        for line in folding_lines {
+            self.scale[line] *= 0.9;
+            if self.scale[line] < 0.001 {
+                self.scale[line] = 0.0;
             } else {
-                new_folding_lines.insert(index);
+                new_folding_lines.insert(line);
             }
-            self.summed_scaled_heights.borrow_mut().truncate(index);
+            self.summed_heights.truncate(line);
         }
         *self.folding_lines = new_folding_lines;
         let unfolding_lines = mem::take(self.unfolding_lines);
         let mut new_unfolding_lines = HashSet::new();
-        for index in unfolding_lines {
-            self.scale[index] = 1.0 - 0.9 * (1.0 - self.scale[index]);
-            if self.scale[index] > 1.0 - 0.001 {
-                self.scale[index] = 1.0;
+        for line in unfolding_lines {
+            self.scale[line] = 1.0 - 0.9 * (1.0 - self.scale[line]);
+            if self.scale[line] > 1.0 - 0.001 {
+                self.scale[line] = 1.0;
             } else {
-                new_unfolding_lines.insert(index);
+                new_unfolding_lines.insert(line);
             }
-            self.summed_scaled_heights.borrow_mut().truncate(index);
+            self.summed_heights.truncate(line);
         }
         *self.unfolding_lines = new_unfolding_lines;
+        self.update_summed_height();
         true
+    }
+
+    fn update_summed_height(&mut self) {
+        use std::mem;
+
+        let start_line = self.summed_heights.len();
+        let mut current_summed_height = if start_line == 0 {
+            0.0
+        } else {
+            self.summed_heights[start_line - 1]
+        };
+        let mut summed_heights = mem::take(self.summed_heights);
+        for block in self
+            .as_view()
+            .blocks(start_line, self.as_view().line_count())
+        {
+            current_summed_height += block.height();
+            if let Block::Line {
+                is_inlay: false, ..
+            } = block
+            {
+                summed_heights.push(current_summed_height);
+            }
+        }
+        *self.summed_heights = summed_heights;
+    }
+
+    fn update_normalized_selections(&mut self) {
+        *self.normalized_selections = self
+            .selections
+            .iter()
+            .map(|selection| selection.range())
+            .collect();
     }
 }
 
 #[derive(Debug)]
 pub struct Lines<'a> {
-    text: Iter<'a, String>,
-    inline_inlays: Iter<'a, Vec<(usize, InlineInlay)>>,
-    soft_breaks: Iter<'a, Vec<usize>>,
-    pivot: Iter<'a, usize>,
-    scale: Iter<'a, f64>,
+    text: slice::Iter<'a, String>,
+    inline_inlays: slice::Iter<'a, Vec<(usize, InlineInlay)>>,
+    soft_breaks: slice::Iter<'a, Vec<usize>>,
+    pivot: slice::Iter<'a, usize>,
+    scale: slice::Iter<'a, f64>,
 }
 
 impl<'a> Clone for Lines<'a> {
@@ -531,45 +583,47 @@ impl<'a> Line<'a> {
         self.scale
     }
 
-    pub fn width(&self, tab_width: usize) -> usize {
-        let mut max_summed_width = 0;
-        let mut summed_width = 0;
+    pub fn column_count(&self, tab_column_count: usize) -> usize {
+        let mut max_summed_column_count = 0;
+        let mut summed_column_count = 0;
         for wrapped_inline in self.wrapped_inlines() {
             match wrapped_inline {
-                WrappedInline::Inline(inline) => summed_width += inline.width(tab_width),
+                WrappedInline::Inline(inline) => {
+                    summed_column_count += inline.column_count(tab_column_count)
+                }
                 WrappedInline::SoftBreak => {
-                    max_summed_width = max_summed_width.max(summed_width);
-                    summed_width = 0;
+                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
+                    summed_column_count = 0;
                 }
             }
         }
-        max_summed_width = max_summed_width.max(summed_width);
-        max_summed_width
+        max_summed_column_count = max_summed_column_count.max(summed_column_count);
+        max_summed_column_count
     }
 
-    pub fn height(&self) -> usize {
+    pub fn row_count(&self) -> usize {
         self.soft_breaks.len() + 1
     }
 
-    pub fn scaled_width(&self, tab_width: usize) -> f64 {
-        self.scaled_x(self.width(tab_width))
+    pub fn width(&self, tab_column_count: usize) -> f64 {
+        self.x(self.column_count(tab_column_count))
     }
 
-    pub fn scaled_height(&self) -> f64 {
-        self.scale * self.height() as f64
+    pub fn height(&self) -> f64 {
+        self.scale * self.row_count() as f64
     }
 
-    pub fn scaled_x(&self, x: usize) -> f64 {
-        let width_before_pivot = x.min(self.pivot);
-        let width_after_pivot = x - width_before_pivot;
-        width_before_pivot as f64 + self.scale * width_after_pivot as f64
+    pub fn x(&self, x: usize) -> f64 {
+        let column_count_before_pivot = x.min(self.pivot);
+        let column_count_after_pivot = x - column_count_before_pivot;
+        column_count_before_pivot as f64 + self.scale * column_count_after_pivot as f64
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Inlines<'a> {
     text: &'a str,
-    inline_inlays: Iter<'a, (usize, InlineInlay)>,
+    inline_inlays: slice::Iter<'a, (usize, InlineInlay)>,
     byte_index: usize,
 }
 
@@ -616,12 +670,12 @@ pub enum Inline<'a> {
 }
 
 impl<'a> Inline<'a> {
-    pub fn width(&self, tab_width: usize) -> usize {
+    pub fn column_count(&self, tab_column_count: usize) -> usize {
         use crate::str::StrExt;
 
         match self {
-            Self::Text { text, .. } => text.width(tab_width),
-            Self::Widget(widget) => widget.width,
+            Self::Text { text, .. } => text.column_count(tab_column_count),
+            Self::Widget(widget) => widget.column_count,
         }
     }
 }
@@ -630,7 +684,7 @@ impl<'a> Inline<'a> {
 pub struct WrappedInlines<'a> {
     inline: Option<Inline<'a>>,
     inlines: Inlines<'a>,
-    soft_breaks: Iter<'a, usize>,
+    soft_breaks: slice::Iter<'a, usize>,
     byte_index: usize,
 }
 
@@ -684,7 +738,7 @@ pub enum WrappedInline<'a> {
 #[derive(Clone, Debug)]
 pub struct Blocks<'a> {
     lines: Lines<'a>,
-    block_inlays: Iter<'a, (usize, BlockInlay)>,
+    block_inlays: slice::Iter<'a, (usize, BlockInlay)>,
     line_index: usize,
 }
 
@@ -696,7 +750,7 @@ impl<'a> Iterator for Blocks<'a> {
             .block_inlays
             .as_slice()
             .first()
-            .map_or(false, |&(line_index, _)| line_index == self.line_index)
+            .map_or(false, |&(line, _)| line == self.line_index)
         {
             let (_, block_inlays) = self.block_inlays.next().unwrap();
             return Some(match block_inlays {
@@ -723,24 +777,24 @@ pub enum Block<'a> {
 }
 
 impl<'a> Block<'a> {
-    pub fn scaled_width(&self, tab_width: usize) -> f64 {
+    pub fn width(&self, tab_column_count: usize) -> f64 {
         match self {
-            Self::Line { line, .. } => line.scaled_width(tab_width),
-            Self::Widget(widget) => widget.scaled_size.width,
+            Self::Line { line, .. } => line.width(tab_column_count),
+            Self::Widget(widget) => widget.size.width,
         }
     }
 
-    pub fn scaled_height(&self) -> f64 {
+    pub fn height(&self) -> f64 {
         match self {
-            Self::Line { line, .. } => line.scaled_height(),
-            Self::Widget(widget) => widget.scaled_size.height,
+            Self::Line { line, .. } => line.height(),
+            Self::Widget(widget) => widget.size.height,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutEvent<'a> {
-    pub scaled_rect: Rect,
+    pub rect: Rect,
     pub kind: LayoutEventKind<'a>,
 }
 
@@ -748,8 +802,7 @@ pub struct LayoutEvent<'a> {
 pub enum LayoutEventKind<'a> {
     Line { is_inlay: bool, line: Line<'a> },
     Grapheme { is_inlay: bool, text: &'a str },
-    SoftBreak,
-    Break,
+    Break { is_soft: bool },
     Widget { id: usize },
 }
 
@@ -765,7 +818,7 @@ pub enum InlineInlay {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct InlineWidget {
     pub id: usize,
-    pub width: usize,
+    pub column_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -808,7 +861,7 @@ impl LineInlay {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlockWidget {
     pub id: usize,
-    pub scaled_size: Size,
+    pub size: Size,
 }
 
 #[derive(Clone, Debug)]
@@ -817,7 +870,9 @@ struct Session {
     soft_breaks: Vec<Vec<usize>>,
     pivot: Vec<usize>,
     scale: Vec<f64>,
-    summed_scaled_heights: RefCell<Vec<f64>>,
+    summed_heights: Vec<f64>,
+    selections: Vec<Selection>,
+    normalized_selections: RangeSet,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }

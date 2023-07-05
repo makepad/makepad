@@ -1,13 +1,15 @@
 pub trait StrExt {
-    fn width(&self, tab_width: usize) -> usize;
+    fn column_count(&self, tab_column_count: usize) -> usize;
     fn graphemes(&self) -> Graphemes<'_>;
 }
 
 impl StrExt for str {
-    fn width(&self, tab_width: usize) -> usize {
+    fn column_count(&self, tab_column_count: usize) -> usize {
         use crate::char::CharExt;
 
-        self.chars().map(|char| char.width(tab_width)).sum()
+        self.chars()
+            .map(|char| char.column_count(tab_column_count))
+            .sum()
     }
 
     fn graphemes(&self) -> Graphemes<'_> {
