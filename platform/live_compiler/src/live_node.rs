@@ -527,6 +527,7 @@ impl LiveValue {
             Self::Str(_) |
             Self::String(_) |
             Self::InlineString {..} |
+            Self::Dependency {..} |
             Self::Bool(_) |
             Self::Int64(_) |
             Self::Float64(_) |
@@ -535,6 +536,15 @@ impl LiveValue {
             Self::Vec2(_) |
             Self::Vec3(_) |
             Self::Vec4(_))
+    }
+
+    pub fn is_single_node(&self) -> bool {
+        self.is_value_type() || match self {
+            Self::Id(_) |
+            Self::IdPath(_) |
+            Self::BareEnum(_) => true,
+            _ => false
+        }
     }
     
     pub fn is_structy_type(&self) -> bool {
