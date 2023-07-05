@@ -13,8 +13,8 @@ live_design!{
     
     Image = {{Image}} {
         walk:{
-            width:Fit
-            height:Fit
+            width: Fit
+            height: Fit
         }
         layout: {
             // This is important to avoid clipping the image, specially when it is rotated.
