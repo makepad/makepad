@@ -678,10 +678,6 @@ impl CxOsDrawShader {
             #version 100
             precision highp float;
             precision highp int;
-            float android_abs_fix(float x){{return sign(x)*x;}}
-            vec2 android_abs_fix(vec2 x){{return sign(x)*x;}}
-            vec3 android_abs_fix(vec3 x){{return sign(x)*x;}}
-            vec4 android_abs_fix(vec4 x){{return sign(x)*x;}}
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}} 
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
@@ -694,10 +690,6 @@ impl CxOsDrawShader {
             #extension GL_OES_standard_derivatives : enable
             precision highp float;
             precision highp int;
-            float android_abs_fix(float x){{return sign(x)*x;}}
-            vec2 android_abs_fix(vec2 x){{return sign(x)*x;}}
-            vec3 android_abs_fix(vec3 x){{return sign(x)*x;}}
-            vec4 android_abs_fix(vec4 x){{return sign(x)*x;}}
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, pos.y)).zyxw;}}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
