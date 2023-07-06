@@ -1,5 +1,5 @@
 use {
-    crate::Length,
+    crate::{diff::Strategy, Diff, Length},
     std::ops::{Add, AddAssign, Sub},
 };
 
@@ -19,6 +19,49 @@ impl Position {
 
     pub fn origin() -> Self {
         Self::default()
+    }
+
+    pub fn apply_diff(self, diff: &Diff, strategy: Strategy) -> Position {
+        use {crate::diff::OperationInfo, std::cmp::Ordering};
+
+        let mut position = Position::default();
+        let mut remaining_length = self - Position::default();
+        let mut operation_infos = diff.iter().map(|operation| operation.info());
+        let mut operation_info_slot = operation_infos.next();
+        loop {
+            match operation_info_slot {
+                Some(OperationInfo::Retain(length)) => match length.cmp(&remaining_length) {
+                    Ordering::Less | Ordering::Equal => {
+                        position += length;
+                        remaining_length -= length;
+                        operation_info_slot = operation_infos.next();
+                    }
+                    Ordering::Greater => {
+                        break position + remaining_length;
+                    }
+                },
+                Some(OperationInfo::Insert(length)) => match strategy {
+                    Strategy::InsertBefore => {
+                        break position + length;
+                    }
+                    Strategy::InsertAfter => {
+                        operation_info_slot = operation_infos.next();
+                    }
+                },
+                Some(OperationInfo::Delete(length)) => match length.cmp(&remaining_length) {
+                    Ordering::Less | Ordering::Equal => {
+                        remaining_length -= length;
+                        operation_info_slot = operation_infos.next();
+                    }
+                    Ordering::Greater => {
+                        break position;
+                    }
+                },
+                None => {
+                    break position + remaining_length;
+                }
+            }
+        }
     }
 }
 
