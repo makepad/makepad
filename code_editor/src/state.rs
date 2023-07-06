@@ -1,5 +1,5 @@
 use {
-    crate::{selection::Region, Point, Position, Rect, Selection, Size, Text},
+    crate::{Point, Position, Rect, Selection, Size, Text},
     std::{
         collections::{HashMap, HashSet},
         ops::ControlFlow,
@@ -31,7 +31,7 @@ impl State {
             pivot: &session.pivot,
             block_inlays: &document.block_inlays,
             summed_heights: &session.summed_heights,
-            selection: &session.selection,
+            selections: &session.selections,
         }
     }
 
@@ -46,7 +46,8 @@ impl State {
             pivot: &mut session.pivot,
             block_inlays: &mut document.block_inlays,
             summed_heights: &mut session.summed_heights,
-            selection: &mut session.selection,
+            selections: &mut session.selections,
+            selection_id: &mut session.selection_id,
             folding_lines: &mut session.folding_lines,
             unfolding_lines: &mut session.unfolding_lines,
         }
@@ -65,7 +66,8 @@ impl State {
                 pivot: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                selection: Selection::new(),
+                selection_id: 0,
+                selections: vec![(0, Selection::default())],
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -119,7 +121,7 @@ pub struct View<'a> {
     scale: &'a [f64],
     summed_heights: &'a [f64],
     block_inlays: &'a [(usize, BlockInlay)],
-    selection: &'a Selection,
+    selections: &'a [(usize, Selection)],
 }
 
 impl<'a> View<'a> {
@@ -344,8 +346,8 @@ impl<'a> View<'a> {
         }
     }
 
-    pub fn selection(&self) -> &Selection {
-        &self.selection
+    pub fn selections(&self) -> &[(usize, Selection)] {
+        &self.selections
     }
 }
 
@@ -358,7 +360,8 @@ pub struct ViewMut<'a> {
     pivot: &'a mut Vec<usize>,
     block_inlays: &'a mut Vec<(usize, BlockInlay)>,
     summed_heights: &'a mut Vec<f64>,
-    selection: &'a mut Selection,
+    selections: &'a mut Vec<(usize, Selection)>,
+    selection_id: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -373,7 +376,7 @@ impl<'a> ViewMut<'a> {
             pivot: self.pivot,
             summed_heights: &self.summed_heights,
             block_inlays: &self.block_inlays,
-            selection: &self.selection,
+            selections: &self.selections,
         }
     }
 
@@ -406,21 +409,29 @@ impl<'a> ViewMut<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: Position) {
-        self.selection.set(Region::new(cursor));
+        *self.selection_id = 1;
+        self.selections.clear();
+        self.selections.push((0, Selection::new(cursor)));
     }
 
     pub fn push_cursor(&mut self, cursor: Position) {
-        self.selection.push(Region::new(cursor));
+        let selection_id = *self.selection_id;
+        *self.selection_id += 1;
+        self.selections.push((selection_id, Selection::new(cursor)));
+        self.normalize_selections();
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: Position) {
-        self.selection.modify_latest(|region| {
-            let mut region = region.update_cursor(|_| cursor);
-            if !select {
-                region = region.reset_anchor();
-            }
-            region
-        });
+        let (_, latest) = self
+            .selections
+            .iter_mut()
+            .find(|&&mut (id, _)| id == *self.selection_id - 1)
+            .unwrap();
+        latest.cursor = cursor;
+        if !select {
+            latest.anchor = cursor;
+        }
+        self.normalize_selections();
     }
 
     pub fn fold_line(&mut self, line_index: usize) {
@@ -490,6 +501,55 @@ impl<'a> ViewMut<'a> {
             }
         }
         *self.summed_heights = summed_heights;
+    }
+
+    fn normalize_selections(&mut self) {
+        self.selections
+            .sort_unstable_by_key(|(_, selection)| selection.start());
+        let mut index = 0;
+        while index + 1 < self.selections.len() {
+            let (current_id, current) = self.selections[index];
+            let (next_id, next) = self.selections[index + 1];
+            let should_merge = if current.is_empty() || next.is_empty() {
+                current.end() >= next.start()
+            } else {
+                current.end() > next.start()
+            };
+            if !should_merge {
+                index += 1;
+                continue;
+            }
+            let winner_index;
+            let loser_index;
+            if current_id < next_id {
+                winner_index = index + 1;
+                loser_index = index;
+            } else {
+                winner_index = index;
+                loser_index = index + 1;
+            };
+            let (winner_id, winner) = self.selections[winner_index];
+            let (_, loser) = self.selections[loser_index];
+            let merged = if winner_id == *self.selection_id - 1 {
+                winner
+            } else {
+                if winner.anchor <= winner.cursor {
+                    Selection {
+                        anchor: winner.start().min(loser.start()),
+                        cursor: winner.end().max(loser.end()),
+                        ..winner
+                    }
+                } else {
+                    Selection {
+                        anchor: winner.start().max(loser.start()),
+                        cursor: winner.end().min(loser.end()),
+                        ..winner
+                    }
+                }
+            };
+            self.selections[winner_index] = (winner_id, merged);
+            self.selections.remove(loser_index);
+        }
     }
 }
 
@@ -850,7 +910,8 @@ struct Session {
     pivot: Vec<usize>,
     scale: Vec<f64>,
     summed_heights: Vec<f64>,
-    selection: Selection,
+    selections: Vec<(usize, Selection)>,
+    selection_id: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
