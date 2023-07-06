@@ -1,7 +1,7 @@
 use {
-    crate::{selection, selection::Region, state, state::ViewMut, Point, Position},
+    crate::{selection::Selection, state, state::ViewMut, Point, Position},
     makepad_widgets::*,
-    std::iter::Peekable,
+    std::{iter::Peekable, slice},
 };
 
 live_design! {
@@ -159,25 +159,26 @@ impl CodeEditor {
             });
 
         let view_ref = view.as_view();
-        let mut active_region = None;
-        let mut regions = view_ref.selection().iter().peekable();
-        while regions.peek().map_or(false, |region| {
-            region.end().line_index < self.start_line_index
+        let mut active_selection = None;
+        let mut selections = view_ref.selections().iter().peekable();
+        while selections.peek().map_or(false, |(_, selection)| {
+            selection.end().line_index < self.start_line_index
         }) {
-            regions.next().unwrap();
+            selections.next().unwrap();
         }
-        if regions.peek().map_or(false, |region| {
-            region.start().line_index < self.start_line_index
+        if selections.peek().map_or(false, |(_, selection)| {
+            selection.start().line_index < self.start_line_index
         }) {
-            active_region = Some(ActiveRegion {
-                region: regions.next().unwrap(),
+            let (_, selection) = *selections.next().unwrap();
+            active_selection = Some(ActiveSelection {
+                selection,
                 start_x: 0.0,
             });
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_region,
-            regions,
+            active_selection,
+            selections,
         }
         .draw_selections(cx, &view_ref);
 
@@ -261,8 +262,8 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_region: Option<ActiveRegion>,
-    regions: Peekable<selection::Iter<'a>>,
+    active_selection: Option<ActiveSelection>,
+    selections: Peekable<slice::Iter<'a, (usize, Selection)>>,
 }
 
 impl<'a> DrawSelectionsContext<'a> {
@@ -295,7 +296,7 @@ impl<'a> DrawSelectionsContext<'a> {
                                 event.rect.size.height,
                             );
                         }
-                        if self.active_region.is_some() {
+                        if self.active_selection.is_some() {
                             self.draw_selection(
                                 cx,
                                 Point::new(
@@ -315,36 +316,36 @@ impl<'a> DrawSelectionsContext<'a> {
                 ControlFlow::<(), _>::Continue(true)
             },
         );
-        if self.active_region.is_some() {
+        if self.active_selection.is_some() {
             self.code_editor.draw_selection.end(cx);
         }
     }
 
     fn handle_event(&mut self, cx: &mut Cx2d<'_>, position: Position, point: Point, height: f64) {
         if self
-            .active_region
+            .active_selection
             .as_ref()
-            .map_or(false, |region| region.region.end() == position)
+            .map_or(false, |selection| selection.selection.end() == position)
         {
             self.draw_selection(cx, point, height);
             self.code_editor.draw_selection.end(cx);
-            let region = self.active_region.take().unwrap().region;
-            if region.cursor == position {
+            let selection = self.active_selection.take().unwrap().selection;
+            if selection.cursor == position {
                 self.draw_cursor(cx, point, height);
             }
         }
         if self
-            .regions
+            .selections
             .peek()
-            .map_or(false, |region| region.start() == position)
+            .map_or(false, |(_, selection)| selection.start() == position)
         {
-            let region = self.regions.next().unwrap();
-            if region.cursor == position {
+            let (_, selection) = *self.selections.next().unwrap();
+            if selection.cursor == position {
                 self.draw_cursor(cx, point, height);
             }
-            if !region.is_empty() {
-                self.active_region = Some(ActiveRegion {
-                    region,
+            if !selection.is_empty() {
+                self.active_selection = Some(ActiveSelection {
+                    selection,
                     start_x: point.x,
                 });
             }
@@ -355,7 +356,7 @@ impl<'a> DrawSelectionsContext<'a> {
     fn draw_selection(&mut self, cx: &mut Cx2d<'_>, end: Point, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_region.as_mut().unwrap().start_x);
+        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
@@ -390,8 +391,8 @@ impl<'a> DrawSelectionsContext<'a> {
     }
 }
 
-struct ActiveRegion {
-    region: Region,
+struct ActiveSelection {
+    selection: Selection,
     start_x: f64,
 }
 
