@@ -47,9 +47,9 @@ impl Sub for Length {
     type Output = Length;
 
     fn sub(self, other: Self) -> Self::Output {
-        if other.line_count == 0 {
+        if self.line_count == other.line_count {
             Self {
-                line_count: self.line_count,
+                line_count: 0,
                 byte_count: self.byte_count - other.byte_count,
             }
         } else {
