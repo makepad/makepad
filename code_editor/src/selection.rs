@@ -7,11 +7,12 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub fn new(cursor: Position) -> Self {
-        Self {
-            anchor: cursor,
-            cursor,
-        }
+    pub fn new(anchor: Position, cursor: Position) -> Self {
+        Self { anchor, cursor }
+    }
+
+    pub fn from_cursor(cursor: Position) -> Self {
+        Self::new(cursor, cursor)
     }
 
     pub fn is_empty(self) -> bool {

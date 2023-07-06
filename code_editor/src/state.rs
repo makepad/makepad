@@ -1,5 +1,5 @@
 use {
-    crate::{Point, Position, Rect, Selection, Size, Text},
+    crate::{diff::Strategy, edit_ops, Diff, Point, Position, Range, Rect, Selection, Size, Text},
     std::{
         collections::{HashMap, HashSet},
         ops::ControlFlow,
@@ -74,7 +74,7 @@ impl State {
             },
         );
         let mut view = self.view_mut(session_id);
-        view.update_summed_height();
+        view.update_summed_heights();
         session_id
     }
 
@@ -412,18 +412,19 @@ impl<'a> ViewMut<'a> {
                 self.summed_heights.truncate(line_index);
             }
         }
-        self.update_summed_height();
+        self.update_summed_heights();
     }
 
     pub fn set_cursor(&mut self, cursor: Position) {
         self.selections.clear();
-        self.selections.push(Selection::new(cursor));
+        self.selections.push(Selection::from_cursor(cursor));
+        *self.last_added_selection_index = 0;
     }
 
     pub fn add_cursor(&mut self, cursor: Position) {
         use std::cmp::Ordering;
 
-        let selection = Selection::new(cursor);
+        let selection = Selection::from_cursor(cursor);
         *self.last_added_selection_index = match self.selections.binary_search_by(|selection| {
             if selection.end() <= cursor {
                 return Ordering::Less;
@@ -470,6 +471,10 @@ impl<'a> ViewMut<'a> {
         }
     }
 
+    pub fn delete(&mut self) {
+        self.modify_text(|_, range| edit_ops::delete(range));
+    }
+
     pub fn fold_line(&mut self, line_index: usize) {
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
@@ -510,11 +515,11 @@ impl<'a> ViewMut<'a> {
             self.summed_heights.truncate(line);
         }
         *self.unfolding_lines = new_unfolding_lines;
-        self.update_summed_height();
+        self.update_summed_heights();
         true
     }
 
-    fn update_summed_height(&mut self) {
+    fn update_summed_heights(&mut self) {
         use std::mem;
 
         let start_line = self.summed_heights.len();
@@ -537,6 +542,67 @@ impl<'a> ViewMut<'a> {
             }
         }
         *self.summed_heights = summed_heights;
+    }
+
+    fn modify_text(&mut self, mut f: impl FnMut(&Text, Range) -> Diff) {
+        use crate::diff::OperationInfo;
+
+        let mut composite_diff = Diff::new();
+        let mut prev_end = Position::origin();
+        let mut diffed_prev_end = Position::origin();
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start() - prev_end;
+            let diffed_start = diffed_prev_end + distance_from_prev_end;
+            let diffed_end = diffed_start + selection.length();
+            let diff = f(&self.text, Range::new(diffed_start, diffed_end));
+            let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
+            let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
+            self.text.apply_diff(diff.clone());
+            composite_diff = composite_diff.compose(diff);
+            prev_end = selection.end();
+            diffed_prev_end = diffed_end;
+            *selection = if selection.anchor <= selection.cursor {
+                Selection::new(diffed_start, diffed_end)
+            } else {
+                Selection::new(diffed_end, diffed_start)
+            };
+        }
+        let mut start_line_index = 0;
+        for operation in composite_diff {
+            match operation.info() {
+                OperationInfo::Delete(length) => {
+                    let end_line_index = start_line_index + length.line_count;
+                    self.inline_inlays.drain(start_line_index..end_line_index);
+                    self.soft_breaks.drain(start_line_index..end_line_index);
+                    self.pivot.drain(start_line_index..end_line_index);
+                    self.scale.drain(start_line_index..end_line_index);
+                    self.summed_heights.truncate(start_line_index);
+                }
+                OperationInfo::Retain(length) => {
+                    start_line_index += length.line_count;
+                }
+                OperationInfo::Insert(length) => {
+                    self.inline_inlays.splice(
+                        start_line_index..start_line_index,
+                        (0..length.line_count).map(|_| Vec::new()),
+                    );
+                    self.soft_breaks.splice(
+                        start_line_index..start_line_index,
+                        (0..length.line_count).map(|_| Vec::new()),
+                    );
+                    self.pivot.splice(
+                        start_line_index..start_line_index,
+                        (0..length.line_count).map(|_| 0),
+                    );
+                    self.scale.splice(
+                        start_line_index..start_line_index,
+                        (0..length.line_count).map(|_| 1.0),
+                    );
+                    self.summed_heights.truncate(start_line_index);
+                }
+            }
+        }
+        self.update_summed_heights();
     }
 }
 
