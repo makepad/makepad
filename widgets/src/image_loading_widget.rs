@@ -5,11 +5,11 @@ use {
     }
 };
 
-pub trait WidgetWithImage {
+pub trait ImageLoadingWidget {
     fn image_filename(&self) -> &LiveDependency;
     fn texture(&mut self) -> &mut Option<Texture>;
 
-    fn after_apply_for_widget_with_image(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply_for_image_loading_widget(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         let filename = self.image_filename();
         let image_path = filename.as_str();
         if image_path.len()>0 {

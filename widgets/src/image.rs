@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_draw::*,
         widget::*,
-        widget_with_image::*
+        image_loading_widget::*
     }
 };
 
@@ -128,7 +128,7 @@ pub struct Image {
     #[live] scale: f64,
 }
 
-impl WidgetWithImage for Image {
+impl ImageLoadingWidget for Image {
     fn image_filename(&self) -> &LiveDependency {
         &self.source
     }
@@ -144,7 +144,7 @@ impl LiveHook for Image {
     }
 
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        self.after_apply_for_widget_with_image(cx, from, index, nodes);
+        self.after_apply_for_image_loading_widget(cx, from, index, nodes);
     }
 }
 
