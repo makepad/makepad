@@ -492,18 +492,6 @@ pub struct FrameRef(WidgetRef);
 pub struct FrameSet(WidgetSet);
 
 impl FrameRef {
-    /*
-    pub fn handle_event(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
-        self.0.handle_widget_event(cx, event)
-    }
-    
-    pub fn draw(&self, cx: &mut Cx2d,) -> WidgetDraw {
-        if let Some(mut inner) = self.inner_mut() {
-            return inner.draw(cx)
-        }
-        WidgetDraw::done()
-    }*/
-    
     pub fn set_visible(&self, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.visible = visible
