@@ -1,5 +1,5 @@
 use {
-    crate::{range_set, state, state::ViewMut, Point, Position},
+    crate::{selection, selection::Region, state, state::ViewMut, Point, Position},
     makepad_widgets::*,
     std::iter::Peekable,
 };
@@ -70,6 +70,10 @@ live_design! {
         draw_selection: {
             draw_depth: 1.0,
         }
+        draw_cursor: {
+            draw_depth: 2.0,
+            color: #C0C0C0,
+        }
     }
 }
 
@@ -83,6 +87,8 @@ pub struct CodeEditor {
     draw_text: DrawText,
     #[live]
     draw_selection: DrawSelection,
+    #[live]
+    draw_cursor: DrawColor,
     #[rust]
     viewport_rect: Rect,
     #[rust]
@@ -123,9 +129,19 @@ impl CodeEditor {
                     }
                     LayoutEventKind::Grapheme { is_inlay, text, .. } => {
                         self.draw_text.color = if is_inlay {
-                            Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 }
+                            Vec4 {
+                                x: 1.0,
+                                y: 0.0,
+                                z: 0.0,
+                                w: 1.0,
+                            }
                         } else {
-                            Vec4 { x: 0.75, y: 0.75, z: 0.75, w: 1.0 }
+                            Vec4 {
+                                x: 0.75,
+                                y: 0.75,
+                                z: 0.75,
+                                w: 1.0,
+                            }
                         };
                         self.draw_text.draw_abs(
                             cx,
@@ -143,25 +159,25 @@ impl CodeEditor {
             });
 
         let view_ref = view.as_view();
-        let mut active_range = None;
-        let mut ranges = view_ref.normalized_selections().iter().peekable();
-        while ranges.peek().map_or(false, |range| {
-            range.end().line_index < self.start_line_index
+        let mut active_region = None;
+        let mut regions = view_ref.selection().iter().peekable();
+        while regions.peek().map_or(false, |region| {
+            region.end().line_index < self.start_line_index
         }) {
-            ranges.next().unwrap();
+            regions.next().unwrap();
         }
-        if ranges.peek().map_or(false, |range| {
-            range.start().line_index < self.start_line_index
+        if regions.peek().map_or(false, |region| {
+            region.start().line_index < self.start_line_index
         }) {
-            active_range = Some(ActiveRange {
-                end: ranges.next().unwrap().end(),
+            active_region = Some(ActiveRegion {
+                region: regions.next().unwrap(),
                 start_x: 0.0,
             });
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_range,
-            ranges,
+            active_region,
+            regions,
         }
         .draw_selections(cx, &view_ref);
 
@@ -182,7 +198,7 @@ impl CodeEditor {
         });
         match event {
             Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Alt,
+                key_code: KeyCode::Escape,
                 ..
             }) => {
                 for index in 0..view.as_view().line_count() {
@@ -191,7 +207,7 @@ impl CodeEditor {
                 cx.redraw_all();
             }
             Event::KeyUp(KeyEvent {
-                key_code: KeyCode::Alt,
+                key_code: KeyCode::Escape,
                 ..
             }) => {
                 for index in 0..view.as_view().line_count() {
@@ -202,9 +218,13 @@ impl CodeEditor {
             _ => {}
         }
         match event.hits(cx, self.scroll_bars.area()) {
-            Hit::FingerDown(event) => {
-                let point =
-                    ((event.abs - event.rect.pos) + self.viewport_rect.pos) / self.cell_size;
+            Hit::FingerDown(FingerDownEvent {
+                abs,
+                rect,
+                modifiers: KeyModifiers { alt, .. },
+                ..
+            }) => {
+                let point = ((abs - rect.pos) + self.viewport_rect.pos) / self.cell_size;
                 if let Some(position) = view.as_view().pick(
                     Point {
                         x: point.x,
@@ -212,7 +232,11 @@ impl CodeEditor {
                     },
                     4,
                 ) {
-                    view.set_cursor(position);
+                    if alt {
+                        view.push_cursor(position);
+                    } else {
+                        view.set_cursor(position);
+                    }
                 }
                 cx.redraw_all();
             }
@@ -237,8 +261,8 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_range: Option<ActiveRange>,
-    ranges: Peekable<range_set::Iter<'a>>,
+    active_region: Option<ActiveRegion>,
+    regions: Peekable<selection::Iter<'a>>,
 }
 
 impl<'a> DrawSelectionsContext<'a> {
@@ -271,7 +295,7 @@ impl<'a> DrawSelectionsContext<'a> {
                                 event.rect.size.height,
                             );
                         }
-                        if self.active_range.is_some() {
+                        if self.active_region.is_some() {
                             self.draw_selection(
                                 cx,
                                 Point::new(
@@ -291,40 +315,48 @@ impl<'a> DrawSelectionsContext<'a> {
                 ControlFlow::<(), _>::Continue(true)
             },
         );
-        if self.active_range.is_some() {
+        if self.active_region.is_some() {
             self.code_editor.draw_selection.end(cx);
         }
     }
 
     fn handle_event(&mut self, cx: &mut Cx2d<'_>, position: Position, point: Point, height: f64) {
         if self
-            .ranges
-            .peek()
-            .map_or(false, |range| range.start() == position)
-        {
-            let range = self.ranges.next().unwrap();
-            self.active_range = Some(ActiveRange {
-                end: range.end(),
-                start_x: point.x,
-            });
-            self.code_editor.draw_selection.begin();
-        }
-        if self
-            .active_range
+            .active_region
             .as_ref()
-            .map_or(false, |range| range.end == position)
+            .map_or(false, |region| region.region.end() == position)
         {
             self.draw_selection(cx, point, height);
             self.code_editor.draw_selection.end(cx);
-            self.active_range.take().unwrap();
+            let region = self.active_region.take().unwrap().region;
+            if region.cursor == position {
+                self.draw_cursor(cx, point, height);
+            }
+        }
+        if self
+            .regions
+            .peek()
+            .map_or(false, |region| region.start() == position)
+        {
+            let region = self.regions.next().unwrap();
+            if region.cursor == position {
+                self.draw_cursor(cx, point, height);
+            }
+            if !region.is_empty() {
+                self.active_region = Some(ActiveRegion {
+                    region,
+                    start_x: point.x,
+                });
+            }
+            self.code_editor.draw_selection.begin();
         }
     }
 
     fn draw_selection(&mut self, cx: &mut Cx2d<'_>, end: Point, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_range.as_mut().unwrap().start_x);
-        self.code_editor.draw_selection.draw_rect(
+        let start_x = mem::take(&mut self.active_region.as_mut().unwrap().start_x);
+        self.code_editor.draw_selection.draw(
             cx,
             Rect {
                 pos: DVec2 {
@@ -339,10 +371,27 @@ impl<'a> DrawSelectionsContext<'a> {
             },
         );
     }
+
+    fn draw_cursor(&mut self, cx: &mut Cx2d<'_>, point: Point, height: f64) {
+        self.code_editor.draw_cursor.draw_abs(
+            cx,
+            Rect {
+                pos: DVec2 {
+                    x: point.x,
+                    y: point.y,
+                } * self.code_editor.cell_size
+                    - self.code_editor.viewport_rect.pos,
+                size: DVec2 {
+                    x: 2.0,
+                    y: height * self.code_editor.cell_size.y,
+                },
+            },
+        );
+    }
 }
 
-struct ActiveRange {
-    end: Position,
+struct ActiveRegion {
+    region: Region,
     start_x: f64,
 }
 
@@ -376,7 +425,7 @@ impl DrawSelection {
         self.prev_rect = None;
     }
 
-    fn draw_rect(&mut self, cx: &mut Cx2d<'_>, rect: Rect) {
+    fn draw(&mut self, cx: &mut Cx2d<'_>, rect: Rect) {
         self.draw_rect_internal(cx, Some(rect));
         self.prev_prev_rect = self.prev_rect;
         self.prev_rect = Some(rect);

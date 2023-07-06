@@ -1,5 +1,5 @@
 use {
-    crate::{Point, Position, RangeSet, Rect, Selection, Size},
+    crate::{selection::Region, Point, Position, Rect, Selection, Size},
     std::{
         collections::{HashMap, HashSet},
         ops::ControlFlow,
@@ -31,8 +31,7 @@ impl State {
             pivot: &session.pivot,
             block_inlays: &document.block_inlays,
             summed_heights: &session.summed_heights,
-            selections: &session.selections,
-            normalized_selections: &session.normalized_selections,
+            selection: &session.selection,
         }
     }
 
@@ -47,8 +46,7 @@ impl State {
             pivot: &mut session.pivot,
             block_inlays: &mut document.block_inlays,
             summed_heights: &mut session.summed_heights,
-            selections: &mut session.selections,
-            normalized_selections: &mut session.normalized_selections,
+            selection: &mut session.selection,
             folding_lines: &mut session.folding_lines,
             unfolding_lines: &mut session.unfolding_lines,
         }
@@ -67,15 +65,13 @@ impl State {
                 pivot: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                selections: vec![Selection::new(Position::new(1, 4), Position::new(12, 22))],
-                normalized_selections: RangeSet::new(),
+                selection: Selection::new(),
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
         );
         let mut view = self.view_mut(session_id);
         view.update_summed_height();
-        view.update_normalized_selections();
         session_id
     }
 
@@ -126,8 +122,7 @@ pub struct View<'a> {
     scale: &'a [f64],
     summed_heights: &'a [f64],
     block_inlays: &'a [(usize, BlockInlay)],
-    selections: &'a [Selection],
-    normalized_selections: &'a RangeSet,
+    selection: &'a Selection,
 }
 
 impl<'a> View<'a> {
@@ -352,12 +347,8 @@ impl<'a> View<'a> {
         }
     }
 
-    pub fn selections(&self) -> &[Selection] {
-        &self.selections
-    }
-
-    pub fn normalized_selections(&self) -> &RangeSet {
-        &self.normalized_selections
+    pub fn selection(&self) -> &Selection {
+        &self.selection
     }
 }
 
@@ -370,8 +361,7 @@ pub struct ViewMut<'a> {
     pivot: &'a mut Vec<usize>,
     block_inlays: &'a mut Vec<(usize, BlockInlay)>,
     summed_heights: &'a mut Vec<f64>,
-    selections: &'a mut Vec<Selection>,
-    normalized_selections: &'a mut RangeSet,
+    selection: &'a mut Selection,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -386,8 +376,7 @@ impl<'a> ViewMut<'a> {
             pivot: self.pivot,
             summed_heights: &self.summed_heights,
             block_inlays: &self.block_inlays,
-            selections: &self.selections,
-            normalized_selections: &self.normalized_selections,
+            selection: &self.selection,
         }
     }
 
@@ -420,20 +409,21 @@ impl<'a> ViewMut<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: Position) {
-        self.selections.truncate(1);
-        let last_selection = self.selections.last_mut().unwrap();
-        last_selection.cursor = cursor;
-        last_selection.anchor = cursor;
-        self.update_normalized_selections();
+        self.selection.set(Region::new(cursor));
+    }
+
+    pub fn push_cursor(&mut self, cursor: Position) {
+        self.selection.push(Region::new(cursor));
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: Position) {
-        let last_selection = self.selections.last_mut().unwrap();
-        last_selection.cursor = cursor;
-        if !select {
-            last_selection.anchor = cursor;
-        }
-        self.update_normalized_selections();
+        self.selection.modify_latest(|region| {
+            let mut region = region.update_cursor(|_| cursor);
+            if !select {
+                region = region.reset_anchor();
+            }
+            region
+        });
     }
 
     pub fn fold_line(&mut self, line_index: usize) {
@@ -503,14 +493,6 @@ impl<'a> ViewMut<'a> {
             }
         }
         *self.summed_heights = summed_heights;
-    }
-
-    fn update_normalized_selections(&mut self) {
-        *self.normalized_selections = self
-            .selections
-            .iter()
-            .map(|selection| selection.range())
-            .collect();
     }
 }
 
@@ -871,8 +853,7 @@ struct Session {
     pivot: Vec<usize>,
     scale: Vec<f64>,
     summed_heights: Vec<f64>,
-    selections: Vec<Selection>,
-    normalized_selections: RangeSet,
+    selection: Selection,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
