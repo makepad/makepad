@@ -4,7 +4,7 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         widget::*,
-        widget_with_image::*,
+        image_loading_widget::*,
         scroll_bars::ScrollBars,
     },
 };
@@ -403,7 +403,7 @@ struct FrameTextureCache {
     color_texture: Texture,
 }
 
-impl WidgetWithImage for Frame {
+impl ImageLoadingWidget for Frame {
     fn image_filename(&self) -> &LiveDependency {
         &self.image
     }
@@ -428,7 +428,7 @@ impl LiveHook for Frame {
             }
         }
 
-        self.after_apply_for_widget_with_image(cx, from, index, nodes);
+        self.after_apply_for_image_loading_widget(cx, from, index, nodes);
 
         if let Some(image_texture) = &mut self.image_texture {
             if self.image_scale != 0.0 {

@@ -54,7 +54,7 @@ pub mod widget;
 pub mod data_binding;
 
 mod theme;
-mod widget_with_image;
+mod image_loading_widget;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
