@@ -1,5 +1,5 @@
 use {
-    crate::{selection::Region, Point, Position, Rect, Selection, Size},
+    crate::{selection::Region, Point, Position, Rect, Selection, Size, Text},
     std::{
         collections::{HashMap, HashSet},
         ops::ControlFlow,
@@ -56,7 +56,7 @@ impl State {
         let document_id = self.open_document();
         let session_id = SessionId(self.session_id);
         self.session_id += 1;
-        let line_count = self.documents[&document_id].text.len();
+        let line_count = self.documents[&document_id].text.as_lines().len();
         self.sessions.insert(
             session_id,
             Session {
@@ -78,11 +78,8 @@ impl State {
     fn open_document(&mut self) -> DocumentId {
         let document_id = DocumentId(self.document_id);
         self.document_id += 1;
-        let text: Vec<String> = include_str!("state.rs")
-            .lines()
-            .map(|line| line.to_string())
-            .collect();
-        let line_count = text.len();
+        let text: Text = include_str!("state.rs").into();
+        let line_count = text.as_lines().len();
         self.documents.insert(
             document_id,
             Document {
@@ -115,7 +112,7 @@ impl State {
 
 #[derive(Clone, Copy, Debug)]
 pub struct View<'a> {
-    text: &'a [String],
+    text: &'a Text,
     inline_inlays: &'a [Vec<(usize, InlineInlay)>],
     soft_breaks: &'a [Vec<usize>],
     pivot: &'a [usize],
@@ -127,12 +124,12 @@ pub struct View<'a> {
 
 impl<'a> View<'a> {
     pub fn line_count(&self) -> usize {
-        self.text.len()
+        self.text.as_lines().len()
     }
 
     pub fn line(&self, line_index: usize) -> Line<'a> {
         Line {
-            text: &self.text[line_index],
+            text: &self.text.as_lines()[line_index],
             inline_inlays: &self.inline_inlays[line_index],
             soft_breaks: &self.soft_breaks[line_index],
             pivot: self.pivot[line_index],
@@ -142,7 +139,7 @@ impl<'a> View<'a> {
 
     pub fn lines(&self, start_line_index: usize, end_line_index: usize) -> Lines<'a> {
         Lines {
-            text: self.text[start_line_index..end_line_index].iter(),
+            text: self.text.as_lines()[start_line_index..end_line_index].iter(),
             inline_inlays: self.inline_inlays[start_line_index..end_line_index].iter(),
             soft_breaks: self.soft_breaks[start_line_index..end_line_index].iter(),
             pivot: self.pivot[start_line_index..end_line_index].iter(),
@@ -354,7 +351,7 @@ impl<'a> View<'a> {
 
 #[derive(Debug)]
 pub struct ViewMut<'a> {
-    text: &'a mut Vec<String>,
+    text: &'a mut Text,
     inline_inlays: &'a mut Vec<Vec<(usize, InlineInlay)>>,
     soft_breaks: &'a mut Vec<Vec<usize>>,
     scale: &'a mut Vec<f64>,
@@ -863,7 +860,7 @@ struct DocumentId(usize);
 
 #[derive(Clone, Debug)]
 struct Document {
-    text: Vec<String>,
+    text: Text,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
     block_inlays: Vec<(usize, BlockInlay)>,
 }
