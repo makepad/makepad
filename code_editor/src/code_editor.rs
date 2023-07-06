@@ -199,6 +199,13 @@ impl CodeEditor {
         });
         match event {
             Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                view.delete();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
