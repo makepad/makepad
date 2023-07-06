@@ -161,15 +161,15 @@ impl CodeEditor {
         let view_ref = view.as_view();
         let mut active_selection = None;
         let mut selections = view_ref.selections().iter().peekable();
-        while selections.peek().map_or(false, |(_, selection)| {
+        while selections.peek().map_or(false, |selection| {
             selection.end().line_index < self.start_line_index
         }) {
             selections.next().unwrap();
         }
-        if selections.peek().map_or(false, |(_, selection)| {
+        if selections.peek().map_or(false, |selection| {
             selection.start().line_index < self.start_line_index
         }) {
-            let (_, selection) = *selections.next().unwrap();
+            let selection = *selections.next().unwrap();
             active_selection = Some(ActiveSelection {
                 selection,
                 start_x: 0.0,
@@ -234,7 +234,7 @@ impl CodeEditor {
                     4,
                 ) {
                     if alt {
-                        view.push_cursor(position);
+                        view.add_cursor(position);
                     } else {
                         view.set_cursor(position);
                     }
@@ -263,7 +263,7 @@ impl CodeEditor {
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
     active_selection: Option<ActiveSelection>,
-    selections: Peekable<slice::Iter<'a, (usize, Selection)>>,
+    selections: Peekable<slice::Iter<'a, Selection>>,
 }
 
 impl<'a> DrawSelectionsContext<'a> {
@@ -337,9 +337,9 @@ impl<'a> DrawSelectionsContext<'a> {
         if self
             .selections
             .peek()
-            .map_or(false, |(_, selection)| selection.start() == position)
+            .map_or(false, |selection| selection.start() == position)
         {
-            let (_, selection) = *self.selections.next().unwrap();
+            let selection = *self.selections.next().unwrap();
             if selection.cursor == position {
                 self.draw_cursor(cx, point, height);
             }
