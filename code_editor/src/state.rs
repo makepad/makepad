@@ -32,6 +32,7 @@ impl State {
             block_inlays: &document.block_inlays,
             summed_heights: &session.summed_heights,
             selections: &session.selections,
+            last_added_selection_index: session.last_added_selection_index,
         }
     }
 
@@ -47,7 +48,7 @@ impl State {
             block_inlays: &mut document.block_inlays,
             summed_heights: &mut session.summed_heights,
             selections: &mut session.selections,
-            selection_id: &mut session.selection_id,
+            last_added_selection_index: &mut session.last_added_selection_index,
             folding_lines: &mut session.folding_lines,
             unfolding_lines: &mut session.unfolding_lines,
         }
@@ -66,8 +67,8 @@ impl State {
                 pivot: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                selection_id: 0,
-                selections: vec![(0, Selection::default())],
+                selections: vec![Selection::default()],
+                last_added_selection_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -121,7 +122,8 @@ pub struct View<'a> {
     scale: &'a [f64],
     summed_heights: &'a [f64],
     block_inlays: &'a [(usize, BlockInlay)],
-    selections: &'a [(usize, Selection)],
+    selections: &'a [Selection],
+    last_added_selection_index: usize,
 }
 
 impl<'a> View<'a> {
@@ -346,8 +348,12 @@ impl<'a> View<'a> {
         }
     }
 
-    pub fn selections(&self) -> &[(usize, Selection)] {
+    pub fn selections(&self) -> &[Selection] {
         &self.selections
+    }
+
+    pub fn last_added_selection_index(&self) -> usize {
+        self.last_added_selection_index
     }
 }
 
@@ -360,8 +366,8 @@ pub struct ViewMut<'a> {
     pivot: &'a mut Vec<usize>,
     block_inlays: &'a mut Vec<(usize, BlockInlay)>,
     summed_heights: &'a mut Vec<f64>,
-    selections: &'a mut Vec<(usize, Selection)>,
-    selection_id: &'a mut usize,
+    selections: &'a mut Vec<Selection>,
+    last_added_selection_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -377,6 +383,7 @@ impl<'a> ViewMut<'a> {
             summed_heights: &self.summed_heights,
             block_inlays: &self.block_inlays,
             selections: &self.selections,
+            last_added_selection_index: *self.last_added_selection_index,
         }
     }
 
@@ -409,29 +416,58 @@ impl<'a> ViewMut<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: Position) {
-        *self.selection_id = 1;
         self.selections.clear();
-        self.selections.push((0, Selection::new(cursor)));
+        self.selections.push(Selection::new(cursor));
     }
 
-    pub fn push_cursor(&mut self, cursor: Position) {
-        let selection_id = *self.selection_id;
-        *self.selection_id += 1;
-        self.selections.push((selection_id, Selection::new(cursor)));
-        self.normalize_selections();
+    pub fn add_cursor(&mut self, cursor: Position) {
+        use std::cmp::Ordering;
+
+        let selection = Selection::new(cursor);
+        *self.last_added_selection_index = match self.selections.binary_search_by(|selection| {
+            if selection.end() <= cursor {
+                return Ordering::Less;
+            }
+            if selection.start() >= cursor {
+                return Ordering::Greater;
+            }
+            Ordering::Equal
+        }) {
+            Ok(index) => {
+                self.selections[index] = selection;
+                index
+            }
+            Err(index) => {
+                self.selections.insert(index, selection);
+                index
+            }
+        };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: Position) {
-        let (_, latest) = self
-            .selections
-            .iter_mut()
-            .find(|&&mut (id, _)| id == *self.selection_id - 1)
-            .unwrap();
-        latest.cursor = cursor;
+        self.selections[*self.last_added_selection_index].cursor = cursor;
         if !select {
-            latest.anchor = cursor;
+            self.selections[*self.last_added_selection_index].anchor = cursor;
         }
-        self.normalize_selections();
+        while *self.last_added_selection_index > 0 {
+            if self.selections[*self.last_added_selection_index - 1]
+                .should_merge_with(self.selections[*self.last_added_selection_index])
+            {
+                self.selections.remove(*self.last_added_selection_index - 1);
+                *self.last_added_selection_index -= 1;
+            } else {
+                break;
+            }
+        }
+        while *self.last_added_selection_index + 1 < self.selections.len() {
+            if self.selections[*self.last_added_selection_index]
+                .should_merge_with(self.selections[*self.last_added_selection_index + 1])
+            {
+                self.selections.remove(*self.last_added_selection_index + 1);
+            } else {
+                break;
+            }
+        }
     }
 
     pub fn fold_line(&mut self, line_index: usize) {
@@ -501,55 +537,6 @@ impl<'a> ViewMut<'a> {
             }
         }
         *self.summed_heights = summed_heights;
-    }
-
-    fn normalize_selections(&mut self) {
-        self.selections
-            .sort_unstable_by_key(|(_, selection)| selection.start());
-        let mut index = 0;
-        while index + 1 < self.selections.len() {
-            let (current_id, current) = self.selections[index];
-            let (next_id, next) = self.selections[index + 1];
-            let should_merge = if current.is_empty() || next.is_empty() {
-                current.end() >= next.start()
-            } else {
-                current.end() > next.start()
-            };
-            if !should_merge {
-                index += 1;
-                continue;
-            }
-            let winner_index;
-            let loser_index;
-            if current_id < next_id {
-                winner_index = index + 1;
-                loser_index = index;
-            } else {
-                winner_index = index;
-                loser_index = index + 1;
-            };
-            let (winner_id, winner) = self.selections[winner_index];
-            let (_, loser) = self.selections[loser_index];
-            let merged = if winner_id == *self.selection_id - 1 {
-                winner
-            } else {
-                if winner.anchor <= winner.cursor {
-                    Selection {
-                        anchor: winner.start().min(loser.start()),
-                        cursor: winner.end().max(loser.end()),
-                        ..winner
-                    }
-                } else {
-                    Selection {
-                        anchor: winner.start().max(loser.start()),
-                        cursor: winner.end().min(loser.end()),
-                        ..winner
-                    }
-                }
-            };
-            self.selections[winner_index] = (winner_id, merged);
-            self.selections.remove(loser_index);
-        }
     }
 }
 
@@ -910,8 +897,8 @@ struct Session {
     pivot: Vec<usize>,
     scale: Vec<f64>,
     summed_heights: Vec<f64>,
-    selections: Vec<(usize, Selection)>,
-    selection_id: usize,
+    selections: Vec<Selection>,
+    last_added_selection_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
