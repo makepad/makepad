@@ -24,13 +24,13 @@ live_design!{
         draw_bg: {
             texture image: texture2d
 
-            instance angle: 0.0
-            instance fade_factor: 1.0
-            instance scale_factor: 1.0
+            instance rotation: 0.0
+            instance opacity: 1.0
+            instance scale: 1.0
 
-            fn rotation_vertex_expansion(angle: float, w: float, h: float) -> vec2 {
-                let horizontal_expansion = (abs(cos(angle)) * w + abs(sin(angle)) * h) / w - 1.0;
-                let vertical_expansion = (abs(sin(angle)) * w + abs(cos(angle)) * h) / h - 1.0;
+            fn rotation_vertex_expansion(rotation: float, w: float, h: float) -> vec2 {
+                let horizontal_expansion = (abs(cos(rotation)) * w + abs(sin(rotation)) * h) / w - 1.0;
+                let vertical_expansion = (abs(sin(rotation)) * w + abs(cos(rotation)) * h) / h - 1.0;
 
                 return vec2(horizontal_expansion, vertical_expansion);
             }
@@ -54,20 +54,20 @@ live_design!{
             fn get_color(self, rot_padding: vec2) -> vec4 {
                 // Current position is a traslated one, so let's get the original position
                 let current_pos = self.pos.xy - rot_padding;
-                let original_pos = rotate_2d_from_center(current_pos, self.angle, self.rect_size);
+                let original_pos = rotate_2d_from_center(current_pos, self.rotation, self.rect_size);
 
                 // Scale the current position by the scale factor
-                let scaled_pos = (original_pos - vec2(0.5, 0.5)) / self.scale_factor + vec2(0.5, 0.5);
+                let scaled_pos = (original_pos - vec2(0.5, 0.5)) / self.scale + vec2(0.5, 0.5);
 
                 // Take pixel color from the original image
                 let color = sample2d(self.image, scaled_pos).xyzw;
 
-                let faded_color = color * vec4(1.0, 1.0, 1.0, self.fade_factor);
+                let faded_color = color * vec4(1.0, 1.0, 1.0, self.opacity);
                 return faded_color;
             }
 
             fn pixel(self) -> vec4 {
-                let rot_expansion = rotation_vertex_expansion(self.angle, self.rect_size.x, self.rect_size.y);
+                let rot_expansion = rotation_vertex_expansion(self.rotation, self.rect_size.x, self.rect_size.y);
 
                 // Debug
                 // let line_width = 0.01;
@@ -81,9 +81,9 @@ live_design!{
                 sdf.translate(translation_offset.x, translation_offset.y);
 
                 let center = self.rect_size * 0.5;
-                sdf.rotate(self.angle, center.x, center.y);
+                sdf.rotate(self.rotation, center.x, center.y);
 
-                let scaled_size = self.rect_size * self.scale_factor;
+                let scaled_size = self.rect_size * self.scale;
                 let offset = (self.rect_size - scaled_size) * 0.5;
                 sdf.box(offset.x, offset.y, scaled_size.x, scaled_size.y, 1);
 
@@ -92,7 +92,7 @@ live_design!{
             }
 
             fn vertex(self) -> vec4 {
-                let rot_expansion = rotation_vertex_expansion(self.angle, self.rect_size.x, self.rect_size.y);
+                let rot_expansion = rotation_vertex_expansion(self.rotation, self.rect_size.x, self.rect_size.y);
                 let adjusted_pos = vec2(
                     self.rect_pos.x - self.rect_size.x * rot_expansion.x / 2.0,
                     self.rect_pos.y - self.rect_size.y * rot_expansion.y / 2.0
