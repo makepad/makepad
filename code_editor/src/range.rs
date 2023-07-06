@@ -31,22 +31,4 @@ impl Range {
     pub fn end(self) -> Position {
         self.end
     }
-
-    pub fn try_merge(mut self, mut other: Self) -> Option<Range> {
-        use std::mem;
-
-        if self.start() > other.start() {
-            mem::swap(&mut self, &mut other);
-        }
-        if self.end() < other.start() {
-            return None;
-        }
-        if self.end() == other.end() && !(self.is_empty() || other.is_empty()) {
-            return None;
-        }
-        Some(Range::new(
-            self.start.min(other.start),
-            self.end.max(other.end),
-        ))
-    }
 }
