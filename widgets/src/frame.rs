@@ -544,18 +544,6 @@ pub enum FrameAction {
 }
 
 impl FrameRef {
-    /*
-    pub fn handle_event(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
-        self.0.handle_widget_event(cx, event)
-    }
-    
-    pub fn draw(&self, cx: &mut Cx2d,) -> WidgetDraw {
-        if let Some(mut inner) = self.inner_mut() {
-            return inner.draw(cx)
-        }
-        WidgetDraw::done()
-    }*/
-    
     pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.cut_state(cx, state);
