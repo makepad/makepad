@@ -149,9 +149,33 @@ impl Default for Text {
     }
 }
 
+impl From<char> for Text {
+    fn from(char: char) -> Self {
+        Text {
+            lines: if char == '\n' {
+                vec![String::new(), String::new()]
+            } else {
+                vec![char.into()]
+            },
+        }
+    }
+}
+
+impl From<String> for Text {
+    fn from(string: String) -> Self {
+        string.as_str().into()
+    }
+}
+
+impl From<&String> for Text {
+    fn from(string: &String) -> Self {
+        string.as_str().into()
+    }
+}
+
 impl From<&str> for Text {
     fn from(string: &str) -> Self {
-        let mut lines: Vec<_> = string.lines().map(|line| line.to_string()).collect();
+        let mut lines: Vec<_> = string.split('\n').map(|line| line.to_string()).collect();
         if lines.is_empty() {
             lines.push(String::new());
         }

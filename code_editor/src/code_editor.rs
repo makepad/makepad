@@ -122,7 +122,7 @@ impl CodeEditor {
         self.scroll_bars.begin(cx, self.walk, Layout::default());
 
         view.as_view()
-            .layout(self.start_line_index, self.end_line_index, 4, |event| {
+            .layout(self.start_line_index, self.end_line_index, |event| {
                 match event.kind {
                     LayoutEventKind::Line { line, .. } => {
                         self.draw_text.font_scale = line.scale();
@@ -198,11 +198,29 @@ impl CodeEditor {
             cx.redraw_all();
         });
         match event {
+            Event::TextInput(TextInputEvent { input, .. }) => {
+                view.replace(input.into());
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                ..
+            }) => {
+                view.enter();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Delete,
+                ..
+            }) => {
+                view.delete();
+                cx.redraw_all();
+            }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
-                view.delete();
+                view.backspace();
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
@@ -233,13 +251,10 @@ impl CodeEditor {
                 ..
             }) => {
                 let point = ((abs - rect.pos) + self.viewport_rect.pos) / self.cell_size;
-                if let Some(position) = view.as_view().pick(
-                    Point {
-                        x: point.x,
-                        y: point.y,
-                    },
-                    4,
-                ) {
+                if let Some(position) = view.as_view().pick(Point {
+                    x: point.x,
+                    y: point.y,
+                }) {
                     if alt {
                         view.add_cursor(position);
                     } else {
@@ -251,13 +266,10 @@ impl CodeEditor {
             Hit::FingerMove(event) => {
                 let point =
                     ((event.abs - event.rect.pos) + self.viewport_rect.pos) / self.cell_size;
-                if let Some(position) = view.as_view().pick(
-                    Point {
-                        x: point.x,
-                        y: point.y,
-                    },
-                    4,
-                ) {
+                if let Some(position) = view.as_view().pick(Point {
+                    x: point.x,
+                    y: point.y,
+                }) {
                     view.move_cursor_to(true, position);
                 }
                 cx.redraw_all();
@@ -281,7 +293,6 @@ impl<'a> DrawSelectionsContext<'a> {
         view.layout(
             self.code_editor.start_line_index,
             self.code_editor.end_line_index,
-            4,
             |event| {
                 match event.kind {
                     LayoutEventKind::Line { is_inlay: true, .. } => {
