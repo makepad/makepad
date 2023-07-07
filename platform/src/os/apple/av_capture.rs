@@ -61,7 +61,6 @@ impl AvCaptureSession {
                 if let Some(cb) = &mut *capture_cb.lock().unwrap() {
                     let image_buffer = CMSampleBufferGetImageBuffer(sample_buffer);
                     let bytes_per_row = CVPixelBufferGetBytesPerRow(image_buffer);
-                    //println!("bytes per row: {}", bpr*2160);
                     CVPixelBufferLockBaseAddress(image_buffer, 0);
                     let len = CVPixelBufferGetDataSize(image_buffer);
                     let ptr = CVPixelBufferGetBaseAddress(image_buffer);
