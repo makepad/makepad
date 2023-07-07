@@ -4,22 +4,27 @@ use crate::{Length, Position, Range};
 pub struct Selection {
     pub anchor: Position,
     pub cursor: Position,
+    pub column_index: Option<usize>,
 }
 
 impl Selection {
-    pub fn new(anchor: Position, cursor: Position) -> Self {
-        Self { anchor, cursor }
+    pub fn new(anchor: Position, cursor: Position, column_index: Option<usize>) -> Self {
+        Self {
+            anchor,
+            cursor,
+            column_index,
+        }
     }
 
     pub fn from_cursor(cursor: Position) -> Self {
-        Self::new(cursor, cursor)
+        Self::new(cursor, cursor, None)
     }
 
     pub fn is_empty(self) -> bool {
         self.anchor == self.cursor
     }
 
-    pub fn should_merge_with(mut self, mut other: Self) -> bool {
+    pub fn should_merge(mut self, mut other: Self) -> bool {
         use std::mem;
 
         if self.start() > other.start() {
@@ -46,5 +51,24 @@ impl Selection {
 
     pub fn range(self) -> Range {
         Range::new(self.start(), self.end())
+    }
+
+    pub fn reset_anchor(self) -> Self {
+        Self {
+            anchor: self.cursor,
+            ..self
+        }
+    }
+
+    pub fn update_cursor(
+        self,
+        f: impl FnOnce(Position, Option<usize>) -> (Position, Option<usize>),
+    ) -> Self {
+        let (cursor, column_index) = f(self.cursor, self.column_index);
+        Self {
+            cursor,
+            column_index,
+            ..self
+        }
     }
 }

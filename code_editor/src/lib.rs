@@ -3,6 +3,7 @@ pub mod code_editor;
 pub mod diff;
 pub mod edit_ops;
 pub mod length;
+pub mod move_ops;
 pub mod point;
 pub mod position;
 pub mod range;
