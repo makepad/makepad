@@ -1,8 +1,5 @@
 use {
-    crate::{
-        diff::Strategy, edit_ops, Diff, Point, Position, Range, Rect, Selection, Settings, Size,
-        Text,
-    },
+    crate::{diff::Strategy, Diff, Point, Position, Range, Rect, Selection, Settings, Size, Text},
     std::{
         collections::{HashMap, HashSet},
         ops::ControlFlow,
@@ -466,35 +463,55 @@ impl<'a> ViewMut<'a> {
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: Position) {
-        self.selections[*self.last_added_selection_index].cursor = cursor;
+        let mut current_index = *self.last_added_selection_index;
+        self.selections[current_index].cursor = cursor;
         if !select {
-            self.selections[*self.last_added_selection_index].anchor = cursor;
+            self.selections[current_index].anchor = cursor;
         }
-        while *self.last_added_selection_index > 0 {
-            if self.selections[*self.last_added_selection_index - 1]
-                .should_merge_with(self.selections[*self.last_added_selection_index])
-            {
-                self.selections.remove(*self.last_added_selection_index - 1);
-                *self.last_added_selection_index -= 1;
+        while current_index > 0 {
+            let previous_index = current_index - 1;
+            let previous_selection = self.selections[current_index - 1];
+            let current_selection = self.selections[current_index];
+            if previous_selection.should_merge(current_selection) {
+                self.selections.remove(previous_index);
+                current_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.last_added_selection_index + 1 < self.selections.len() {
-            if self.selections[*self.last_added_selection_index]
-                .should_merge_with(self.selections[*self.last_added_selection_index + 1])
-            {
-                self.selections.remove(*self.last_added_selection_index + 1);
+        while current_index + 1 < self.selections.len() {
+            let next_index = current_index + 1;
+            let current_selection = self.selections[current_index];
+            let next_selection = self.selections[next_index];
+            if current_selection.should_merge(next_selection) {
+                self.selections.remove(next_index);
             } else {
                 break;
             }
         }
+        *self.last_added_selection_index = current_index;
+    }
+
+    pub fn move_cursors_left(&mut self, select: bool) {
+        use crate::move_ops;
+
+        self.modify_selections(select, |view, selection| {
+            selection.update_cursor(|position, _| (move_ops::move_left(&view.text, position), None))
+        });
+    }
+
+    pub fn move_cursors_right(&mut self, select: bool) {
+        use crate::move_ops;
+
+        self.modify_selections(select, |view, selection| {
+            selection.update_cursor(|position, _| (move_ops::move_right(view.text, position), None))
+        });
     }
 
     pub fn replace(&mut self, replace_with: Text) {
-        self.modify_text(|_, range| {
-            edit_ops::replace(range, replace_with.clone())
-        })
+        use crate::edit_ops;
+
+        self.modify_text(|_, range| edit_ops::replace(range, replace_with.clone()))
     }
 
     pub fn enter(&mut self) {
@@ -502,12 +519,14 @@ impl<'a> ViewMut<'a> {
     }
 
     pub fn delete(&mut self) {
-        self.modify_text(|_, range| {
-            edit_ops::delete(range)
-        })
+        use crate::edit_ops;
+
+        self.modify_text(|_, range| edit_ops::delete(range))
     }
 
     pub fn backspace(&mut self) {
+        use crate::edit_ops;
+
         self.modify_text(edit_ops::backspace)
     }
 
@@ -555,6 +574,61 @@ impl<'a> ViewMut<'a> {
         true
     }
 
+    fn modify_selections(
+        &mut self,
+        select: bool,
+        mut f: impl FnMut(&Self, Selection) -> Selection,
+    ) {
+        use std::mem;
+
+        let mut selections = mem::take(self.selections);
+        for selection in &mut selections {
+            *selection = f(self, *selection);
+            if !select {
+                *selection = selection.reset_anchor();
+            }
+        }
+        *self.selections = selections;
+        let mut current_index = 0;
+        while current_index + 1 < self.selections.len() {
+            let next_index = current_index + 1;
+            let current_selection = self.selections[current_index];
+            let next_selection = self.selections[next_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if !current_selection.should_merge(next_selection) {
+                current_index += 1;
+                continue;
+            }
+            let winner_index;
+            let loser_index;
+            if next_index == *self.last_added_selection_index {
+                winner_index = next_index;
+                loser_index = current_index;
+            } else {
+                winner_index = current_index;
+                loser_index = next_index;
+            }
+            let winner_selection = self.selections[winner_index];
+            let start = current_selection.start().min(next_selection.start());
+            let end = current_selection.end().max(next_selection.end());
+            let anchor;
+            let cursor;
+            if winner_selection.anchor <= winner_selection.cursor {
+                anchor = start;
+                cursor = end;
+            } else {
+                anchor = end;
+                cursor = start;
+            }
+            self.selections[current_index] =
+                Selection::new(anchor, cursor, winner_selection.column_index);
+            self.selections.remove(loser_index);
+            if loser_index < *self.last_added_selection_index {
+                *self.last_added_selection_index -= 1;
+            }
+        }
+    }
+
     fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::origin();
@@ -571,9 +645,9 @@ impl<'a> ViewMut<'a> {
             prev_end = selection.end();
             diffed_prev_end = diffed_end;
             *selection = if selection.anchor <= selection.cursor {
-                Selection::new(diffed_start, diffed_end)
+                Selection::new(diffed_start, diffed_end, selection.column_index)
             } else {
-                Selection::new(diffed_end, diffed_start)
+                Selection::new(diffed_end, diffed_start, selection.column_index)
             };
         }
         self.update_after_modify_text(composite_diff);
