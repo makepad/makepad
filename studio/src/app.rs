@@ -1,4 +1,4 @@
-studiouse {
+use {
     crate::{
         makepad_platform::*,
         app_inner::AppInner,
