@@ -1,5 +1,8 @@
 use {
-    crate::{diff::Strategy, edit_ops, Diff, Point, Position, Range, Rect, Selection, Size, Text},
+    crate::{
+        diff::Strategy, edit_ops, Diff, Point, Position, Range, Rect, Selection, Settings, Size,
+        Text,
+    },
     std::{
         collections::{HashMap, HashSet},
         ops::ControlFlow,
@@ -9,6 +12,7 @@ use {
 
 #[derive(Clone, Debug, Default)]
 pub struct State {
+    settings: Settings,
     session_id: usize,
     sessions: HashMap<SessionId, Session>,
     document_id: usize,
@@ -20,10 +24,18 @@ impl State {
         Self::default()
     }
 
+    pub fn with_settings(settings: Settings) -> Self {
+        Self {
+            settings,
+            ..Self::default()
+        }
+    }
+
     pub fn view(&self, session_id: SessionId) -> View<'_> {
         let session = &self.sessions[&session_id];
         let document = &self.documents[&session.document_id];
         View {
+            settings: &self.settings,
             text: &document.text,
             inline_inlays: &document.inline_inlays,
             soft_breaks: &session.soft_breaks,
@@ -40,6 +52,7 @@ impl State {
         let session = self.sessions.get_mut(&session_id).unwrap();
         let document = self.documents.get_mut(&session.document_id).unwrap();
         ViewMut {
+            settings: &mut self.settings,
             text: &mut document.text,
             inline_inlays: &mut document.inline_inlays,
             soft_breaks: &mut session.soft_breaks,
@@ -115,6 +128,7 @@ impl State {
 
 #[derive(Clone, Copy, Debug)]
 pub struct View<'a> {
+    settings: &'a Settings,
     text: &'a Text,
     inline_inlays: &'a [Vec<(usize, InlineInlay)>],
     soft_breaks: &'a [Vec<usize>],
@@ -206,7 +220,6 @@ impl<'a> View<'a> {
         &self,
         start_line_index: usize,
         end_line_index: usize,
-        tab_column_count: usize,
         mut handle_event: impl FnMut(LayoutEvent<'_>) -> ControlFlow<T, bool>,
     ) -> ControlFlow<T, bool> {
         use crate::str::StrExt;
@@ -222,7 +235,7 @@ impl<'a> View<'a> {
                     if !handle_event(LayoutEvent {
                         rect: Rect::new(
                             Point::new(0.0, y),
-                            Size::new(line.width(tab_column_count), line.height()),
+                            Size::new(line.width(self.settings.tab_column_count), line.height()),
                         ),
                         kind: LayoutEventKind::Line { is_inlay, line },
                     })? {
@@ -236,8 +249,8 @@ impl<'a> View<'a> {
                                 Inline::Text { is_inlay, text } => {
                                     for grapheme in text.graphemes() {
                                         let x = line.x(column_index);
-                                        let next_column_index =
-                                            column_index + grapheme.column_count(tab_column_count);
+                                        let next_column_index = column_index
+                                            + grapheme.column_count(self.settings.tab_column_count);
                                         handle_event(LayoutEvent {
                                             rect: Rect::new(
                                                 Point::new(x, y),
@@ -303,10 +316,10 @@ impl<'a> View<'a> {
         ControlFlow::Continue(true)
     }
 
-    pub fn pick(&self, point: Point, tab_column_count: usize) -> Option<Position> {
+    pub fn pick(&self, point: Point) -> Option<Position> {
         let line_index = self.find_first_line_ending_after(point.y);
         let mut position = Position::new(line_index, 0);
-        match self.layout(line_index, line_index + 1, tab_column_count, |event| {
+        match self.layout(line_index, line_index + 1, |event| {
             match event.kind {
                 LayoutEventKind::Line { is_inlay: true, .. } => {
                     if event.rect.contains(point) {
@@ -333,6 +346,11 @@ impl<'a> View<'a> {
                     }
                 }
                 LayoutEventKind::Break { is_soft: false } => {
+                    if point.y >= event.rect.origin.y
+                        && point.y <= event.rect.origin.y + event.rect.size.height
+                    {
+                        return ControlFlow::Break(Some(position));
+                    }
                     position.line_index += 1;
                     position.byte_index = 0;
                 }
@@ -359,6 +377,7 @@ impl<'a> View<'a> {
 
 #[derive(Debug)]
 pub struct ViewMut<'a> {
+    settings: &'a mut Settings,
     text: &'a mut Text,
     inline_inlays: &'a mut Vec<Vec<(usize, InlineInlay)>>,
     soft_breaks: &'a mut Vec<Vec<usize>>,
@@ -375,6 +394,7 @@ pub struct ViewMut<'a> {
 impl<'a> ViewMut<'a> {
     pub fn as_view(&self) -> View<'_> {
         View {
+            settings: &self.settings,
             text: &self.text,
             inline_inlays: &self.inline_inlays,
             soft_breaks: &self.soft_breaks,
@@ -471,8 +491,24 @@ impl<'a> ViewMut<'a> {
         }
     }
 
+    pub fn replace(&mut self, replace_with: Text) {
+        self.modify_text(|_, range| {
+            edit_ops::replace(range, replace_with.clone())
+        })
+    }
+
+    pub fn enter(&mut self) {
+        self.replace('\n'.into())
+    }
+
     pub fn delete(&mut self) {
-        self.modify_text(|_, range| edit_ops::delete(range));
+        self.modify_text(|_, range| {
+            edit_ops::delete(range)
+        })
+    }
+
+    pub fn backspace(&mut self) {
+        self.modify_text(edit_ops::backspace)
     }
 
     pub fn fold_line(&mut self, line_index: usize) {
@@ -519,6 +555,69 @@ impl<'a> ViewMut<'a> {
         true
     }
 
+    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
+        let mut composite_diff = Diff::new();
+        let mut prev_end = Position::origin();
+        let mut diffed_prev_end = Position::origin();
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start() - prev_end;
+            let diffed_start = diffed_prev_end + distance_from_prev_end;
+            let diffed_end = diffed_start + selection.length();
+            let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
+            let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
+            let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
+            self.text.apply_diff(diff.clone());
+            composite_diff = composite_diff.compose(diff);
+            prev_end = selection.end();
+            diffed_prev_end = diffed_end;
+            *selection = if selection.anchor <= selection.cursor {
+                Selection::new(diffed_start, diffed_end)
+            } else {
+                Selection::new(diffed_end, diffed_start)
+            };
+        }
+        self.update_after_modify_text(composite_diff);
+    }
+
+    fn update_after_modify_text(&mut self, diff: Diff) {
+        use crate::diff::OperationInfo;
+
+        let mut position = Position::origin();
+        for operation in diff {
+            match operation.info() {
+                OperationInfo::Delete(length) => {
+                    let start_line_index = position.line_index;
+                    let end_line_index = position.line_index + length.line_count;
+                    self.inline_inlays.drain(start_line_index..end_line_index);
+                    self.soft_breaks.drain(start_line_index..end_line_index);
+                    self.pivot.drain(start_line_index..end_line_index);
+                    self.scale.drain(start_line_index..end_line_index);
+                    self.summed_heights.truncate(start_line_index);
+                }
+                OperationInfo::Retain(length) => {
+                    position += length;
+                }
+                OperationInfo::Insert(length) => {
+                    let line_index = position.line_index + 1;
+                    self.inline_inlays.splice(
+                        line_index..line_index,
+                        (0..length.line_count).map(|_| Vec::new()),
+                    );
+                    self.soft_breaks.splice(
+                        line_index..line_index,
+                        (0..length.line_count).map(|_| Vec::new()),
+                    );
+                    self.pivot
+                        .splice(line_index..line_index, (0..length.line_count).map(|_| 0));
+                    self.scale
+                        .splice(line_index..line_index, (0..length.line_count).map(|_| 1.0));
+                    self.summed_heights.truncate(position.line_index);
+                }
+            }
+        }
+        self.update_summed_heights();
+    }
+
     fn update_summed_heights(&mut self) {
         use std::mem;
 
@@ -542,67 +641,6 @@ impl<'a> ViewMut<'a> {
             }
         }
         *self.summed_heights = summed_heights;
-    }
-
-    fn modify_text(&mut self, mut f: impl FnMut(&Text, Range) -> Diff) {
-        use crate::diff::OperationInfo;
-
-        let mut composite_diff = Diff::new();
-        let mut prev_end = Position::origin();
-        let mut diffed_prev_end = Position::origin();
-        for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start() - prev_end;
-            let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + selection.length();
-            let diff = f(&self.text, Range::new(diffed_start, diffed_end));
-            let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
-            let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
-            self.text.apply_diff(diff.clone());
-            composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end();
-            diffed_prev_end = diffed_end;
-            *selection = if selection.anchor <= selection.cursor {
-                Selection::new(diffed_start, diffed_end)
-            } else {
-                Selection::new(diffed_end, diffed_start)
-            };
-        }
-        let mut start_line_index = 0;
-        for operation in composite_diff {
-            match operation.info() {
-                OperationInfo::Delete(length) => {
-                    let end_line_index = start_line_index + length.line_count;
-                    self.inline_inlays.drain(start_line_index..end_line_index);
-                    self.soft_breaks.drain(start_line_index..end_line_index);
-                    self.pivot.drain(start_line_index..end_line_index);
-                    self.scale.drain(start_line_index..end_line_index);
-                    self.summed_heights.truncate(start_line_index);
-                }
-                OperationInfo::Retain(length) => {
-                    start_line_index += length.line_count;
-                }
-                OperationInfo::Insert(length) => {
-                    self.inline_inlays.splice(
-                        start_line_index..start_line_index,
-                        (0..length.line_count).map(|_| Vec::new()),
-                    );
-                    self.soft_breaks.splice(
-                        start_line_index..start_line_index,
-                        (0..length.line_count).map(|_| Vec::new()),
-                    );
-                    self.pivot.splice(
-                        start_line_index..start_line_index,
-                        (0..length.line_count).map(|_| 0),
-                    );
-                    self.scale.splice(
-                        start_line_index..start_line_index,
-                        (0..length.line_count).map(|_| 1.0),
-                    );
-                    self.summed_heights.truncate(start_line_index);
-                }
-            }
-        }
-        self.update_summed_heights();
     }
 }
 
