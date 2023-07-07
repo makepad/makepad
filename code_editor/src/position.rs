@@ -24,41 +24,45 @@ impl Position {
     pub fn apply_diff(self, diff: &Diff, strategy: Strategy) -> Position {
         use {crate::diff::OperationInfo, std::cmp::Ordering};
 
-        let mut position = Position::default();
-        let mut remaining_length = self - Position::default();
+        let mut diffed_position = Position::origin();
+        let mut distance_to_position = self - Position::origin();
         let mut operation_infos = diff.iter().map(|operation| operation.info());
         let mut operation_info_slot = operation_infos.next();
         loop {
             match operation_info_slot {
-                Some(OperationInfo::Retain(length)) => match length.cmp(&remaining_length) {
+                Some(OperationInfo::Retain(length)) => match length.cmp(&distance_to_position) {
                     Ordering::Less | Ordering::Equal => {
-                        position += length;
-                        remaining_length -= length;
+                        diffed_position += length;
+                        distance_to_position -= length;
                         operation_info_slot = operation_infos.next();
                     }
                     Ordering::Greater => {
-                        break position + remaining_length;
+                        break diffed_position + distance_to_position;
                     }
                 },
-                Some(OperationInfo::Insert(length)) => match strategy {
-                    Strategy::InsertBefore => {
-                        break position + length;
-                    }
-                    Strategy::InsertAfter => {
+                Some(OperationInfo::Insert(length)) => {
+                    if distance_to_position == Length::zero() {
+                        break match strategy {
+                            Strategy::InsertBefore => diffed_position + length,
+                            Strategy::InsertAfter => diffed_position,
+                        };
+                    } else {
+                        diffed_position += length;
                         operation_info_slot = operation_infos.next();
                     }
-                },
-                Some(OperationInfo::Delete(length)) => match length.cmp(&remaining_length) {
+                }
+                Some(OperationInfo::Delete(length)) => match length.cmp(&distance_to_position) {
                     Ordering::Less | Ordering::Equal => {
-                        remaining_length -= length;
+                        distance_to_position -= length;
                         operation_info_slot = operation_infos.next();
                     }
                     Ordering::Greater => {
-                        break position;
+                        distance_to_position = Length::zero();
+                        operation_info_slot = operation_infos.next();
                     }
                 },
                 None => {
-                    break position + remaining_length;
+                    break diffed_position + distance_to_position;
                 }
             }
         }
