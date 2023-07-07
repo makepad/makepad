@@ -440,7 +440,7 @@ impl AppMain for App {
         self.audio_graph.handle_event_with(cx, event, &mut | cx, action | {
             match action {
                 AudioGraphAction::DisplayAudio {buffer, voice, ..} => {
-                    display_audio.process_buffer(cx, None, voice, buffer);
+                    display_audio.process_buffer(cx, None, voice, buffer, 1.0);
                     buffers += 1;
                 }
                 AudioGraphAction::VoiceOff {voice} => {
