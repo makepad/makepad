@@ -111,8 +111,8 @@ impl CodeEditor {
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         self.start_line_index = view
             .as_view()
-            .find_first_line_ending_after(self.viewport_rect.pos.y / self.cell_size.y);
-        self.end_line_index = view.as_view().find_first_line_starting_after(
+            .find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
+        self.end_line_index = view.as_view().find_first_line_starting_after_y(
             (self.viewport_rect.pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
 
@@ -212,6 +212,22 @@ impl CodeEditor {
                 ..
             }) => {
                 view.move_cursors_right(shift);
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowUp,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                view.move_cursors_up(shift);
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowDown,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                view.move_cursors_down(shift);
                 cx.redraw_all();
             }
             Event::TextInput(TextInputEvent { ref input, .. }) => {
