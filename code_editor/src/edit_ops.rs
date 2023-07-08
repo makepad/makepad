@@ -1,4 +1,4 @@
-use crate::{move_ops, Diff, Position, Range, Text};
+use crate::{Diff, Position, Range, Text};
 
 pub fn replace(range: Range, replace_with: Text) -> Diff {
     use crate::diff::Builder;
@@ -23,7 +23,7 @@ pub fn backspace(text: &mut Text, range: Range) -> Diff {
     use crate::diff::Builder;
 
     if range.is_empty() {
-        let position = move_ops::move_left(text, range.start());
+        let position = prev_position(text, range.start());
         let mut builder = Builder::new();
         builder.retain(position - Position::origin());
         builder.delete(range.start() - position);
@@ -31,4 +31,24 @@ pub fn backspace(text: &mut Text, range: Range) -> Diff {
     } else {
         delete(range)
     }
+}
+
+pub fn prev_position(text: &Text, position: Position) -> Position {
+    use crate::str::StrExt;
+
+    if position.byte_index > 0 {
+        return Position::new(
+            position.line_index,
+            text.as_lines()[position.line_index][..position.byte_index]
+                .grapheme_indices()
+                .next_back()
+                .map(|(byte_index, _)| byte_index)
+                .unwrap(),
+        );
+    }
+    if position.line_index > 0 {
+        let prev_line_index = position.line_index - 1;
+        return Position::new(prev_line_index, text.as_lines()[prev_line_index].len());
+    }
+    position
 }
