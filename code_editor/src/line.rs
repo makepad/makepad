@@ -1,12 +1,19 @@
-use std::slice;
+use {
+    crate::{
+        misc::{Bias, BiasedIndex, VirtualPoint},
+        token::TokenInfo,
+        Token,
+    },
+    std::slice,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Line<'a> {
     text: &'a str,
     token_infos: &'a [TokenInfo],
     text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
-    wrap: &'a [usize],
+    widget_inlays: &'a [(BiasedIndex, Widget)],
+    wraps: &'a [usize],
 }
 
 impl<'a> Line<'a> {
@@ -14,75 +21,141 @@ impl<'a> Line<'a> {
         text: &'a str,
         token_infos: &'a [TokenInfo],
         text_inlays: &'a [(usize, String)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
-        wrap: &'a [usize],
+        widget_inlays: &'a [(BiasedIndex, Widget)],
+        wraps: &'a [usize],
     ) -> Self {
         Self {
             text,
             token_infos,
             text_inlays,
             widget_inlays,
-            wrap,
+            wraps,
         }
     }
 
-    pub fn index_to_position(&self, index: usize, tab_width: usize) -> Position {
-        let mut index = 0;
-        let mut position = Position::default();
+    pub fn compute_virtual_width(&self, tab_width: usize) -> usize {
+        use crate::str::StrExt;
+
+        let mut max_summed_width = 0;
+        let mut summed_width = 0;
+        for wrapped_element in self.wrapped_elements() {
+            match wrapped_element {
+                WrappedElement::Token(token) => {
+                    summed_width += token.text.width(tab_width);
+                }
+                WrappedElement::Text(text) => {
+                    summed_width += text.width(tab_width);
+                }
+                WrappedElement::Widget(_, widget) => {
+                    summed_width += widget.width;
+                }
+                WrappedElement::Wrap => {
+                    max_summed_width = max_summed_width.max(summed_width);
+                    summed_width = 0;
+                }
+            }
+        }
+        max_summed_width.max(summed_width)
+    }
+
+    pub fn virtual_height(&self) -> usize {
+        self.wraps.len() + 1
+    }
+
+    pub fn biased_index_to_virtual_point(
+        &self,
+        index: BiasedIndex,
+        tab_width: usize,
+    ) -> VirtualPoint {
+        use crate::str::StrExt;
+
+        let mut current_index = 0;
+        let mut current_point = VirtualPoint::default();
+        if current_index == index.index && index.bias == Bias::Before {
+            return current_point;
+        }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(token) => {
                     for grapheme in token.text.graphemes() {
-                        // TODO
-                        index += grapheme.text.len();
-                        position.x += grapheme.width(tab_width);
+                        if current_index == index.index && index.bias == Bias::After {
+                            return current_point;
+                        }
+                        current_index += grapheme.len();
+                        current_point.row += grapheme.width(tab_width);
+                        if current_index == index.index && index.bias == Bias::Before {
+                            return current_point;
+                        }
                     }
                 }
                 WrappedElement::Text(text) => {
-                    position.x += text.width(tab_width);
+                    current_point.row += text.width(tab_width);
                 }
-                WrappedElement::Widget(widget) => {
-                    position.x += widget.width;
+                WrappedElement::Widget(_, widget) => {
+                    current_point.row += widget.width;
                 }
                 WrappedElement::Wrap => {
-                    position.y += 1;
-                    position.x = 0;
+                    current_point.column += 1;
+                    current_point.row = 0;
                 }
             }
         }
-        position
+        if current_index == index.index && index.bias == Bias::After {
+            return current_point;
+        }
+        panic!()
     }
 
-    pub fn position_to_index(&self, position: Position, tab_width: usize) -> usize {
-        let mut index = 0;
-        let mut position = Position::default();
-        for wrapped_element in self.wrapped_elements(){ 
+    pub fn virtual_point_to_index(&self, point: VirtualPoint, tab_width: usize) -> BiasedIndex {
+        use crate::str::StrExt;
+
+        let mut current_index = 0;
+        let mut current_point = VirtualPoint::default();
+        for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(token) => {
                     for grapheme in token.text.graphemes() {
                         let width = grapheme.width(tab_width);
-                        // TODO
-                        index += grapheme.text.len();
-                        position.x += width;
+                        if (current_point.row..current_point.row + width / 2).contains(&point.row) {
+                            return BiasedIndex::new(current_index, Bias::After);
+                        }
+                        current_index += grapheme.len();
+                        current_point.row += width;
+                        if (current_point.row - width / 2..current_point.row).contains(&point.row) {
+                            return BiasedIndex::new(current_index, Bias::Before);
+                        }
                     }
                 }
                 WrappedElement::Text(text) => {
                     let width = text.width(tab_width);
-                    // TODO
-                    position.x += width;
+                    if (current_point.row..current_point.row + width / 2).contains(&point.row) {
+                        return BiasedIndex::new(current_index, Bias::After);
+                    }
+                    current_index += text.len();
+                    current_point.row += width;
+                    if (current_point.row - width / 2..current_point.row).contains(&point.row) {
+                        return BiasedIndex::new(current_index, Bias::Before);
+                    }
                 }
-                WrappedElement::Widget(widget) => {
-                    let width = widget.width;
-                    // TODO
-                    position.x += widget.width;
+                WrappedElement::Widget(affinity, widget) => {
+                    if (current_point.row..current_point.row + widget.width).contains(&point.row) {
+                        return BiasedIndex::new(current_index, affinity);
+                    }
+                    current_point.row += widget.width;
                 }
                 WrappedElement::Wrap => {
-                    position.y += 1;
-                    position.x = 0;
+                    if current_point.column == point.column {
+                        return BiasedIndex::new(current_index, Bias::Before);
+                    }
+                    current_point.column += 1;
+                    current_point.row = 0;
                 }
             }
         }
-        index
+        if current_point.column == point.column {
+            return BiasedIndex::new(current_index, Bias::After);
+        }
+        panic!()
     }
 
     pub fn tokens(&self) -> Tokens<'a> {
@@ -108,7 +181,7 @@ impl<'a> Line<'a> {
         WrappedElements {
             element: elements.next(),
             elements,
-            wrap: self.wrap,
+            wraps: self.wraps,
             index: 0,
         }
     }
@@ -127,17 +200,8 @@ impl<'a> Iterator for Tokens<'a> {
         let token_info = self.token_infos.next()?;
         let (text_0, text_1) = self.text.split_at(token_info.len);
         self.text = text_1;
-        Some(Token {
-            text: text_0,
-            kind: token_info.kind,
-        })
+        Some(Token::new(text_0, token_info.kind))
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct Token<'a> {
-    text: &'a str,
-    kind: TokenKind,
 }
 
 #[derive(Clone, Debug)]
@@ -145,7 +209,7 @@ pub struct Elements<'a> {
     token: Option<Token<'a>>,
     tokens: Tokens<'a>,
     text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    widget_inlays: &'a [(BiasedIndex, Widget)],
     index: usize,
 }
 
@@ -153,14 +217,12 @@ impl<'a> Iterator for Elements<'a> {
     type Item = Element<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self
-            .widget_inlays
-            .first()
-            .map_or(false, |(index, _)| *index == (self.index, Affinity::Before))
-        {
+        if self.widget_inlays.first().map_or(false, |(index, _)| {
+            *index == BiasedIndex::new(self.index, Bias::Before)
+        }) {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
             self.widget_inlays = widget_inlays;
-            return Some(Element::Widget(Affinity::Before, *widget));
+            return Some(Element::Widget(Bias::Before, *widget));
         }
         if self
             .text_inlays
@@ -171,33 +233,25 @@ impl<'a> Iterator for Elements<'a> {
             self.text_inlays = text_inlays;
             return Some(Element::Text(text));
         }
-        if self
-            .widget_inlays
-            .first()
-            .map_or(false, |(index, _)| *index == (self.index, Affinity::After))
-        {
+        if self.widget_inlays.first().map_or(false, |(index, _)| {
+            *index == BiasedIndex::new(self.index, Bias::After)
+        }) {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
             self.widget_inlays = widget_inlays;
-            return Some(Element::Widget(Affinity::After, *widget));
+            return Some(Element::Widget(Bias::After, *widget));
         }
         let token = self.token.take()?;
         let mut len = token.text.len();
         if let Some((index, _)) = self.text_inlays.first() {
             len = len.min(*index - self.index);
         }
-        if let Some(((index, _), _)) = self.widget_inlays.first() {
-            len = len.min(*index - self.index);
+        if let Some((index, _)) = self.widget_inlays.first() {
+            len = len.min(index.index - self.index);
         }
         let token = if len < token.text.len() {
             let (text_0, text_1) = token.text.split_at(len);
-            self.token = Some(Token {
-                text: text_1,
-                kind: token.kind,
-            });
-            Token {
-                text: text_0,
-                kind: token.kind,
-            }
+            self.token = Some(Token::new(text_1, token.kind));
+            Token::new(text_0, token.kind)
         } else {
             self.token = self.tokens.next();
             token
@@ -211,14 +265,14 @@ impl<'a> Iterator for Elements<'a> {
 pub enum Element<'a> {
     Token(Token<'a>),
     Text(&'a str),
-    Widget(Affinity, Widget),
+    Widget(Bias, Widget),
 }
 
 #[derive(Clone, Debug)]
 pub struct WrappedElements<'a> {
     element: Option<Element<'a>>,
     elements: Elements<'a>,
-    wrap: &'a [usize],
+    wraps: &'a [usize],
     index: usize,
 }
 
@@ -226,37 +280,31 @@ impl<'a> Iterator for WrappedElements<'a> {
     type Item = WrappedElement<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(Element::Widget(Affinity::Before, ..)) = self.element {
+        if let Some(Element::Widget(Bias::Before, ..)) = self.element {
             let Element::Widget(_, widget) = self.element.take().unwrap() else {
                 panic!()
             };
             self.element = self.elements.next();
-            return Some(WrappedElement::Widget(widget));
+            return Some(WrappedElement::Widget(Bias::Before, widget));
         }
         if self
-            .wrap
+            .wraps
             .first()
             .map_or(false, |index| *index == self.index)
         {
-            self.wrap = &self.wrap[1..];
+            self.wraps = &self.wraps[1..];
             return Some(WrappedElement::Wrap);
         }
         Some(match self.element.take()? {
             Element::Token(token) => {
                 let mut len = token.text.len();
-                if let Some(index) = self.wrap.first() {
+                if let Some(index) = self.wraps.first() {
                     len = len.min(*index - self.index);
                 }
                 let token = if len < token.text.len() {
                     let (text_0, text_1) = token.text.split_at(len);
-                    self.element = Some(Element::Token(Token {
-                        text: text_1,
-                        kind: token.kind,
-                    }));
-                    Token {
-                        text: text_0,
-                        kind: token.kind,
-                    }
+                    self.element = Some(Element::Token(Token::new(text_1, token.kind)));
+                    Token::new(text_0, token.kind)
                 } else {
                     self.element = self.elements.next();
                     token
@@ -266,7 +314,7 @@ impl<'a> Iterator for WrappedElements<'a> {
             }
             Element::Text(text) => {
                 let mut len = text.len();
-                if let Some(index) = self.wrap.first() {
+                if let Some(index) = self.wraps.first() {
                     len = len.min(*index - self.index);
                 }
                 let text = if len < text.len() {
@@ -280,11 +328,11 @@ impl<'a> Iterator for WrappedElements<'a> {
                 self.index += text.len();
                 WrappedElement::Text(text)
             }
-            Element::Widget(Affinity::After, widget) => {
+            Element::Widget(Bias::After, widget) => {
                 self.element = self.elements.next();
-                WrappedElement::Widget(widget)
+                WrappedElement::Widget(Bias::After, widget)
             }
-            Element::Widget(Affinity::Before, _) => panic!(),
+            Element::Widget(Bias::Before, _) => panic!(),
         })
     }
 }
@@ -293,32 +341,8 @@ impl<'a> Iterator for WrappedElements<'a> {
 pub enum WrappedElement<'a> {
     Token(Token<'a>),
     Text(&'a str),
-    Widget(Widget),
+    Widget(Bias, Widget),
     Wrap,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct TokenInfo {
-    pub len: usize,
-    pub kind: TokenKind,
-}
-
-impl TokenInfo {
-    pub fn new(len: usize, kind: TokenKind) -> Self {
-        Self { len, kind }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TokenKind {
-    Unknown,
-    Whitespace,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Affinity {
-    Before,
-    After,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -330,17 +354,5 @@ pub struct Widget {
 impl Widget {
     pub fn new(id: usize, width: usize) -> Self {
         Self { id, width }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Position {
-    pub x: usize,
-    pub y: usize,
-}
-
-impl Position {
-    pub fn new(x: usize, y: usize) -> Self {
-        Self { x, y }
     }
 }
