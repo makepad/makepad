@@ -1,9 +1,11 @@
 use crate::{
     document, document::LineInlay, line, token::TokenInfo, Affinity, Document, Position, Selection,
+    Settings,
 };
 
 #[derive(Debug, PartialEq)]
 pub struct Context<'a> {
+    settings: &'a mut Settings,
     text: &'a mut Vec<String>,
     token_infos: &'a mut Vec<Vec<TokenInfo>>,
     text_inlays: &'a mut Vec<Vec<(usize, String)>>,
@@ -19,6 +21,7 @@ pub struct Context<'a> {
 
 impl<'a> Context<'a> {
     pub fn new(
+        settings: &'a mut Settings,
         text: &'a mut Vec<String>,
         token_infos: &'a mut Vec<Vec<TokenInfo>>,
         text_inlays: &'a mut Vec<Vec<(usize, String)>>,
@@ -32,6 +35,7 @@ impl<'a> Context<'a> {
         selections: &'a mut Vec<Selection>,
     ) -> Self {
         Self {
+            settings,
             text,
             token_infos,
             text_inlays,
@@ -48,6 +52,7 @@ impl<'a> Context<'a> {
 
     pub fn document(&self) -> Document<'_> {
         Document::new(
+            self.settings,
             self.text,
             self.token_infos,
             self.text_inlays,
@@ -93,7 +98,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _)| move_ops::move_left(document, position))
+            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
@@ -101,7 +106,23 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _)| move_ops::move_right(document, position))
+            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        });
+    }
+
+    pub fn move_cursors_up(&mut self, select: bool) {
+        use crate::move_ops;
+
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        });
+    }
+
+    pub fn move_cursors_down(&mut self, select: bool) {
+        use crate::move_ops;
+
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 

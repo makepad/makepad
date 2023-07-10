@@ -1,10 +1,11 @@
 use {
-    crate::{line, token::TokenInfo, Affinity, Line, Selection},
+    crate::{line, token::TokenInfo, Affinity, Line, Selection, Settings},
     std::slice,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Document<'a> {
+    settings: &'a Settings,
     text: &'a Vec<String>,
     token_infos: &'a [Vec<TokenInfo>],
     text_inlays: &'a [Vec<(usize, String)>],
@@ -20,6 +21,7 @@ pub struct Document<'a> {
 
 impl<'a> Document<'a> {
     pub fn new(
+        settings: &'a Settings,
         text: &'a Vec<String>,
         token_infos: &'a [Vec<TokenInfo>],
         text_inlays: &'a [Vec<(usize, String)>],
@@ -33,6 +35,7 @@ impl<'a> Document<'a> {
         selections: &'a [Selection],
     ) -> Self {
         Self {
+            settings,
             text,
             token_infos,
             text_inlays,
@@ -47,11 +50,15 @@ impl<'a> Document<'a> {
         }
     }
 
-    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
+    pub fn settings(&self) -> &'a Settings {
+        self.settings
+    }
+
+    pub fn compute_width(&self) -> f64 {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(tab_column_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }

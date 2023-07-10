@@ -1,5 +1,5 @@
 use {
-    crate::{state::ViewId, Affinity, Position, Selection, State},
+    crate::{state::ViewId, Affinity, Context, Document, Position, Selection, State},
     makepad_widgets::*,
 };
 
@@ -99,11 +99,12 @@ pub struct CodeEditor {
 }
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d<'_>, state: &mut State, view_id: ViewId) {
-        self.begin(cx, state, view_id);
-        self.draw_text(cx, state, view_id);
-        self.draw_selections(cx, state, view_id);
-        self.end(cx, state, view_id);
+    pub fn draw(&mut self, cx: &mut Cx2d<'_>, context: &mut Context<'_>) {
+        self.begin(cx, context);
+        let document = context.document();
+        self.draw_text(cx, &document);
+        self.draw_selections(cx, &document);
+        self.end(cx, context);
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, state: &mut State, view_id: ViewId, event: &Event) {
@@ -125,6 +126,23 @@ impl CodeEditor {
                 ..
             }) => {
                 state.context(view_id).move_cursors_right(shift);
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowUp,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                state.context(view_id).move_cursors_up(shift);
+                cx.redraw_all();
+            }
+
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowDown,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                state.context(view_id).move_cursors_down(shift);
                 cx.redraw_all();
             }
             _ => {}
@@ -150,14 +168,14 @@ impl CodeEditor {
         }
     }
 
-    fn begin(&mut self, cx: &mut Cx2d<'_>, state: &mut State, view_id: ViewId) {
+    fn begin(&mut self, cx: &mut Cx2d<'_>, context: &mut Context<'_>) {
         self.viewport_rect = Rect {
             pos: self.scroll_bars.get_scroll_pos(),
             size: cx.turtle().rect().size,
         };
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-        let document = state.document(view_id);
+        let document = context.document();
         self.start_line =
             document.find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
         self.end_line = document.find_first_line_starting_after_y(
@@ -166,19 +184,18 @@ impl CodeEditor {
         self.scroll_bars.begin(cx, self.walk, Layout::default());
     }
 
-    fn end(&mut self, cx: &mut Cx2d<'_>, state: &State, view_id: ViewId) {
-        let document = state.document(view_id);
+    fn end(&mut self, cx: &mut Cx2d<'_>, context: &mut Context<'_>) {
+        let document = context.document();
         cx.turtle_mut().set_used(
-            document.compute_width(state.settings().tab_column_count) * self.cell_size.x,
+            document.compute_width() * self.cell_size.x,
             document.height() * self.cell_size.y,
         );
         self.scroll_bars.end(cx);
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d<'_>, state: &State, view_id: ViewId) {
+    fn draw_text(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
-        let document = state.document(view_id);
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
             let mut column = 0;
@@ -197,8 +214,9 @@ impl CodeEditor {
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                column +=
-                                    token.text.column_count(state.settings().tab_column_count);
+                                column += token
+                                    .text
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
                                 column += widget.column_count;
@@ -218,9 +236,9 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, state: &State, view_id: ViewId) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         let mut active_selection = None;
-        let mut selections = state.document(view_id).selections();
+        let mut selections = document.selections();
         while selections
             .first()
             .map_or(false, |selection| selection.end().0.line < self.start_line)
@@ -239,7 +257,7 @@ impl CodeEditor {
             active_selection,
             selections,
         }
-        .draw_selections(cx, state, view_id)
+        .draw_selections(cx, document)
     }
 
     fn pick(&self, state: &State, view_id: ViewId, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -337,10 +355,9 @@ struct DrawSelectionsContext<'a> {
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, state: &State, view_id: ViewId) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
-        let document = state.document(view_id);
         let mut line = self.code_editor.start_line;
         let mut y = document.line_y(line);
         for element in document.elements(self.code_editor.start_line, self.code_editor.end_line) {
@@ -372,7 +389,7 @@ impl<'a> DrawSelectionsContext<'a> {
                                     );
                                     byte += grapheme.len();
                                     column +=
-                                        grapheme.column_count(state.settings().tab_column_count);
+                                        grapheme.column_count(document.settings().tab_column_count);
                                     self.handle_event(
                                         cx,
                                         line,
@@ -385,8 +402,9 @@ impl<'a> DrawSelectionsContext<'a> {
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                column +=
-                                    token.text.column_count(state.settings().tab_column_count);
+                                column += token
+                                    .text
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
                                 column += widget.column_count;

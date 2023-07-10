@@ -30,8 +30,8 @@ impl AppMain for App {
             let mut cx = Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(&mut cx).hook_widget() {
                 if next == self.ui.get_widget(id!(code_editor)) {
-                    self.code_editor
-                        .draw(&mut cx, &mut self.state.code_editor, self.state.view_id);
+                    let mut context = self.state.code_editor.context(self.state.view_id);
+                    self.code_editor.draw(&mut cx, &mut context);
                 }
             }
             return;
