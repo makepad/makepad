@@ -3,7 +3,7 @@ use {
         document, document::LineInlay, line, token::TokenInfo, Affinity, Context, Document,
         Selection, Settings, Text,
     },
-    std::{collections::HashMap, io, path::Path},
+    std::{collections::{HashMap, HashSet}, io, path::Path},
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -66,6 +66,8 @@ impl State {
             &mut editor.document_widget_inlays,
             &mut view.summed_heights,
             &mut view.selections,
+            &mut view.folding_lines,
+            &mut view.unfolding_lines,
         )
     }
 
@@ -83,6 +85,8 @@ impl State {
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
                 selections: [Selection::default()].into(),
+                folding_lines: HashSet::new(),
+                unfolding_lines: HashSet::new(),
             },
         );
         self.context(view_id).update_summed_heights();
@@ -155,6 +159,8 @@ struct View {
     wrap_bytes: Vec<Vec<usize>>,
     summed_heights: Vec<f64>,
     selections: Vec<Selection>,
+    folding_lines: HashSet<usize>,
+    unfolding_lines: HashSet<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

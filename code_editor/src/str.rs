@@ -1,5 +1,7 @@
 pub trait StrExt {
     fn column_count(&self, tab_column_count: usize) -> usize;
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
     fn split_whitespace_boundaries(&self) -> SplitWhitespaceBoundaries<'_>;
@@ -12,6 +14,19 @@ impl StrExt for str {
         self.chars()
             .map(|char| char.column_count(tab_column_count))
             .sum()
+    }
+
+
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        self.indentation().column_count(tab_column_count) / indent_column_count
+    }
+
+    fn indentation(&self) -> &str {
+        &self[..self
+            .char_indices()
+            .find(|(_, char)| !char.is_whitespace())
+            .map(|(index, _)| index)
+            .unwrap_or(self.len())]
     }
 
     fn graphemes(&self) -> Graphemes<'_> {
