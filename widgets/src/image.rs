@@ -57,7 +57,7 @@ live_design!{
                 let original_pos = rotate_2d_from_center(current_pos, self.rotation, self.rect_size);
 
                 // Scale the current position by the scale factor
-                let scaled_pos = (original_pos - vec2(0.5, 0.5)) / self.scale + vec2(0.5, 0.5);
+                let scaled_pos = original_pos / self.scale;
 
                 // Take pixel color from the original image
                 let color = sample2d(self.image, scaled_pos).xyzw;
@@ -71,21 +71,20 @@ live_design!{
 
                 // Debug
                 // let line_width = 0.01;
-                // if self.pos.x < line_width || self.pos.x > (1. + rot_expansion.x - line_width) || self.pos.y < line_width || self.pos.y > (1. + rot_expansion.y - line_width) {
+                // if self.pos.x < line_width || self.pos.x > (self.scale + rot_expansion.x - line_width) || self.pos.y < line_width || self.pos.y > (self.scale + rot_expansion.y - line_width) {
                 //     return #c86;
                 // }
 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
 
-                let translation_offset = vec2(self.rect_size.x * rot_expansion.x / 2.0, self.rect_size.y * rot_expansion.y / 2.0);
+                let translation_offset = vec2(self.rect_size.x * rot_expansion.x / 2.0, self.rect_size.y * self.scale * rot_expansion.y / 2.0);
                 sdf.translate(translation_offset.x, translation_offset.y);
 
                 let center = self.rect_size * 0.5;
                 sdf.rotate(self.rotation, center.x, center.y);
 
                 let scaled_size = self.rect_size * self.scale;
-                let offset = (self.rect_size - scaled_size) * 0.5;
-                sdf.box(offset.x, offset.y, scaled_size.x, scaled_size.y, 1);
+                sdf.box(0.0, 0.0, scaled_size.x, scaled_size.y, 1);
 
                 sdf.fill_premul(Pal::premul(self.get_color(rot_expansion / 2.0)));
                 return sdf.result
@@ -98,11 +97,11 @@ live_design!{
                     self.rect_pos.y - self.rect_size.y * rot_expansion.y / 2.0
                 );
 
-                let expanded_size = vec2(self.rect_size.x * (1.0 + rot_expansion.x), self.rect_size.y * (1.0 + rot_expansion.y));
+                let expanded_size = vec2(self.rect_size.x * (self.scale + rot_expansion.x), self.rect_size.y * (self.scale + rot_expansion.y));
                 let clipped: vec2 = clamp(
                     self.geom_pos * expanded_size + adjusted_pos,
                     self.draw_clip.xy,
-                    vec2(self.draw_clip.zw.x * (1.0 + rot_expansion.x), self.draw_clip.zw.y * (1.0 + rot_expansion.y))
+                    self.draw_clip.zw
                 );
 
                 self.pos = (clipped - adjusted_pos) / self.rect_size;
