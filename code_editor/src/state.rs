@@ -1,8 +1,7 @@
 use {
     crate::{
-        document, line,
-        token::{TokenInfo, TokenKind},
-        Affinity, Context, Document, Settings,
+        document, document::LineInlay, line, token::TokenInfo, Affinity, Context, Document,
+        Selection, Settings,
     },
     std::{collections::HashMap, io, path::Path},
 };
@@ -43,8 +42,10 @@ impl State {
             &view.wrap_bytes,
             &view.fold_column,
             &view.scale,
+            &editor.line_inlays,
             &editor.document_widget_inlays,
             &view.summed_heights,
+            &view.selections,
         )
     }
 
@@ -59,8 +60,10 @@ impl State {
             &mut view.wrap_bytes,
             &mut view.fold_column,
             &mut view.scale,
+            &mut editor.line_inlays,
             &mut editor.document_widget_inlays,
             &mut view.summed_heights,
+            &mut view.selections,
         )
     }
 
@@ -77,6 +80,7 @@ impl State {
                 fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
+                selections: [Selection::default()].into(),
             },
         );
         self.context(view_id).update_summed_heights();
@@ -93,16 +97,12 @@ impl State {
             .lines()
             .map(|line| line.into())
             .collect();
-        let token_infos = text
-            .iter()
-            .map(|line: &String| [TokenInfo::new(line.len(), TokenKind::Unknown)].into())
-            .collect();
         let line_count = text.len();
         self.editors.insert(
             editor_id,
             Editor {
                 text,
-                token_infos,
+                token_infos: (0..line_count).map(|_| [].into()).collect(),
                 text_inlays: (0..line_count)
                     .map(|line| {
                         if line % 2 == 0 {
@@ -118,6 +118,25 @@ impl State {
                         }
                     })
                     .collect(),
+                line_inlays: [
+                    (
+                        10,
+                        LineInlay::new("##################################################".into()),
+                    ),
+                    (
+                        20,
+                        LineInlay::new("##################################################".into()),
+                    ),
+                    (
+                        30,
+                        LineInlay::new("##################################################".into()),
+                    ),
+                    (
+                        40,
+                        LineInlay::new("##################################################".into()),
+                    ),
+                ]
+                .into(),
                 line_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
                 document_widget_inlays: [].into(),
             },
@@ -136,6 +155,7 @@ struct View {
     scale: Vec<f64>,
     wrap_bytes: Vec<Vec<usize>>,
     summed_heights: Vec<f64>,
+    selections: Vec<Selection>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -147,5 +167,6 @@ struct Editor {
     token_infos: Vec<Vec<TokenInfo>>,
     text_inlays: Vec<Vec<(usize, String)>>,
     line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
+    line_inlays: Vec<(usize, LineInlay)>,
     document_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
