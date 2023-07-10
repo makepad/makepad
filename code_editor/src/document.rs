@@ -1,12 +1,12 @@
 use {
-    crate::{line, token::TokenInfo, Affinity, Line, Selection, Settings},
+    crate::{line, token::TokenInfo, Affinity, Line, Selection, Settings, Text},
     std::slice,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Document<'a> {
     settings: &'a Settings,
-    text: &'a Vec<String>,
+    text: &'a Text,
     token_infos: &'a [Vec<TokenInfo>],
     text_inlays: &'a [Vec<(usize, String)>],
     line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
@@ -22,7 +22,7 @@ pub struct Document<'a> {
 impl<'a> Document<'a> {
     pub fn new(
         settings: &'a Settings,
-        text: &'a Vec<String>,
+        text: &'a Text,
         token_infos: &'a [Vec<TokenInfo>],
         text_inlays: &'a [Vec<(usize, String)>],
         line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
@@ -96,12 +96,12 @@ impl<'a> Document<'a> {
     }
 
     pub fn line_count(&self) -> usize {
-        self.text.len()
+        self.text.as_lines().len()
     }
 
     pub fn line(&self, line: usize) -> Line<'a> {
         Line::new(
-            &self.text[line],
+            &self.text.as_lines()[line],
             &self.token_infos[line],
             &self.text_inlays[line],
             &self.line_widget_inlays[line],
@@ -113,7 +113,7 @@ impl<'a> Document<'a> {
 
     pub fn lines(&self, start_line: usize, end_line: usize) -> Lines<'a> {
         Lines {
-            text: self.text[start_line..end_line].iter(),
+            text: self.text.as_lines()[start_line..end_line].iter(),
             token_infos: self.token_infos[start_line..end_line].iter(),
             text_inlays: self.text_inlays[start_line..end_line].iter(),
             line_widget_inlays: self.line_widget_inlays[start_line..end_line].iter(),
