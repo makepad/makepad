@@ -1,7 +1,7 @@
 use {
     crate::{
         document, document::LineInlay, line, token::TokenInfo, Affinity, Context, Document,
-        Selection, Settings,
+        Selection, Settings, Text,
     },
     std::{collections::HashMap, io, path::Path},
 };
@@ -73,7 +73,7 @@ impl State {
         let editor_id = self.open_editor(path)?;
         let view_id = ViewId(self.view_id);
         self.view_id += 1;
-        let line_count = self.editors[&editor_id].text.len();
+        let line_count = self.editors[&editor_id].text.as_lines().len();
         self.views.insert(
             view_id,
             View {
@@ -95,11 +95,8 @@ impl State {
         let editor_id = EditorId(self.editor_id);
         self.editor_id += 1;
         let bytes = fs::read(path.as_ref())?;
-        let text: Vec<_> = String::from_utf8_lossy(&bytes)
-            .lines()
-            .map(|line| line.into())
-            .collect();
-        let line_count = text.len();
+        let text: Text = String::from_utf8_lossy(&bytes).into();
+        let line_count = text.as_lines().len();
         self.editors.insert(
             editor_id,
             Editor {
@@ -165,7 +162,7 @@ struct EditorId(usize);
 
 #[derive(Clone, Debug, PartialEq)]
 struct Editor {
-    text: Vec<String>,
+    text: Text,
     token_infos: Vec<Vec<TokenInfo>>,
     text_inlays: Vec<Vec<(usize, String)>>,
     line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
