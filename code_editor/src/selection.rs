@@ -1,4 +1,4 @@
-use crate::{Affinity, Position};
+use crate::{Affinity, Length, Position};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Selection {
@@ -30,6 +30,10 @@ impl Selection {
 
     pub fn is_empty(self) -> bool {
         self.anchor == self.cursor
+    }
+
+    pub fn length(&self) -> Length {
+        self.end().0 - self.start().0
     }
 
     pub fn start(self) -> (Position, Affinity) {

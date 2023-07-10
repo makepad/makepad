@@ -1,6 +1,6 @@
 use crate::{
-    document, document::LineInlay, line, token::TokenInfo, Affinity, Document, Position, Selection,
-    Settings, Text,
+    document, document::LineInlay, line, token::TokenInfo, Affinity, Diff, Document, Position,
+    Range, Selection, Settings, Text,
 };
 
 #[derive(Debug, PartialEq)]
@@ -109,6 +109,30 @@ impl<'a> Context<'a> {
         self.update_summed_heights();
     }
 
+    pub fn replace(&mut self, replace_with: Text) {
+        use crate::edit_ops;
+
+        self.modify_text(|_, range| edit_ops::replace(range, replace_with.clone()))
+    }
+
+    pub fn enter(&mut self) {
+        use crate::edit_ops;
+
+        self.modify_text(|_, range| edit_ops::enter(range))
+    }
+
+    pub fn delete(&mut self) {
+        use crate::edit_ops;
+
+        self.modify_text(|_, range| edit_ops::delete(range))
+    }
+
+    pub fn backspace(&mut self) {
+        use crate::edit_ops;
+
+        self.modify_text(edit_ops::backspace)
+    }
+
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
         self.selections.clear();
         self.selections.push(Selection::from_cursor(cursor));
@@ -214,5 +238,77 @@ impl<'a> Context<'a> {
             }
         }
         *self.selections = selections;
+    }
+
+    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
+        use crate::diff::Strategy;
+
+        let mut composite_diff = Diff::new();
+        let mut prev_end = Position::default();
+        let mut diffed_prev_end = Position::default();
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start().0 - prev_end;
+            let diffed_start = diffed_prev_end + distance_from_prev_end;
+            let diffed_end = diffed_start + selection.length();
+            let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
+            let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
+            let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
+            self.text.apply_diff(diff.clone());
+            composite_diff = composite_diff.compose(diff);
+            prev_end = selection.end().0;
+            diffed_prev_end = diffed_end;
+            *selection = if selection.anchor <= selection.cursor {
+                Selection::new(
+                    (diffed_start, selection.start().1),
+                    (diffed_end, selection.end().1),
+                    selection.preferred_column,
+                )
+            } else {
+                Selection::new(
+                    (diffed_end, selection.end().1),
+                    (diffed_start, selection.start().1),
+                    selection.preferred_column,
+                )
+            };
+        }
+        self.update_after_modify_text(composite_diff);
+    }
+
+    fn update_after_modify_text(&mut self, diff: Diff) {
+        use crate::diff::OperationInfo;
+
+        let mut position = Position::default();
+        for operation in diff {
+            match operation.info() {
+                OperationInfo::Delete(length) => {
+                    let start_line = position.line + 1;
+                    let end_line = start_line + length.line_count;
+                    self.token_infos.drain(start_line..end_line);
+                    self.text_inlays.drain(start_line..end_line);
+                    self.line_widget_inlays.drain(start_line..end_line);
+                    self.fold_column.drain(start_line..end_line);
+                    self.scale.drain(start_line..end_line);
+                    self.summed_heights.truncate(position.line);
+                }
+                OperationInfo::Retain(length) => {
+                    position += length;
+                }
+                OperationInfo::Insert(length) => {
+                    let line = position.line + 1;
+                    let line_count = length.line_count;
+                    self.token_infos
+                        .splice(line..line, (0..line_count).map(|_| Vec::new()));
+                    self.text_inlays
+                        .splice(line..line, (0..line_count).map(|_| Vec::new()));
+                    self.line_widget_inlays
+                        .splice(line..line, (0..line_count).map(|_| Vec::new()));
+                    self.fold_column
+                        .splice(line..line, (0..line_count).map(|_| 0));
+                    self.scale.splice(line..line, (0..line_count).map(|_| 1.0));
+                    self.summed_heights.truncate(position.line);
+                }
+            }
+        }
+        self.update_summed_heights();
     }
 }
