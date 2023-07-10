@@ -232,9 +232,8 @@ fn move_to_first_row_of_next_line(
         column = preferred_column;
     }
     let next_line = position.line + 1;
-    let (byte, affinity) = document.line(next_line).row_column_to_byte_affinity(
-        (0, column),
-        document.settings().tab_column_count,
-    );
+    let (byte, affinity) = document
+        .line(next_line)
+        .row_column_to_byte_affinity((0, column), document.settings().tab_column_count);
     ((Position::new(next_line, byte), affinity), Some(column))
 }
