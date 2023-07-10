@@ -16,7 +16,6 @@ impl StrExt for str {
             .sum()
     }
 
-
     fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
         self.indentation().column_count(tab_column_count) / indent_column_count
     }

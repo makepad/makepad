@@ -56,6 +56,15 @@ live_design! {
         }
     }
 
+    TokenColors = {{TokenColors}} {
+        unknown: #808080,
+        identifier: #D4D4D4,
+        keyword: #5B9BD3,
+        number: #B6CEAA,
+        punctuator: #D4D4D4,
+        whitespace: #6E6E6E,
+    }
+
     CodeEditor = {{CodeEditor}} {
         walk: {
             width: Fill,
@@ -88,6 +97,8 @@ pub struct CodeEditor {
     draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
+    #[live]
+    token_colors: TokenColors,
     #[rust]
     viewport_rect: Rect,
     #[rust]
@@ -180,10 +191,12 @@ impl CodeEditor {
                 for line in 0..context.document().line_count() {
                     let document = context.document();
                     let settings = document.settings();
-                    if document.line(line).text().indent_level(
-                        settings.tab_column_count,
-                        settings.indent_column_count,
-                    ) >= 2 {
+                    if document
+                        .line(line)
+                        .text()
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        >= 2
+                    {
                         context.fold_line(line);
                     }
                 }
@@ -197,10 +210,12 @@ impl CodeEditor {
                 for line in 0..context.document().line_count() {
                     let document = context.document();
                     let settings = document.settings();
-                    if document.line(line).text().indent_level(
-                        settings.tab_column_count,
-                        settings.indent_column_count,
-                    ) >= 2 {
+                    if document
+                        .line(line)
+                        .text()
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        >= 2
+                    {
                         context.unfold_line(line);
                     }
                 }
@@ -223,6 +238,18 @@ impl CodeEditor {
                     } else {
                         context.set_cursor(cursor);
                     }
+                    cx.redraw_all();
+                }
+            }
+            Hit::FingerMove(FingerMoveEvent {
+                abs,
+                rect,
+                ..
+            }) => {
+                let document = state.document(view_id);
+                if let Some(cursor) = self.pick(&document, abs - rect.pos) {
+                    let mut context = state.context(view_id);
+                    context.move_cursor_to(true, cursor);
                     cx.redraw_all();
                 }
             }
@@ -260,7 +287,7 @@ impl CodeEditor {
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        use crate::{document, line, str::StrExt};
+        use crate::{document, line, str::StrExt, token::TokenKind};
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
@@ -271,6 +298,14 @@ impl CodeEditor {
                     for wrapped_element in line.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(_, token) => {
+                                self.draw_text.color = match token.kind {
+                                    TokenKind::Unknown => self.token_colors.unknown,
+                                    TokenKind::Identifier => self.token_colors.identifier,
+                                    TokenKind::Keyword => self.token_colors.keyword,
+                                    TokenKind::Number => self.token_colors.number,
+                                    TokenKind::Punctuator => self.token_colors.punctuator,
+                                    TokenKind::Whitespace => self.token_colors.whitespace,
+                                };
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
@@ -661,4 +696,20 @@ impl DrawSelection {
             self.draw_abs(cx, prev_rect);
         }
     }
+}
+
+#[derive(Live, LiveHook)]
+pub struct TokenColors {
+    #[live]
+    unknown: Vec4,
+    #[live]
+    identifier: Vec4,
+    #[live]
+    keyword: Vec4,
+    #[live]
+    number: Vec4,
+    #[live]
+    punctuator: Vec4,
+    #[live]
+    whitespace: Vec4,
 }

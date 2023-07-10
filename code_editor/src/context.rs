@@ -1,7 +1,7 @@
 use {
     crate::{
-        document, document::LineInlay, line, token::TokenInfo, Affinity, Diff, Document, Position,
-        Range, Selection, Settings, Text,
+        document, document::LineInlay, line, Affinity, Diff, Document, Position, Range, Selection,
+        Settings, Text, Tokenizer,
     },
     std::collections::HashSet,
 };
@@ -10,7 +10,7 @@ use {
 pub struct Context<'a> {
     settings: &'a mut Settings,
     text: &'a mut Text,
-    token_infos: &'a mut Vec<Vec<TokenInfo>>,
+    tokenizer: &'a mut Tokenizer,
     text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
     wrap_bytes: &'a mut Vec<Vec<usize>>,
@@ -20,6 +20,7 @@ pub struct Context<'a> {
     document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
     selections: &'a mut Vec<Selection>,
+    latest_selection_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -28,7 +29,7 @@ impl<'a> Context<'a> {
     pub fn new(
         settings: &'a mut Settings,
         text: &'a mut Text,
-        token_infos: &'a mut Vec<Vec<TokenInfo>>,
+        tokenizer: &'a mut Tokenizer,
         text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
         wrap_bytes: &'a mut Vec<Vec<usize>>,
@@ -38,13 +39,14 @@ impl<'a> Context<'a> {
         document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
         selections: &'a mut Vec<Selection>,
+        latest_selection_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
         Self {
             settings,
             text,
-            token_infos,
+            tokenizer,
             text_inlays,
             line_widget_inlays,
             wrap_bytes,
@@ -54,6 +56,7 @@ impl<'a> Context<'a> {
             document_widget_inlays,
             summed_heights,
             selections,
+            latest_selection_index,
             folding_lines,
             unfolding_lines,
         }
@@ -63,7 +66,7 @@ impl<'a> Context<'a> {
         Document::new(
             self.settings,
             self.text,
-            self.token_infos,
+            self.tokenizer,
             self.text_inlays,
             self.line_widget_inlays,
             self.wrap_bytes,
@@ -73,6 +76,7 @@ impl<'a> Context<'a> {
             self.document_widget_inlays,
             self.summed_heights,
             self.selections,
+            *self.latest_selection_index,
         )
     }
 
@@ -151,7 +155,7 @@ impl<'a> Context<'a> {
         use std::cmp::Ordering;
 
         let selection = Selection::from_cursor(cursor);
-        match self.selections.binary_search_by(|selection| {
+        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
             if selection.end() <= cursor {
                 return Ordering::Less;
             }
@@ -162,41 +166,42 @@ impl<'a> Context<'a> {
         }) {
             Ok(index) => {
                 self.selections[index] = selection;
+                index
             }
             Err(index) => {
                 self.selections.insert(index, selection);
+                index
             }
         };
     }
 
-    pub fn update_summed_heights(&mut self) {
-        use std::mem;
-
-        let start = self.summed_heights.len();
-        let mut summed_height = if start == 0 {
-            0.0
-        } else {
-            self.summed_heights[start - 1]
-        };
-        let mut summed_heights = mem::take(self.summed_heights);
-        for element in self
-            .document()
-            .elements(start, self.document().line_count())
-        {
-            match element {
-                document::Element::Line(false, line) => {
-                    summed_height += line.height();
-                    summed_heights.push(summed_height);
-                }
-                document::Element::Line(true, line) => {
-                    summed_height += line.height();
-                }
-                document::Element::Widget(_, widget) => {
-                    summed_height += widget.height;
-                }
+    pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
+        let latest_selection = &mut self.selections[*self.latest_selection_index];
+        latest_selection.cursor = cursor;
+        if !select {
+            latest_selection.anchor = cursor;
+        }
+        while *self.latest_selection_index > 0 {
+            let previous_selection_index = *self.latest_selection_index - 1;
+            let previous_selection = self.selections[previous_selection_index];
+            let latest_selection = self.selections[*self.latest_selection_index];
+            if previous_selection.should_merge(latest_selection) {
+                self.selections.remove(previous_selection_index);
+                *self.latest_selection_index -= 1;
+            } else {
+                break;
             }
         }
-        *self.summed_heights = summed_heights;
+        while *self.latest_selection_index + 1 < self.selections.len() {
+            let next_selection_index = *self.latest_selection_index + 1;
+            let latest_selection = self.selections[*self.latest_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            if latest_selection.should_merge(next_selection) {
+                self.selections.remove(next_selection_index);
+            } else {
+                break;
+            }
+        }
     }
 
     pub fn move_cursors_left(&mut self, select: bool) {
@@ -229,6 +234,36 @@ impl<'a> Context<'a> {
         self.modify_selections(select, |document, selection| {
             selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
+    }
+
+    pub fn update_summed_heights(&mut self) {
+        use std::mem;
+
+        let start = self.summed_heights.len();
+        let mut summed_height = if start == 0 {
+            0.0
+        } else {
+            self.summed_heights[start - 1]
+        };
+        let mut summed_heights = mem::take(self.summed_heights);
+        for element in self
+            .document()
+            .elements(start, self.document().line_count())
+        {
+            match element {
+                document::Element::Line(false, line) => {
+                    summed_height += line.height();
+                    summed_heights.push(summed_height);
+                }
+                document::Element::Line(true, line) => {
+                    summed_height += line.height();
+                }
+                document::Element::Widget(_, widget) => {
+                    summed_height += widget.height;
+                }
+            }
+        }
+        *self.summed_heights = summed_heights;
     }
 
     pub fn fold_line(&mut self, line_index: usize) {
@@ -330,38 +365,41 @@ impl<'a> Context<'a> {
     fn update_after_modify_text(&mut self, diff: Diff) {
         use crate::diff::OperationInfo;
 
-        let mut position = Position::default();
-        for operation in diff {
+        let mut line = 0;
+        for operation in &diff {
             match operation.info() {
                 OperationInfo::Delete(length) => {
-                    let start_line = position.line + 1;
+                    let start_line = line;
                     let end_line = start_line + length.line_count;
-                    self.token_infos.drain(start_line..end_line);
                     self.text_inlays.drain(start_line..end_line);
                     self.line_widget_inlays.drain(start_line..end_line);
+                    self.wrap_bytes.drain(start_line..end_line);
                     self.fold_column.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
-                    self.summed_heights.truncate(position.line);
+                    self.summed_heights.truncate(line);
                 }
                 OperationInfo::Retain(length) => {
-                    position += length;
+                    line += length.line_count;
                 }
                 OperationInfo::Insert(length) => {
-                    let line = position.line + 1;
+                    let next_line = line + 1;
                     let line_count = length.line_count;
-                    self.token_infos
-                        .splice(line..line, (0..line_count).map(|_| Vec::new()));
                     self.text_inlays
-                        .splice(line..line, (0..line_count).map(|_| Vec::new()));
+                        .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.line_widget_inlays
-                        .splice(line..line, (0..line_count).map(|_| Vec::new()));
+                        .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
+                    self.wrap_bytes
+                        .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.fold_column
-                        .splice(line..line, (0..line_count).map(|_| 0));
-                    self.scale.splice(line..line, (0..line_count).map(|_| 1.0));
-                    self.summed_heights.truncate(position.line);
+                        .splice(next_line..next_line, (0..line_count).map(|_| 0));
+                    self.scale
+                        .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
+                    self.summed_heights.truncate(line);
+                    line += line_count;
                 }
             }
         }
+        self.tokenizer.retokenize(&diff, &self.text);
         self.update_summed_heights();
     }
 }

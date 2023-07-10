@@ -1,9 +1,13 @@
 use {
     crate::{
-        document, document::LineInlay, line, token::TokenInfo, Affinity, Context, Document,
-        Selection, Settings, Text,
+        document, document::LineInlay, line, Affinity, Context, Document, Selection, Settings,
+        Text, Tokenizer,
     },
-    std::{collections::{HashMap, HashSet}, io, path::Path},
+    std::{
+        collections::{HashMap, HashSet},
+        io,
+        path::Path,
+    },
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -37,7 +41,7 @@ impl State {
         Document::new(
             &self.settings,
             &editor.text,
-            &editor.token_infos,
+            &editor.tokenizer,
             &editor.text_inlays,
             &editor.line_widget_inlays,
             &view.wrap_bytes,
@@ -47,6 +51,7 @@ impl State {
             &editor.document_widget_inlays,
             &view.summed_heights,
             &view.selections,
+            view.latest_selection_index,
         )
     }
 
@@ -56,7 +61,7 @@ impl State {
         Context::new(
             &mut self.settings,
             &mut editor.text,
-            &mut editor.token_infos,
+            &mut editor.tokenizer,
             &mut editor.text_inlays,
             &mut editor.line_widget_inlays,
             &mut view.wrap_bytes,
@@ -66,6 +71,7 @@ impl State {
             &mut editor.document_widget_inlays,
             &mut view.summed_heights,
             &mut view.selections,
+            &mut view.latest_selection_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -85,6 +91,7 @@ impl State {
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
                 selections: [Selection::default()].into(),
+                latest_selection_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -100,12 +107,13 @@ impl State {
         self.editor_id += 1;
         let bytes = fs::read(path.as_ref())?;
         let text: Text = String::from_utf8_lossy(&bytes).into();
+        let tokenizer = Tokenizer::new(&text);
         let line_count = text.as_lines().len();
         self.editors.insert(
             editor_id,
             Editor {
                 text,
-                token_infos: (0..line_count).map(|_| [].into()).collect(),
+                tokenizer,
                 text_inlays: (0..line_count)
                     .map(|line| {
                         if line % 2 == 0 {
@@ -159,6 +167,7 @@ struct View {
     wrap_bytes: Vec<Vec<usize>>,
     summed_heights: Vec<f64>,
     selections: Vec<Selection>,
+    latest_selection_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -169,7 +178,7 @@ struct EditorId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct Editor {
     text: Text,
-    token_infos: Vec<Vec<TokenInfo>>,
+    tokenizer: Tokenizer,
     text_inlays: Vec<Vec<(usize, String)>>,
     line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,

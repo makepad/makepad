@@ -32,6 +32,19 @@ impl Selection {
         self.anchor == self.cursor
     }
 
+    pub fn should_merge(mut self, mut other: Self) -> bool {
+        use std::mem;
+
+        if self.start() > other.start() {
+            mem::swap(&mut self, &mut other);
+        }
+        if self.is_empty() || other.is_empty() {
+            self.end() >= other.start()
+        } else {
+            self.end() > other.start()
+        }
+    }
+
     pub fn length(&self) -> Length {
         self.end().0 - self.start().0
     }
