@@ -1,5 +1,5 @@
 use {
-    crate::{Length, Position, Range},
+    crate::{Diff, Length, Position, Range},
     std::{borrow::Cow, ops::AddAssign},
 };
 
@@ -32,14 +32,11 @@ impl Text {
         let mut lines = Vec::new();
         if range.start().line == range.end().line {
             lines.push(
-                self.lines[range.start().line]
-                    [range.start().byte..range.end().byte]
-                    .to_string(),
+                self.lines[range.start().line][range.start().byte..range.end().byte].to_string(),
             );
         } else {
             lines.reserve(range.end().line - range.start().line + 1);
-            lines
-                .push(self.lines[range.start().line][range.start().byte..].to_string());
+            lines.push(self.lines[range.start().line][range.start().byte..].to_string());
             lines.extend(
                 self.lines[range.start().line + 1..range.end().line]
                     .iter()
@@ -73,10 +70,8 @@ impl Text {
 
     pub fn insert(&mut self, position: Position, mut text: Self) {
         if text.length().line_count == 0 {
-            self.lines[position.line].replace_range(
-                position.byte..position.byte,
-                text.lines.first().unwrap(),
-            );
+            self.lines[position.line]
+                .replace_range(position.byte..position.byte, text.lines.first().unwrap());
         } else {
             text.lines
                 .first_mut()
@@ -95,19 +90,32 @@ impl Text {
         use std::iter;
 
         if length.line_count == 0 {
-            self.lines[position.line].replace_range(
-                position.byte..position.byte + length.byte_count,
-                "",
-            );
+            self.lines[position.line]
+                .replace_range(position.byte..position.byte + length.byte_count, "");
         } else {
             let mut line = self.lines[position.line][..position.byte].to_string();
-            line.push_str(
-                &self.lines[position.line + length.line_count][length.byte_count..],
-            );
+            line.push_str(&self.lines[position.line + length.line_count][length.byte_count..]);
             self.lines.splice(
                 position.line..position.line + length.line_count + 1,
                 iter::once(line),
             );
+        }
+    }
+
+    pub fn apply_diff(&mut self, diff: Diff) {
+        use super::diff::Operation;
+
+        let mut position = Position::default();
+        for operation in diff {
+            match operation {
+                Operation::Delete(length) => self.delete(position, length),
+                Operation::Retain(length) => position += length,
+                Operation::Insert(text) => {
+                    let length = text.length();
+                    self.insert(position, text);
+                    position += length;
+                }
+            }
         }
     }
 }
@@ -128,6 +136,17 @@ impl Default for Text {
     fn default() -> Self {
         Self {
             lines: vec![String::new()],
+        }
+    }
+}
+
+impl From<char> for Text {
+    fn from(char: char) -> Self {
+        Self {
+            lines: match char {
+                '\n' | '\r' => vec![String::new(), String::new()],
+                _ => vec![char.into()],
+            },
         }
     }
 }
