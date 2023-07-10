@@ -146,16 +146,11 @@ impl<'a> Line<'a> {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_byte = byte + grapheme.len();
                         let next_column = current_column + grapheme.column_count(tab_column_count);
-                        let mid_column = (current_column + next_column) / 2;
-                        if (current_column..mid_column).contains(&column) {
+                        if (current_column..next_column).contains(&column) {
                             return (byte, Affinity::After);
                         }
-                        if (mid_column..next_column).contains(&column) {
-                            return (next_byte, Affinity::Before);
-                        }
-                        byte = next_byte;
+                        byte = byte + grapheme.len();
                         current_column = next_column;
                     }
                 }

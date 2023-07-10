@@ -35,6 +35,7 @@ impl State {
         let view = &self.views[&view_id];
         let editor = &self.editors[&view.editor_id];
         Document::new(
+            &self.settings,
             &editor.text,
             &editor.token_infos,
             &editor.text_inlays,
@@ -53,6 +54,7 @@ impl State {
         let view = self.views.get_mut(&view_id).unwrap();
         let editor = self.editors.get_mut(&view.editor_id).unwrap();
         Context::new(
+            &mut self.settings,
             &mut editor.text,
             &mut editor.token_infos,
             &mut editor.text_inlays,
