@@ -266,7 +266,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize) {
+    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
+        self.fold_column[line_index] = fold_column;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
