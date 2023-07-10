@@ -8,7 +8,7 @@ use {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Line<'a> {
-    text: &'a str,
+    pub text: &'a str,
     token_infos: &'a [TokenInfo],
     text_inlays: &'a [(usize, String)],
     widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -88,86 +88,90 @@ impl<'a> Line<'a> {
 
     pub fn byte_affinity_to_row_column(
         &self,
-        byte: usize,
-        affinity: Affinity,
+        (byte, affinity): (usize, Affinity),
         tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
-        let mut current_row = 0;
-        let mut current_column = 0;
+        let mut row = 0;
+        let mut column = 0;
         if byte == current_byte && affinity == Affinity::Before {
-            return (current_row, current_column);
+            return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(is_inlay, token) => {
                     if is_inlay {
-                        current_column += token.text.column_count(tab_column_count);
+                        column += token.text.column_count(tab_column_count);
                     } else {
                         for grapheme in token.text.graphemes() {
                             if byte == current_byte && affinity == Affinity::After {
-                                return (current_row, current_column);
+                                return (row, column);
                             }
                             current_byte += grapheme.len();
-                            current_column += grapheme.column_count(tab_column_count);
+                            column += grapheme.column_count(tab_column_count);
                             if byte == current_byte && affinity == Affinity::Before {
-                                return (current_row, current_column);
+                                return (row, column);
                             }
                         }
                     }
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_column += widget.column_count;
+                    column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    current_column += 1;
-                    current_row = 0;
+                    column += 1;
+                    row = 0;
                 }
             }
         }
         if byte == current_byte && affinity == Affinity::After {
-            return (current_row, current_column);
+            return (row, column);
         }
         panic!()
     }
 
     pub fn row_column_to_byte_affinity(
         &self,
-        row: usize,
-        column: usize,
+        (row, column): (usize, usize),
         tab_column_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
-        let mut current_byte = 0;
+        let mut byte = 0;
         let mut current_row = 0;
         let mut current_column = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
-                WrappedElement::Token(_, token) => {
+                WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let column_count = grapheme.column_count(tab_column_count);
-                        if (current_column..current_column + column_count / 2).contains(&column) {
-                            return (current_byte, Affinity::After);
+                        let next_byte = byte + grapheme.len();
+                        let next_column = current_column + grapheme.column_count(tab_column_count);
+                        let mid_column = (current_column + next_column) / 2;
+                        if (current_column..mid_column).contains(&column) {
+                            return (byte, Affinity::After);
                         }
-                        current_byte += grapheme.len();
-                        current_column += column_count;
-                        if (current_column - column_count / 2..current_column).contains(&column) {
-                            return (current_byte, Affinity::Before);
+                        if (mid_column..next_column).contains(&column) {
+                            return (next_byte, Affinity::Before);
                         }
+                        byte = next_byte;
+                        current_column = next_column;
                     }
                 }
-                WrappedElement::Widget(affinity, widget) => {
-                    if (current_column..current_column + widget.column_count).contains(&column) {
-                        return (current_byte, affinity);
+                WrappedElement::Token(true, token) => {
+                    let next_column = column + token.text.column_count(tab_column_count);
+                    if (current_column..next_column).contains(&column) {
+                        return (byte, Affinity::Before);
                     }
+                    current_column = next_column;
+                }
+                WrappedElement::Widget(_, widget) => {
                     current_column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     if current_column == column {
-                        return (current_byte, Affinity::Before);
+                        return (byte, Affinity::Before);
                     }
                     current_column += 1;
                     current_row = 0;
@@ -175,9 +179,13 @@ impl<'a> Line<'a> {
             }
         }
         if current_row == row {
-            return (current_byte, Affinity::After);
+            return (byte, Affinity::After);
         }
         panic!()
+    }
+
+    pub fn text(&self) -> &'a str {
+        self.text
     }
 
     pub fn tokens(&self) -> Tokens<'a> {
@@ -219,10 +227,21 @@ impl<'a> Iterator for Tokens<'a> {
     type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let token_info = self.token_infos.next()?;
-        let (text_0, text_1) = self.text.split_at(token_info.byte_count);
-        self.text = text_1;
-        Some(Token::new(text_0, token_info.kind))
+        Some(match self.token_infos.next() {
+            Some(token_info) => {
+                let (text_0, text_1) = self.text.split_at(token_info.byte_count);
+                self.text = text_1;
+                Token::new(text_0, token_info.kind)
+            }
+            None => {
+                if self.text.is_empty() {
+                    return None;
+                }
+                let text = self.text;
+                self.text = "";
+                Token::new(text, TokenKind::Unknown)
+            }
+        })
     }
 }
 

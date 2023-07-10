@@ -1,5 +1,5 @@
 use {
-    crate::{line, token::TokenInfo, Affinity, Line},
+    crate::{line, token::TokenInfo, Affinity, Line, Selection},
     std::slice,
 };
 
@@ -12,8 +12,10 @@ pub struct Document<'a> {
     wrap_bytes: &'a [Vec<usize>],
     fold_column: &'a [usize],
     scale: &'a [f64],
+    line_inlays: &'a [(usize, LineInlay)],
     widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
+    selections: &'a [Selection],
 }
 
 impl<'a> Document<'a> {
@@ -25,8 +27,10 @@ impl<'a> Document<'a> {
         wrap_bytes: &'a [Vec<usize>],
         fold_column: &'a [usize],
         scale: &'a [f64],
+        line_inlays: &'a [(usize, LineInlay)],
         widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
+        selections: &'a [Selection],
     ) -> Self {
         Self {
             text,
@@ -36,8 +40,10 @@ impl<'a> Document<'a> {
             wrap_bytes,
             fold_column,
             scale,
+            line_inlays,
             widget_inlays,
             summed_heights,
+            selections,
         }
     }
 
@@ -110,9 +116,22 @@ impl<'a> Document<'a> {
         }
     }
 
+    pub fn line_y(&self, line: usize) -> f64 {
+        if line == 0 {
+            0.0
+        } else {
+            self.summed_heights[line - 1]
+        }
+    }
+
     pub fn elements(&self, start_line: usize, end_line: usize) -> Elements<'a> {
         Elements {
             lines: self.lines(start_line, end_line),
+            line_inlays: &self.line_inlays[self
+                .line_inlays
+                .iter()
+                .position(|(line, _)| *line >= start_line)
+                .unwrap_or(self.line_inlays.len())..],
             widget_inlays: &self.widget_inlays[self
                 .widget_inlays
                 .iter()
@@ -120,6 +139,10 @@ impl<'a> Document<'a> {
                 .unwrap_or(self.widget_inlays.len())..],
             line: start_line,
         }
+    }
+
+    pub fn selections(&self) -> &'a [Selection] {
+        self.selections
     }
 }
 
@@ -153,6 +176,7 @@ impl<'a> Iterator for Lines<'a> {
 #[derive(Clone, Debug)]
 pub struct Elements<'a> {
     lines: Lines<'a>,
+    line_inlays: &'a [(usize, LineInlay)],
     widget_inlays: &'a [((usize, Affinity), Widget)],
     line: usize,
 }
@@ -164,8 +188,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, bias), _)| {
-                *line == self.line && *bias == Affinity::Before
+            .map_or(false, |((line, affinity), _)| {
+                *line == self.line && *affinity == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -173,10 +197,19 @@ impl<'a> Iterator for Elements<'a> {
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
+            .line_inlays
+            .first()
+            .map_or(false, |(line, _)| *line == self.line)
+        {
+            let ((_, line), line_inlays) = self.line_inlays.split_first().unwrap();
+            self.line_inlays = line_inlays;
+            return Some(Element::Line(true, line.as_line()));
+        }
+        if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, bias), _)| {
-                *line == self.line && *bias == Affinity::After
+            .map_or(false, |((line, affinity), _)| {
+                *line == self.line && *affinity == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -193,6 +226,21 @@ impl<'a> Iterator for Elements<'a> {
 pub enum Element<'a> {
     Line(bool, Line<'a>),
     Widget(Affinity, Widget),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct LineInlay {
+    text: String,
+}
+
+impl LineInlay {
+    pub fn new(text: String) -> Self {
+        Self { text }
+    }
+
+    pub fn as_line(&self) -> Line<'_> {
+        Line::new(&self.text, &[], &[], &[], &[], 0, 1.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
