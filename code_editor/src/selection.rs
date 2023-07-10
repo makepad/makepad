@@ -4,17 +4,27 @@ use crate::{Affinity, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
+    pub preferred_column: Option<usize>,
 }
 
 impl Selection {
-    pub fn new(anchor: (Position, Affinity), cursor: (Position, Affinity)) -> Self {
-        Self { anchor, cursor }
+    pub fn new(
+        anchor: (Position, Affinity),
+        cursor: (Position, Affinity),
+        preferred_column: Option<usize>,
+    ) -> Self {
+        Self {
+            anchor,
+            cursor,
+            preferred_column,
+        }
     }
 
     pub fn from_cursor(cursor: (Position, Affinity)) -> Self {
         Self {
             anchor: cursor,
             cursor,
+            preferred_column: None,
         }
     }
 
@@ -39,9 +49,13 @@ impl Selection {
 
     pub fn update_cursor(
         self,
-        f: impl FnOnce((Position, Affinity)) -> (Position, Affinity),
+        f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let cursor = f(self.cursor);
-        Self { cursor, ..self }
+        let (cursor, column) = f(self.cursor, self.preferred_column);
+        Self {
+            cursor,
+            preferred_column: column,
+            ..self
+        }
     }
 }
