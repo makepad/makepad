@@ -1,12 +1,12 @@
 use crate::{
     document, document::LineInlay, line, token::TokenInfo, Affinity, Document, Position, Selection,
-    Settings,
+    Settings, Text,
 };
 
 #[derive(Debug, PartialEq)]
 pub struct Context<'a> {
     settings: &'a mut Settings,
-    text: &'a mut Vec<String>,
+    text: &'a mut Text,
     token_infos: &'a mut Vec<Vec<TokenInfo>>,
     text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
@@ -22,7 +22,7 @@ pub struct Context<'a> {
 impl<'a> Context<'a> {
     pub fn new(
         settings: &'a mut Settings,
-        text: &'a mut Vec<String>,
+        text: &'a mut Text,
         token_infos: &'a mut Vec<Vec<TokenInfo>>,
         text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
@@ -68,10 +68,7 @@ impl<'a> Context<'a> {
     }
 
     pub fn wrap_lines(&mut self, max_column: usize) {
-        use {
-            crate::str::StrExt,
-            std::mem,
-        };
+        use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
             let old_wrap_byte_count = self.wrap_bytes[line].len();

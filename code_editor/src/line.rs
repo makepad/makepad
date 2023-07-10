@@ -8,7 +8,7 @@ use {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Line<'a> {
-    pub text: &'a str,
+    text: &'a str,
     token_infos: &'a [TokenInfo],
     text_inlays: &'a [(usize, String)],
     widget_inlays: &'a [((usize, Affinity), Widget)],
