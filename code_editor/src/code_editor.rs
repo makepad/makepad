@@ -197,7 +197,7 @@ impl CodeEditor {
                         .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
-                        context.fold_line(line);
+                        context.fold_line(line, 2 * settings.indent_column_count);
                     }
                 }
                 cx.redraw_all();
