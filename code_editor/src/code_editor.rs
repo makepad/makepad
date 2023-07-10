@@ -108,6 +108,8 @@ impl CodeEditor {
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, state: &mut State, view_id: ViewId, event: &Event) {
+        use crate::str::StrExt;
+
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
         });
@@ -170,6 +172,40 @@ impl CodeEditor {
                 state.context(view_id).move_cursors_down(*shift);
                 cx.redraw_all();
             }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Escape,
+                ..
+            }) => {
+                let mut context = state.context(view_id);
+                for line in 0..context.document().line_count() {
+                    let document = context.document();
+                    let settings = document.settings();
+                    if document.line(line).text().indent_level(
+                        settings.tab_column_count,
+                        settings.indent_column_count,
+                    ) >= 2 {
+                        context.fold_line(line);
+                    }
+                }
+                cx.redraw_all();
+            }
+            Event::KeyUp(KeyEvent {
+                key_code: KeyCode::Escape,
+                ..
+            }) => {
+                let mut context = state.context(view_id);
+                for line in 0..context.document().line_count() {
+                    let document = context.document();
+                    let settings = document.settings();
+                    if document.line(line).text().indent_level(
+                        settings.tab_column_count,
+                        settings.indent_column_count,
+                    ) >= 2 {
+                        context.unfold_line(line);
+                    }
+                }
+                cx.redraw_all();
+            }
             _ => {}
         }
         match event.hits(cx, self.scroll_bars.area()) {
@@ -218,6 +254,9 @@ impl CodeEditor {
             document.height() * self.cell_size.y,
         );
         self.scroll_bars.end(cx);
+        if context.update_fold_animations() {
+            cx.redraw_all();
+        }
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {

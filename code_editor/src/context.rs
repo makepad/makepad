@@ -1,6 +1,9 @@
-use crate::{
-    document, document::LineInlay, line, token::TokenInfo, Affinity, Diff, Document, Position,
-    Range, Selection, Settings, Text,
+use {
+    crate::{
+        document, document::LineInlay, line, token::TokenInfo, Affinity, Diff, Document, Position,
+        Range, Selection, Settings, Text,
+    },
+    std::collections::HashSet,
 };
 
 #[derive(Debug, PartialEq)]
@@ -17,6 +20,8 @@ pub struct Context<'a> {
     document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
     selections: &'a mut Vec<Selection>,
+    folding_lines: &'a mut HashSet<usize>,
+    unfolding_lines: &'a mut HashSet<usize>,
 }
 
 impl<'a> Context<'a> {
@@ -33,6 +38,8 @@ impl<'a> Context<'a> {
         document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
         selections: &'a mut Vec<Selection>,
+        folding_lines: &'a mut HashSet<usize>,
+        unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
         Self {
             settings,
@@ -47,6 +54,8 @@ impl<'a> Context<'a> {
             document_widget_inlays,
             summed_heights,
             selections,
+            folding_lines,
+            unfolding_lines,
         }
     }
 
@@ -160,6 +169,36 @@ impl<'a> Context<'a> {
         };
     }
 
+    pub fn update_summed_heights(&mut self) {
+        use std::mem;
+
+        let start = self.summed_heights.len();
+        let mut summed_height = if start == 0 {
+            0.0
+        } else {
+            self.summed_heights[start - 1]
+        };
+        let mut summed_heights = mem::take(self.summed_heights);
+        for element in self
+            .document()
+            .elements(start, self.document().line_count())
+        {
+            match element {
+                document::Element::Line(false, line) => {
+                    summed_height += line.height();
+                    summed_heights.push(summed_height);
+                }
+                document::Element::Line(true, line) => {
+                    summed_height += line.height();
+                }
+                document::Element::Widget(_, widget) => {
+                    summed_height += widget.height;
+                }
+            }
+        }
+        *self.summed_heights = summed_heights;
+    }
+
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
@@ -192,34 +231,48 @@ impl<'a> Context<'a> {
         });
     }
 
-    pub fn update_summed_heights(&mut self) {
+    pub fn fold_line(&mut self, line_index: usize) {
+        self.unfolding_lines.remove(&line_index);
+        self.folding_lines.insert(line_index);
+    }
+
+    pub fn unfold_line(&mut self, line_index: usize) {
+        self.folding_lines.remove(&line_index);
+        self.unfolding_lines.insert(line_index);
+    }
+
+    pub fn update_fold_animations(&mut self) -> bool {
         use std::mem;
 
-        let start = self.summed_heights.len();
-        let mut summed_height = if start == 0 {
-            0.0
-        } else {
-            self.summed_heights[start - 1]
-        };
-        let mut summed_heights = mem::take(self.summed_heights);
-        for element in self
-            .document()
-            .elements(start, self.document().line_count())
-        {
-            match element {
-                document::Element::Line(false, line) => {
-                    summed_height += line.height();
-                    summed_heights.push(summed_height);
-                }
-                document::Element::Line(true, line) => {
-                    summed_height += line.height();
-                }
-                document::Element::Widget(_, widget) => {
-                    summed_height += widget.height;
-                }
-            }
+        if self.folding_lines.is_empty() && self.unfolding_lines.is_empty() {
+            return false;
         }
-        *self.summed_heights = summed_heights;
+        let folding_lines = mem::take(self.folding_lines);
+        let mut new_folding_lines = HashSet::new();
+        for line in folding_lines {
+            self.scale[line] *= 0.9;
+            if self.scale[line] < 0.001 {
+                self.scale[line] = 0.0;
+            } else {
+                new_folding_lines.insert(line);
+            }
+            self.summed_heights.truncate(line);
+        }
+        *self.folding_lines = new_folding_lines;
+        let unfolding_lines = mem::take(self.unfolding_lines);
+        let mut new_unfolding_lines = HashSet::new();
+        for line in unfolding_lines {
+            self.scale[line] = 1.0 - 0.9 * (1.0 - self.scale[line]);
+            if self.scale[line] > 1.0 - 0.001 {
+                self.scale[line] = 1.0;
+            } else {
+                new_unfolding_lines.insert(line);
+            }
+            self.summed_heights.truncate(line);
+        }
+        *self.unfolding_lines = new_unfolding_lines;
+        self.update_summed_heights();
+        true
     }
 
     fn modify_selections(
