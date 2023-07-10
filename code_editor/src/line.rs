@@ -101,28 +101,27 @@ impl<'a> Line<'a> {
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
-                WrappedElement::Token(is_inlay, token) => {
-                    if is_inlay {
-                        column += token.text.column_count(tab_column_count);
-                    } else {
-                        for grapheme in token.text.graphemes() {
-                            if byte == current_byte && affinity == Affinity::After {
-                                return (row, column);
-                            }
-                            current_byte += grapheme.len();
-                            column += grapheme.column_count(tab_column_count);
-                            if byte == current_byte && affinity == Affinity::Before {
-                                return (row, column);
-                            }
+                WrappedElement::Token(false, token) => {
+                    for grapheme in token.text.graphemes() {
+                        if byte == current_byte && affinity == Affinity::After {
+                            return (row, column);
+                        }
+                        current_byte += grapheme.len();
+                        column += grapheme.column_count(tab_column_count);
+                        if byte == current_byte && affinity == Affinity::Before {
+                            return (row, column);
                         }
                     }
+                }
+                WrappedElement::Token(true, token) => {
+                    column += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
                     column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    column += 1;
-                    row = 0;
+                    row += 1;
+                    column = 0;
                 }
             }
         }
@@ -147,7 +146,7 @@ impl<'a> Line<'a> {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         let next_column = current_column + grapheme.column_count(tab_column_count);
-                        if (current_column..next_column).contains(&column) {
+                        if current_row == row && (current_column..next_column).contains(&column) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
@@ -155,8 +154,8 @@ impl<'a> Line<'a> {
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_column = column + token.text.column_count(tab_column_count);
-                    if (current_column..next_column).contains(&column) {
+                    let next_column = current_column + token.text.column_count(tab_column_count);
+                    if current_row == row && (current_column..next_column).contains(&column) {
                         return (byte, Affinity::Before);
                     }
                     current_column = next_column;
@@ -165,11 +164,11 @@ impl<'a> Line<'a> {
                     current_column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    if current_column == column {
+                    if current_row == row {
                         return (byte, Affinity::Before);
                     }
-                    current_column += 1;
-                    current_row = 0;
+                    current_row += 1;
+                    current_column = 0;
                 }
             }
         }
