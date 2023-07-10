@@ -16,9 +16,10 @@ pub mod state;
 pub mod str;
 pub mod text;
 pub mod token;
+pub mod tokenizer;
 
 pub use crate::{
     affinity::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
     length::Length, line::Line, position::Position, range::Range, selection::Selection,
-    settings::Settings, state::State, text::Text, token::Token,
+    settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
