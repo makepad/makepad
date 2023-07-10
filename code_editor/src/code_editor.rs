@@ -175,6 +175,7 @@ impl CodeEditor {
         };
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+        context.wrap_lines((self.viewport_rect.size.x / self.cell_size.x) as usize);
         let document = context.document();
         self.start_line =
             document.find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);

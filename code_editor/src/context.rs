@@ -67,6 +67,51 @@ impl<'a> Context<'a> {
         )
     }
 
+    pub fn wrap_lines(&mut self, max_column: usize) {
+        use {
+            crate::str::StrExt,
+            std::mem,
+        };
+
+        for line in 0..self.document().line_count() {
+            let old_wrap_byte_count = self.wrap_bytes[line].len();
+            self.wrap_bytes[line].clear();
+            let mut wrap_bytes = mem::take(&mut self.wrap_bytes[line]);
+            let mut byte = 0;
+            let mut column = 0;
+            let document = self.document();
+            for element in document.line(line).elements() {
+                match element {
+                    line::Element::Token(_, token) => {
+                        for string in token.text.split_whitespace_boundaries() {
+                            let mut next_column =
+                                column + string.column_count(document.settings().tab_column_count);
+                            if next_column > max_column {
+                                next_column = 0;
+                                wrap_bytes.push(byte);
+                            }
+                            byte += string.len();
+                            column = next_column;
+                        }
+                    }
+                    line::Element::Widget(_, widget) => {
+                        let mut next_column = column + widget.column_count;
+                        if next_column > max_column {
+                            next_column = 0;
+                            wrap_bytes.push(byte);
+                        }
+                        column = next_column;
+                    }
+                }
+            }
+            self.wrap_bytes[line] = wrap_bytes;
+            if self.wrap_bytes[line].len() != old_wrap_byte_count {
+                self.summed_heights.truncate(line);
+            }
+        }
+        self.update_summed_heights();
+    }
+
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
         self.selections.clear();
         self.selections.push(Selection::from_cursor(cursor));
