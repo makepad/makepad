@@ -1,5 +1,5 @@
 use {
-    crate::{line, token::TokenInfo, Affinity, Line, Selection, Settings, Text},
+    crate::{line, token::TokenInfo, Affinity, Line, Selection, Settings, Text, Tokenizer},
     std::slice,
 };
 
@@ -7,7 +7,7 @@ use {
 pub struct Document<'a> {
     settings: &'a Settings,
     text: &'a Text,
-    token_infos: &'a [Vec<TokenInfo>],
+    tokenizer: &'a Tokenizer,
     text_inlays: &'a [Vec<(usize, String)>],
     line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
     wrap_bytes: &'a [Vec<usize>],
@@ -17,13 +17,14 @@ pub struct Document<'a> {
     widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
     selections: &'a [Selection],
+    latest_selection_index: usize,
 }
 
 impl<'a> Document<'a> {
     pub fn new(
         settings: &'a Settings,
         text: &'a Text,
-        token_infos: &'a [Vec<TokenInfo>],
+        tokenizer: &'a Tokenizer,
         text_inlays: &'a [Vec<(usize, String)>],
         line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
         wrap_bytes: &'a [Vec<usize>],
@@ -33,11 +34,12 @@ impl<'a> Document<'a> {
         widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
         selections: &'a [Selection],
+        latest_selection_index: usize,
     ) -> Self {
         Self {
             settings,
             text,
-            token_infos,
+            tokenizer,
             text_inlays,
             line_widget_inlays,
             wrap_bytes,
@@ -47,6 +49,7 @@ impl<'a> Document<'a> {
             widget_inlays,
             summed_heights,
             selections,
+            latest_selection_index,
         }
     }
 
@@ -102,7 +105,7 @@ impl<'a> Document<'a> {
     pub fn line(&self, line: usize) -> Line<'a> {
         Line::new(
             &self.text.as_lines()[line],
-            &self.token_infos[line],
+            &self.tokenizer.token_infos()[line],
             &self.text_inlays[line],
             &self.line_widget_inlays[line],
             &self.wrap_bytes[line],
@@ -114,7 +117,7 @@ impl<'a> Document<'a> {
     pub fn lines(&self, start_line: usize, end_line: usize) -> Lines<'a> {
         Lines {
             text: self.text.as_lines()[start_line..end_line].iter(),
-            token_infos: self.token_infos[start_line..end_line].iter(),
+            token_infos: self.tokenizer.token_infos()[start_line..end_line].iter(),
             text_inlays: self.text_inlays[start_line..end_line].iter(),
             line_widget_inlays: self.line_widget_inlays[start_line..end_line].iter(),
             wrap_bytes: self.wrap_bytes[start_line..end_line].iter(),
@@ -150,6 +153,10 @@ impl<'a> Document<'a> {
 
     pub fn selections(&self) -> &'a [Selection] {
         self.selections
+    }
+
+    pub fn latest_selection_index(&self) -> usize {
+        self.latest_selection_index
     }
 }
 
