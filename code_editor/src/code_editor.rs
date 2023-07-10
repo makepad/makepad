@@ -111,13 +111,38 @@ impl CodeEditor {
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
         });
-        match *event {
+        match event {
+            Event::TextInput(TextInputEvent { input, .. }) => {
+                state.context(view_id).replace(input.into());
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                ..
+            }) => {
+                state.context(view_id).enter();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Delete,
+                ..
+            }) => {
+                state.context(view_id).delete();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                state.context(view_id).backspace();
+                cx.redraw_all();
+            }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_left(shift);
+                state.context(view_id).move_cursors_left(*shift);
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
@@ -125,7 +150,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_right(shift);
+                state.context(view_id).move_cursors_right(*shift);
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
@@ -133,7 +158,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_up(shift);
+                state.context(view_id).move_cursors_up(*shift);
                 cx.redraw_all();
             }
 
@@ -142,7 +167,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_down(shift);
+                state.context(view_id).move_cursors_down(*shift);
                 cx.redraw_all();
             }
             _ => {}
@@ -154,7 +179,8 @@ impl CodeEditor {
                 modifiers: KeyModifiers { alt, .. },
                 ..
             }) => {
-                if let Some(cursor) = self.pick(state, view_id, abs - rect.pos) {
+                let document = state.document(view_id);
+                if let Some(cursor) = self.pick(&document, abs - rect.pos) {
                     let mut context = state.context(view_id);
                     if alt {
                         context.insert_cursor(cursor);
@@ -261,11 +287,10 @@ impl CodeEditor {
         .draw_selections(cx, document)
     }
 
-    fn pick(&self, state: &State, view_id: ViewId, pos: DVec2) -> Option<(Position, Affinity)> {
+    fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
         use crate::{document, line, str::StrExt};
 
         let pos = (pos + self.viewport_rect.pos) / self.cell_size;
-        let document = state.document(view_id);
         let mut line = document.find_first_line_ending_after_y(pos.y);
         let mut y = document.line_y(line);
         for element in document.elements(line, line + 1) {
@@ -279,7 +304,8 @@ impl CodeEditor {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
                                     let next_column = column
-                                        + grapheme.column_count(state.settings().tab_column_count);
+                                        + grapheme
+                                            .column_count(document.settings().tab_column_count);
                                     let next_y = y + line_ref.scale();
                                     let x = line_ref.column_to_x(column);
                                     let next_x = line_ref.column_to_x(next_column);
@@ -304,7 +330,9 @@ impl CodeEditor {
                             }
                             line::WrappedElement::Token(true, token) => {
                                 let next_column = column
-                                    + token.text.column_count(state.settings().tab_column_count);
+                                    + token
+                                        .text
+                                        .column_count(document.settings().tab_column_count);
                                 let x = line_ref.column_to_x(column);
                                 let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
