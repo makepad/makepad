@@ -57,7 +57,7 @@ struct State {
 impl Default for State {
     fn default() -> Self {
         let mut code_editor = makepad_code_editor::State::new();
-        let view_id = code_editor.open_view("code_editor/src/line.rs").unwrap();
+        let view_id = code_editor.open_view("code_editor/test.rs").unwrap();
         Self {
             code_editor,
             view_id,
