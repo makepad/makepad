@@ -61,6 +61,7 @@ impl State {
         let editor = self.editors.get_mut(&view.editor_id).unwrap();
         Context::new(
             &mut self.settings,
+            &mut view.max_column,
             &mut editor.text,
             &mut editor.tokenizer,
             &mut editor.text_inlays,
@@ -88,6 +89,7 @@ impl State {
             view_id,
             View {
                 editor_id,
+                max_column: None,
                 wrap_bytes: (0..line_count).map(|_| [].into()).collect(),
                 start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
                 fold_column: (0..line_count).map(|_| 0).collect(),
@@ -164,6 +166,7 @@ pub struct ViewId(usize);
 
 #[derive(Clone, Debug, PartialEq)]
 struct View {
+    max_column: Option<usize>,
     editor_id: EditorId,
     fold_column: Vec<usize>,
     scale: Vec<f64>,
