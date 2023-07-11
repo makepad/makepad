@@ -13,6 +13,7 @@ pub struct Line<'a> {
     text_inlays: &'a [(usize, String)],
     widget_inlays: &'a [((usize, Affinity), Widget)],
     wrap_bytes: &'a [usize],
+    start_column_after_wrap: usize,
     fold_column: usize,
     scale: f64,
 }
@@ -24,6 +25,7 @@ impl<'a> Line<'a> {
         text_inlays: &'a [(usize, String)],
         widget_inlays: &'a [((usize, Affinity), Widget)],
         wrap_bytes: &'a [usize],
+        start_column_after_wrap: usize,
         fold_column: usize,
         scale: f64,
     ) -> Self {
@@ -33,6 +35,7 @@ impl<'a> Line<'a> {
             text_inlays,
             widget_inlays,
             wrap_bytes,
+            start_column_after_wrap,
             fold_column,
             scale,
         }
@@ -53,7 +56,7 @@ impl<'a> Line<'a> {
                 }
                 WrappedElement::Wrap => {
                     max_summed_column_count = max_summed_column_count.max(summed_column_count);
-                    summed_column_count = 0;
+                    summed_column_count = self.start_column_after_wrap();
                 }
             }
         }
@@ -70,20 +73,6 @@ impl<'a> Line<'a> {
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
-    }
-
-    pub fn fold_column(&self) -> usize {
-        self.fold_column
-    }
-
-    pub fn scale(&self) -> f64 {
-        self.scale
-    }
-
-    pub fn column_to_x(&self, column: usize) -> f64 {
-        let column_count_before_fold_column = column.min(self.fold_column);
-        let column_count_after_fold_column = column - column_count_before_fold_column;
-        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
     }
 
     pub fn byte_affinity_to_row_column(
@@ -121,7 +110,7 @@ impl<'a> Line<'a> {
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    column = 0;
+                    column = self.start_column_after_wrap();
                 }
             }
         }
@@ -168,7 +157,7 @@ impl<'a> Line<'a> {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_column = 0;
+                    current_column = self.start_column_after_wrap();
                 }
             }
         }
@@ -176,6 +165,12 @@ impl<'a> Line<'a> {
             return (byte, Affinity::After);
         }
         panic!()
+    }
+
+    pub fn column_to_x(&self, column: usize) -> f64 {
+        let column_count_before_fold_column = column.min(self.fold_column);
+        let column_count_after_fold_column = column - column_count_before_fold_column;
+        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -208,6 +203,18 @@ impl<'a> Line<'a> {
             wrap_bytes: self.wrap_bytes,
             byte: 0,
         }
+    }
+
+    pub fn start_column_after_wrap(&self) -> usize {
+        self.start_column_after_wrap
+    }
+
+    pub fn fold_column(&self) -> usize {
+        self.fold_column
+    }
+
+    pub fn scale(&self) -> f64 {
+        self.scale
     }
 }
 

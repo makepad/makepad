@@ -176,11 +176,12 @@ impl InitialState {
         (
             State::Initial(InitialState),
             match &cursor.string[start..end] {
-                "Self" | "as" | "async" | "await" | "break" | "const" | "continue" | "crate"
-                | "dyn" | "else" | "enum" | "extern" | "false" | "fn" | "for" | "if" | "impl"
-                | "in" | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref"
-                | "return" | "self" | "static" | "struct" | "super" | "trait" | "true" | "type"
-                | "unsafe" | "use" | "where" | "while" => TokenKind::Keyword,
+                "else" | "if" | "match" | "return" => TokenKind::BranchKeyword,
+                "break" | "continue" | "for" | "loop" | "while" => TokenKind::LoopKeyword,
+                "Self" | "as" | "async" | "await" | "const" | "crate" | "dyn" | "enum"
+                | "extern" | "false" | "fn" | "impl" | "in" | "let" | "mod" | "move" | "mut"
+                | "pub" | "ref" | "self" | "static" | "struct" | "super" | "trait" | "true"
+                | "type" | "unsafe" | "use" | "where" => TokenKind::OtherKeyword,
                 _ => TokenKind::Identifier,
             },
         )
