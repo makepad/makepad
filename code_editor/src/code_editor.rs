@@ -58,9 +58,11 @@ live_design! {
 
     TokenColors = {{TokenColors}} {
         unknown: #808080,
+        branch_keyword: #C485BE,
         identifier: #D4D4D4,
-        keyword: #5B9BD3,
+        loop_keyword: #FF8C00,
         number: #B6CEAA,
+        other_keyword: #5B9BD3,
         punctuator: #D4D4D4,
         whitespace: #6E6E6E,
     }
@@ -241,11 +243,7 @@ impl CodeEditor {
                     cx.redraw_all();
                 }
             }
-            Hit::FingerMove(FingerMoveEvent {
-                abs,
-                rect,
-                ..
-            }) => {
+            Hit::FingerMove(FingerMoveEvent { abs, rect, .. }) => {
                 let document = state.document(view_id);
                 if let Some(cursor) = self.pick(&document, abs - rect.pos) {
                     let mut context = state.context(view_id);
@@ -300,9 +298,11 @@ impl CodeEditor {
                             line::WrappedElement::Token(_, token) => {
                                 self.draw_text.color = match token.kind {
                                     TokenKind::Unknown => self.token_colors.unknown,
+                                    TokenKind::BranchKeyword => self.token_colors.branch_keyword,
                                     TokenKind::Identifier => self.token_colors.identifier,
-                                    TokenKind::Keyword => self.token_colors.keyword,
+                                    TokenKind::LoopKeyword => self.token_colors.loop_keyword,
                                     TokenKind::Number => self.token_colors.number,
+                                    TokenKind::OtherKeyword => self.token_colors.other_keyword,
                                     TokenKind::Punctuator => self.token_colors.punctuator,
                                     TokenKind::Whitespace => self.token_colors.whitespace,
                                 };
@@ -324,7 +324,7 @@ impl CodeEditor {
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                column = 0;
+                                column = line.start_column_after_wrap();
                             }
                         }
                     }
@@ -424,7 +424,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                column = 0;
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -523,7 +523,7 @@ impl<'a> DrawSelectionsContext<'a> {
                                     );
                                 }
                                 y += line_ref.scale();
-                                column = 0;
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -703,11 +703,15 @@ pub struct TokenColors {
     #[live]
     unknown: Vec4,
     #[live]
+    branch_keyword: Vec4,
+    #[live]
     identifier: Vec4,
     #[live]
-    keyword: Vec4,
+    loop_keyword: Vec4,
     #[live]
     number: Vec4,
+    #[live]
+    other_keyword: Vec4,
     #[live]
     punctuator: Vec4,
     #[live]

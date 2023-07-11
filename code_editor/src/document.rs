@@ -11,6 +11,7 @@ pub struct Document<'a> {
     text_inlays: &'a [Vec<(usize, String)>],
     line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
     wrap_bytes: &'a [Vec<usize>],
+    start_column_after_wrap: &'a [usize],
     fold_column: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
@@ -28,6 +29,7 @@ impl<'a> Document<'a> {
         text_inlays: &'a [Vec<(usize, String)>],
         line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
         wrap_bytes: &'a [Vec<usize>],
+        start_column_after_wrap: &'a [usize],
         fold_column: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
@@ -43,6 +45,7 @@ impl<'a> Document<'a> {
             text_inlays,
             line_widget_inlays,
             wrap_bytes,
+            start_column_after_wrap,
             fold_column,
             scale,
             line_inlays,
@@ -109,6 +112,7 @@ impl<'a> Document<'a> {
             &self.text_inlays[line],
             &self.line_widget_inlays[line],
             &self.wrap_bytes[line],
+            self.start_column_after_wrap[line],
             self.fold_column[line],
             self.scale[line],
         )
@@ -121,6 +125,7 @@ impl<'a> Document<'a> {
             text_inlays: self.text_inlays[start_line..end_line].iter(),
             line_widget_inlays: self.line_widget_inlays[start_line..end_line].iter(),
             wrap_bytes: self.wrap_bytes[start_line..end_line].iter(),
+            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
             fold_column: self.fold_column[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
@@ -167,6 +172,7 @@ pub struct Lines<'a> {
     text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
     line_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
     wrap_bytes: slice::Iter<'a, Vec<usize>>,
+    start_column_after_wrap: slice::Iter<'a, usize>,
     fold_column: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
@@ -181,6 +187,7 @@ impl<'a> Iterator for Lines<'a> {
             self.text_inlays.next()?,
             self.line_widget_inlays.next()?,
             self.wrap_bytes.next()?,
+            *self.start_column_after_wrap.next()?,
             *self.fold_column.next()?,
             *self.scale.next()?,
         ))
@@ -253,7 +260,7 @@ impl LineInlay {
     }
 
     pub fn as_line(&self) -> Line<'_> {
-        Line::new(&self.text, &[], &[], &[], &[], 0, 1.0)
+        Line::new(&self.text, &[], &[], &[], &[], 0, 0, 1.0)
     }
 }
 
