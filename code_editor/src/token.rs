@@ -28,8 +28,10 @@ impl TokenInfo {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TokenKind {
     Unknown,
+    BranchKeyword,
     Identifier,
-    Keyword,
+    LoopKeyword,
+    OtherKeyword,
     Number,
     Punctuator,
     Whitespace,
