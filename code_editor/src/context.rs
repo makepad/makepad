@@ -9,6 +9,7 @@ use {
 #[derive(Debug, PartialEq)]
 pub struct Context<'a> {
     settings: &'a mut Settings,
+    max_column: &'a mut Option<usize>,
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
     text_inlays: &'a mut Vec<Vec<(usize, String)>>,
@@ -29,6 +30,7 @@ pub struct Context<'a> {
 impl<'a> Context<'a> {
     pub fn new(
         settings: &'a mut Settings,
+        max_column: &'a mut Option<usize>,
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
         text_inlays: &'a mut Vec<Vec<(usize, String)>>,
@@ -47,6 +49,7 @@ impl<'a> Context<'a> {
     ) -> Self {
         Self {
             settings,
+            max_column,
             text,
             tokenizer,
             text_inlays,
@@ -84,72 +87,12 @@ impl<'a> Context<'a> {
         )
     }
 
-    pub fn wrap_lines(&mut self, max_column: usize) {
-        use {crate::str::StrExt, std::mem};
-
-        for line in 0..self.document().line_count() {
-            let old_wrap_byte_count = self.wrap_bytes[line].len();
-            self.wrap_bytes[line].clear();
-            let mut wrap_bytes = Vec::new();
-            mem::take(&mut self.wrap_bytes[line]);
-            let mut byte = 0;
-            let mut column = 0;
-            let document = self.document();
-            let line_ref = document.line(line);
-            let mut start_column_after_wrap = line_ref
-                .text()
-                .indentation()
-                .column_count(document.settings().tab_column_count);
-            for element in line_ref.elements() {
-                match element {
-                    line::Element::Token(_, token) => {
-                        for string in token.text.split_whitespace_boundaries() {
-                            if start_column_after_wrap
-                                + string.column_count(document.settings().tab_column_count)
-                                > max_column
-                            {
-                                start_column_after_wrap = 0;
-                            }
-                        }
-                    }
-                    line::Element::Widget(_, widget) => {
-                        if start_column_after_wrap + widget.column_count > max_column {
-                            start_column_after_wrap = 0;
-                        }
-                    }
-                }
-            }
-            for element in line_ref.elements() {
-                match element {
-                    line::Element::Token(_, token) => {
-                        for string in token.text.split_whitespace_boundaries() {
-                            let mut next_column =
-                                column + string.column_count(document.settings().tab_column_count);
-                            if next_column > max_column {
-                                next_column = start_column_after_wrap;
-                                wrap_bytes.push(byte);
-                            }
-                            byte += string.len();
-                            column = next_column;
-                        }
-                    }
-                    line::Element::Widget(_, widget) => {
-                        let mut next_column = column + widget.column_count;
-                        if next_column > max_column {
-                            next_column = start_column_after_wrap;
-                            wrap_bytes.push(byte);
-                        }
-                        column = next_column;
-                    }
-                }
-            }
-            self.wrap_bytes[line] = wrap_bytes;
-            self.start_column_after_wrap[line] = start_column_after_wrap;
-            if self.wrap_bytes[line].len() != old_wrap_byte_count {
-                self.summed_heights.truncate(line);
-            }
+    pub fn set_max_column(&mut self, max_column: Option<usize>) {
+        if *self.max_column == max_column {
+            return;
         }
-        self.update_summed_heights();
+        *self.max_column = max_column;
+        self.wrap_lines();
     }
 
     pub fn replace(&mut self, replace_with: Text) {
@@ -340,6 +283,76 @@ impl<'a> Context<'a> {
         *self.unfolding_lines = new_unfolding_lines;
         self.update_summed_heights();
         true
+    }
+
+    fn wrap_lines(&mut self) {
+        use crate::str::StrExt;
+
+        for line in 0..self.document().line_count() {
+            let old_wrap_byte_count = self.wrap_bytes[line].len();
+            self.wrap_bytes[line].clear();
+            self.start_column_after_wrap[line] = 0;
+            if let Some(&max_column) = self.max_column.as_ref() {
+                let mut byte = 0;
+                let mut column = 0;
+                let document = self.document();
+                let line_ref = document.line(line);
+                let mut start_column_after_wrap = line_ref
+                    .text()
+                    .indentation()
+                    .column_count(document.settings().tab_column_count);
+                for element in line_ref.elements() {
+                    match element {
+                        line::Element::Token(_, token) => {
+                            for string in token.text.split_whitespace_boundaries() {
+                                if start_column_after_wrap
+                                    + string.column_count(document.settings().tab_column_count)
+                                    > max_column
+                                {
+                                    start_column_after_wrap = 0;
+                                }
+                            }
+                        }
+                        line::Element::Widget(_, widget) => {
+                            if start_column_after_wrap + widget.column_count > max_column {
+                                start_column_after_wrap = 0;
+                            }
+                        }
+                    }
+                }
+                let mut wrap_bytes = Vec::new();
+                for element in line_ref.elements() {
+                    match element {
+                        line::Element::Token(_, token) => {
+                            for string in token.text.split_whitespace_boundaries() {
+                                let mut next_column =
+                                    column + string.column_count(document.settings().tab_column_count);
+                                if next_column > max_column {
+                                    next_column = start_column_after_wrap;
+                                    wrap_bytes.push(byte);
+                                }
+                                byte += string.len();
+                                column = next_column;
+                            }
+                        }
+                        line::Element::Widget(_, widget) => {
+                            let mut next_column = column + widget.column_count;
+                            if next_column > max_column {
+                                next_column = start_column_after_wrap;
+                                wrap_bytes.push(byte);
+                            }
+                            column = next_column;
+                        }
+                    }
+                }
+                self.wrap_bytes[line] = wrap_bytes;
+                self.start_column_after_wrap[line] = start_column_after_wrap;
+            }
+            if self.wrap_bytes[line].len() != old_wrap_byte_count {
+                self.summed_heights.truncate(line);
+            }
+        }
+        self.update_summed_heights();
     }
 
     fn modify_selections(
