@@ -431,6 +431,7 @@ impl<'a> Context<'a> {
                     self.text_inlays.drain(start_line..end_line);
                     self.line_widget_inlays.drain(start_line..end_line);
                     self.wrap_bytes.drain(start_line..end_line);
+                    self.start_column_after_wrap.drain(start_line..end_line);
                     self.fold_column.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
@@ -447,6 +448,8 @@ impl<'a> Context<'a> {
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.wrap_bytes
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
+                    self.start_column_after_wrap
+                        .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.fold_column
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
