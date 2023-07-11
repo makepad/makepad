@@ -48,7 +48,7 @@ pub fn move_down(
     if !is_at_last_row_of_line(document, (position, affinity)) {
         return move_to_next_row_of_line(document, (position, affinity), preferred_column);
     }
-    if !is_at_first_line(position) {
+    if !is_at_last_line(document, position) {
         return move_to_first_row_of_next_line(document, (position, affinity), preferred_column);
     }
     ((position, affinity), preferred_column)

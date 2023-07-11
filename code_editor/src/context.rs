@@ -14,6 +14,7 @@ pub struct Context<'a> {
     text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
     wrap_bytes: &'a mut Vec<Vec<usize>>,
+    start_column_after_wrap: &'a mut Vec<usize>,
     fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
@@ -33,6 +34,7 @@ impl<'a> Context<'a> {
         text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
         wrap_bytes: &'a mut Vec<Vec<usize>>,
+        start_column_after_wrap: &'a mut Vec<usize>,
         fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
@@ -50,6 +52,7 @@ impl<'a> Context<'a> {
             text_inlays,
             line_widget_inlays,
             wrap_bytes,
+            start_column_after_wrap,
             fold_column,
             scale,
             line_inlays,
@@ -70,6 +73,7 @@ impl<'a> Context<'a> {
             self.text_inlays,
             self.line_widget_inlays,
             self.wrap_bytes,
+            self.start_column_after_wrap,
             self.fold_column,
             self.scale,
             self.line_inlays,
@@ -86,18 +90,43 @@ impl<'a> Context<'a> {
         for line in 0..self.document().line_count() {
             let old_wrap_byte_count = self.wrap_bytes[line].len();
             self.wrap_bytes[line].clear();
-            let mut wrap_bytes = mem::take(&mut self.wrap_bytes[line]);
+            let mut wrap_bytes = Vec::new();
+            mem::take(&mut self.wrap_bytes[line]);
             let mut byte = 0;
             let mut column = 0;
             let document = self.document();
-            for element in document.line(line).elements() {
+            let line_ref = document.line(line);
+            let mut start_column_after_wrap = line_ref
+                .text()
+                .indentation()
+                .column_count(document.settings().tab_column_count);
+            for element in line_ref.elements() {
+                match element {
+                    line::Element::Token(_, token) => {
+                        for string in token.text.split_whitespace_boundaries() {
+                            if start_column_after_wrap
+                                + string.column_count(document.settings().tab_column_count)
+                                > max_column
+                            {
+                                start_column_after_wrap = 0;
+                            }
+                        }
+                    }
+                    line::Element::Widget(_, widget) => {
+                        if start_column_after_wrap + widget.column_count > max_column {
+                            start_column_after_wrap = 0;
+                        }
+                    }
+                }
+            }
+            for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
                             let mut next_column =
                                 column + string.column_count(document.settings().tab_column_count);
                             if next_column > max_column {
-                                next_column = 0;
+                                next_column = start_column_after_wrap;
                                 wrap_bytes.push(byte);
                             }
                             byte += string.len();
@@ -107,7 +136,7 @@ impl<'a> Context<'a> {
                     line::Element::Widget(_, widget) => {
                         let mut next_column = column + widget.column_count;
                         if next_column > max_column {
-                            next_column = 0;
+                            next_column = start_column_after_wrap;
                             wrap_bytes.push(byte);
                         }
                         column = next_column;
@@ -115,6 +144,7 @@ impl<'a> Context<'a> {
                 }
             }
             self.wrap_bytes[line] = wrap_bytes;
+            self.start_column_after_wrap[line] = start_column_after_wrap;
             if self.wrap_bytes[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
@@ -149,6 +179,7 @@ impl<'a> Context<'a> {
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
         self.selections.clear();
         self.selections.push(Selection::from_cursor(cursor));
+        *self.latest_selection_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
@@ -327,6 +358,34 @@ impl<'a> Context<'a> {
             }
         }
         *self.selections = selections;
+        let mut current_selection_index = 0;
+        while current_selection_index + 1 < self.selections.len() {
+            let next_selection_index = current_selection_index + 1;
+            let current_selection = self.selections[current_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if !current_selection.should_merge(next_selection) {
+                current_selection_index += 1;
+                continue;
+            }
+            let start = current_selection.start().min(next_selection.start());
+            let end = current_selection.end().max(next_selection.end());
+            let anchor;
+            let cursor;
+            if current_selection.anchor <= next_selection.cursor {
+                anchor = start;
+                cursor = end;
+            } else {
+                anchor = end;
+                cursor = start;
+            }
+            self.selections[current_selection_index] =
+                Selection::new(anchor, cursor, current_selection.preferred_column);
+            self.selections.remove(next_selection_index);
+            if next_selection_index < *self.latest_selection_index {
+                *self.latest_selection_index -= 1;
+            }
+        }
     }
 
     fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
@@ -346,19 +405,16 @@ impl<'a> Context<'a> {
             composite_diff = composite_diff.compose(diff);
             prev_end = selection.end().0;
             diffed_prev_end = diffed_end;
-            *selection = if selection.anchor <= selection.cursor {
-                Selection::new(
-                    (diffed_start, selection.start().1),
-                    (diffed_end, selection.end().1),
-                    selection.preferred_column,
-                )
+            let anchor;
+            let cursor;
+            if selection.anchor <= selection.cursor {
+                anchor = (diffed_start, selection.start().1);
+                cursor = (diffed_end, selection.end().1);
             } else {
-                Selection::new(
-                    (diffed_end, selection.end().1),
-                    (diffed_start, selection.start().1),
-                    selection.preferred_column,
-                )
-            };
+                anchor = (diffed_end, selection.end().1);
+                cursor = (diffed_start, selection.start().1);
+            }
+            *selection = Selection::new(anchor, cursor, selection.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
