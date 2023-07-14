@@ -66,6 +66,7 @@ pub use crate::{
     swipe_list::*,
     text_input::*,
     link_label::*,
+    infinite_list::*,
     desktop_window::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
