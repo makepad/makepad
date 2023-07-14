@@ -21,7 +21,7 @@ live_design!{
     import makepad_widgets::slides_view::SlidesView;
     import makepad_widgets::slides_view::SlideBody;
     import makepad_draw::shader::std::*;
-
+    
     import makepad_widgets::desktop_window::DesktopWindow
     import makepad_widgets::multi_window::MultiWindow
     import makepad_audio_widgets::display_audio::DisplayAudio
@@ -42,11 +42,11 @@ live_design!{
                 )
             }
             
-            fn get_video_pixel(self) -> vec4 {
+            fn get_video_pixel(self, pos:vec2) -> vec4 {
                 let pix = self.pos * self.image_size;
                 
                 // fetch pixel
-                let data = sample2d(self.image, self.pos).xyzw;
+                let data = sample2d(self.image, pos).xyzw;
                 if self.is_rgb > 0.5 {
                     return vec4(data.xyz, 1.0);
                 }
@@ -57,7 +57,7 @@ live_design!{
             }
             
             fn pixel(self) -> vec4 {
-                return self.get_video_pixel();
+                return self.get_video_pixel(self.pos);
             }
         }
     }
@@ -66,7 +66,7 @@ live_design!{
         draw_bg: {
             uniform alpha: 1.0
             fn pixel(self) -> vec4 {
-                let color = self.get_video_pixel();
+                let color = self.get_video_pixel(vec2(1.0-self.pos.x,self.pos.y));
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 sdf.box(
                     1,
@@ -97,12 +97,19 @@ live_design!{
             video_input0 = <VideoFrame> {
                 walk: {width: 1920, height: Fill}
             }
-            <Image> {
-                image: dep("crate://self/rust_meetup_slide.png"),
-                walk: {width: 1920, height: 1080}
+            
+            <Slide> {
+                title = {label: "Schedule"},
+                <SlideBody> {label: "18:00 Welcome & food\n19:00 Intro by Erik and Jasper\n19:10 Are we web yet, by Marlon Baeten\n19:40 Break\n20:00 Volumetric rendering using Rust, by Rosalie de Winther\n20:40 Building a Code Editor from scratch in Makepad, by Eddy Bruël\n21:10 Drinks"}
             }
         }
     }
+    
+    MeetupOverlay = <Image> {
+        image: dep("crate://self/rust-meetup-breda.png"),
+        walk: {width: 1920, height: 1080}
+    }
+    
     App = {{App}} {
         mixer: {
             channel: [2.0, 2.0, 2.0, 2.0]
@@ -111,38 +118,41 @@ live_design!{
             window1 = <DesktopWindow> {
                 window: {inner_size: vec2(960, 540), dpi_override: 1.0},
                 <Frame> {
-                    layout:{flow:Overlay}
-                    <MainSlides>{}
-                    <Frame>{
-                        video_input1 = <VideoFrameRound> {
-                            walk: {width: 480, height: 270}
-                        }
-                        layout: {align: {y: 1.0}, spacing: 5, padding: 10}
+                    layout: {flow: Overlay}
+                    <MainSlides> {}
+                    meetup_overlay = <MeetupOverlay> {}
+                    <Frame> {
+                        layout: {align: {y: 1.0}, spacing: 5, padding: 40}
                         chan1 = <DisplayChannel> {}
                         chan2 = <DisplayChannel> {}
                         chan3 = <DisplayChannel> {}
                         chan4 = <DisplayChannel> {}
+                        video_input1 = <VideoFrameRound> {
+                            walk: {width: 480, height: 270}
+                        }
                     }
                 }
             }
             
             window2 = <DesktopWindow> {
                 window: {inner_size: vec2(960, 540), position: vec2(0, 540), dpi_override: 1.0},
-                <MainSlides> {
-                }
+                layout: {flow: Overlay}
+                <MainSlides> {}
+                meetup_overlay = <MeetupOverlay> {}
             }
             window3 = <DesktopWindow> {
                 window: {inner_size: vec2(960, 540), position: vec2(0, 540), dpi_override: 1.0},
                 <Frame> {
-                    layout:{flow:Overlay}
+                    layout: {flow: Overlay}
                     <MainSlides> {
                     }
-                    <Frame>{
+                    <Frame> {
                         video_input1 = <VideoFrameRound> {
                             walk: {width: 480, height: 270}
                         }
-                        layout: {align: {x:1.0, y: 1.0}, spacing: 5, padding: 40}
+                        layout: {align: {x: 1.0, y: 1.0}, spacing: 5, padding: 40}
                     }
+                    meetup_overlay = <MeetupOverlay> {}
                 }
             }
         }
@@ -159,10 +169,10 @@ pub struct AudioMixer {
 #[derive(Live)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[rust([Texture::new(cx),Texture::new(cx)])] video_input: [Texture;2],
+    #[rust([Texture::new(cx), Texture::new(cx)])] video_input: [Texture; 2],
     #[live] mixer: Arc<AudioMixer>,
     #[rust(cx.midi_input())] midi_input: MidiInput,
-    #[rust] video_recv: ToUIReceiver<(usize,VideoBuffer)>,
+    #[rust] video_recv: ToUIReceiver<(usize, VideoBuffer)>,
     #[rust] audio_recv: ToUIReceiver<(usize, AudioBuffer)>,
 }
 
@@ -212,11 +222,11 @@ impl App {
         
         let video_sender = self.video_recv.sender();
         cx.video_input(0, move | img | {
-            let _ = video_sender.send((0,img.to_buffer()));
+            let _ = video_sender.send((0, img.to_buffer()));
         });
         let video_sender = self.video_recv.sender();
         cx.video_input(1, move | img | {
-            let _ = video_sender.send((1,img.to_buffer()));
+            let _ = video_sender.send((1, img.to_buffer()));
         });
     }
 }
@@ -228,7 +238,6 @@ impl AppMain for App {
                 while let Some((_, data)) = self.midi_input.receive() {
                     match data.decode() {
                         MidiEvent::ControlChange(cc) => {
-                            //log!("{} {}", cc.param, cc.value);
                             if cc.param == 2 {self.mixer.channel[0].set(cc.value as f32 / 63.0)};
                             if cc.param == 3 {self.mixer.channel[1].set(cc.value as f32 / 63.0)};
                             if cc.param == 4 {self.mixer.channel[2].set(cc.value as f32 / 63.0)};
@@ -237,10 +246,15 @@ impl AppMain for App {
                             if cc.param == 14 {self.mixer.gain[1].set(cc.value as f32 / 63.0)};
                             if cc.param == 15 {self.mixer.gain[2].set(cc.value as f32 / 63.0)};
                             if cc.param == 16 {self.mixer.gain[3].set(cc.value as f32 / 63.0)};
+                            if cc.param == 19 {
+                                let val = cc.value as f32 / 127.0;
+                                let v = self.ui.get_frame_set(ids!(video_input1));
+                                v.set_uniform(cx, id!(alpha), &[val]);
+                            };
                             if cc.param == 20 {
                                 let val = cc.value as f32 / 127.0;
-                                let v = self.ui.get_frame_set(ids!(warp_image));
-                                v.set_uniform(cx, id!(warp), &[val]);
+                                let v = self.ui.get_frame_set(ids!(meetup_overlay));
+                                v.set_uniform(cx, id!(image_alpha), &[val]);
                             };
                             if cc.param == 62 && cc.value == 127 {
                                 let v = self.ui.get_slides_view_set(ids!(slides_view));
@@ -257,15 +271,15 @@ impl AppMain for App {
                 // lets receive the audio buffers
                 while let Ok((input, audio)) = self.audio_recv.try_recv() {
                     if input == 0 {
-                        self.ui.get_display_audio(id!(chan1.disp)).process_buffer(cx, Some(0), 0, &audio, self.mixer.gain[0].get()*self.mixer.channel[0].get());
-                        self.ui.get_display_audio(id!(chan2.disp)).process_buffer(cx, Some(1), 0, &audio, self.mixer.gain[1].get()*self.mixer.channel[1].get());
+                        self.ui.get_display_audio(id!(chan1.disp)).process_buffer(cx, Some(0), 0, &audio, self.mixer.gain[0].get() * self.mixer.channel[0].get());
+                        self.ui.get_display_audio(id!(chan2.disp)).process_buffer(cx, Some(1), 0, &audio, self.mixer.gain[1].get() * self.mixer.channel[1].get());
                     }
                     if input == 1 {
-                        self.ui.get_display_audio(id!(chan3.disp)).process_buffer(cx, Some(0), 0, &audio, self.mixer.gain[2].get()*self.mixer.channel[2].get());
-                        self.ui.get_display_audio(id!(chan4.disp)).process_buffer(cx, Some(1), 0, &audio, self.mixer.gain[3].get()*self.mixer.channel[3].get());
+                        self.ui.get_display_audio(id!(chan3.disp)).process_buffer(cx, Some(0), 0, &audio, self.mixer.gain[2].get() * self.mixer.channel[2].get());
+                        self.ui.get_display_audio(id!(chan4.disp)).process_buffer(cx, Some(1), 0, &audio, self.mixer.gain[3].get() * self.mixer.channel[3].get());
                     }
                 }
-                if let Ok((id,mut vfb)) = self.video_recv.try_recv_flush() {
+                while let Ok((id, mut vfb)) = self.video_recv.try_recv() {
                     self.video_input[id].set_desc(cx, TextureDesc {
                         format: TextureFormat::ImageBGRA,
                         width: Some(vfb.format.width / 2),
@@ -275,7 +289,7 @@ impl AppMain for App {
                         self.video_input[id].swap_image_u32(cx, buf);
                     }
                     let image_size = [vfb.format.width as f32, vfb.format.height as f32];
-                    for v in self.ui.get_frame_set(if id == 0{ids!(video_input0)}else{ids!(video_input1)}).iter() {
+                    for v in self.ui.get_frame_set(if id == 0 {ids!(video_input0)}else {ids!(video_input1)}).iter() {
                         v.set_texture(0, &self.video_input[id]);
                         v.set_uniform(cx, id!(image_size), &image_size);
                         v.set_uniform(cx, id!(is_rgb), &[0.0]);
@@ -300,14 +314,17 @@ impl AppMain for App {
                 let output = devices.match_outputs(&[
                     "NINJA V",
                 ]);
-                log!("{:?}", output);
+                //log!("{:?}", devices);
                 cx.use_audio_outputs(&output);
             }
             Event::VideoInputs(devices) => {
-                //    log!("{:?}", devices);
+                log!("{:?}", devices);
                 //cx.use_video_input(&devices.find_highest_at_res(devices.find_device("USB Capture HDMI 4K+"), 1920, 1080));
-                let input_a = devices.find_highest_at_res(devices.find_device("USB Capture HDMI 4K+"), 1920, 1080);
-                let input_b = devices.find_highest_at_res(devices.find_device("Cam Link 4K"), 3840, 2160);
+                //let input_a = devices.find_highest_at_res(devices.find_device("USB Capture HDMI 4K+"), 1920, 1080, 90.0);
+                //let input_b = devices.find_highest_at_res(devices.find_device("Game Capture HD60 X"), 1920, 1080, 90.0);
+                let input_a = devices.find_highest_at_res(devices.find_device("USB Capture HDMI 4K+"), 1920, 1080, 90.0);
+                let input_b = devices.find_highest_at_res(devices.find_device("Game Capture HD60 X"), 1920, 1080, 90.0);
+                
                 let mut devs = Vec::new();
                 devs.extend(input_a);
                 devs.extend(input_b);
