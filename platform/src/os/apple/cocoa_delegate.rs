@@ -89,6 +89,7 @@ pub fn define_av_video_callback_delegate() -> *const Class {
         _: ObjcId,
         _: ObjcId,
     ) {
+        crate::log!("DROP!");
     }
     
     let superclass = class!(NSObject);
