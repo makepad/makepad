@@ -284,9 +284,13 @@ live_design!{
                 }
             }
             
-            <InfiniteList> {
+            news_feed = <InfiniteList> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
+                TopSpace = <Frame> {walk: {height: 100}}
+                BarePost = <Post>{}
+                BottomSpace = <Frame> {walk: {height: 100}}
+/*
                 <Frame> {walk: {height: 100}}
                 <PostImage> {}
                 <Post> {
@@ -314,7 +318,7 @@ live_design!{
                 <Post> {}
                 <Post> {}
                 <Post> {}
-                <Frame> {walk: {height: 100}}
+                <Frame> {walk: {height: 100}}*/
             }
             
             <Frame> {
@@ -344,8 +348,34 @@ impl LiveHook for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let news_feed = self.ui.get_infinite_list_set(ids!(news_feed));
+        
         if let Event::Draw(event) = event {
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+            let cx = &mut Cx2d::new(cx, event);
+            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+                if let Some(mut list) = news_feed.has_widget(&next).borrow_mut() {
+                    while let Some(item_id) = list.next_visible(cx){
+                        
+                        // this is a single ever increasing u64 item id starting at 0
+                        let template = match item_id{
+                            0=>id!(TopSpace),
+                            _=>id!(BarePost)
+                        };
+                        let item = list.get_entry(cx, item_id, template).unwrap();
+                        let text = match item_id%4{
+                            0=>format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit", item_id),
+                            1=>format!("Item: {} amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
+                            2=>format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
+                            _=>format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.", item_id),
+                        };
+                        item.get_label(id!(content.text)).set_label(&text);
+                        item.get_button(id!(likes)).set_label(&format!("{}", item_id%23));
+                        item.get_button(id!(comments)).set_label(&format!("{}", item_id%6));
+                        item.draw_widget_all(cx);
+                    }
+                }
+            }
+            return
         }
         
         let actions = self.ui.handle_widget_event(cx, event);

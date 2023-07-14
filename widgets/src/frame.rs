@@ -303,12 +303,14 @@ live_design!{
         texture image: texture2d
         instance image_scale: vec2(1.0, 1.0)
         instance image_pan: vec2(0.0, 0.0)
+        uniform image_alpha: 1.0
         fn get_color(self) -> vec4 {
             return sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
         }
         
         fn pixel(self) -> vec4 {
-            return Pal::premul(self.get_color())
+            let color = self.get_color();
+            return Pal::premul(vec4(color.xyz, color.w*self.image_alpha))
         }
         
         shape: Solid,
