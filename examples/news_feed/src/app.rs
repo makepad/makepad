@@ -289,6 +289,7 @@ live_design!{
                 layout: {flow: Down}
                 TopSpace = <Frame> {walk: {height: 100}}
                 BarePost = <Post>{}
+                ImagePost = <PostImage>{}
                 BottomSpace = <Frame> {walk: {height: 100}}
 /*
                 <Frame> {walk: {height: 100}}
@@ -359,6 +360,7 @@ impl AppMain for App {
                         // this is a single ever increasing u64 item id starting at 0
                         let template = match item_id{
                             0=>id!(TopSpace),
+                            x if x%5 == 0=>id!(ImagePost),
                             _=>id!(BarePost)
                         };
                         let item = list.get_entry(cx, item_id, template).unwrap();
