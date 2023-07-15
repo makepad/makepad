@@ -89,12 +89,7 @@ impl InfiniteList {
     
     fn end(&mut self, cx: &mut Cx2d) {
         let rect = cx.turtle().rect();
-        // ok so.. lets calculate a fake view_rect_total from our range and viewport size
         let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
-        // calculate a virtual scrollbar
-       //let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start) as f64) * rect.size.y;
-        // move the scrollbar to the right 'top' position
-       // self.scroll_bar.set_scroll_pos_no_redraw(cx, scroll_pos);
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
         
         cx.end_turtle_with_area(&mut self.area);
@@ -104,9 +99,6 @@ impl InfiniteList {
     }
     
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<u64> {
-        // drawing of the items is first downwards from the top_id
-        // then upwards
-        // every time checking the viewport
         match self.draw_phase {
             Some(DrawPhase::Begin) => {
                 let viewport = cx.turtle().rect();
@@ -131,6 +123,11 @@ impl InfiniteList {
                 if did_draw && rect.pos.y + rect.size.y < viewport.pos.y {
                     self.top_id = index + 1;
                     self.top_scroll = (rect.pos.y + rect.size.y) - viewport.pos.y;
+                }
+                
+                if index + 1== self.range_end{
+                    self.draw_phase = None;
+                    return None
                 }
                 
                 if !did_draw || rect.pos.y + rect.size.y > viewport.pos.y + viewport.size.y {
@@ -266,9 +263,10 @@ impl Widget for InfiniteList {
                 if self.top_id == self.range_start && self.top_scroll > 0.0 {
                     self.top_scroll = 0.0;
                 }
-                let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start) as f64) *self.scroll_bar.get_scroll_view_visible();
+                let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) *self.scroll_bar.get_scroll_view_total();
+                log!("{}", scroll_pos);
                 // move the scrollbar to the right 'top' position
-                self.scroll_bar.set_scroll_pos_no_redraw(cx, scroll_pos);
+                self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
 
                 dispatch_action(cx,WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid) );
                 self.area.redraw(cx);
