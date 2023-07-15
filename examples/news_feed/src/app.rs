@@ -288,38 +288,9 @@ live_design!{
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
                 TopSpace = <Frame> {walk: {height: 100}}
-                BarePost = <Post>{}
-                ImagePost = <PostImage>{}
+                Post = <Post>{}
+                PostImage = <PostImage>{}
                 BottomSpace = <Frame> {walk: {height: 100}}
-/*
-                <Frame> {walk: {height: 100}}
-                <PostImage> {}
-                <Post> {
-                    body = {profile = {profile_img = {
-                        image: (IMG_PROFILE_B)
-                    }}}
-                }
-                <PostImage> {
-                    hero = {image: (IMG_B),}
-                    post = {body = {profile = {profile_img = {
-                        image: (IMG_PROFILE_B)
-                    }}}}
-                }
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Frame> {walk: {height: 100}}*/
             }
             
             <Frame> {
@@ -355,15 +326,15 @@ impl AppMain for App {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                 if let Some(mut list) = news_feed.has_widget(&next).borrow_mut() {
-                    while let Some(item_id) = list.next_visible(cx){
-                        
-                        // this is a single ever increasing u64 item id starting at 0
+                    // lets set our scroll range
+                    list.set_item_range(0, 1000, 3);
+                    while let Some(item_id) = list.next_visible_item(cx){
                         let template = match item_id{
                             0=>id!(TopSpace),
-                            x if x%5 == 0=>id!(ImagePost),
-                            _=>id!(BarePost)
+                            x if x%5 == 0=>id!(PostImage),
+                            _=>id!(Post)
                         };
-                        let item = list.get_entry(cx, item_id, template).unwrap();
+                        let item = list.get_item(cx, item_id, template).unwrap();
                         let text = match item_id%4{
                             0=>format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit", item_id),
                             1=>format!("Item: {} amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
