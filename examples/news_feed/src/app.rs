@@ -326,8 +326,8 @@ impl AppMain for App {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                 if let Some(mut list) = news_feed.has_widget(&next).borrow_mut() {
-                    // lets set our scroll range
-                    list.set_item_range(0, 1000, 3);
+                    // lets set our scroll range so the scrollbar has something
+                    list.set_item_range(0, 3000, 1);
                     // next visible item only returns items that are visible
                     while let Some(item_id) = list.next_visible_item(cx){
                         let template = match item_id{
