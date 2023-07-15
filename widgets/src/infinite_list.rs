@@ -4,7 +4,7 @@ use {
         widget::*,
         makepad_derive_widget::*,
         makepad_draw::*,
-        scroll_bar::{ScrollBar,ScrollBarAction}
+        scroll_bar::{ScrollBar, ScrollBarAction}
     }
 };
 
@@ -120,17 +120,15 @@ impl InfiniteList {
                 let did_draw = cx.turtle_has_align_items();
                 let rect = cx.end_turtle();
                 
-                if did_draw && rect.pos.y + rect.size.y < viewport.pos.y {
+                if did_draw && rect.pos.y + rect.size.y < viewport.pos.y && index + 1 < self.range_end {
                     self.top_id = index + 1;
                     self.top_scroll = (rect.pos.y + rect.size.y) - viewport.pos.y;
+                    if self.top_id + 1 == self.range_end && self.top_scroll < 0.0{
+                        self.top_scroll = 0.0;
+                    }
                 }
                 
-                if index + 1== self.range_end{
-                    self.draw_phase = None;
-                    return None
-                }
-                
-                if !did_draw || rect.pos.y + rect.size.y > viewport.pos.y + viewport.size.y {
+                if !did_draw || rect.pos.y + rect.size.y > viewport.pos.y + viewport.size.y || index + 1 == self.range_end {
                     if self.top_id > self.range_start && self.top_scroll > 0.0 {
                         self.draw_phase = Some(DrawPhase::Up {
                             index: self.top_id - 1,
@@ -150,7 +148,16 @@ impl InfiniteList {
                         return None
                     }
                 }
-                let scroll = scroll + rect.size.y;
+                
+                if index + 1 == self.range_end {
+                    self.draw_phase = None;
+                    return None
+                }
+                
+                let mut scroll = scroll + rect.size.y;
+                if self.top_id + 1 == self.range_end {
+                    scroll = 0.0;
+                }
                 self.draw_phase = Some(DrawPhase::Down {
                     index: index + 1,
                     scroll,
@@ -177,7 +184,10 @@ impl InfiniteList {
                 }
                 self.top_id = index;
                 self.top_scroll = scroll - used.y;
-                if  index == self.range_start{
+                if self.top_id + 1 == self.range_end && self.top_scroll < 0.0{
+                    self.top_scroll = 0.0;
+                }
+                if index == self.range_start {
                     self.draw_phase = None;
                     return None
                 }
@@ -230,8 +240,8 @@ pub enum InfiniteListAction {
 }
 
 impl Widget for InfiniteList {
-    fn redraw(&mut self, _cx: &mut Cx) {
-        
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
     }
     
     fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
@@ -244,12 +254,12 @@ impl Widget for InfiniteList {
                 scroll_to = Some(scroll_pos)
             }
         });
-        if let Some(scroll_to) = scroll_to{
+        if let Some(scroll_to) = scroll_to {
             // reverse compute the top_id
             let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
             self.top_id = scroll_to;
             self.top_scroll = 0.0;
-            dispatch_action(cx,WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid) );
+            dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
             self.area.redraw(cx);
         }
         
@@ -263,11 +273,15 @@ impl Widget for InfiniteList {
                 if self.top_id == self.range_start && self.top_scroll > 0.0 {
                     self.top_scroll = 0.0;
                 }
-                let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) *self.scroll_bar.get_scroll_view_total();
+                if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
+                    self.top_scroll = 0.0;
+                }
+                log!("{} {}", self.top_id, self.top_scroll);
+                let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
                 // move the scrollbar to the right 'top' position
                 self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
-
-                dispatch_action(cx,WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid) );
+                
+                dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
                 self.area.redraw(cx);
                 
             },

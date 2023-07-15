@@ -332,7 +332,6 @@ impl AppMain for App {
                     while let Some(item_id) = list.next_visible_item(cx){
                         let template = match item_id{
                             0=>id!(TopSpace),
-                            999=>id!(BottomSpace),
                             x if x%5 == 0=>id!(PostImage),
                             _=>id!(Post)
                         };
