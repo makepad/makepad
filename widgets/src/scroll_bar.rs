@@ -216,7 +216,7 @@ impl ScrollBar {
         return self.scroll_pos;
     }
     
-    pub fn set_scroll_pos_no_redraw(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
+    pub fn set_scroll_pos_no_action(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
         // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
         if self.scroll_pos != scroll_pos {

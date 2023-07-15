@@ -328,9 +328,11 @@ impl AppMain for App {
                 if let Some(mut list) = news_feed.has_widget(&next).borrow_mut() {
                     // lets set our scroll range
                     list.set_item_range(0, 1000, 3);
+                    // next visible item only returns items that are visible
                     while let Some(item_id) = list.next_visible_item(cx){
                         let template = match item_id{
                             0=>id!(TopSpace),
+                            999=>id!(BottomSpace),
                             x if x%5 == 0=>id!(PostImage),
                             _=>id!(Post)
                         };
