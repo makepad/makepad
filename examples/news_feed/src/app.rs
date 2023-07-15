@@ -329,6 +329,7 @@ impl AppMain for App {
                     // lets set our scroll range so the scrollbar has something
                     list.set_item_range(0, 3000, 1);
                     // next visible item only returns items that are visible
+                    // this means the performance here is O(visible)
                     while let Some(item_id) = list.next_visible_item(cx){
                         let template = match item_id{
                             0=>id!(TopSpace),
