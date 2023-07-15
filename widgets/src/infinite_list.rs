@@ -264,7 +264,6 @@ impl Widget for InfiniteList {
                     self.top_scroll = 0.0;
                 }
                 let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) *self.scroll_bar.get_scroll_view_total();
-                log!("{}", scroll_pos);
                 // move the scrollbar to the right 'top' position
                 self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
 
