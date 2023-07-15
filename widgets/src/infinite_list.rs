@@ -176,9 +176,8 @@ impl InfiniteList {
                 let used = cx.turtle().used();
                 let shift = dvec2(0.0, scroll - used.y);
                 cx.turtle_mut().set_shift(shift);
-                let mut rect = cx.end_turtle();
-                rect.pos += shift;
-                if !did_draw || rect.pos.y + rect.size.y < viewport.pos.y {
+                let rect = cx.end_turtle();
+                if !did_draw || rect.pos.y + rect.size.y + shift.y < viewport.pos.y {
                     self.draw_phase = None;
                     return None
                 }
@@ -248,7 +247,7 @@ impl Widget for InfiniteList {
         let uid = self.widget_uid();
         
         let mut scroll_to = None;
-        self.scroll_bar.handle_event_with(cx, event, &mut | cx, action | {
+        self.scroll_bar.handle_event_with(cx, event, &mut | _cx, action | {
             // snap the scrollbar to a top-index with scroll_pos 0
             if let ScrollBarAction::Scroll {scroll_pos, ..} = action {
                 scroll_to = Some(scroll_pos)
