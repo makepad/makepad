@@ -4,7 +4,7 @@ use {
         widget::*,
         makepad_derive_widget::*,
         makepad_draw::*,
-        scroll_bars::ScrollBars
+        scroll_bar::{ScrollBar,ScrollBarAction}
     }
 };
 
@@ -36,13 +36,19 @@ pub struct InfiniteList {
     #[rust] area: Area,
     #[live] walk: Walk,
     #[live] layout: Layout,
+    
+    #[rust] range_start: u64,
+    #[rust(u64::MAX)] range_end: u64,
+    #[rust(10u64)] view_window: u64,
+    
     #[rust] top_id: u64,
     #[rust] top_scroll: f64,
     #[rust] draw_phase: Option<DrawPhase>,
+    #[live] scroll_bar: ScrollBar,
     //    #[live] scroll_bars: ScrollBars,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] entries: ComponentMap<(u64, LiveId), WidgetRef>,
+    #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
 }
 
 impl LiveHook for InfiniteList {
@@ -58,7 +64,7 @@ impl LiveHook for InfiniteList {
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                     self.templates.insert(id, live_ptr);
                     // lets apply this thing over all our childnodes with that template
-                    for ((_, templ_id), node) in self.entries.iter_mut() {
+                    for ((_, templ_id), node) in self.items.iter_mut() {
                         if *templ_id == id {
                             node.apply(cx, from, index, nodes);
                         }
@@ -76,37 +82,40 @@ impl LiveHook for InfiniteList {
 
 impl InfiniteList {
     
-    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
-        // self.scroll_bars.begin(cx, walk, self.layout);
+    fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
-        // lets ask the turtle rect
         self.draw_phase = Some(DrawPhase::Begin)
     }
     
-    pub fn end(&mut self, cx: &mut Cx2d) {
-        // self.scroll_bars.end(cx);
+    fn end(&mut self, cx: &mut Cx2d) {
+        let rect = cx.turtle().rect();
+        // ok so.. lets calculate a fake view_rect_total from our range and viewport size
+        let total_views = (self.range_end - self.range_start) as f64 / self.view_window as f64;
+        // calculate a virtual scrollbar
+       //let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start) as f64) * rect.size.y;
+        // move the scrollbar to the right 'top' position
+       // self.scroll_bar.set_scroll_pos_no_redraw(cx, scroll_pos);
+        self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
+        
         cx.end_turtle_with_area(&mut self.area);
         if self.draw_phase.is_some() {
-            panic!("please call next_visible in a loop untill returns None");
+            panic!("please call next_visible in a loop untill it returns None");
         }
-        // alright we ended.
     }
     
-    
-    // keep returning an item till the visual space is filled
-    // we keep a movable turtle for that
-    pub fn next_visible(&mut self, cx: &mut Cx2d) -> Option<u64> {
-        // check our drawphase
+    pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<u64> {
+        // drawing of the items is first downwards from the top_id
+        // then upwards
+        // every time checking the viewport
         match self.draw_phase {
             Some(DrawPhase::Begin) => {
-                // we're the first thing to draw. so that should be our 'first' item at scroll pos y
                 let viewport = cx.turtle().rect();
                 self.draw_phase = Some(DrawPhase::Down {
                     index: self.top_id,
                     scroll: self.top_scroll,
                     viewport,
                 });
-                // lets begin a turtle at 'top_scroll' with fill width and fit height
+                
                 cx.begin_turtle(Walk {
                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y + self.top_scroll)),
                     margin: Default::default(),
@@ -116,19 +125,16 @@ impl InfiniteList {
                 return Some(self.top_id)
             }
             Some(DrawPhase::Down {index, scroll, viewport}) => {
-                // lets end the turtle and check if we drew anything
                 let did_draw = cx.turtle_has_align_items();
                 let rect = cx.end_turtle();
-                // check if we drew nothing, or if our turtle went > the end, ifso switch to the Up drawphase
                 
-                // ok we are seeking for a new first_id
-                // if the item we just drew is above the viewport, we shift down
                 if did_draw && rect.pos.y + rect.size.y < viewport.pos.y {
                     self.top_id = index + 1;
                     self.top_scroll = (rect.pos.y + rect.size.y) - viewport.pos.y;
                 }
+                
                 if !did_draw || rect.pos.y + rect.size.y > viewport.pos.y + viewport.size.y {
-                    if self.top_id > 0 && self.top_scroll > 0.0 {
+                    if self.top_id > self.range_start && self.top_scroll > 0.0 {
                         self.draw_phase = Some(DrawPhase::Up {
                             index: self.top_id - 1,
                             scroll: self.top_scroll,
@@ -143,8 +149,6 @@ impl InfiniteList {
                         return Some(self.top_id - 1);
                     }
                     else {
-                        // update our top_id / top_scroll values
-                        
                         self.draw_phase = None;
                         return None
                     }
@@ -165,20 +169,21 @@ impl InfiniteList {
             }
             Some(DrawPhase::Up {index, scroll, viewport}) => {
                 let did_draw = cx.turtle_has_align_items();
-
                 let used = cx.turtle().used();
-                // set shift moves the item we drew at viewport 0,0 to the place we need it
-                cx.turtle_mut().set_shift(dvec2(0.0, scroll - used.y));
-                let rect = cx.end_turtle();
-                 
-                self.top_id = index;
-                self.top_scroll = scroll - used.y;
-                // check if we reached the end or not
-                if !did_draw || rect.pos.y + rect.size.y < viewport.pos.y || index == 0 {
+                let shift = dvec2(0.0, scroll - used.y);
+                cx.turtle_mut().set_shift(shift);
+                let mut rect = cx.end_turtle();
+                rect.pos += shift;
+                if !did_draw || rect.pos.y + rect.size.y < viewport.pos.y {
                     self.draw_phase = None;
                     return None
                 }
-                
+                self.top_id = index;
+                self.top_scroll = scroll - used.y;
+                if  index == self.range_start{
+                    self.draw_phase = None;
+                    return None
+                }
                 self.draw_phase = Some(DrawPhase::Up {
                     index: self.top_id - 1,
                     scroll: self.top_scroll,
@@ -199,9 +204,9 @@ impl InfiniteList {
         }
     }
     
-    pub fn get_entry(&mut self, cx: &mut Cx2d, entry_id: u64, template: &[LiveId; 1]) -> Option<WidgetRef> {
+    pub fn get_item(&mut self, cx: &mut Cx2d, entry_id: u64, template: &[LiveId; 1]) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template[0]) {
-            let entry = self.entries.get_or_insert(cx, (entry_id, template[0]), | cx | {
+            let entry = self.items.get_or_insert(cx, (entry_id, template[0]), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
             });
             return Some(entry.clone())
@@ -209,29 +214,10 @@ impl InfiniteList {
         None
     }
     
-    
-    pub fn handle_event_with(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, InfiniteListAction),
-    ) {
-        //self.scroll_bars.handle_event_with(cx, event, &mut | _, _ | {});
-        
-        match event.hits(cx, self.area) {
-            Hit::FingerScroll(s) => {
-                self.top_scroll -= s.scroll.y;
-                if self.top_id == 0 && self.top_scroll > 0.0 {
-                    self.top_scroll = 0.0;
-                }
-                self.area.redraw(cx);
-            },
-            Hit::KeyFocus(_) => {
-            }
-            Hit::KeyFocusLost(_) => {
-            }
-            _ => ()
-        }
+    pub fn set_item_range(&mut self, range_start: u64, range_end: u64, view_window: u64) {
+        self.range_start = range_start;
+        self.range_end = range_end;
+        self.view_window = view_window;
     }
 }
 
@@ -254,13 +240,46 @@ impl Widget for InfiniteList {
     fn handle_widget_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
         let uid = self.widget_uid();
         
-        for entry in self.entries.values_mut() {
-            entry.handle_widget_event_with(cx, event, dispatch_action);
+        let mut scroll_to = None;
+        self.scroll_bar.handle_event_with(cx, event, &mut | cx, action | {
+            // snap the scrollbar to a top-index with scroll_pos 0
+            if let ScrollBarAction::Scroll {scroll_pos, ..} = action {
+                scroll_to = Some(scroll_pos)
+            }
+        });
+        if let Some(scroll_to) = scroll_to{
+            // reverse compute the top_id
+            let scroll_to = ((scroll_to / self.scroll_bar.get_scroll_view_visible()) * self.view_window as f64) as u64;
+            self.top_id = scroll_to;
+            self.top_scroll = 0.0;
+            dispatch_action(cx,WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid) );
+            self.area.redraw(cx);
         }
         
-        self.handle_event_with(cx, event, &mut | cx, action | {
-            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
-        });
+        for item in self.items.values_mut() {
+            item.handle_widget_event_with(cx, event, dispatch_action);
+        }
+        
+        match event.hits(cx, self.area) {
+            Hit::FingerScroll(s) => {
+                self.top_scroll -= s.scroll.y;
+                if self.top_id == self.range_start && self.top_scroll > 0.0 {
+                    self.top_scroll = 0.0;
+                }
+                let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start) as f64) *self.scroll_bar.get_scroll_view_visible();
+                // move the scrollbar to the right 'top' position
+                self.scroll_bar.set_scroll_pos_no_redraw(cx, scroll_pos);
+
+                dispatch_action(cx,WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid) );
+                self.area.redraw(cx);
+                
+            },
+            Hit::KeyFocus(_) => {
+            }
+            Hit::KeyFocusLost(_) => {
+            }
+            _ => ()
+        }
     }
     
     fn get_walk(&self) -> Walk {self.walk}
@@ -283,8 +302,6 @@ pub struct InfiniteListRef(WidgetRef);
 
 impl InfiniteListRef {
     pub fn items_with_actions(&self, _actions: &WidgetActions) -> WidgetSet {
-        // find items with container set to our uid
-        // and return those
         Default::default()
     }
 }
