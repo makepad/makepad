@@ -355,13 +355,10 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        for news_feed in news_feeds.iter() {
-            for item in news_feed.items_with_actions(&actions).iter() {
-                // check for actions inside the list item
-                if item.get_button(id!(delete)).clicked(&actions) {
-                    // delete the item in the data
-                    //list.redraw(cx);
-                }
+        for (item_id,item) in news_feeds.items_with_actions(&actions) {
+            // check for actions inside the list item
+            if item.get_button(id!(likes)).clicked(&actions) {
+                log!("CLICKED LIKES on item {}", item_id);
             }
         }
         
