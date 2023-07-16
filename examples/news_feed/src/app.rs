@@ -11,7 +11,7 @@ live_design!{
     import makepad_widgets::slider::Slider;
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::drop_down::DropDown;
-    import makepad_widgets::infinite_list::InfiniteList;
+    import makepad_widgets::list_view::ListView;
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_B = dep("crate://self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
@@ -284,7 +284,7 @@ live_design!{
                 }
             }
             
-            news_feed = <InfiniteList> {
+            news_feed = <ListView> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
                 TopSpace = <Frame> {walk: {height: 100}}
@@ -320,12 +320,12 @@ impl LiveHook for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let news_feed = self.ui.get_infinite_list_set(ids!(news_feed));
+        let news_feeds = self.ui.get_list_view_set(ids!(news_feed));
         
         if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                if let Some(mut list) = news_feed.has_widget(&next).borrow_mut() {
+                if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
                     // lets set our scroll range so the scrollbar has something
                     list.set_item_range(0, 3000, 1);
                     // next visible item only returns items that are visible
@@ -354,6 +354,16 @@ impl AppMain for App {
         }
         
         let actions = self.ui.handle_widget_event(cx, event);
+        
+        for news_feed in news_feeds.iter() {
+            for item in news_feed.items_with_actions(&actions).iter() {
+                // check for actions inside the list item
+                if item.get_button(id!(delete)).clicked(&actions) {
+                    // delete the item in the data
+                    //list.redraw(cx);
+                }
+            }
+        }
         
         if self.ui.get_button(id!(button1)).clicked(&actions) {
         }

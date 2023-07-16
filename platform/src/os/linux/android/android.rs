@@ -130,7 +130,7 @@ impl Cx {
             }
             else {
                 let message = format!("cannot load dependency {}", path);
-                //crate::makepad_error_log::error!("Android asset failed: {}", message);
+                crate::makepad_error_log::error!("Android asset failed: {}", message);
                 dep.data = Some(Err(message));
             }
         }
