@@ -29,25 +29,20 @@ const URL_OPENJDK_17_0_2_WINDOWS_X64: &str = "https://download.java.net/java/GA/
 const URL_OPENJDK_17_0_2_MACOS_AARCH64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-aarch64_bin.tar.gz";
 const URL_OPENJDK_17_0_2_MACOS_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-x64_bin.tar.gz";
 const URL_OPENJDK_17_0_2_LINUX_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_linux-x64_bin.tar.gz";
-const ANDROID_TARGETS: [(&str,&str,&str);4] = [
-    ("aarch64-linux-android","aarch64-linux-android","aarch64-linux-android"),
-    ("x86_64-linux-android","x86_64-linux-android","x86_64-linux-android",) ,
-    ("arm-linux-androideabi","armv7a-linux-androideabi","armv7-linux-androideabi"), 
-    ("i686-linux-android","i686-linux-android","i686-linux-android")
-];
 
 fn url_file_name(url: &str) -> &str {
     url.rsplit_once('/').unwrap().1
 }
 
-pub fn rustup_toolchain_install(all_targets:bool) -> Result<(), String> {
+pub fn rustup_toolchain_install(targets:&[AndroidTarget]) -> Result<(), String> {
     println!("Installing Rust toolchains for android");
     println!("Installing nightly");
     shell_env_cap(&[],&std::env::current_dir().unwrap(), "rustup", &[
         "install",
         "nightly"
     ]) ?;
-    for (_,_,toolchain) in ANDROID_TARGETS{
+    for target in targets{
+        let toolchain = target.toolchain();
         println!("Installing rust nightly for {}", toolchain);
         shell_env_cap(&[],&std::env::current_dir().unwrap(), "rustup", &[
             "target",
@@ -56,9 +51,6 @@ pub fn rustup_toolchain_install(all_targets:bool) -> Result<(), String> {
             "--toolchain",
             "nightly"
         ]) ?;
-        if !all_targets{
-            break;
-        }
     }
     Ok(())
 }
@@ -110,7 +102,7 @@ pub fn remove_sdk_sources(sdk_dir: &Path, _host_os: HostOs, _args: &[String]) ->
     rmdir(src_dir) 
 }
 
-pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], all_targets:bool) -> Result<(), String> {
+pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], targets:&[AndroidTarget]) -> Result<(), String> {
     
     let src_dir = &sdk_dir.join("sources");
     
@@ -229,7 +221,9 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], all_targets
             
             let mut ndk_extract = Vec::new();
             #[allow(non_snake_case)]
-            for (sys_dir,clang,_) in ANDROID_TARGETS{
+            for target in targets{
+                let sys_dir = target.sys_dir();
+                let clang = target.clang();
                 let SYS_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 ndk_extract.extend_from_slice(&[
@@ -255,7 +249,6 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], all_targets
                     (format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
                     (format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
                 ]);
-                if !all_targets{break}
             }
             let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
             unzip(4, src_dir, sdk_dir, URL_NDK_33_WINDOWS, &ndk_extract) ?;
@@ -305,7 +298,9 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], all_targets
             
             let mut ndk_extract = Vec::new();
             #[allow(non_snake_case)]
-            for (sys_dir,clang,_) in ANDROID_TARGETS{
+            for target in targets{
+                let sys_dir = target.sys_dir();
+                let clang = target.clang();
                 let SYS_IN = &format!("AndroidNDK9519653.app/Contents/NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 ndk_extract.extend_from_slice(&[
@@ -331,7 +326,6 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], all_targets
                     (format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
                     (format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
                 ]);
-                if !all_targets{break}
             }
             let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
             dmg_extract(4, src_dir, sdk_dir, URL_NDK_33_MACOS, &ndk_extract) ?;
@@ -382,7 +376,9 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], all_targets
             
             let mut ndk_extract = Vec::new();
             #[allow(non_snake_case)]
-            for (sys_dir,clang,_) in ANDROID_TARGETS{
+            for target in targets{
+                let sys_dir = target.sys_dir();
+                let clang = target.clang();
                 let SYS_IN = &format!("android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 let SYS_OUT = &format!("NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/{sys_dir}/33");
                 ndk_extract.extend_from_slice(&[
@@ -412,7 +408,6 @@ pub fn expand_sdk(sdk_dir: &Path, host_os: HostOs, _args: &[String], all_targets
                     (format!("{SYS_IN}/libc.so|{SYS_OUT}/libgcc.so"), false),
                     (format!("{SYS_IN}/libc.so|{SYS_OUT}/libunwind.so"), false),
                 ]);
-                if !all_targets{break}
             }
             let ndk_extract: Vec<(&str,bool)> = ndk_extract.iter().map(|s| (s.0.as_str(),s.1)).collect();
             unzip(4, src_dir, sdk_dir, URL_NDK_33_LINUX, &ndk_extract) ?;
