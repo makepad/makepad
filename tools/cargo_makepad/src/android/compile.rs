@@ -2,7 +2,7 @@ use std::{
     path::{Path, PathBuf},
     collections::HashSet,
 };
-use crate::android::HostOs;
+use crate::android::{HostOs, AndroidTarget};
 use crate::shell::*;
 
 struct BuildPaths {
@@ -403,7 +403,7 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     Ok(())
 }
 
-pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String]) -> Result<BuildResult, String> {
+pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], _targets:&[AndroidTarget]) -> Result<BuildResult, String> {
     let target = get_target_from_args(args)?;
     let underscore_target = target.replace('-', "_");
 
@@ -432,8 +432,8 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     })
 }
 
-pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String]) -> Result<(), String> {
-    let result = build(sdk_dir, host_os, package_name, app_label, args)?;
+pub fn run(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], targets:&[AndroidTarget]) -> Result<(), String> {
+    let result = build(sdk_dir, host_os, package_name, app_label, args, targets)?;
     
     let cwd = std::env::current_dir().unwrap();
     //println!("Installing android application");
