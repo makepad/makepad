@@ -45,6 +45,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut sdk_path = None;
     let mut package_name = None;
     let mut app_label = None;
+    let mut all_targets = false;
     // pull out options
     for i in 0..args.len() {
         let v = &args[i];
@@ -60,6 +61,9 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         else if let Some(opt) = v.strip_prefix("--app-label=") {
             app_label = Some(opt.to_string());
         }
+        else if let Some(_) = v.strip_prefix("--all-targets") {
+            all_targets = true;
+        }
         else {
             args = &args[i..];
             break
@@ -73,9 +77,6 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let sdk_dir = cwd.join(sdk_path.unwrap());
     
     match args[0].as_ref() {
-        "rustup-toolchain-install"=>{
-            sdk::rustup_toolchain_install()
-        }
         "adb"=>{
             compile::adb(&sdk_dir, host_os, &args[1..])
         },
@@ -85,20 +86,23 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         "javac"=>{
             compile::javac(&sdk_dir, host_os, &args[1..])
         },
+        "rustup-toolchain-install"=>{
+            sdk::rustup_toolchain_install(all_targets)
+        }
         "download-sdk" => {
             sdk::download_sdk(&sdk_dir, host_os, &args[1..])
         }
         "expand-sdk" => {
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..])
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..],all_targets)
         }
         "remove-sdk-sources" => {
             sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
         }
         "toolchain-install" => {
             println!("Installing Android toolchain\n");
-            sdk::rustup_toolchain_install()?;
+            sdk::rustup_toolchain_install(all_targets)?;
             sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..])?;
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..],all_targets)?;
             sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])?;
             println!("\nAndroid toolchain has been installed\n");
             Ok(())
