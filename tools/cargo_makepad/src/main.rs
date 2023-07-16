@@ -33,7 +33,13 @@ fn show_help(err: &str){
     println!();
     println!("       --sdk-path=./android_33_sdk               The path to read/write the android SDK");
     println!("       --host-os=<linux-x64|windows-x64|macos-aarch64|macos-x64>");
+    println!("       --all-targets                             install all android targets, default only aarch64");
     println!("                                                 Host OS is autodetected but can be overridden here");
+    println!("    [Android toolchain-install separated steps]");
+    println!("    android [options] rustup-toolchain-install");
+    println!("    android [options] download-sdk");
+    println!("    android [options] expand-sdk");
+    println!("    android [options] remove-sdk-sources");
     println!();
     println!("Linux commands:");
     println!();
