@@ -599,6 +599,7 @@ impl LiveNew for WidgetRef {
 pub struct WidgetActionItem {
     pub widget_uid: WidgetUid,
     pub container_uid: WidgetUid,
+    pub item_uid: WidgetUid,
     pub action: Box<dyn WidgetAction>
 }
 
@@ -633,8 +634,22 @@ impl WidgetActionItem {
     pub fn new(action: Box<dyn WidgetAction>, widget_uid:WidgetUid) -> Self {
         Self {
             container_uid: WidgetUid(0),
+            item_uid: WidgetUid(0),
             widget_uid,
             action
+        }
+    }
+    pub fn with_container(self, container_uid: WidgetUid)->Self{
+        Self{
+            container_uid,
+            ..self
+        }
+    }
+    
+    pub fn with_item(self, item_uid: WidgetUid)->Self{
+        Self{
+            item_uid,
+            ..self
         }
     }
     
