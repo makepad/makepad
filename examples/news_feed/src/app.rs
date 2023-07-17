@@ -245,7 +245,7 @@ live_design!{
         hero = <Image> {
             image: (IMG_A),
             image_scale: 1.0,
-            walk: {margin: 0}
+            walk: {margin: 0, width:Fill}
             layout: {padding: 0}
         }
         
