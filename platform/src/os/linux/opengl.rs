@@ -231,7 +231,7 @@ impl Cx {
     
     pub fn set_default_depth_and_blend_mode() {
         unsafe {
-            gl_sys::Disable(gl_sys::DEPTH_TEST);
+            gl_sys::Enable(gl_sys::DEPTH_TEST);
             gl_sys::DepthFunc(gl_sys::LEQUAL);
             gl_sys::BlendEquationSeparate(gl_sys::FUNC_ADD, gl_sys::FUNC_ADD);
             gl_sys::BlendFuncSeparate(gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA, gl_sys::ONE, gl_sys::ONE_MINUS_SRC_ALPHA);
