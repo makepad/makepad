@@ -242,6 +242,7 @@ impl DesktopWindow {
         
         if let Event::Resume = event {
             Cx2d::reset_fonts_atlas(cx);
+            Cx2d::reset_icon_atlas(cx);
         }
         if let Event::MouseMove(ev) = event {
             if let OsType::LinuxDirect = cx.os_type() {
