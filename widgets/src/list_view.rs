@@ -28,6 +28,12 @@ enum DrawPhase {
     Up {index: u64, scroll: f64, viewport: Rect},
 }
 
+enum ScrollState {
+    Stopped,
+    Drag {last_abs: f64, delta:f64},
+    Flick {delta: f64, next_frame: NextFrame}
+}
+
 #[derive(Live)]
 pub struct ListView {
     #[rust] area: Area,
@@ -37,7 +43,8 @@ pub struct ListView {
     #[rust] range_start: u64,
     #[rust(u64::MAX)] range_end: u64,
     #[rust(10u64)] view_window: u64,
-    
+    #[live(0.1)] flick_scroll_minimum: f64,
+    #[live(0.98)] flick_scroll_decay: f64,
     #[rust] top_id: u64,
     #[rust] top_scroll: f64,
     #[rust] draw_phase: Option<DrawPhase>,
@@ -46,6 +53,7 @@ pub struct ListView {
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
+    #[rust(ScrollState::Stopped)] scroll_state: ScrollState
 }
 
 impl LiveHook for ListView {
@@ -120,7 +128,7 @@ impl ListView {
                 if did_draw && rect.pos.y + rect.size.y < viewport.pos.y && index + 1 < self.range_end {
                     self.top_id = index + 1;
                     self.top_scroll = (rect.pos.y + rect.size.y) - viewport.pos.y;
-                    if self.top_id + 1 == self.range_end && self.top_scroll < 0.0{
+                    if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
                         self.top_scroll = 0.0;
                     }
                 }
@@ -180,7 +188,7 @@ impl ListView {
                 }
                 self.top_id = index;
                 self.top_scroll = scroll - used.y;
-                if self.top_id + 1 == self.range_end && self.top_scroll < 0.0{
+                if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
                     self.top_scroll = 0.0;
                 }
                 if index == self.range_start {
@@ -221,6 +229,19 @@ impl ListView {
         self.range_start = range_start;
         self.range_end = range_end;
         self.view_window = view_window;
+    }
+    
+    fn delta_top_scroll(&mut self, cx: &mut Cx, delta: f64) {
+        self.top_scroll += delta;
+        if self.top_id == self.range_start && self.top_scroll > 0.0 {
+            self.top_scroll = 0.0;
+        }
+        if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
+            self.top_scroll = 0.0;
+        }
+        let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
+        // move the scrollbar to the right 'top' position
+        self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
     }
 }
 
@@ -266,23 +287,56 @@ impl Widget for ListView {
             });
         }
         
+        
+        if let ScrollState::Flick {delta, next_frame} = &mut self.scroll_state{
+            if let Some(_) =  next_frame.is_event(event){
+                *delta = *delta * self.flick_scroll_decay;
+                if delta.abs()>self.flick_scroll_minimum {
+                    *next_frame = cx.new_next_frame();
+                    let delta = *delta;
+                    self.delta_top_scroll(cx, delta);
+                    dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
+                    self.area.redraw(cx);
+                }
+            }
+        }
+
         match event.hits(cx, self.area) {
-            Hit::FingerScroll(s) => {
-                self.top_scroll -= s.scroll.y;
-                if self.top_id == self.range_start && self.top_scroll > 0.0 {
-                    self.top_scroll = 0.0;
-                }
-                if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
-                    self.top_scroll = 0.0;
-                }
-                let scroll_pos = ((self.top_id - self.range_start) as f64 / (self.range_end - self.range_start - self.view_window) as f64) * self.scroll_bar.get_scroll_view_total();
-                // move the scrollbar to the right 'top' position
-                self.scroll_bar.set_scroll_pos_no_action(cx, scroll_pos);
-                
+            Hit::FingerScroll(e) => {
+                self.delta_top_scroll(cx, -e.scroll.y);
                 dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
                 self.area.redraw(cx);
-                
             },
+            Hit::FingerDown(e) => {
+                // ok so fingerdown eh.
+                self.scroll_state = ScrollState::Drag {
+                    last_abs: e.abs.y,
+                    delta: 0.0
+                };
+            }
+            Hit::FingerMove(e) => {
+                // ok we kinda have to set the scroll pos to our abs position
+                if let ScrollState::Drag {last_abs, delta} = &mut self.scroll_state {
+                    let new_delta = e.abs.y - *last_abs;
+                    *delta = new_delta;
+                    *last_abs = e.abs.y;
+                    self.delta_top_scroll(cx, new_delta);
+                    dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
+                    self.area.redraw(cx);
+                }
+            }
+            Hit::FingerUp(_) => {
+                if let ScrollState::Drag {last_abs, delta} = &mut self.scroll_state {
+                    if delta.abs()>self.flick_scroll_minimum {
+                        self.scroll_state = ScrollState::Flick {
+                            delta: *delta,
+                            next_frame: cx.new_next_frame()
+                        };
+                    }
+                }
+                // ok so. lets check our gap from 'drag'
+                // here we kinda have to take our last delta and animate it
+            }
             Hit::KeyFocus(_) => {
             }
             Hit::KeyFocusLost(_) => {
@@ -316,13 +370,13 @@ impl ListViewRef {
         set
     }
     
-    fn items_with_actions_vec(&self, actions: &WidgetActions, set:&mut Vec<(u64, WidgetRef)> ){
+    fn items_with_actions_vec(&self, actions: &WidgetActions, set: &mut Vec<(u64, WidgetRef)>) {
         let uid = self.widget_uid();
-        for action in actions{
-            if action.container_uid == uid{
-                if let Some(inner) = self.borrow(){
-                    for ((item_id, _),item) in inner.items.iter(){
-                        if item.widget_uid() == action.item_uid{
+        for action in actions {
+            if action.container_uid == uid {
+                if let Some(inner) = self.borrow() {
+                    for ((item_id, _), item) in inner.items.iter() {
+                        if item.widget_uid() == action.item_uid {
                             set.push((*item_id, item.clone()))
                         }
                     }
@@ -335,10 +389,10 @@ impl ListViewRef {
 #[derive(Clone, Default, WidgetSet)]
 pub struct ListViewSet(WidgetSet);
 
-impl ListViewSet{
+impl ListViewSet {
     pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(u64, WidgetRef)> {
         let mut set = Vec::new();
-        for list in self.iter(){
+        for list in self.iter() {
             list.items_with_actions_vec(actions, &mut set)
         }
         set
