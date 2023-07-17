@@ -123,10 +123,10 @@ live_design!{
     }
     
     
-    Header = <Box> {
+    Header = <BoxY> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: 4.5}
+        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: vec2(0.5,4.5)}
         
         <Logo> {
             walk: {height: Fit, width: Fill, margin: {top: 30.0}}
@@ -135,10 +135,10 @@ live_design!{
         
     }
     
-    Menu = <Box> {
+    Menu = <BoxY> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: 4.5}
+        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5,0.5)}
         
         <Frame> {
             walk: {width: Fill, height: Fit, margin: 0.0}
