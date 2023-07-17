@@ -270,7 +270,8 @@ impl CxIconAtlasAlloc {
 pub struct CxIconAtlasRc(pub Rc<RefCell<CxIconAtlas >>);
 
 impl CxIconAtlas {
-    pub fn reset_vector_atlas(&mut self) {
+    pub fn reset_icon_atlas(&mut self) {
+        self.entries.clear();
         self.alloc.xpos = 0.;
         self.alloc.ypos = 0.;
         self.alloc.hmax = 0.;
@@ -365,7 +366,7 @@ impl<'a> Cx2d<'a> {
     pub fn reset_icon_atlas(cx: &mut Cx) {
         if cx.has_global::<CxIconAtlasRc>() {
             let mut fonts_atlas = cx.get_global::<CxIconAtlasRc>().0.borrow_mut();
-            fonts_atlas.reset_vector_atlas();
+            fonts_atlas.reset_icon_atlas();
         }
     }
     
