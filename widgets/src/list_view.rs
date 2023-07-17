@@ -326,7 +326,7 @@ impl Widget for ListView {
                 }
             }
             Hit::FingerUp(_) => {
-                if let ScrollState::Drag {last_abs, delta} = &mut self.scroll_state {
+                if let ScrollState::Drag {delta,..} = &mut self.scroll_state {
                     if delta.abs()>self.flick_scroll_minimum {
                         self.scroll_state = ScrollState::Flick {
                             delta: *delta,
