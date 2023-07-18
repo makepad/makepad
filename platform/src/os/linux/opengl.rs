@@ -131,9 +131,9 @@ impl Cx {
                     }
                         
                     vao.vao = Some(unsafe {
-                        let mut vao = std::mem::MaybeUninit::uninit();
-                        gl_sys::GenVertexArrays(1, vao.as_mut_ptr());
-                        vao.assume_init()
+                        let mut vao = 0u32;
+                        gl_sys::GenVertexArrays(1, &mut vao);
+                        vao
                     });    
                     
                     vao.shader_id = Some(draw_call.draw_shader.draw_shader_id);

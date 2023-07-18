@@ -34,9 +34,9 @@ pub struct DrawApp {
 
 #[derive(Live)]
 pub struct RunView {
-    draw_bg: DrawApp,
-    state: State,
-    frame_delta: f64,
+    #[live] draw_bg: DrawApp,
+    #[state] state: LiveState,
+    #[live] frame_delta: f64,
     #[rust] last_size: (usize, usize),
     #[rust] tick: Timer,
     #[rust] time: f64,
