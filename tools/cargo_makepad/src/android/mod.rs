@@ -60,6 +60,30 @@ impl AndroidTarget {
             Self::i686 => "i686-linux-android"
         }
     }
+    fn to_str(&self) -> &'static str {
+        match self {
+            Self::aarch64 => "aarch64",
+            Self::x86_64 => "x86_64",
+            Self::armv7 => "armv7",
+            Self::i686 => "i686",
+        }
+    }
+    fn abi_identifier(&self) -> &'static str {
+        match self {
+            Self::aarch64 => "arm64-v8a",
+            Self::x86_64 => "x86_64",
+            Self::armv7 => "armeabi-v7a",
+            Self::i686 => "x86",
+        }
+    }
+    fn linker_env_var(&self) -> &'static str {
+        match self {
+            Self::aarch64 => "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER",
+            Self::x86_64 => "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER",
+            Self::armv7 => "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER",
+            Self::i686 => "CARGO_TARGET_I686_LINUX_ANDROID_LINKER",
+        }
+    }
 }
 
 impl HostOs {
