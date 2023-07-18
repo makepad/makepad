@@ -80,7 +80,7 @@ pub struct ShaderView {
     #[live] size: DVec2,
     #[live] pad: DVec2,
 
-    #[live] state: State
+    #[state] state: LiveState
 }
 
 

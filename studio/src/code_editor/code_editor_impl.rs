@@ -208,7 +208,7 @@ pub struct CodeEditorImpl {
     
     #[live] padding_top: f64,
     
-    #[live] state: State,
+    #[state] state: LiveState,
     
     #[live] selection_quad: DrawSelection,
     #[live] code_text: DrawText,
@@ -250,6 +250,7 @@ pub struct DrawIndentLine {
 
 #[derive(Live, LiveHook)]
 #[repr(u32)]
+#[live_ignore]
 pub enum MsgLineLevel {
     Warning = shader_enum(1),
     #[pick] Error = shader_enum(2),
@@ -805,19 +806,20 @@ impl CodeEditorImpl {
     
     pub fn draw_code_chunk(
         &mut self,
-        cx: &mut Cx2d,
+        _cx: &mut Cx2d,
         font_scale: f64,
         color: Vec4,
-        pos: DVec2,
-        chunk: &[char],
+        _pos: DVec2,
+        _chunk: &[char],
     ) {
         self.code_text.font_scale = font_scale;
         self.code_text.color = color;
+        /*
         self.code_text.draw_inner_fix_later_when_editor_rep_is_not_vec_of_char(
             cx,
             pos,
             chunk
-        );
+        );*/
     }
     
     pub fn draw_current_line(
