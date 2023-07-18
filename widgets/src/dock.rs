@@ -1,5 +1,7 @@
 use {
     crate::{
+        makepad_derive_widget::*,
+        widget::*,
         makepad_draw::*,
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
@@ -69,6 +71,8 @@ pub struct DrawRoundCorner {
 
 #[derive(Live)]
 pub struct Dock {
+    #[rust] draw_state: DrawStateWrap<DockDrawState>,
+    #[live] walk: Walk,
     #[live] layout: Layout,
     #[live] overlay_view: View,
     #[live] round_corner: DrawRoundCorner,
@@ -97,12 +101,15 @@ impl LiveHook for Dock {
         }
         self.area.redraw(cx);
     }
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, Dock)
+    }
 }
 
 impl Dock {
     
-    pub fn begin(&mut self, cx: &mut Cx2d) {
-        cx.begin_turtle(Walk::default(), self.layout);
+    pub fn begin(&mut self, cx: &mut Cx2d, walk:Walk) {
+        cx.begin_turtle(walk, self.layout);
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
@@ -361,6 +368,38 @@ impl Dock {
     }
 }
 
+
+#[derive(Clone)]
+enum DockDrawState {
+    Hook,
+}
+
+
+impl Widget for Dock {
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+    }
+    
+    fn handle_widget_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        let _uid = self.widget_uid();
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        if self.draw_state.begin(cx, DockDrawState::Hook) {
+            self.begin(cx, walk);
+            return WidgetDraw::hook_above()
+        }
+        if let Some(DockDrawState::Hook) = self.draw_state.get() {
+            self.end(cx);
+            self.draw_state.end();
+        }
+        WidgetDraw::done()
+    }
+}
+
+
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PanelId(pub LiveId);
 
@@ -481,3 +520,11 @@ fn compute_drag_rect(rect: Rect, position: DragPosition) -> Rect {
         DragPosition::Center => rect,
     }
 }
+
+
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct DockRef(WidgetRef); 
+
+#[derive(Clone, WidgetSet)]
+pub struct DockSet(WidgetSet);
+

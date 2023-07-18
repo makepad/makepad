@@ -9,10 +9,10 @@ live_design!{
     import makepad_draw::shader::std::*;
     import crate::theme::*;
     
+    const THICKNESS = 0.8
     LinkLabel = {{LinkLabel}} {
         button: {
             draw_bg: {
-                const THICKNESS = 0.8
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     let offset_y = 1.0
