@@ -89,42 +89,53 @@ fn get_target_crate_dir(target: &str) -> Result<PathBuf, String> {
     }
 }
 
-fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<(), String> {
+fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String], android_targets:&[AndroidTarget]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
-    
-    let linker = match host_os{
-        HostOs::MacosX64=>"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
-        HostOs::MacosAarch64=>"NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
-        HostOs::WindowsX64=>"NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android33-clang.cmd",
-        HostOs::LinuxX64=>"NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang",
-        _=>panic!()
-    };
 
-    let base_args = &[
-        "run",
-        "nightly",
-        "cargo",
-        "rustc",
-        "--lib",
-        "--crate-type=cdylib",
-        "--release",
-        "--target=aarch64-linux-android"
-    ]; 
-    let mut args_out = Vec::new();
-    args_out.extend_from_slice(base_args);
-    for arg in args {
-        args_out.push(arg);
+    for android_target in android_targets {
+        let clang_filename = format!("{}33-clang", android_target.clang());
+        
+        let linker = match host_os{
+            HostOs::MacosX64=>format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/{clang_filename}"),
+            HostOs::MacosAarch64=>format!("NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/{clang_filename}"),
+            HostOs::WindowsX64=>format!("NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/{clang_filename}.cmd"),
+            HostOs::LinuxX64=>format!("NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/{clang_filename}"),
+            _=>panic!()
+        };
+
+        let toolchain = android_target.toolchain();
+        let target_opt = format!("--target={toolchain}");
+
+        let base_args = &[
+            "run",
+            "nightly",
+            "cargo",
+            "rustc",
+            "--lib",
+            "--crate-type=cdylib",
+            "--release",
+            &target_opt
+        ]; 
+        let mut args_out = Vec::new();
+        args_out.extend_from_slice(base_args);
+        for arg in args {
+            args_out.push(arg);
+        }
+
+        let target_str = android_target.to_str();
+        let cfg_flag = format!("--cfg android_target=\"{}\"", target_str);
+        
+        shell_env(
+            &[
+                (&android_target.linker_env_var(), (sdk_dir.join(linker).to_str().unwrap())),
+                ("RUSTFLAGS", &cfg_flag),
+                ("MAKEPAD", "lines"),
+            ],
+            &cwd,
+            "rustup",
+            &args_out
+        ) ?;
     }
-    
-    shell_env(
-        &[
-            ("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", (sdk_dir.join(linker).to_str().unwrap())),
-            ("MAKEPAD", "lines"),
-        ],
-        &cwd,
-        "rustup",
-        &args_out
-    ) ?;
 
     Ok(())
 }
@@ -132,8 +143,8 @@ fn rust_build(sdk_dir: &Path, host_os: HostOs, args: &[String]) -> Result<(), St
 fn prepare_build(underscore_target: &str, java_url: &str, app_label: &str) -> Result<BuildPaths, String> {
     let cwd = std::env::current_dir().unwrap();
 
-    let tmp_dir = cwd.join(format!("target/aarch64-linux-android-apk/{underscore_target}/tmp"));
-    let out_dir = cwd.join(format!("target/aarch64-linux-android-apk/{underscore_target}/apk"));
+    let tmp_dir = cwd.join(format!("target/linux-android-apk/{underscore_target}/tmp"));
+    let out_dir = cwd.join(format!("target/linux-android-apk/{underscore_target}/apk"));
     
     // lets remove tmp and out dir
     let _ = rmdir(&tmp_dir);
@@ -290,20 +301,26 @@ fn build_unaligned_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), S
     Ok(())
 }
 
-fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths) -> Result<(), String> {
+fn add_rust_library(sdk_dir: &Path, underscore_target: &str, build_paths: &BuildPaths, android_targets: &[AndroidTarget]) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
 
-    mkdir(&build_paths.out_dir.join("lib/arm64-v8a")) ?;
-    
-    let src_lib = cwd.join("target/aarch64-linux-android/release/").join(format!("lib{underscore_target}.so"));
-    let dst_lib = build_paths.out_dir.join("lib/arm64-v8a").join("libmakepad.so");
-    cp(&src_lib, &dst_lib, false) ?;
+    for android_target in android_targets {
+        let abi = android_target.abi_identifier();
+        mkdir(&build_paths.out_dir.join(format!("lib/{abi}"))) ?;
 
-    shell_env_cap(&[], &build_paths.out_dir, sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
-        "add",
-        (build_paths.dst_unaligned_apk.to_str().unwrap()),
-        "lib/arm64-v8a/libmakepad.so",
-    ]) ?;
+        let android_target_dir = android_target.toolchain();
+        let binary_path = format!("lib/{abi}/libmakepad.so");
+
+        let src_lib = cwd.join(format!("target/{android_target_dir}/release/lib{underscore_target}.so"));
+        let dst_lib = build_paths.out_dir.join(binary_path.clone());
+        cp(&src_lib, &dst_lib, false) ?;
+
+        shell_env_cap(&[], &build_paths.out_dir, sdk_dir.join("android-13/aapt").to_str().unwrap(), &[
+            "add",
+            (build_paths.dst_unaligned_apk.to_str().unwrap()),
+            &binary_path,
+        ]) ?;
+    }
 
     Ok(())
 }
@@ -403,14 +420,14 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
     Ok(())
 }
 
-pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], _targets:&[AndroidTarget]) -> Result<BuildResult, String> {
+pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_label: Option<String>, args: &[String], android_targets:&[AndroidTarget]) -> Result<BuildResult, String> {
     let target = get_target_from_args(args)?;
     let underscore_target = target.replace('-', "_");
 
     let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_target}"));
     let app_label = app_label.unwrap_or_else(|| format!("{underscore_target}"));
 
-    rust_build(sdk_dir, host_os, args)?;
+    rust_build(sdk_dir, host_os, args, android_targets)?;
     let build_paths = prepare_build(target, &java_url, &app_label)?;
 
     println!("Compiling APK & R.java files");
@@ -420,7 +437,7 @@ pub fn build(sdk_dir: &Path, host_os: HostOs, package_name: Option<String>, app_
     println!("Building APK");
     build_dex(sdk_dir, &build_paths)?;
     build_unaligned_apk(sdk_dir, &build_paths)?;
-    add_rust_library(sdk_dir, &underscore_target, &build_paths)?;
+    add_rust_library(sdk_dir, &underscore_target, &build_paths, android_targets)?;
     add_resources(sdk_dir, target, &build_paths)?;
     build_zipaligned_apk(sdk_dir, &build_paths)?;
     sign_apk(sdk_dir, &build_paths)?;
