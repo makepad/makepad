@@ -71,9 +71,8 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.2}}
                     apply: {
-                        hover: 0.0,
-                        draw_bg: {hover: (hover)}
-                        draw_name: {hover: (hover)}
+                        draw_bg: {hover: 0.0}
+                        draw_name: {hover: 0.0}
                     }
                 }
                 
@@ -81,7 +80,8 @@ live_design!{
                     cursor: Hand,
                     from: {all: Forward {duration: 0.1}}
                     apply: {
-                        hover: [{time: 0.0, value: 1.0}],
+                        draw_bg: {hover: [{time: 0.0, value: 1.0}]}
+                        draw_name: {hover: [{time: 0.0, value: 1.0}]}
                     }
                 }
             }
@@ -91,17 +91,18 @@ live_design!{
                 off = {
                     from: {all: Forward {duration: 0.3}}
                     apply: {
-                        selected: 0.0,
-                        close_button: {draw_button: {selected: (selected)}}
-                        draw_bg: {selected: (selected)}
-                        draw_name: {selected: (selected)}
+                        close_button: {draw_button: {selected: 0.0}}
+                        draw_bg: {selected: 0.0}
+                        draw_name: {selected: 0.0}
                     }
                 }
                 
                 on = {
                     from: {all: Snap}
                     apply: {
-                        selected: 1.0,
+                        close_button: {draw_button: {selected: 1.0}}
+                        draw_bg: {selected: 1.0}
+                        draw_name: {selected: 1.0}
                     }
                 }
             }
