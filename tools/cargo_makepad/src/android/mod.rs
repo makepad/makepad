@@ -30,7 +30,7 @@ impl AndroidTarget {
                 "armv7" => out.push(AndroidTarget::armv7),
                 "i686" => out.push(AndroidTarget::i686),
                 x => {
-                    return Err(format!("{:?} please provide a valid target: aarch64, x86_64, armv7, i686", x))
+                    return Err(format!("{:?} please provide a valid ABI: aarch64, x86_64, armv7, i686", x))
                 }
             }
         }
@@ -137,7 +137,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         else if let Some(opt) = v.strip_prefix("--app-label=") {
             app_label = Some(opt.to_string());
         }
-        else if let Some(opt) = v.strip_prefix("--target=") {
+        else if let Some(opt) = v.strip_prefix("--abi=") {
             targets = AndroidTarget::from_str(opt)?;
         }
         else {
