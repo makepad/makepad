@@ -51,7 +51,9 @@ live_design!{
                 return rotated + vec2(0.5, 0.5);
             }
 
-            fn get_color(self, rot_padding: vec2) -> vec4 {
+            fn get_color(self) -> vec4 {
+                let rot_padding = rotation_vertex_expansion(self.rotation, self.rect_size.x, self.rect_size.y) / 2.0;
+
                 // Current position is a traslated one, so let's get the original position
                 let current_pos = self.pos.xy - rot_padding;
                 let original_pos = rotate_2d_from_center(current_pos, self.rotation, self.rect_size);
@@ -86,7 +88,7 @@ live_design!{
                 let scaled_size = self.rect_size * self.scale;
                 sdf.box(0.0, 0.0, scaled_size.x, scaled_size.y, 1);
 
-                sdf.fill_premul(Pal::premul(self.get_color(rot_expansion / 2.0)));
+                sdf.fill_premul(Pal::premul(self.get_color()));
                 return sdf.result
             }
 

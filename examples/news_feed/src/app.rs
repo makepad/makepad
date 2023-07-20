@@ -189,6 +189,7 @@ live_design!{
                 profile_img = <Image> {
                     source: (IMG_PROFILE_A)
                     draw_bg: {
+                        scale: 0.65
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                             let c = self.rect_size * 0.5;
@@ -198,7 +199,6 @@ live_design!{
                             return sdf.result
                         }
                     }
-                    scale_factor: 0.65
                     walk: {margin: 0}
                     layout: {padding: 0}
                 }
