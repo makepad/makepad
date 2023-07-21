@@ -60,6 +60,7 @@ pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
     frame::*,
+    image::*,
     label::*,
     slider::*,
     check_box::*,
