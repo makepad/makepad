@@ -1,7 +1,7 @@
 // image_formats::image
 // by Desmond Germans, 2019
 
-#[derive(Default)] 
+#[derive(Default, Clone)] 
 pub struct ImageBuffer {
     pub width: usize,
     pub height: usize,

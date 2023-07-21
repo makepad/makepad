@@ -10,12 +10,32 @@ pub trait ImageLoadingWidget {
     fn texture(&mut self) -> &mut Option<Texture>;
 
     fn after_apply_for_image_loading_widget(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        let filename = self.image_filename();
-        let image_path = filename.as_str();
-        if image_path.len()>0 {
-            let mut image_buffer = Self::load_image_dependency(cx, image_path, index, nodes);
-            if let Some(mut image_buffer) = image_buffer.take() {
-                self.create_texture_from_image(cx, &mut image_buffer);
+        if self.texture().is_none() {
+            let filename = self.image_filename();
+            let image_path = filename.as_str();
+
+            let buffer = {
+                if image_path.len() > 0 {
+                    if let Some(buffer) = cx.image_cache.get(image_path) {
+                        Some(buffer.clone())
+                    } else {
+                        if let Some(buffer) =
+                            Self::load_image_dependency(cx, image_path, index, nodes)
+                        {
+                            cx.image_cache
+                                .insert(image_path.to_string(), buffer.clone());
+                            Some(buffer)
+                        } else {
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(mut buffer) = buffer {
+                self.create_texture_from_image(cx, &mut buffer);
             }
         }
     }
