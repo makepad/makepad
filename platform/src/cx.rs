@@ -11,6 +11,7 @@ use {
         cell::RefCell,
     },
     crate::{
+        image::ImageBuffer,
         makepad_live_compiler::{
             LiveRegistry,
             LiveFileChange
@@ -128,6 +129,8 @@ pub struct Cx {
     #[allow(dead_code)]
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
+
+    pub image_cache: HashMap<String, ImageBuffer>
 }
 
 #[derive(Clone)]
@@ -280,6 +283,8 @@ impl Cx {
             executor: Some(executor),
             spawner,
             
+            image_cache: HashMap::new(),
+
             self_ref: None
         }
     }
