@@ -164,8 +164,8 @@ impl OpenglCx {
                 8,
                 //glx_sys::GLX_ALPHA_SIZE as i32,
                 //8,
-               // glx_sys::GLX_DEPTH_SIZE as i32,
-               // 24,
+                glx_sys::GLX_DEPTH_SIZE as i32,
+                24,
                 glx_sys::None as i32,
             ];
             let mut config_count = 0;
@@ -184,7 +184,7 @@ impl OpenglCx {
             // Create GLX context.
             let context_attribs = &[
                 glx_sys::GLX_CONTEXT_MAJOR_VERSION_ARB as i32,
-                2,
+                3,
                 glx_sys::GLX_CONTEXT_MINOR_VERSION_ARB as i32,
                 0,
                 glx_sys::GLX_CONTEXT_PROFILE_MASK_ARB as i32,
