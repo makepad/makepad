@@ -164,8 +164,8 @@ impl OpenglCx {
                 8,
                 //glx_sys::GLX_ALPHA_SIZE as i32,
                 //8,
-                glx_sys::GLX_DEPTH_SIZE as i32,
-                24,
+               // glx_sys::GLX_DEPTH_SIZE as i32,
+               // 24,
                 glx_sys::None as i32,
             ];
             let mut config_count = 0;
