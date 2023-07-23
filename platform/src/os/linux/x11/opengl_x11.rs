@@ -184,7 +184,7 @@ impl OpenglCx {
             // Create GLX context.
             let context_attribs = &[
                 glx_sys::GLX_CONTEXT_MAJOR_VERSION_ARB as i32,
-                3,
+                2,
                 glx_sys::GLX_CONTEXT_MINOR_VERSION_ARB as i32,
                 0,
                 glx_sys::GLX_CONTEXT_PROFILE_MASK_ARB as i32,
