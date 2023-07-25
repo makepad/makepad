@@ -19,7 +19,19 @@ pub mod token;
 pub mod tokenizer;
 
 pub use crate::{
-    affinity::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, selection::Selection,
-    settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
+    context::Context,
+    document::Document,
+    state::State,
+    affinity::Affinity,
+    code_editor::CodeEditor,
+    diff::Diff,
+    length::Length,
+    line::Line,
+    position::Position,
+    range::Range,
+    selection::Selection,
+    settings::Settings,
+    text::Text,
+    token::Token,
+    tokenizer::Tokenizer,
 };
