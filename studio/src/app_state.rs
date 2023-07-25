@@ -7,7 +7,7 @@ use {
             tab_bar::{TabId},
         },
         makepad_draw::*,
-        editor_state::{EditorState, SessionId},
+        //editor_state::{EditorState, SessionId},
         build::build_manager::BuildState,
         makepad_collab_protocol::{
             FileNodeData, FileTreeData,
@@ -26,7 +26,7 @@ pub struct AppState {
     
     pub path: UnixPathBuf,
     
-    pub editor_state: EditorState,
+    pub editor_state: makepad_code_editor::State,
     
     pub build_state: BuildState
 }

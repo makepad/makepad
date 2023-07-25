@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_micro_serde::*,
-        makepad_editor_core::range::{Range},
+        makepad_code_editor::range::{Range},
         build::{
             build_protocol::*,
             child_process::{
