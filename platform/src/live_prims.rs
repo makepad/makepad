@@ -87,6 +87,10 @@ live_primitive!(
                 *self = *id;
                 index + 1
             }
+            LiveValue::BareEnum(id)=>{
+                *self = *id;
+                index + 1
+            }
             LiveValue::Array => {
                 if let Some(index) = LiveState::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, from, index, nodes);

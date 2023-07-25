@@ -302,9 +302,9 @@ impl Splitter {
                     Axis::Horizontal => {
                         let center = self.rect.size.x / 2.0;
                         if new_position < center - 30.0 {
-                            SplitterAlign::FromStart(new_position.max(self.min_vertical))
+                            SplitterAlign::FromA(new_position.max(self.min_vertical))
                         } else if new_position > center + 30.0 {
-                            SplitterAlign::FromEnd((self.rect.size.x - new_position).max(self.max_vertical))
+                            SplitterAlign::FromB((self.rect.size.x - new_position).max(self.max_vertical))
                         } else {
                             SplitterAlign::Weighted(new_position / self.rect.size.x)
                         }
@@ -312,9 +312,9 @@ impl Splitter {
                     Axis::Vertical => {
                         let center = self.rect.size.y / 2.0;
                         if new_position < center - 30.0 {
-                            SplitterAlign::FromStart(new_position.max(self.min_horizontal))
+                            SplitterAlign::FromA(new_position.max(self.min_horizontal))
                         } else if new_position > center + 30.0 {
-                            SplitterAlign::FromEnd((self.rect.size.y - new_position).max(self.max_horizontal))
+                            SplitterAlign::FromB((self.rect.size.y - new_position).max(self.max_horizontal))
                         } else {
                             SplitterAlign::Weighted(new_position / self.rect.size.y)
                         }
@@ -349,8 +349,8 @@ fn margin(&self) -> Margin {
 #[derive(Clone, Copy, Debug, Live, LiveHook)]
 #[live_ignore]
 pub enum SplitterAlign {
-    #[live(50.0)] FromStart(f64),
-    #[live(50.0)] FromEnd(f64),
+    #[live(50.0)] FromA(f64),
+    #[live(50.0)] FromB(f64),
     #[pick(0.5)] Weighted(f64),
 }
 
@@ -358,13 +358,13 @@ impl SplitterAlign {
     fn to_position(self, axis: Axis, rect: Rect) -> f64 {
         match axis {
             Axis::Horizontal => match self {
-                Self::FromStart(position) => position,
-                Self::FromEnd(position) => rect.size.x - position,
+                Self::FromA(position) => position,
+                Self::FromB(position) => rect.size.x - position,
                 Self::Weighted(weight) => weight * rect.size.x,
             },
             Axis::Vertical => match self {
-                Self::FromStart(position) => position,
-                Self::FromEnd(position) => rect.size.y - position,
+                Self::FromA(position) => position,
+                Self::FromB(position) => rect.size.y - position,
                 Self::Weighted(weight) => weight * rect.size.y,
             },
         }
