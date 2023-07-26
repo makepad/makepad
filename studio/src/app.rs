@@ -63,12 +63,12 @@ live_design!{
                 
                 file1 = Tab{
                     name:"File1"
-                    kind:Empty
+                    kind:Empty1
                 }
                 
                 file2 = Tab{
                     name:"File2"
-                    kind:Empty
+                    kind:Empty2
                 }
 
                 file_tree = Tab {
@@ -78,10 +78,12 @@ live_design!{
                 
                 log_list = Tab{
                     name: "LogList",
-                    kind: Empty
+                    kind: Empty3
                 }
                 
-                Empty = <Box>{}
+                Empty1 = <Rect>{draw_bg:{color:#f00}}
+                Empty2 = <Rect>{draw_bg:{color:#0f0}}
+                Empty3 = <Rect>{draw_bg:{color:#00f}}
                 FileTree = <FileTree> {}
                 //LogList = <LogList>{}
             }

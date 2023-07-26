@@ -18,7 +18,7 @@ pub struct DragEvent {
     pub handled: Cell<bool>,
     pub abs: DVec2,
     pub state: DragState,
-    pub action: Rc<Cell<DragAction >>,
+    pub response: Rc<Cell<DragResponse >>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,7 +33,7 @@ pub struct DragHitEvent<'a> {
     pub abs: DVec2,
     pub rect: Rect,
     pub state: DragState,
-    pub action: &'a Cell<DragAction>,
+    pub response: &'a Cell<DragResponse>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -51,7 +51,7 @@ pub enum DragState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DragAction {
+pub enum DragResponse {
     None,
     Copy,
     Link,
@@ -110,14 +110,14 @@ impl Event {
                             rect,
                             abs: event.abs,
                             state: event.state.clone(),
-                            action: &event.action
+                            response: &event.response
                         })
                     } else {
                         DragHit::Drag(DragHitEvent {
                             rect,
                             state: DragState::Out,
                             abs: event.abs,
-                            action: &event.action
+                            response: &event.response
                         })
                     }
                 } else {
@@ -128,7 +128,7 @@ impl Event {
                             rect,
                             state: DragState::In,
                             abs: event.abs,
-                            action: &event.action
+                            response: &event.response
                         })
                     } else {
                         DragHit::NoHit

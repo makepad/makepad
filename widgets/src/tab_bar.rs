@@ -172,6 +172,13 @@ impl TabBar {
         self.view_area.redraw(cx)
     }
     
+    
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<TabBarAction> {
+        let mut actions = Vec::new();
+        self.handle_event_with(cx, event, &mut | _, a | actions.push(a));
+        actions
+    }
+    
     pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
