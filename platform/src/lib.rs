@@ -182,7 +182,7 @@ pub use {
             DragEvent,
             DropEvent,
             DragState,
-            DragAction,
+            DragResponse,
             DraggedItem,
             HitOptions,
             DragHitEvent,

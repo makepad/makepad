@@ -38,7 +38,7 @@ use {
             DragEvent,
             DropEvent,
             DraggedItem,
-            DragAction
+            DragResponse
         },
     }
 };
@@ -794,20 +794,20 @@ pub fn define_cocoa_view_class() -> *const Class {
         let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
-        let action = Rc::new(Cell::new(DragAction::None));
+        let response = Rc::new(Cell::new(DragResponse::None));
         
         window.do_callback(CocoaEvent::Drag(DragEvent {
             handled: Cell::new(false),
             abs: pos,
             state: DragState::Over,
-            action: action.clone()
+            response: response.clone()
         }));
         
-        match action.get(){
-            DragAction::None => NSDragOperation::None,
-            DragAction::Copy => NSDragOperation::Copy,
-            DragAction::Link => NSDragOperation::Link,
-            DragAction::Move => NSDragOperation::Move,
+        match response.get(){
+            DragResponse::None => NSDragOperation::None,
+            DragResponse::Copy => NSDragOperation::Copy,
+            DragResponse::Link => NSDragOperation::Link,
+            DragResponse::Move => NSDragOperation::Move,
         }
     }
     
