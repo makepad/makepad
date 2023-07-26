@@ -111,7 +111,8 @@ pub struct Splitter {
     #[rust] rect: Rect,
     #[rust] position: f64,
     #[rust] drag_start_align: Option<SplitterAlign>,
-    
+    #[rust] area_a: Area,
+    #[rust] area_b: Area,
     #[state] state: LiveState,
     
     #[live] min_vertical: f64,
@@ -220,7 +221,7 @@ impl Splitter {
     }
     
     pub fn middle(&mut self, cx: &mut Cx2d) {
-        cx.end_turtle();
+        cx.end_turtle_with_area(&mut self.area_a);
         match self.axis {
             Axis::Horizontal => {
                 self.draw_splitter.is_vertical = 1.0;
@@ -235,12 +236,20 @@ impl Splitter {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        cx.end_turtle();
+        cx.end_turtle_with_area(&mut self.area_b);
         cx.end_turtle();
     }
     
     pub fn axis(&self) -> Axis {
         self.axis
+    }
+
+    pub fn area_a(&self) -> Area {
+        self.area_a
+    }
+    
+    pub fn area_b(&self) -> Area {
+        self.area_b
     }
     
     pub fn set_axis(&mut self, axis: Axis) {

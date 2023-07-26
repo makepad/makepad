@@ -198,7 +198,7 @@ impl Tab {
                 DragState::In => {
                     self.is_dragged = true;
                     self.draw_bg.redraw(cx);
-                    f.action.set(DragAction::Copy);
+                    f.response.set(DragResponse::Copy);
                 }
                 DragState::Out => {
                     self.is_dragged = false;
@@ -206,7 +206,7 @@ impl Tab {
                 }
                 DragState::Over => match event {
                     Event::Drag(event) => {
-                        event.action.set(DragAction::Copy);
+                        event.response.set(DragResponse::Copy);
                     }
                     _ => panic!(),
                 },
