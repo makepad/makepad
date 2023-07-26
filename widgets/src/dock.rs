@@ -69,12 +69,28 @@ pub struct DrawRoundCorner {
     #[live] flip: Vec2,
 }
 
+impl DrawRoundCorner{
+    fn draw_corners(&mut self, cx:&mut Cx2d, rect:Rect){
+        self.flip = vec2(0.0, 0.0);
+        let rad = dvec2(self.border_radius as f64, self.border_radius as f64);
+        let pos = rect.pos;
+        let size = rect.size;
+        self.draw_abs(cx, Rect {pos, size: rad});
+        self.flip = vec2(1.0, 0.0);
+        self.draw_abs(cx, Rect {pos: pos + dvec2(size.x - rad.x, 0.), size: rad});
+        self.flip = vec2(1.0, 1.0);
+        self.draw_abs(cx, Rect {pos: pos + dvec2(size.x - rad.x, size.y - rad.y), size: rad});
+        self.flip = vec2(0.0, 1.0);
+        self.draw_abs(cx, Rect {pos: pos + dvec2(0., size.y - rad.y), size: rad});
+    }
+}
+
 #[derive(Live)]
 pub struct Dock {
     #[rust] draw_state: DrawStateWrap<DockDrawState>,
     #[live] walk: Walk,
     #[live] layout: Layout,
-    #[live] overlay_view: View,
+    #[live] drag_view: View,
     #[live] round_corner: DrawRoundCorner,
     #[live] padding_fill: DrawColor,
     #[live] border_size: f64,
@@ -98,8 +114,7 @@ pub struct Dock {
 struct TabBarWrap {
     tab_bar: TabBar,
     contents_view: View,
-    contents_rect: Rect,
-    full_rect: Rect
+    contents_rect: Rect
 }
 
 #[derive(Copy, Debug, Clone)]
@@ -110,7 +125,8 @@ enum DrawStackItem {
     SplitEnd {id: LiveId},
     Tabs {id: LiveId},
     TabLabel {id: LiveId, index: usize},
-    Tab {id: LiveId}
+    Tab {id: LiveId},
+    TabContent {id: LiveId}
 }
 
 impl DrawStackItem {
@@ -203,49 +219,26 @@ impl Dock {
     }
     
     fn end(&mut self, cx: &mut Cx2d) {
-        
-        if self.overlay_view.begin(cx, Walk::default()).is_redrawing() {
+        /*
+        if self.drag_view.begin(cx, Walk::default()).is_redrawing() {
             if let Some(drag) = self.drag.as_ref() {
                 let tab_bar = &self.tab_bars[drag.panel_id];
                 let rect = compute_drag_rect(tab_bar.contents_rect, drag.position);
                 self.drag_quad.draw_abs(cx, rect);
             }
             self.overlay_view.end(cx);
-        }
+        }*/
+        
         self.tab_bars.retain_visible();
         self.splitters.retain_visible();
         
-        // lets draw the borders here
-        for tab_bar in self.tab_bars.values() {
-            let rc = &mut self.round_corner;
-            rc.flip = vec2(0.0, 0.0);
-            let rad = dvec2(rc.border_radius as f64, rc.border_radius as f64);
-            let pos = tab_bar.full_rect.pos;
-            let size = tab_bar.full_rect.size;
-            rc.draw_abs(cx, Rect {pos, size: rad});
-            rc.flip = vec2(1.0, 0.0);
-            rc.draw_abs(cx, Rect {pos: pos + dvec2(size.x - rad.x, 0.), size: rad});
-            rc.flip = vec2(1.0, 1.0);
-            rc.draw_abs(cx, Rect {pos: pos + dvec2(size.x - rad.x, size.y - rad.y), size: rad});
-            rc.flip = vec2(0.0, 1.0);
-            rc.draw_abs(cx, Rect {pos: pos + dvec2(0., size.y - rad.y), size: rad});
+        // lets draw the corners here
+        for splitter in self.splitters.values() {
+            self.round_corner.draw_corners(cx, splitter.area_a().get_rect(cx));
+            self.round_corner.draw_corners(cx, splitter.area_b().get_rect(cx));
         }
-        let pf = &mut self.padding_fill;
-        // lets get the turtle rect
-        let rect = cx.turtle().rect();
+        self.round_corner.draw_corners(cx, cx.turtle().rect());
 
-        pf.draw_abs(cx, Rect {
-            pos: rect.pos,
-            size: dvec2(self.border_size, rect.size.y)
-        });
-        pf.draw_abs(cx, Rect {
-            pos: rect.pos + dvec2(rect.size.x - self.border_size, 0.0),
-            size: dvec2(self.border_size, rect.size.y)
-        });
-        pf.draw_abs(cx, Rect {
-            pos: rect.pos + dvec2(0., rect.size.y - self.border_size),
-            size: dvec2(rect.size.x, self.border_size)
-        });
         cx.end_turtle_with_area(&mut self.area);
     }
     
@@ -259,6 +252,7 @@ impl Dock {
         }
         None
     }
+
 }
 
 
@@ -286,39 +280,45 @@ impl Widget for Dock {
             });
         }
         for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
-            let mut redraw = false;
-            tab_bar
-                .tab_bar
-                .handle_event_with(cx, event, &mut | cx, action | match action {
-                TabBarAction::ReceivedDraggedItem(item) => dispatch_action(
-                    cx,
-                    DockAction::TabBarReceivedDraggedItem(*panel_id, item).into_action(uid),
-                ),
-                TabBarAction::TabWasPressed(tab_id) => {
-                    // lets 
-                    redraw = true;
-                    dispatch_action(cx, DockAction::TabWasPressed(*panel_id, tab_id).into_action(uid))
-                }
-                TabBarAction::TabCloseWasPressed(tab_id) => {
-                    redraw = true;
-                    dispatch_action(cx, DockAction::TabCloseWasPressed(*panel_id, tab_id).into_action(uid))
-                }
-                TabBarAction::TabReceivedDraggedItem(tab_id, item) => {
-                    dispatch_action(
+            let contents_view = &mut tab_bar.contents_view;
+            for action in tab_bar.tab_bar.handle_event(cx, event){
+                match action{
+                    TabBarAction::ReceivedDraggedItem(item) => dispatch_action(
                         cx,
-                        DockAction::TabReceivedDraggedItem(*panel_id, tab_id, item).into_action(uid),
-                    )
+                        DockAction::TabBarReceivedDraggedItem(*panel_id, item).into_action(uid),
+                    ),
+                    TabBarAction::TabWasPressed(tab_id) => {
+                        if let Some(DockItem::Tabs{tabs, selected,..}) = dock_items.get_mut(&panel_id){
+                            if let Some(sel) = tabs.iter().position(|v| *v == tab_id.0){
+                                *selected = sel;
+                                contents_view.redraw(cx);
+                                dispatch_action(cx, DockAction::TabWasPressed(*panel_id, tab_id).into_action(uid))
+                            }
+                            else{
+                                log!("Cannot find tab {}", tab_id.0);
+                            }
+                        }
+                    }
+                    TabBarAction::TabCloseWasPressed(tab_id) => {
+                        // alright.. we wanna remove the tab
+                        
+                        dispatch_action(cx, DockAction::TabCloseWasPressed(*panel_id, tab_id).into_action(uid))
+                    }
+                    TabBarAction::TabReceivedDraggedItem(tab_id, item) => {
+                        dispatch_action(
+                            cx,
+                            DockAction::TabReceivedDraggedItem(*panel_id, tab_id, item).into_action(uid),
+                        )
+                    }
                 }
-            });
-            if redraw {
-                tab_bar.contents_view.redraw(cx);
-            }
+            };
         }
         for item in self.items.values_mut(){
             item.handle_widget_event_with(cx, event, dispatch_action);
         }
         match event {
             Event::Drag(event) => {
+                /*
                 self.drag = None;
                 for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
                     if tab_bar.contents_rect.contains(event.abs) {
@@ -329,9 +329,10 @@ impl Widget for Dock {
                         event.action.set(DragAction::Copy);
                     }
                 }
-                self.overlay_view.redraw(cx);
+                self.overlay_view.redraw(cx);*/
             }
             Event::Drop(event) => {
+                /*
                 self.drag = None;
                 for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
                     if tab_bar.contents_rect.contains(event.abs) {
@@ -345,7 +346,7 @@ impl Widget for Dock {
                         );
                     }
                 }
-                self.overlay_view.redraw(cx);
+                self.overlay_view.redraw(cx);*/
             }
             _ => {}
         }
@@ -423,10 +424,9 @@ impl Widget for Dock {
                                 tab_bar: TabBar::new_from_ptr(cx, tab_bar),
                                 contents_view: View::new(cx),
                                 contents_rect: Rect::default(),
-                                full_rect: Rect::default(),
+                                //full_rect: Rect::default(),
                             }
                         });
-                        tab_bar.full_rect = cx.turtle().rect();
                         tab_bar.tab_bar.begin(cx, Some(*selected));
                         stack.push(DrawStackItem::TabLabel {id, index: 0});
                     }
@@ -437,13 +437,17 @@ impl Widget for Dock {
                         let tab_bar = self.tab_bars.get_mut(&id).unwrap();
                         if index < tabs.len() {
                             if let Some(DockItem::Tab {name, ..}) = self.dock_items.get(&tabs[index]) {
-                                tab_bar.tab_bar.draw_tab(cx, id.into(), name);
+                                tab_bar.tab_bar.draw_tab(cx, tabs[index].into(), name);
                             }
                             stack.push(DrawStackItem::TabLabel {id, index: index + 1});
                         }
                         else {
                             tab_bar.tab_bar.end(cx);
-                            stack.push(DrawStackItem::Tab {id: tabs[*selected]});
+                            tab_bar.contents_rect = cx.turtle().rect();
+                            if tab_bar.contents_view.begin(cx, Walk::default()).is_redrawing(){
+                                stack.push(DrawStackItem::TabContent{id});
+                                stack.push(DrawStackItem::Tab {id: tabs[*selected]});
+                            }
                         }
                     }
                     else {panic!()}
@@ -459,6 +463,13 @@ impl Widget for Dock {
                         }
                     }
                     stack.pop();
+                }
+                Some(DrawStackItem::TabContent {id}) => {
+                    if let Some(DockItem::Tabs {..}) = self.dock_items.get(&id) {
+                        let tab_bar = self.tab_bars.get_mut(&id).unwrap();
+                        tab_bar.contents_view.end(cx);
+                    }
+                    else{panic!()}
                 }
                 Some(DrawStackItem::Invalid) => {}
                 None=>{
@@ -483,15 +494,6 @@ struct Drag {
     position: DragPosition,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DragPosition {
-    Left,
-    Right,
-    Top,
-    Bottom,
-    Center,
-}
-
 #[derive(Clone, WidgetAction)]
 pub enum DockAction {
     SplitPanelChanged {panel_id: LiveId, axis: Axis, align: SplitterAlign},
@@ -503,59 +505,70 @@ pub enum DockAction {
     None
 }
 
-fn compute_drag_position(rect: Rect, position: DVec2) -> DragPosition {
-    let top_left = rect.pos;
-    let bottom_right = rect.pos + rect.size;
-    if (position.x - top_left.x) / rect.size.x < 0.1 {
-        DragPosition::Left
-    } else if (bottom_right.x - position.x) / rect.size.x < 0.1 {
-        DragPosition::Right
-    } else if (position.y - top_left.y) / rect.size.y < 0.1 {
-        DragPosition::Top
-    } else if (bottom_right.y - position.y) / rect.size.y < 0.1 {
-        DragPosition::Bottom
-    } else {
-        DragPosition::Center
-    }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DragPosition {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
 }
 
-fn compute_drag_rect(rect: Rect, position: DragPosition) -> Rect {
-    match position {
-        DragPosition::Left => Rect {
-            pos: rect.pos,
-            size: DVec2 {
-                x: rect.size.x / 2.0,
-                y: rect.size.y,
+impl DragPosition{
+    fn compute_drag_position(rect: Rect, position: DVec2) -> DragPosition {
+        let top_left = rect.pos;
+        let bottom_right = rect.pos + rect.size;
+        if (position.x - top_left.x) / rect.size.x < 0.1 {
+            DragPosition::Left
+        } else if (bottom_right.x - position.x) / rect.size.x < 0.1 {
+            DragPosition::Right
+        } else if (position.y - top_left.y) / rect.size.y < 0.1 {
+            DragPosition::Top
+        } else if (bottom_right.y - position.y) / rect.size.y < 0.1 {
+            DragPosition::Bottom
+        } else {
+            DragPosition::Center
+        }
+    }
+    
+    fn compute_drag_rect(&self, rect: Rect) -> Rect {
+        match self {
+            DragPosition::Left => Rect {
+                pos: rect.pos,
+                size: DVec2 {
+                    x: rect.size.x / 2.0,
+                    y: rect.size.y,
+                },
             },
-        },
-        DragPosition::Right => Rect {
-            pos: DVec2 {
-                x: rect.pos.x + rect.size.x / 2.0,
-                y: rect.pos.y,
+            DragPosition::Right => Rect {
+                pos: DVec2 {
+                    x: rect.pos.x + rect.size.x / 2.0,
+                    y: rect.pos.y,
+                },
+                size: DVec2 {
+                    x: rect.size.x / 2.0,
+                    y: rect.size.y,
+                },
             },
-            size: DVec2 {
-                x: rect.size.x / 2.0,
-                y: rect.size.y,
+            DragPosition::Top => Rect {
+                pos: rect.pos,
+                size: DVec2 {
+                    x: rect.size.x,
+                    y: rect.size.y / 2.0,
+                },
             },
-        },
-        DragPosition::Top => Rect {
-            pos: rect.pos,
-            size: DVec2 {
-                x: rect.size.x,
-                y: rect.size.y / 2.0,
+            DragPosition::Bottom => Rect {
+                pos: DVec2 {
+                    x: rect.pos.x,
+                    y: rect.pos.y + rect.size.y / 2.0,
+                },
+                size: DVec2 {
+                    x: rect.size.x,
+                    y: rect.size.y / 2.0,
+                },
             },
-        },
-        DragPosition::Bottom => Rect {
-            pos: DVec2 {
-                x: rect.pos.x,
-                y: rect.pos.y + rect.size.y / 2.0,
-            },
-            size: DVec2 {
-                x: rect.size.x,
-                y: rect.size.y / 2.0,
-            },
-        },
-        DragPosition::Center => rect,
+            DragPosition::Center => rect,
+        }
     }
 }
 
