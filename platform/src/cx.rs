@@ -11,7 +11,6 @@ use {
         cell::RefCell,
     },
     crate::{
-        image::ImageBuffer,
         makepad_live_compiler::{
             LiveRegistry,
             LiveFileChange

@@ -48,6 +48,9 @@ pub const VERTEX_SHADER: types::GLenum = 0x8B31;
 pub const FRAGMENT_SHADER: types::GLenum = 0x8B30;
 pub const TEXTURE_MIN_FILTER: types::GLenum = 0x2801;
 pub const LINEAR: types::GLenum = 0x2601;
+pub const LINEAR_MIPMAP_LINEAR: types::GLenum = 0x2703;
+pub const TEXTURE_BASE_LEVEL: types::GLenum = 0x813C;
+pub const TEXTURE_MAX_LEVEL: types::GLenum = 0x813D;
 pub const TEXTURE_MAG_FILTER: types::GLenum = 0x2800;
 pub const RGBA: types::GLenum = 0x1908;
 pub const UNSIGNED_BYTE: types::GLenum = 0x1401;
@@ -114,6 +117,7 @@ pub const PROGRAM_BINARY_LENGTH: types::GLenum = 0x8741;
 #[inline] pub unsafe fn DeleteBuffers(n: types::GLsizei, buffers: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteBuffers.f)(n, buffers) }
 #[inline] pub unsafe fn DeleteFramebuffers(n: types::GLsizei, framebuffers: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteFramebuffers.f)(n, framebuffers) }
 #[inline] pub unsafe fn DeleteVertexArrays(n: types::GLsizei, arrays: *const types::GLuint) -> () { mem::transmute::<_, extern "system" fn(types::GLsizei, *const types::GLuint) -> ()>(storage::DeleteVertexArrays.f)(n, arrays) }
+#[inline] pub unsafe fn GenerateMipmap(target: types::GLenum) -> () { mem::transmute::<_, extern "system" fn(types::GLenum) -> ()>( storage::GenerateMipmap.f)(target)}
 
 mod storage {
     use super::FnPtr;
@@ -173,6 +177,7 @@ mod storage {
     pub static mut DeleteBuffers: FnPtr = FnPtr::default();
     pub static mut DeleteFramebuffers: FnPtr = FnPtr::default();
     pub static mut DeleteVertexArrays: FnPtr = FnPtr::default();
+    pub static mut GenerateMipmap: FnPtr = FnPtr::default();
 }
 
 pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const raw::c_void {
@@ -231,7 +236,8 @@ pub unsafe fn load_with<F>(mut loadfn: F) where F: FnMut(&'static str) -> *const
     storage::DeleteRenderbuffers = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteRenderbuffers", &["glDeleteRenderbuffersEXT"]));
     storage::DeleteBuffers = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteBuffers", &["glDeleteBuffersARB"]));
     storage::DeleteFramebuffers = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteFramebuffers", &["glDeleteFramebuffersEXT"]));
-    storage::DeleteVertexArrays = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteVertexArrays", &["glDeleteVertexArraysAPPLE", "glDeleteVertexArraysOES"]))
+    storage::DeleteVertexArrays = FnPtr::new(metaloadfn(&mut loadfn, "glDeleteVertexArrays", &["glDeleteVertexArraysAPPLE", "glDeleteVertexArraysOES"]));
+    storage::GenerateMipmap = FnPtr::new(metaloadfn(&mut loadfn, "glGenerateMipmap", &[]));
 }
 
 #[inline(never)]
