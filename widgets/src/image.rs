@@ -1,15 +1,9 @@
-use {
-    crate::{
-        makepad_draw::*,
-        widget::*,
-        image_loading_widget::*
-    }
-};
+use crate::{image_loading_widget::*, makepad_draw::*, widget::*};
 
-live_design!{
+live_design! {
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
-    
+
     Image = {{Image}} {
         walk:{
             width: Fit
@@ -111,7 +105,7 @@ live_design!{
                     self.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_zbias, 1.)
                 ));
             }
-            
+
             shape: Solid,
             fill: Image
         }
@@ -120,13 +114,19 @@ live_design!{
 
 #[derive(Live)]
 pub struct Image {
-    #[live] walk: Walk,
-    #[live] layout: Layout,
-    #[live] draw_bg: DrawColor,
-    
-    #[live] source: LiveDependency,
-    #[live] texture: Option<Texture>,
-    #[live] scale: f64,
+    #[live]
+    walk: Walk,
+    #[live]
+    layout: Layout,
+    #[live]
+    draw_bg: DrawColor,
+
+    #[live]
+    source: LiveDependency,
+    #[live]
+    texture: Option<Texture>,
+    #[live]
+    scale: f64,
 }
 
 impl ImageLoadingWidget for Image {
@@ -134,8 +134,12 @@ impl ImageLoadingWidget for Image {
         &self.source
     }
 
-    fn texture(&mut self) -> &mut Option<Texture> {
-        &mut self.texture
+    fn get_texture(&self) -> &Option<Texture> {
+        &self.texture
+    }
+
+    fn set_texture(&mut self, texture: Option<Texture>) {
+        self.texture = texture;
     }
 }
 
@@ -150,14 +154,14 @@ impl LiveHook for Image {
 }
 
 impl Widget for Image {
-    fn redraw(&mut self, cx:&mut Cx) {
+    fn redraw(&mut self, cx: &mut Cx) {
         self.draw_bg.redraw(cx)
     }
-    
-    fn get_walk(&self)->Walk {
+
+    fn get_walk(&self) -> Walk {
         self.walk
     }
-    
+
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         self.draw_walk(cx, walk)
     }
