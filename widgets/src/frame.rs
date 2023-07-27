@@ -446,8 +446,12 @@ impl ImageLoadingWidget for Frame {
         &self.image
     }
 
-    fn texture(&mut self) -> &mut Option<Texture> {
-        &mut self.image_texture
+    fn get_texture(&self) -> &Option<Texture> {
+        &self.image_texture
+    }
+
+    fn set_texture(&mut self, texture: Option<Texture>) {
+        self.image_texture = texture;
     }
 }
 
