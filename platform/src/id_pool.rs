@@ -29,7 +29,7 @@ impl<T> DerefMut for IdPoolItem<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.item}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PoolId {
     pub id: usize,
     pub generation: u64,
