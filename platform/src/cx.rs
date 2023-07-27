@@ -64,8 +64,12 @@ use {
     }
 };
 
+use std::collections::VecDeque;
+
 pub use makepad_shader_compiler::makepad_derive_live::*;
 pub use makepad_shader_compiler::makepad_math::*;
+
+use crate::Texture;
 
 pub struct Cx {
     pub (crate) os_type: OsType,
@@ -128,7 +132,7 @@ pub struct Cx {
     pub(crate) executor: Option<Executor>,
     pub(crate) spawner: Spawner,
 
-    pub image_cache: HashMap<String, ImageBuffer>
+    pub image_cache: ImageCache
 }
 
 #[derive(Clone)]
@@ -280,7 +284,7 @@ impl Cx {
             executor: Some(executor),
             spawner,
             
-            image_cache: HashMap::new(),
+            image_cache: ImageCache::new(10),
 
             self_ref: None
         }
@@ -288,3 +292,40 @@ impl Cx {
 }
 
 
+// Implements Least-Recently-Used eviction.
+// we can further improve it by determining capactity by how much size we want to handle.
+pub struct ImageCache {
+    map: HashMap<String, Texture>,
+    order: VecDeque<String>,
+    capacity: usize,
+}
+
+impl ImageCache {
+    pub fn new(capacity: usize) -> Self {
+        ImageCache {
+            capacity,
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    pub fn get(&mut self, key: &str) -> Option<&Texture> {
+        if self.map.contains_key(key) {
+            self.order.retain(|k| *k != key.to_string());
+            self.order.push_back(key.to_string());
+            self.map.get(key)
+        } else {
+            None
+        }
+    }
+
+    pub fn put(&mut self, key: &str, value: Texture) {
+        if self.map.len() == self.capacity {
+            if let Some(lru_key) = self.order.pop_front() {
+                self.map.remove(&lru_key);
+            }
+        }
+        self.order.push_back(key.to_string());
+        self.map.insert(key.to_string(), value);
+    }
+}

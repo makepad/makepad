@@ -20,6 +20,7 @@ use {
 };
 
 
+#[derive(Clone)]
 pub struct Texture(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
