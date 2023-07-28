@@ -151,7 +151,11 @@ impl AppMain for App {
                 }
             }
         }
-        let _actions = self.ui.handle_widget_event(cx, event);
+        let actions = self.ui.handle_widget_event(cx, event);
+
+        if let Some(tab_id) = dock.clicked_tab_close(&actions){
+            dock.close_tab(cx, tab_id);
+        }
         //self.inner.handle_event(cx, event, &mut *dock.borrow_mut().unwrap(), &mut self.app_state);
     }
 }
