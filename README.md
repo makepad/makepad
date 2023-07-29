@@ -35,8 +35,6 @@ Demo links:
 
 ### Prerequisites
 
-NOTE: At the moment, we only support Mac and web. We however have most of the code for Windows and Linux already there and it will be supported in the near future.
-
 To build the Makepad crates you first need to install Rust.
 [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
 
