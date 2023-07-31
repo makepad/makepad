@@ -24,6 +24,7 @@ public class Makepad {
         System.loadLibrary("makepad");
     }
     // Event calls from Java to Rust
+    static native void onHookPanic();
     static native long onNewCx();
     static native void onDropCx(long cx);
     static native long onPause(long cx, Callback callback);

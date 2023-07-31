@@ -46,6 +46,7 @@ impl AvCaptureSession {
         device: &RcObjcId,
         format: VideoFormat
     ) -> Self {
+        
         // lets start a capture session with a callback
         unsafe {
             let session: ObjcId = msg_send![class!(AVCaptureSession), alloc];
@@ -58,10 +59,10 @@ impl AvCaptureSession {
             OSError::from_nserror(err).unwrap();
             
             let callback = AvVideoCaptureCallback::new(Box::new(move | sample_buffer | {
-                if let Some(cb) = &mut *capture_cb.lock().unwrap() {
+                if let Some(cb) = &mut *capture_cb.try_lock().unwrap() {
+                    
                     let image_buffer = CMSampleBufferGetImageBuffer(sample_buffer);
                     let bytes_per_row = CVPixelBufferGetBytesPerRow(image_buffer);
-                    //println!("bytes per row: {}", bpr*2160);
                     CVPixelBufferLockBaseAddress(image_buffer, 0);
                     let len = CVPixelBufferGetDataSize(image_buffer);
                     let ptr = CVPixelBufferGetBaseAddress(image_buffer);
@@ -72,9 +73,10 @@ impl AvCaptureSession {
                     if width != format.width || height != format.height {
                         println!("Video format not correct got {} x {} for {:?}", width, height, format);
                     }
+                    //crate::log!("{:?} {:?}", std::thread::current().id(), input_id);
                     cb(VideoBufferRef {
                         format,
-                        data: VideoBufferRefData::U32(data) 
+                        data: VideoBufferRefData::U32(data)
                     });
                     CVPixelBufferUnlockBaseAddress(image_buffer, 0);
                 }
@@ -112,7 +114,6 @@ impl AvCaptureSession {
             let () = msg_send![output, setVideoSettings: dict];
             
             let queue = dispatch_queue_create(std::ptr::null(), nil);
-            
             let () = msg_send![output, setSampleBufferDelegate: callback.delegate.as_id() queue: queue];
             let () = msg_send![session, addOutput: output];
             let () = msg_send![session, commitConfiguration];

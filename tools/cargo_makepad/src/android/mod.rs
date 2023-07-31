@@ -10,6 +10,58 @@ pub enum HostOs {
     Unsupported
 }
 
+#[allow(non_camel_case_types)]
+pub enum AndroidTarget {
+    aarch64,
+    x86_64,
+    armv7,
+    i686
+}
+
+impl AndroidTarget {
+    fn from_str(opt: &str) -> Result<Vec<Self>,
+    String> {
+        let mut out = Vec::new();
+        for opt in opt.split(","){
+            match opt {
+                "all"=> return Ok(vec![AndroidTarget::aarch64, AndroidTarget::x86_64, AndroidTarget::armv7, AndroidTarget::i686]),
+                "aarch64" => out.push(AndroidTarget::aarch64),
+                "x86_64" => out.push(AndroidTarget::x86_64),
+                "armv7" => out.push(AndroidTarget::armv7),
+                "i686" => out.push(AndroidTarget::i686),
+                x => {
+                    return Err(format!("{:?} please provide a valid target: aarch64, x86_64, armv7, i686", x))
+                }
+            }
+        }
+        return Ok(out);
+    }
+    fn sys_dir(&self) -> &'static str {
+        match self {
+            Self::aarch64 => "aarch64-linux-android",
+            Self::x86_64 => "x86_64-linux-android",
+            Self::armv7 => "arm-linux-androideabi",
+            Self::i686 => "i686-linux-android",
+        }
+    }
+    fn clang(&self) -> &'static str {
+        match self {
+            Self::aarch64 => "aarch64-linux-android",
+            Self::x86_64 => "x86_64-linux-android", 
+            Self::armv7 => "armv7a-linux-androideabi", 
+            Self::i686 => "i686-linux-android", 
+        }
+    }
+    fn toolchain(&self)->&'static str{
+        match self {
+            Self::aarch64 => "aarch64-linux-android",
+            Self::x86_64 => "x86_64-linux-android",
+            Self::armv7 => "armv7-linux-androideabi",
+            Self::i686 => "i686-linux-android"
+        }
+    }
+}
+
 impl HostOs {
     fn from_str(opt: &str) -> Result<Self,
     String> {
@@ -45,6 +97,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     let mut sdk_path = None;
     let mut package_name = None;
     let mut app_label = None;
+    let mut targets = vec![AndroidTarget::aarch64];
     // pull out options
     for i in 0..args.len() {
         let v = &args[i];
@@ -60,58 +113,61 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         else if let Some(opt) = v.strip_prefix("--app-label=") {
             app_label = Some(opt.to_string());
         }
+        else if let Some(opt) = v.strip_prefix("--target=") {
+            targets = AndroidTarget::from_str(opt)?;
+        }
         else {
             args = &args[i..];
             break
         }
     }
     if sdk_path.is_none() {
-        sdk_path = Some(format!("{}/{}",env!("CARGO_MANIFEST_DIR"),host_os.default_path().to_string()));
+        sdk_path = Some(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), host_os.default_path().to_string()));
     }
     
     let cwd = std::env::current_dir().unwrap();
     let sdk_dir = cwd.join(sdk_path.unwrap());
     
     match args[0].as_ref() {
-        "rustup-toolchain-install"=>{
-            sdk::rustup_toolchain_install()
-        }
-        "adb"=>{
+        "adb" => {
             compile::adb(&sdk_dir, host_os, &args[1..])
         },
-        "java"=>{
+        "java" => {
             compile::java(&sdk_dir, host_os, &args[1..])
         },
-        "javac"=>{
+        "javac" => {
             compile::javac(&sdk_dir, host_os, &args[1..])
         },
+        "rustup-toolchain-install" => {
+            sdk::rustup_toolchain_install(&targets)
+        }
         "download-sdk" => {
             sdk::download_sdk(&sdk_dir, host_os, &args[1..])
         }
         "expand-sdk" => {
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..])
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets)
         }
         "remove-sdk-sources" => {
             sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])
         }
         "toolchain-install" => {
             println!("Installing Android toolchain\n");
-            sdk::rustup_toolchain_install()?;
+            sdk::rustup_toolchain_install(&targets) ?;
             sdk::download_sdk(&sdk_dir, host_os, &args[1..]) ?;
-            sdk::expand_sdk(&sdk_dir, host_os, &args[1..])?;
-            sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..])?;
+            sdk::expand_sdk(&sdk_dir, host_os, &args[1..], &targets) ?;
+            sdk::remove_sdk_sources(&sdk_dir, host_os, &args[1..]) ?;
             println!("\nAndroid toolchain has been installed\n");
             Ok(())
         }
         /*"base-apk"=>{
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
-        "build" =>{
-            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..])?;
+        "build" => {
+            compile::build(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets) ?;
             Ok(())
         }
-        "run" =>{
-            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..])
+        "run" => {
+            compile::run(&sdk_dir, host_os, package_name, app_label, &args[1..], &targets)
         }
         _ => Err(format!("{} is not a valid command or option", args[0]))
     }

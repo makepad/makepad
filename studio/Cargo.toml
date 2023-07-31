@@ -11,7 +11,6 @@ metadata.makepad-auto-version = "wYzZ6_rSf-yOavE6qCqFfkBHIaA="
 
 [dependencies]
 makepad-widgets = {path="../widgets" , version="0.3.0"}
-makepad-editor-core = {path="./editor_core", version="0.3.0"}
+makepad-code-editor = {path="../code_editor", version="0.1.0"}
 makepad-collab-protocol = {path="./collab_protocol", version="0.3.0"}
 makepad-collab-server = {path="./collab_server", version="0.3.0"}
-

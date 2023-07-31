@@ -10,7 +10,7 @@ use {
             DocumentId,
             SessionId,
         },
-        code_editor::{
+        makepad_code_editor::{
             code_editor_impl::{
                 CodeEditorAction
             },
