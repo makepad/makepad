@@ -1,11 +1,11 @@
 use {
-    crate::{Length, Text},
+    crate::{Len, Text},
     std::{slice, vec},
 };
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Diff {
-    operations: Vec<Operation>,
+    ops: Vec<Op>,
 }
 
 impl Diff {
@@ -14,16 +14,16 @@ impl Diff {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.operations.is_empty()
+        self.ops.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.operations.len()
+        self.ops.len()
     }
 
     pub fn iter(&self) -> Iter<'_> {
         Iter {
-            iter: self.operations.iter(),
+            iter: self.ops.iter(),
         }
     }
 
@@ -31,117 +31,117 @@ impl Diff {
         use std::cmp::Ordering;
 
         let mut builder = Builder::new();
-        let mut operations_0 = self.operations.into_iter();
-        let mut operations_1 = other.operations.into_iter();
-        let mut operation_slot_0 = operations_0.next();
-        let mut operation_slot_1 = operations_1.next();
+        let mut op_iter_0 = self.ops.into_iter();
+        let mut op_iter_1 = other.ops.into_iter();
+        let mut op_opt_0 = op_iter_0.next();
+        let mut op_opt_1 = op_iter_1.next();
         loop {
-            match (operation_slot_0, operation_slot_1) {
-                (Some(Operation::Retain(length_0)), Some(Operation::Retain(length_1))) => {
-                    match length_0.cmp(&length_1) {
+            match (op_opt_0, op_opt_1) {
+                (Some(Op::Retain(len_0)), Some(Op::Retain(len_1))) => {
+                    match len_0.cmp(&len_1) {
                         Ordering::Less => {
-                            builder.retain(length_0);
-                            operation_slot_0 = operations_0.next();
-                            operation_slot_1 = Some(Operation::Retain(length_1 - length_0));
+                            builder.retain(len_0);
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = Some(Op::Retain(len_1 - len_0));
                         }
                         Ordering::Equal => {
-                            builder.retain(length_0);
-                            operation_slot_0 = operations_0.next();
-                            operation_slot_1 = operations_1.next();
+                            builder.retain(len_0);
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = op_iter_1.next();
                         }
                         Ordering::Greater => {
-                            builder.retain(length_1);
-                            operation_slot_0 = Some(Operation::Retain(length_0 - length_1));
-                            operation_slot_1 = operations_1.next();
+                            builder.retain(len_1);
+                            op_opt_0 = Some(Op::Retain(len_0 - len_1));
+                            op_opt_1 = op_iter_1.next();
                         }
                     }
                 }
-                (Some(Operation::Retain(length_0)), Some(Operation::Delete(length_1))) => {
-                    match length_0.cmp(&length_1) {
+                (Some(Op::Retain(len_0)), Some(Op::Delete(len_1))) => {
+                    match len_0.cmp(&len_1) {
                         Ordering::Less => {
-                            builder.delete(length_0);
-                            operation_slot_0 = operations_0.next();
-                            operation_slot_1 = Some(Operation::Delete(length_1 - length_0));
+                            builder.delete(len_0);
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = Some(Op::Delete(len_1 - len_0));
                         }
                         Ordering::Equal => {
-                            builder.delete(length_0);
-                            operation_slot_0 = operations_0.next();
-                            operation_slot_1 = operations_1.next();
+                            builder.delete(len_0);
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = op_iter_1.next();
                         }
                         Ordering::Greater => {
-                            builder.delete(length_1);
-                            operation_slot_0 = Some(Operation::Retain(length_0 - length_1));
-                            operation_slot_1 = operations_1.next();
+                            builder.delete(len_1);
+                            op_opt_0 = Some(Op::Retain(len_0 - len_1));
+                            op_opt_1 = op_iter_1.next();
                         }
                     }
                 }
-                (Some(Operation::Insert(mut text)), Some(Operation::Retain(length))) => {
-                    match text.length().cmp(&length) {
+                (Some(Op::Insert(mut text)), Some(Op::Retain(len))) => {
+                    match text.len().cmp(&len) {
                         Ordering::Less => {
-                            let text_length = text.length();
+                            let text_len = text.len();
                             builder.insert(text);
-                            operation_slot_0 = operations_0.next();
-                            operation_slot_1 = Some(Operation::Retain(length - text_length));
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = Some(Op::Retain(len - text_len));
                         }
                         Ordering::Equal => {
                             builder.insert(text);
-                            operation_slot_0 = operations_0.next();
-                            operation_slot_1 = operations_1.next();
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = op_iter_1.next();
                         }
                         Ordering::Greater => {
-                            builder.insert(text.take(length));
-                            operation_slot_0 = Some(Operation::Insert(text));
-                            operation_slot_1 = operations_1.next();
+                            builder.insert(text.take(len));
+                            op_opt_0 = Some(Op::Insert(text));
+                            op_opt_1 = op_iter_1.next();
                         }
                     }
                 }
-                (Some(Operation::Insert(mut text)), Some(Operation::Delete(length))) => {
-                    match text.length().cmp(&length) {
+                (Some(Op::Insert(mut text)), Some(Op::Delete(len))) => {
+                    match text.len().cmp(&len) {
                         Ordering::Less => {
-                            operation_slot_0 = operations_0.next();
-                            operation_slot_1 = Some(Operation::Delete(text.length() - length));
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = Some(Op::Delete(text.len() - len));
                         }
                         Ordering::Equal => {
-                            operation_slot_0 = operations_0.next();
-                            operation_slot_1 = operations_1.next();
+                            op_opt_0 = op_iter_0.next();
+                            op_opt_1 = op_iter_1.next();
                         }
                         Ordering::Greater => {
-                            text.skip(length);
-                            operation_slot_0 = Some(Operation::Insert(text));
-                            operation_slot_1 = operations_1.next();
+                            text.skip(len);
+                            op_opt_0 = Some(Op::Insert(text));
+                            op_opt_1 = op_iter_1.next();
                         }
                     }
                 }
-                (Some(Operation::Insert(text)), None) => {
+                (Some(Op::Insert(text)), None) => {
                     builder.insert(text);
-                    operation_slot_0 = operations_0.next();
-                    operation_slot_1 = None;
+                    op_opt_0 = op_iter_0.next();
+                    op_opt_1 = None;
                 }
-                (Some(Operation::Retain(len)), None) => {
+                (Some(Op::Retain(len)), None) => {
                     builder.retain(len);
-                    operation_slot_0 = operations_0.next();
-                    operation_slot_1 = None;
+                    op_opt_0 = op_iter_0.next();
+                    op_opt_1 = None;
                 }
-                (Some(Operation::Delete(len)), op) => {
+                (Some(Op::Delete(len)), op) => {
                     builder.delete(len);
-                    operation_slot_0 = operations_0.next();
-                    operation_slot_1 = op;
+                    op_opt_0 = op_iter_0.next();
+                    op_opt_1 = op;
                 }
-                (None, Some(Operation::Retain(len))) => {
+                (None, Some(Op::Retain(len))) => {
                     builder.retain(len);
-                    operation_slot_0 = None;
-                    operation_slot_1 = operations_1.next();
+                    op_opt_0 = None;
+                    op_opt_1 = op_iter_1.next();
                 }
-                (None, Some(Operation::Delete(len))) => {
+                (None, Some(Op::Delete(len))) => {
                     builder.delete(len);
-                    operation_slot_0 = None;
-                    operation_slot_1 = operations_1.next();
+                    op_opt_0 = None;
+                    op_opt_1 = op_iter_1.next();
                 }
                 (None, None) => break,
-                (op, Some(Operation::Insert(text))) => {
+                (op, Some(Op::Insert(text))) => {
                     builder.insert(text);
-                    operation_slot_0 = op;
-                    operation_slot_1 = operations_1.next();
+                    op_opt_0 = op;
+                    op_opt_1 = op_iter_1.next();
                 }
             }
         }
@@ -150,7 +150,7 @@ impl Diff {
 }
 
 impl<'a> IntoIterator for &'a Diff {
-    type Item = &'a Operation;
+    type Item = &'a Op;
     type IntoIter = Iter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -159,19 +159,19 @@ impl<'a> IntoIterator for &'a Diff {
 }
 
 impl IntoIterator for Diff {
-    type Item = Operation;
+    type Item = Op;
     type IntoIter = IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         IntoIter {
-            iter: self.operations.into_iter(),
+            iter: self.ops.into_iter(),
         }
     }
 }
 
 #[derive(Debug, Default)]
 pub struct Builder {
-    operations: Vec<Operation>,
+    ops: Vec<Op>,
 }
 
 impl Builder {
@@ -179,36 +179,36 @@ impl Builder {
         Self::default()
     }
 
-    pub fn delete(&mut self, length: Length) {
+    pub fn delete(&mut self, len: Len) {
         use std::mem;
 
-        if length == Length::default() {
+        if len == Len::default() {
             return;
         }
-        match self.operations.as_mut_slice() {
-            [.., Operation::Delete(last_length)] => {
-                *last_length += length;
+        match self.ops.as_mut_slice() {
+            [.., Op::Delete(last_len)] => {
+                *last_len += len;
             }
-            [.., Operation::Delete(second_last_length), Operation::Insert(_)] => {
-                *second_last_length += length;
+            [.., Op::Delete(second_last_len), Op::Insert(_)] => {
+                *second_last_len += len;
             }
-            [.., last_operation @ Operation::Insert(_)] => {
-                let operation = mem::replace(last_operation, Operation::Delete(length));
-                self.operations.push(operation);
+            [.., last_op @ Op::Insert(_)] => {
+                let op = mem::replace(last_op, Op::Delete(len));
+                self.ops.push(op);
             }
-            _ => self.operations.push(Operation::Delete(length)),
+            _ => self.ops.push(Op::Delete(len)),
         }
     }
 
-    pub fn retain(&mut self, length: Length) {
-        if length == Length::default() {
+    pub fn retain(&mut self, len: Len) {
+        if len == Len::default() {
             return;
         }
-        match self.operations.last_mut() {
-            Some(Operation::Retain(last_length)) => {
-                *last_length += length;
+        match self.ops.last_mut() {
+            Some(Op::Retain(last_len)) => {
+                *last_len += len;
             }
-            _ => self.operations.push(Operation::Retain(length)),
+            _ => self.ops.push(Op::Retain(len)),
         }
     }
 
@@ -216,31 +216,29 @@ impl Builder {
         if text.is_empty() {
             return;
         }
-        match self.operations.as_mut_slice() {
-            [.., Operation::Insert(last_text)] => {
+        match self.ops.as_mut_slice() {
+            [.., Op::Insert(last_text)] => {
                 *last_text += text;
             }
-            _ => self.operations.push(Operation::Insert(text)),
+            _ => self.ops.push(Op::Insert(text)),
         }
     }
 
     pub fn finish(mut self) -> Diff {
-        if let Some(Operation::Retain(_)) = self.operations.last() {
-            self.operations.pop();
+        if let Some(Op::Retain(_)) = self.ops.last() {
+            self.ops.pop();
         }
-        Diff {
-            operations: self.operations,
-        }
+        Diff { ops: self.ops }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Iter<'a> {
-    iter: slice::Iter<'a, Operation>,
+    iter: slice::Iter<'a, Op>,
 }
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = &'a Operation;
+    type Item = &'a Op;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
@@ -249,11 +247,11 @@ impl<'a> Iterator for Iter<'a> {
 
 #[derive(Clone, Debug)]
 pub struct IntoIter {
-    iter: vec::IntoIter<Operation>,
+    iter: vec::IntoIter<Op>,
 }
 
 impl Iterator for IntoIter {
-    type Item = Operation;
+    type Item = Op;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
@@ -261,25 +259,25 @@ impl Iterator for IntoIter {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum Operation {
-    Delete(Length),
-    Retain(Length),
+pub enum Op {
+    Delete(Len),
+    Retain(Len),
     Insert(Text),
 }
 
-impl Operation {
-    pub fn info(&self) -> OperationInfo {
+impl Op {
+    pub fn info(&self) -> OpInfo {
         match *self {
-            Self::Delete(length) => OperationInfo::Delete(length),
-            Self::Retain(length) => OperationInfo::Retain(length),
-            Self::Insert(ref text) => OperationInfo::Insert(text.length()),
+            Self::Delete(len) => OpInfo::Delete(len),
+            Self::Retain(len) => OpInfo::Retain(len),
+            Self::Insert(ref text) => OpInfo::Insert(text.len()),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum OperationInfo {
-    Delete(Length),
-    Retain(Length),
-    Insert(Length),
+pub enum OpInfo {
+    Delete(Len),
+    Retain(Len),
+    Insert(Len),
 }

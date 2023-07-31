@@ -1,6 +1,6 @@
 use {
     crate::{
-        document, document::LineInlay, line, Affinity, Diff, Document, Point, Range, Selection,
+        document, document::LineInlay, line, Affinity, Diff, Document, Pos, Range, Selection,
         Settings, Text, Tokenizer,
     },
     std::collections::HashSet,
@@ -119,13 +119,13 @@ impl<'a> Context<'a> {
         self.modify_text(edit_ops::backspace)
     }
 
-    pub fn set_cursor(&mut self, cursor: (Point, Affinity)) {
+    pub fn set_cursor(&mut self, cursor: (Pos, Affinity)) {
         self.selections.clear();
         self.selections.push(Selection::from_cursor(cursor));
         *self.latest_selection_index = 0;
     }
 
-    pub fn insert_cursor(&mut self, cursor: (Point, Affinity)) {
+    pub fn insert_cursor(&mut self, cursor: (Pos, Affinity)) {
         use std::cmp::Ordering;
 
         let selection = Selection::from_cursor(cursor);
@@ -149,7 +149,7 @@ impl<'a> Context<'a> {
         };
     }
 
-    pub fn move_cursor_to(&mut self, select: bool, cursor: (Point, Affinity)) {
+    pub fn move_cursor_to(&mut self, select: bool, cursor: (Pos, Affinity)) {
         let latest_selection = &mut self.selections[*self.latest_selection_index];
         latest_selection.cursor = cursor;
         if !select {
@@ -325,8 +325,8 @@ impl<'a> Context<'a> {
                     match element {
                         line::Element::Token(_, token) => {
                             for string in token.text.split_whitespace_boundaries() {
-                                let mut next_column =
-                                    column + string.column_count(document.settings().tab_column_count);
+                                let mut next_column = column
+                                    + string.column_count(document.settings().tab_column_count);
                                 if next_column > max_column {
                                     next_column = start_column_after_wrap;
                                     wrap_bytes.push(byte);
@@ -402,11 +402,11 @@ impl<'a> Context<'a> {
     }
 
     fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
-        use crate::point::ApplyDiffMode;
+        use crate::pos::ApplyDiffMode;
 
         let mut composite_diff = Diff::new();
-        let mut prev_end = Point::default();
-        let mut diffed_prev_end = Point::default();
+        let mut prev_end = Pos::default();
+        let mut diffed_prev_end = Pos::default();
         for selection in &mut *self.selections {
             let distance_from_prev_end = selection.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
@@ -433,14 +433,14 @@ impl<'a> Context<'a> {
     }
 
     fn update_after_modify_text(&mut self, diff: Diff) {
-        use crate::diff::OperationInfo;
+        use crate::diff::OpInfo;
 
         let mut line = 0;
         for operation in &diff {
             match operation.info() {
-                OperationInfo::Delete(length) => {
+                OpInfo::Delete(length) => {
                     let start_line = line;
-                    let end_line = start_line + length.line_count;
+                    let end_line = start_line + length.lines;
                     self.text_inlays.drain(start_line..end_line);
                     self.line_widget_inlays.drain(start_line..end_line);
                     self.wrap_bytes.drain(start_line..end_line);
@@ -449,12 +449,12 @@ impl<'a> Context<'a> {
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
-                OperationInfo::Retain(length) => {
-                    line += length.line_count;
+                OpInfo::Retain(length) => {
+                    line += length.lines;
                 }
-                OperationInfo::Insert(length) => {
+                OpInfo::Insert(length) => {
                     let next_line = line + 1;
-                    let line_count = length.line_count;
+                    let line_count = length.lines;
                     self.text_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.line_widget_inlays

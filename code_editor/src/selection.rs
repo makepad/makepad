@@ -1,16 +1,16 @@
-use crate::{Affinity, Length, Point};
+use crate::{Affinity, Len, Pos};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Selection {
-    pub anchor: (Point, Affinity),
-    pub cursor: (Point, Affinity),
+    pub anchor: (Pos, Affinity),
+    pub cursor: (Pos, Affinity),
     pub preferred_column: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
-        anchor: (Point, Affinity),
-        cursor: (Point, Affinity),
+        anchor: (Pos, Affinity),
+        cursor: (Pos, Affinity),
         preferred_column: Option<usize>,
     ) -> Self {
         Self {
@@ -20,7 +20,7 @@ impl Selection {
         }
     }
 
-    pub fn from_cursor(cursor: (Point, Affinity)) -> Self {
+    pub fn from_cursor(cursor: (Pos, Affinity)) -> Self {
         Self {
             anchor: cursor,
             cursor,
@@ -45,15 +45,15 @@ impl Selection {
         }
     }
 
-    pub fn length(&self) -> Length {
+    pub fn length(&self) -> Len {
         self.end().0 - self.start().0
     }
 
-    pub fn start(self) -> (Point, Affinity) {
+    pub fn start(self) -> (Pos, Affinity) {
         self.anchor.min(self.cursor)
     }
 
-    pub fn end(self) -> (Point, Affinity) {
+    pub fn end(self) -> (Pos, Affinity) {
         self.anchor.max(self.cursor)
     }
 
@@ -66,7 +66,7 @@ impl Selection {
 
     pub fn update_cursor(
         self,
-        f: impl FnOnce((Point, Affinity), Option<usize>) -> ((Point, Affinity), Option<usize>),
+        f: impl FnOnce((Pos, Affinity), Option<usize>) -> ((Pos, Affinity), Option<usize>),
     ) -> Self {
         let (cursor, column) = f(self.cursor, self.preferred_column);
         Self {

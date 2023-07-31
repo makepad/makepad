@@ -1,13 +1,13 @@
-use crate::{Length, Point};
+use crate::{Len, Pos};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Range {
-    start: Point,
-    end: Point,
+    start: Pos,
+    end: Pos,
 }
 
 impl Range {
-    pub fn new(start: Point, end: Point) -> Self {
+    pub fn new(start: Pos, end: Pos) -> Self {
         assert!(start <= end);
         Self { start, end }
     }
@@ -16,19 +16,19 @@ impl Range {
         self.start == self.end
     }
 
-    pub fn length(self) -> Length {
-        self.end - self.start
-    }
-
-    pub fn contains(&self, position: Point) -> bool {
+    pub fn contains(&self, position: Pos) -> bool {
         self.start <= position && position <= self.end
     }
 
-    pub fn start(self) -> Point {
+    pub fn length(self) -> Len {
+        self.end - self.start
+    }
+
+    pub fn start(self) -> Pos {
         self.start
     }
 
-    pub fn end(self) -> Point {
+    pub fn end(self) -> Pos {
         self.end
     }
 }
