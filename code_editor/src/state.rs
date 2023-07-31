@@ -1,6 +1,6 @@
 use {
     crate::{
-        document, document::LineInlay, line, Context, Document, Bias, Selection, Settings, Text,
+        document, document::LineInlay, line, Bias, Context, Document, Selection, Settings, Text,
         Tokenizer,
     },
     std::{

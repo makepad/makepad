@@ -1,5 +1,5 @@
 use {
-    crate::{state::ViewId, Context, Document, BiasedPos, Bias, Pos, Selection, State},
+    crate::{state::ViewId, Bias, BiasedPos, Context, Document, Pos, Selection, State},
     makepad_widgets::*,
 };
 
@@ -238,7 +238,7 @@ impl CodeEditor {
                     if alt {
                         context.insert_cursor(cursor);
                     } else {
-                        context.set_cursor(cursor);
+                        context.set_cursor_pos(cursor);
                     }
                     cx.redraw_all();
                 }
@@ -348,9 +348,10 @@ impl CodeEditor {
         {
             selections = &selections[1..];
         }
-        if selections.first().map_or(false, |selection| {
-            selection.start().line < self.start_line
-        }) {
+        if selections
+            .first()
+            .map_or(false, |selection| selection.start().line < self.start_line)
+        {
             let (selection, remaining_selections) = selections.split_first().unwrap();
             selections = remaining_selections;
             active_selection = Some(ActiveSelection::new(*selection, 0.0));
@@ -388,7 +389,10 @@ impl CodeEditor {
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
-                                            return Some(BiasedPos::from_pos_and_bias(Pos { line, byte }, Bias::After));
+                                            return Some(BiasedPos::from_pos_and_bias(
+                                                Pos { line, byte },
+                                                Bias::After,
+                                            ));
                                         }
                                         if (mid_x..=next_x).contains(&pos.x) {
                                             return Some(BiasedPos::from_pos_and_bias(
@@ -413,7 +417,10 @@ impl CodeEditor {
                                 let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
-                                    return Some(BiasedPos::from_pos_and_bias(Pos { line, byte }, Bias::Before));
+                                    return Some(BiasedPos::from_pos_and_bias(
+                                        Pos { line, byte },
+                                        Bias::Before,
+                                    ));
                                 }
                                 column = next_column;
                             }
@@ -423,7 +430,10 @@ impl CodeEditor {
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) {
-                                    return Some(BiasedPos::from_pos_and_bias(Pos { line, byte }, Bias::Before));
+                                    return Some(BiasedPos::from_pos_and_bias(
+                                        Pos { line, byte },
+                                        Bias::Before,
+                                    ));
                                 }
                                 y = next_y;
                                 column = line_ref.start_column_after_wrap();
@@ -432,7 +442,10 @@ impl CodeEditor {
                     }
                     let next_y = y + line_ref.scale();
                     if (y..=next_y).contains(&pos.y) {
-                        return Some(BiasedPos::from_pos_and_bias(Pos { line, byte }, Bias::After));
+                        return Some(BiasedPos::from_pos_and_bias(
+                            Pos { line, byte },
+                            Bias::After,
+                        ));
                     }
                     line += 1;
                     y += next_y;
@@ -440,7 +453,10 @@ impl CodeEditor {
                 document::Element::Line(true, line_ref) => {
                     let next_y = y + line_ref.height();
                     if (y..=next_y).contains(&pos.y) {
-                        return Some(BiasedPos::from_pos_and_bias(Pos { line, byte: 0 }, Bias::Before));
+                        return Some(BiasedPos::from_pos_and_bias(
+                            Pos { line, byte: 0 },
+                            Bias::Before,
+                        ));
                     }
                     y = next_y;
                 }
@@ -575,18 +591,16 @@ impl<'a> DrawSelectionsContext<'a> {
             self.draw_selection(cx, x, y, height);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == BiasedPos::from_pos_and_bias(position, affinity) {
+            if selection.cursor.pos == BiasedPos::from_pos_and_bias(position, affinity) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
-        if self
-            .selections
-            .first()
-            .map_or(false, |selection| selection.start() == BiasedPos::from_pos_and_bias(position, affinity))
-        {
+        if self.selections.first().map_or(false, |selection| {
+            selection.start() == BiasedPos::from_pos_and_bias(position, affinity)
+        }) {
             let (selection, selections) = self.selections.split_first().unwrap();
             self.selections = selections;
-            if selection.cursor == BiasedPos::from_pos_and_bias(position, affinity) {
+            if selection.cursor.pos == BiasedPos::from_pos_and_bias(position, affinity) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !selection.is_empty() {
