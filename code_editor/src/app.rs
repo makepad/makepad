@@ -37,8 +37,12 @@ impl AppMain for App {
             return;
         }
         self.ui.handle_widget_event(cx, event);
-        self.code_editor
-            .handle_event(cx, &mut self.state.code_editor, self.state.session_id, event)
+        self.code_editor.handle_event(
+            cx,
+            &mut self.state.code_editor,
+            self.state.session_id,
+            event,
+        )
     }
 }
 

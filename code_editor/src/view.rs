@@ -14,7 +14,6 @@ pub struct View<'a> {
     start_column_after_wrap: &'a [usize],
     fold_column: &'a [usize],
     scale: &'a [f64],
-    line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Bias), Widget)],
     summed_heights: &'a [f64],
     sels: &'a [Sel],
@@ -32,7 +31,6 @@ impl<'a> View<'a> {
         start_column_after_wrap: &'a [usize],
         fold_column: &'a [usize],
         scale: &'a [f64],
-        line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Bias), Widget)],
         summed_heights: &'a [f64],
         sels: &'a [Sel],
@@ -48,7 +46,6 @@ impl<'a> View<'a> {
             start_column_after_wrap,
             fold_column,
             scale,
-            line_inlays,
             block_widget_inlays,
             summed_heights,
             sels,
@@ -56,15 +53,11 @@ impl<'a> View<'a> {
         }
     }
 
-    pub fn settings(&self) -> &'a Settings {
-        self.settings
-    }
-
     pub fn compute_width(&self) -> f64 {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_scaled_width(self.settings.tab_width),
+                Element::Line(_, line) => line.compute_scaled_width(),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -101,6 +94,10 @@ impl<'a> View<'a> {
         }
     }
 
+    pub fn settings(&self) -> &'a Settings {
+        self.settings
+    }
+
     pub fn text(self) -> &'a Text {
         &self.text
     }
@@ -111,6 +108,7 @@ impl<'a> View<'a> {
 
     pub fn line(&self, line: usize) -> Line<'a> {
         Line::new(
+            &self.settings,
             &self.text.as_lines()[line],
             &self.tokenizer.token_infos()[line],
             &self.inline_text_inlays[line],
@@ -124,6 +122,7 @@ impl<'a> View<'a> {
 
     pub fn lines(&self, start_line: usize, end_line: usize) -> Lines<'a> {
         Lines {
+            settings: self.settings,
             text: self.text.as_lines()[start_line..end_line].iter(),
             token_infos: self.tokenizer.token_infos()[start_line..end_line].iter(),
             inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
@@ -143,14 +142,9 @@ impl<'a> View<'a> {
         }
     }
 
-    pub fn elements(&self, start_line: usize, end_line: usize) -> Elements<'a> {
-        Elements {
+    pub fn elements(&self, start_line: usize, end_line: usize) -> BlockElements<'a> {
+        BlockElements {
             lines: self.lines(start_line, end_line),
-            line_inlays: &self.line_inlays[self
-                .line_inlays
-                .iter()
-                .position(|(line, _)| *line >= start_line)
-                .unwrap_or(self.line_inlays.len())..],
             block_widget_inlays: &self.block_widget_inlays[self
                 .block_widget_inlays
                 .iter()
@@ -171,6 +165,7 @@ impl<'a> View<'a> {
 
 #[derive(Clone, Debug)]
 pub struct Lines<'a> {
+    settings: &'a Settings,
     text: slice::Iter<'a, String>,
     token_infos: slice::Iter<'a, Vec<TokenInfo>>,
     inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
@@ -186,6 +181,7 @@ impl<'a> Iterator for Lines<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         Some(Line::new(
+            &self.settings,
             self.text.next()?,
             self.token_infos.next()?,
             self.inline_text_inlays.next()?,
@@ -199,14 +195,13 @@ impl<'a> Iterator for Lines<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Elements<'a> {
+pub struct BlockElements<'a> {
     lines: Lines<'a>,
-    line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Bias), Widget)],
     line: usize,
 }
 
-impl<'a> Iterator for Elements<'a> {
+impl<'a> Iterator for BlockElements<'a> {
     type Item = Element<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -217,18 +212,10 @@ impl<'a> Iterator for Elements<'a> {
                 *line == self.line && *bias == Bias::Before
             })
         {
-            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            let ((_, widget), block_widget_inlays) =
+                self.block_widget_inlays.split_first().unwrap();
             self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Bias::Before, *widget));
-        }
-        if self
-            .line_inlays
-            .first()
-            .map_or(false, |(line, _)| *line == self.line)
-        {
-            let ((_, line), line_inlays) = self.line_inlays.split_first().unwrap();
-            self.line_inlays = line_inlays;
-            return Some(Element::Line(true, line.as_line()));
         }
         if self
             .block_widget_inlays
@@ -237,13 +224,14 @@ impl<'a> Iterator for Elements<'a> {
                 *line == self.line && *bias == Bias::After
             })
         {
-            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            let ((_, widget), block_widget_inlays) =
+                self.block_widget_inlays.split_first().unwrap();
             self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Bias::After, *widget));
         }
-        let line = self.lines.next()?;
+        let line_ref = self.lines.next()?;
         self.line += 1;
-        Some(Element::Line(false, line))
+        Some(Element::Line(false, line_ref))
     }
 }
 
@@ -251,21 +239,6 @@ impl<'a> Iterator for Elements<'a> {
 pub enum Element<'a> {
     Line(bool, Line<'a>),
     Widget(Bias, Widget),
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct LineInlay {
-    text: String,
-}
-
-impl LineInlay {
-    pub fn new(text: String) -> Self {
-        Self { text }
-    }
-
-    pub fn as_line(&self) -> Line<'_> {
-        Line::new(&self.text, &[], &[], &[], &[], 0, 0, 1.0)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

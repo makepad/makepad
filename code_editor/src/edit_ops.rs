@@ -1,4 +1,4 @@
-use crate::{Text, Diff, Pos, Range};
+use crate::{Diff, Pos, Range, Text};
 
 pub fn replace(range: Range, replace_with: Text) -> Diff {
     use crate::diff::Builder;

@@ -11,24 +11,22 @@ impl BiasedPos {
         Self {
             pos: Pos {
                 line,
-                byte: biased_byte.value
+                byte: biased_byte.value,
             },
-            bias: biased_byte.bias
+            bias: biased_byte.bias,
         }
     }
 
     pub fn is_at_first_row_of_line(self, view: &View<'_>) -> bool {
         view.line(self.pos.line)
-            .biased_byte_to_point(self.biased_byte(), view.settings().tab_width)
+            .biased_byte_to_point(self.biased_byte())
             .row
             == 0
     }
 
     pub fn is_at_last_row_of_line(self, view: &View<'_>) -> bool {
         let line = view.line(self.pos.line);
-        line.biased_byte_to_point(self.biased_byte(), view.settings().tab_width)
-            .row
-            == line.height() - 1
+        line.biased_byte_to_point(self.biased_byte()).row == line.height() - 1
     }
 
     pub fn biased_byte(self) -> BiasedUsize {
