@@ -283,9 +283,3 @@ pub enum OperationInfo {
     Retain(Length),
     Insert(Length),
 }
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Strategy {
-    InsertBefore,
-    InsertAfter,
-}
