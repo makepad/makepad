@@ -23,6 +23,7 @@ live_design!{
             flow: Down
         },
         caption_bar = <Solid> {
+            visible: false,
             layout: {
                 flow: Right
             },
@@ -31,7 +32,7 @@ live_design!{
             caption_label = <Frame> {
                 walk: {width: Fill, height: Fill}
                 layout: {align: {x: 0.5, y: 0.5}},
-                <Label> {label: "Makepad", walk: {margin: {left: 100}}}
+                label = <Label> {label: "Makepad", walk: {margin: {left: 100}}}
             }
             windows_buttons = <Frame> {
                 visible: false,
@@ -145,15 +146,15 @@ impl LiveHook for DesktopWindow {
                 self.frame.get_frame(id!(windows_buttons)).set_visible(true);
             }
             OsType::Macos => {
-                self.frame.get_frame(id!(caption_bar)).set_visible(false);
+               // self.frame.get_frame(id!(caption_bar)).set_visible(false);
             }
             OsType::LinuxWindow(_) |
             OsType::LinuxDirect |
             OsType::Android(_) => {
-                self.frame.get_frame(id!(caption_bar)).set_visible(false);
+                //self.frame.get_frame(id!(caption_bar)).set_visible(false);
             }
             OsType::Web(_) => {
-                self.frame.get_frame(id!(caption_bar)).set_visible(false);
+               // self.frame.get_frame(id!(caption_bar)).set_visible(false);
             }
             _ => ()
         }
@@ -242,6 +243,7 @@ impl DesktopWindow {
         
         if let Event::Resume = event {
             Cx2d::reset_fonts_atlas(cx);
+            Cx2d::reset_icon_atlas(cx);
         }
         if let Event::MouseMove(ev) = event {
             if let OsType::LinuxDirect = cx.os_type() {

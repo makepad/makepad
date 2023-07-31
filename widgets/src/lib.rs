@@ -27,7 +27,7 @@ pub mod dock;
 pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
-pub mod infinite_list;
+pub mod list_view;
 pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
@@ -66,6 +66,7 @@ pub use crate::{
     swipe_list::*,
     text_input::*,
     link_label::*,
+    list_view::*,
     desktop_window::*,
     scroll_bars::{ScrollBars},
     scroll_shadow::{DrawScrollShadow},
@@ -118,7 +119,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::multi_window::live_design(cx);
     crate::designer::live_design(cx);
     crate::hook_widget::live_design(cx);
-    crate::infinite_list::live_design(cx);
+    crate::list_view::live_design(cx);
     //#[cfg(ide_widgets)]{
         crate::log_list::live_design(cx);
         crate::log_icon::live_design(cx);

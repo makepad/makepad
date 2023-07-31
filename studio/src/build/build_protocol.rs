@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_editor_core::range::{Range},
+        makepad_code_editor::range::{Range},
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
     }
 };
@@ -9,7 +9,7 @@ use {
 #[derive(PartialEq, Clone, Copy, Debug, SerBin, DeBin)]
 pub struct BuildCmdId(pub u64);
 
-#[derive(Clone, Debug, SerBin, DeBin)]
+#[derive(Clone, Debug)]
 pub struct BuildCmdWrap {
     pub cmd_id: BuildCmdId,
     pub cmd: BuildCmd
@@ -24,13 +24,13 @@ impl BuildCmdId{
     }
 }
 
-#[derive(Clone, Debug, SerBin, DeBin)]
+#[derive(Clone, Debug)]
 pub enum BuildCmd {
     CargoRun{what:String},
     HostToStdin(String)
 }
 
-#[derive(Clone, Debug, SerBin, DeBin)]
+#[derive(Clone, Debug)]
 pub struct BuildMsgWrap {
     pub cmd_id: BuildCmdId,
     pub msg: BuildMsg
@@ -45,7 +45,7 @@ pub enum BuildMsgLevel{
     Panic,
 }
 
-#[derive(Clone, Debug, SerBin, DeBin)]
+#[derive(Clone, Debug)]
 pub struct BuildMsgLocation{
     pub level: BuildMsgLevel,
     pub file_name: String,
@@ -53,13 +53,13 @@ pub struct BuildMsgLocation{
     pub msg: String
 }
 
-#[derive(Clone, Debug, SerBin, DeBin)]
+#[derive(Clone, Debug)]
 pub struct BuildMsgBare{
     pub level: BuildMsgLevel,
     pub line: String,
 }
 
-#[derive(Clone, Debug, SerBin, DeBin)]
+#[derive(Clone, Debug)]
 pub enum BuildMsg {
     Bare(BuildMsgBare),
     Location(BuildMsgLocation),

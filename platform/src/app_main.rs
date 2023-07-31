@@ -26,11 +26,6 @@ macro_rules!app_main {
         #[cfg(target_os = "android")]
         #[no_mangle]
         pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onNewCx(_: *const std::ffi::c_void, _: *const std::ffi::c_void) -> i64 {
-            pub fn panic_hook(info: &std::panic::PanicInfo) {   
-                error!("{}", info)
-            }
-            std::panic::set_hook(Box::new(panic_hook));
-            
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
                 if let Event::Construct = event {

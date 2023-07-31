@@ -35,7 +35,7 @@ pub enum ShaderCompileResult {
 }*/
 
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os="android", target_os="linux"))]
 pub const fn shader_enum(i: u32) -> u32 {
     match i {
         1 => 0x3f800000,
@@ -73,7 +73,7 @@ pub const fn shader_enum(i: u32) -> u32 {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os="android", target_os="linux")))]
 pub const fn shader_enum(i: u32) -> u32 {
     if i<1 || i > 31 {
         panic!();
