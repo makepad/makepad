@@ -1,5 +1,5 @@
 use {
-    crate::{state::ViewId, Bias, BiasedPos, Context, Document, Pos, Selection, State},
+    crate::{state::ViewId, Bias, BiasedPos, Context, Pos, Selection, State, View},
     makepad_widgets::*,
 };
 
@@ -286,14 +286,14 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        use crate::{document, line, str::StrExt, token::TokenKind};
+    fn draw_text(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
+        use crate::{line, str::StrExt, token::TokenKind, view};
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
             let mut column = 0;
             match element {
-                document::Element::Line(_, line) => {
+                view::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
                     for wrapped_element in line.wrapped_elements() {
                         match wrapped_element {
@@ -332,14 +332,14 @@ impl CodeEditor {
                     }
                     y += line.scale();
                 }
-                document::Element::Widget(_, widget) => {
+                view::Element::Widget(_, widget) => {
                     y += widget.height;
                 }
             }
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
         let mut active_selection = None;
         let mut selections = document.selections();
         while selections
@@ -364,15 +364,15 @@ impl CodeEditor {
         .draw_selections(cx, document)
     }
 
-    fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<BiasedPos> {
-        use crate::{document, line, str::StrExt};
+    fn pick(&self, document: &View<'_>, pos: DVec2) -> Option<BiasedPos> {
+        use crate::{line, str::StrExt, view};
 
         let pos = (pos + self.viewport_rect.pos) / self.cell_size;
         let mut line = document.find_first_line_ending_after_y(pos.y);
         let mut y = document.line_y(line);
         for element in document.elements(line, line + 1) {
             match element {
-                document::Element::Line(false, line_ref) => {
+                view::Element::Line(false, line_ref) => {
                     let mut byte = 0;
                     let mut column = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
@@ -450,7 +450,7 @@ impl CodeEditor {
                     line += 1;
                     y += next_y;
                 }
-                document::Element::Line(true, line_ref) => {
+                view::Element::Line(true, line_ref) => {
                     let next_y = y + line_ref.height();
                     if (y..=next_y).contains(&pos.y) {
                         return Some(BiasedPos::from_pos_and_bias(
@@ -460,7 +460,7 @@ impl CodeEditor {
                     }
                     y = next_y;
                 }
-                document::Element::Widget(_, widget) => {
+                view::Element::Widget(_, widget) => {
                     y += widget.height;
                 }
             }
@@ -476,14 +476,14 @@ struct DrawSelectionsContext<'a> {
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        use crate::{document, line, str::StrExt};
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
+        use crate::{line, str::StrExt, view};
 
         let mut line = self.code_editor.start_line;
         let mut y = document.line_y(line);
         for element in document.elements(self.code_editor.start_line, self.code_editor.end_line) {
             match element {
-                document::Element::Line(false, line_ref) => {
+                view::Element::Line(false, line_ref) => {
                     let mut byte = 0;
                     let mut column = 0;
                     self.handle_event(
@@ -561,10 +561,10 @@ impl<'a> DrawSelectionsContext<'a> {
                     line += 1;
                     y += line_ref.scale();
                 }
-                document::Element::Line(true, line_ref) => {
+                view::Element::Line(true, line_ref) => {
                     y += line_ref.height();
                 }
-                document::Element::Widget(_, widget) => {
+                view::Element::Widget(_, widget) => {
                     y += widget.height;
                 }
             }
@@ -579,28 +579,28 @@ impl<'a> DrawSelectionsContext<'a> {
         cx: &mut Cx2d<'_>,
         line: usize,
         byte: usize,
-        affinity: Bias,
+        bias: Bias,
         x: f64,
         y: f64,
         height: f64,
     ) {
         let position = Pos { line, byte };
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == BiasedPos::from_pos_and_bias(position, affinity)
+            selection.selection.end() == BiasedPos::from_pos_and_bias(position, bias)
         }) {
             self.draw_selection(cx, x, y, height);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor.pos == BiasedPos::from_pos_and_bias(position, affinity) {
+            if selection.cursor.pos == BiasedPos::from_pos_and_bias(position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self.selections.first().map_or(false, |selection| {
-            selection.start() == BiasedPos::from_pos_and_bias(position, affinity)
+            selection.start() == BiasedPos::from_pos_and_bias(position, bias)
         }) {
             let (selection, selections) = self.selections.split_first().unwrap();
             self.selections = selections;
-            if selection.cursor.pos == BiasedPos::from_pos_and_bias(position, affinity) {
+            if selection.cursor.pos == BiasedPos::from_pos_and_bias(position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !selection.is_empty() {

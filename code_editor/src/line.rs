@@ -75,9 +75,9 @@ impl<'a> Line<'a> {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_affinity_to_row_column(
+    pub fn byte_bias_to_row_column(
         &self,
-        (byte, affinity): (usize, Bias),
+        (byte, bias): (usize, Bias),
         tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
@@ -85,19 +85,19 @@ impl<'a> Line<'a> {
         let mut current_byte = 0;
         let mut row = 0;
         let mut column = 0;
-        if byte == current_byte && affinity == Bias::Before {
+        if byte == current_byte && bias == Bias::Before {
             return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        if byte == current_byte && affinity == Bias::After {
+                        if byte == current_byte && bias == Bias::After {
                             return (row, column);
                         }
                         current_byte += grapheme.len();
                         column += grapheme.column_count(tab_column_count);
-                        if byte == current_byte && affinity == Bias::Before {
+                        if byte == current_byte && bias == Bias::Before {
                             return (row, column);
                         }
                     }
@@ -114,13 +114,13 @@ impl<'a> Line<'a> {
                 }
             }
         }
-        if byte == current_byte && affinity == Bias::After {
+        if byte == current_byte && bias == Bias::After {
             return (row, column);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_affinity(
+    pub fn row_column_to_byte_bias(
         &self,
         (row, column): (usize, usize),
         tab_column_count: usize,
@@ -262,8 +262,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Bias::Before
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Bias::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -282,8 +282,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Bias::After
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Bias::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();

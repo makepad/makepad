@@ -1,7 +1,7 @@
 use {
     crate::{
-        document, document::LineInlay, line, Bias, BiasedPos, Diff, Document, Pos, Range,
-        Selection, Settings, Text, Tokenizer,
+        line, view, view::LineInlay, Bias, BiasedPos, Diff, Pos, Range, Selection, Settings, Text,
+        Tokenizer, View,
     },
     std::collections::HashSet,
 };
@@ -19,7 +19,7 @@ pub struct Context<'a> {
     fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Bias), document::Widget)>,
+    document_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
     summed_heights: &'a mut Vec<f64>,
     selections: &'a mut Vec<Selection>,
     latest_selection_index: &'a mut usize,
@@ -40,7 +40,7 @@ impl<'a> Context<'a> {
         fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Bias), document::Widget)>,
+        document_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
         summed_heights: &'a mut Vec<f64>,
         selections: &'a mut Vec<Selection>,
         latest_selection_index: &'a mut usize,
@@ -68,8 +68,8 @@ impl<'a> Context<'a> {
         }
     }
 
-    pub fn document(&self) -> Document<'_> {
-        Document::new(
+    pub fn document(&self) -> View<'_> {
+        View::new(
             self.settings,
             self.text,
             self.tokenizer,
@@ -181,33 +181,29 @@ impl<'a> Context<'a> {
     }
 
     pub fn move_cursors_left(&mut self, select: bool) {
-        use crate::{Cursor, move_ops};
+        use crate::{move_ops, Cursor};
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor| {
-                Cursor {
-                    pos: BiasedPos::from_pos_and_bias(
-                        move_ops::move_left(document, cursor.pos.to_pos()),
-                        Bias::Before,
-                    ),
-                    col: None,
-                }
+        self.modify_selections(select, |view, selection| {
+            selection.update_cursor(|cursor| Cursor {
+                pos: BiasedPos::from_pos_and_bias(
+                    move_ops::move_left(view.text().as_lines(), cursor.pos.to_pos()),
+                    Bias::Before,
+                ),
+                col: None,
             })
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
-        use crate::{Cursor, move_ops};
+        use crate::{move_ops, Cursor};
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor| {
-                Cursor {
-                    pos: BiasedPos::from_pos_and_bias(
-                        move_ops::move_right(document, cursor.pos.to_pos()),
-                        Bias::After,
-                    ),
-                    col: None,
-                }
+        self.modify_selections(select, |view, selection| {
+            selection.update_cursor(|cursor| Cursor {
+                pos: BiasedPos::from_pos_and_bias(
+                    move_ops::move_right(view.text().as_lines(), cursor.pos.to_pos()),
+                    Bias::After,
+                ),
+                col: None,
             })
         });
     }
@@ -243,14 +239,14 @@ impl<'a> Context<'a> {
             .elements(start, self.document().line_count())
         {
             match element {
-                document::Element::Line(false, line) => {
+                view::Element::Line(false, line) => {
                     summed_height += line.height();
                     summed_heights.push(summed_height);
                 }
-                document::Element::Line(true, line) => {
+                view::Element::Line(true, line) => {
                     summed_height += line.height();
                 }
-                document::Element::Widget(_, widget) => {
+                view::Element::Widget(_, widget) => {
                     summed_height += widget.height;
                 }
             }
@@ -376,7 +372,7 @@ impl<'a> Context<'a> {
     fn modify_selections(
         &mut self,
         select: bool,
-        mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
+        mut f: impl FnMut(&View<'_>, Selection) -> Selection,
     ) {
         use {crate::Cursor, std::mem};
 
@@ -405,13 +401,18 @@ impl<'a> Context<'a> {
             let cursor;
             if current_selection.anchor_pos <= next_selection.cursor.pos {
                 anchor_pos = start;
-                cursor = Cursor { pos: end, col: next_selection.cursor.col }
+                cursor = Cursor {
+                    pos: end,
+                    col: next_selection.cursor.col,
+                }
             } else {
                 anchor_pos = end;
-                cursor = Cursor { pos: start, col: current_selection.cursor.col };
+                cursor = Cursor {
+                    pos: start,
+                    col: current_selection.cursor.col,
+                };
             }
-            self.selections[current_selection_index] =
-                Selection { anchor_pos, cursor };
+            self.selections[current_selection_index] = Selection { anchor_pos, cursor };
             self.selections.remove(next_selection_index);
             if next_selection_index < *self.latest_selection_index {
                 *self.latest_selection_index -= 1;
@@ -420,7 +421,7 @@ impl<'a> Context<'a> {
     }
 
     fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
-        use crate::{Cursor, pos::ApplyDiffMode};
+        use crate::{pos::ApplyDiffMode, Cursor};
 
         let mut composite_diff = Diff::new();
         let mut prev_end = Pos::default();
@@ -445,7 +446,13 @@ impl<'a> Context<'a> {
                 anchor_pos = BiasedPos::from_pos_and_bias(diffed_end, selection.end().bias);
                 cursor_pos = BiasedPos::from_pos_and_bias(diffed_start, selection.start().bias);
             }
-            *selection = Selection { anchor_pos, cursor: Cursor { pos: cursor_pos, col: None } };
+            *selection = Selection {
+                anchor_pos,
+                cursor: Cursor {
+                    pos: cursor_pos,
+                    col: None,
+                },
+            };
         }
         self.update_after_modify_text(composite_diff);
     }

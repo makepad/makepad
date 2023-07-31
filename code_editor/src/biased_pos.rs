@@ -1,4 +1,4 @@
-use crate::{Bias, Pos};
+use crate::{Bias, Pos, View};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BiasedPos {
@@ -14,6 +14,20 @@ impl BiasedPos {
             byte: pos.byte,
             bias,
         }
+    }
+
+    pub fn is_at_first_row_of_line(self, view: &View<'_>) -> bool {
+        view.line(self.line)
+            .byte_bias_to_row_column((self.byte, self.bias), view.settings().tab_column_count)
+            .0
+            == 0
+    }
+
+    pub fn is_at_last_row_of_line(self, view: &View<'_>,) -> bool {
+        let line = view.line(self.line);
+        line.byte_bias_to_row_column((self.byte, self.bias), view.settings().tab_column_count)
+            .0
+            == line.row_count() - 1
     }
 
     pub fn to_pos(self) -> Pos {
