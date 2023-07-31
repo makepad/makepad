@@ -11,8 +11,8 @@ pub struct View<'a> {
     inline_text_inlays: &'a [Vec<(usize, String)>],
     inline_widget_inlays: &'a [Vec<((usize, Bias), line::Widget)>],
     soft_breaks: &'a [Vec<usize>],
-    start_col_after_wrap: &'a [usize],
-    fold_col: &'a [usize],
+    start_column_after_wrap: &'a [usize],
+    fold_column: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Bias), Widget)],
@@ -29,8 +29,8 @@ impl<'a> View<'a> {
         inline_text_inlays: &'a [Vec<(usize, String)>],
         inline_widget_inlays: &'a [Vec<((usize, Bias), line::Widget)>],
         soft_breaks: &'a [Vec<usize>],
-        start_col_after_wrap: &'a [usize],
-        fold_col: &'a [usize],
+        start_column_after_wrap: &'a [usize],
+        fold_column: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Bias), Widget)],
@@ -45,8 +45,8 @@ impl<'a> View<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -64,7 +64,7 @@ impl<'a> View<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_width),
+                Element::Line(_, line) => line.compute_scaled_width(self.settings.tab_width),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -116,8 +116,8 @@ impl<'a> View<'a> {
             &self.inline_text_inlays[line],
             &self.inline_widget_inlays[line],
             &self.soft_breaks[line],
-            self.start_col_after_wrap[line],
-            self.fold_col[line],
+            self.start_column_after_wrap[line],
+            self.fold_column[line],
             self.scale[line],
         )
     }
@@ -129,8 +129,8 @@ impl<'a> View<'a> {
             inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
             inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
             soft_breaks: self.soft_breaks[start_line..end_line].iter(),
-            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
-            fold_col: self.fold_col[start_line..end_line].iter(),
+            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
+            fold_column: self.fold_column[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -176,8 +176,8 @@ pub struct Lines<'a> {
     inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
     inline_widget_inlays: slice::Iter<'a, Vec<((usize, Bias), line::Widget)>>,
     soft_breaks: slice::Iter<'a, Vec<usize>>,
-    start_col_after_wrap: slice::Iter<'a, usize>,
-    fold_col: slice::Iter<'a, usize>,
+    start_column_after_wrap: slice::Iter<'a, usize>,
+    fold_column: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -191,8 +191,8 @@ impl<'a> Iterator for Lines<'a> {
             self.inline_text_inlays.next()?,
             self.inline_widget_inlays.next()?,
             self.soft_breaks.next()?,
-            *self.start_col_after_wrap.next()?,
-            *self.fold_col.next()?,
+            *self.start_column_after_wrap.next()?,
+            *self.fold_column.next()?,
             *self.scale.next()?,
         ))
     }

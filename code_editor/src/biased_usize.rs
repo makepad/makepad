@@ -1,15 +1,15 @@
 use crate::Bias;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct BiasedLinePos {
-    pub pos: usize,
+pub struct BiasedUsize {
+    pub value: usize,
     pub bias: Bias,
 }
 
-impl From<usize> for BiasedLinePos {
-    fn from(pos: usize) -> Self {
+impl From<usize> for BiasedUsize {
+    fn from(value: usize) -> Self {
         Self {
-            pos,
+            value,
             ..Self::default()
         }
     }

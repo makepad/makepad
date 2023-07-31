@@ -1,5 +1,5 @@
 use {
-    crate::{state::ViewId, Bias, BiasedTextPos, ViewMut, Sel, State, TextPos, View},
+    crate::{state::SessionId, Bias, BiasedPos, ViewMut, Sel, State, Pos, View},
     makepad_widgets::*,
 };
 
@@ -112,15 +112,15 @@ pub struct CodeEditor {
 }
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d<'_>, context: &mut ViewMut<'_>) {
-        self.begin(cx, context);
-        let document = context.document();
+    pub fn draw(&mut self, cx: &mut Cx2d<'_>, view: &mut ViewMut<'_>) {
+        self.begin(cx, view);
+        let document = view.as_view();
         self.draw_text(cx, &document);
         self.draw_sels(cx, &document);
-        self.end(cx, context);
+        self.end(cx, view);
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, state: &mut State, view_id: ViewId, event: &Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, state: &mut State, session_id: SessionId, event: &Event) {
         use crate::str::StrExt;
 
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
@@ -128,28 +128,28 @@ impl CodeEditor {
         });
         match event {
             Event::TextInput(TextInputEvent { input, .. }) => {
-                state.context(view_id).replace(input.into());
+                state.view_mut(session_id).replace(input.into());
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
                 ..
             }) => {
-                state.context(view_id).enter();
+                state.view_mut(session_id).enter();
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
                 ..
             }) => {
-                state.context(view_id).delete();
+                state.view_mut(session_id).delete();
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
-                state.context(view_id).backspace();
+                state.view_mut(session_id).backspace();
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
@@ -157,7 +157,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_left(*shift);
+                state.view_mut(session_id).move_cursors_left(*shift);
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
@@ -165,7 +165,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_right(*shift);
+                state.view_mut(session_id).move_cursors_right(*shift);
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
@@ -173,7 +173,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_up(*shift);
+                state.view_mut(session_id).move_cursors_up(*shift);
                 cx.redraw_all();
             }
 
@@ -182,16 +182,16 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_down(*shift);
+                state.view_mut(session_id).move_cursors_down(*shift);
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
-                let mut context = state.context(view_id);
-                for line in 0..context.document().line_count() {
-                    let document = context.document();
+                let mut view = state.view_mut(session_id);
+                for line in 0..view.as_view().line_count() {
+                    let document = view.as_view();
                     let settings = document.settings();
                     if document
                         .line(line)
@@ -199,7 +199,7 @@ impl CodeEditor {
                         .indent_level(settings.tab_width, settings.indent_width)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_width);
+                        view.fold_line(line, 2 * settings.indent_width);
                     }
                 }
                 cx.redraw_all();
@@ -208,9 +208,9 @@ impl CodeEditor {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
-                let mut context = state.context(view_id);
-                for line in 0..context.document().line_count() {
-                    let document = context.document();
+                let mut view = state.view_mut(session_id);
+                for line in 0..view.as_view().line_count() {
+                    let document = view.as_view();
                     let settings = document.settings();
                     if document
                         .line(line)
@@ -218,7 +218,7 @@ impl CodeEditor {
                         .indent_level(settings.tab_width, settings.indent_width)
                         >= 2
                     {
-                        context.unfold_line(line);
+                        view.unfold_line(line);
                     }
                 }
                 cx.redraw_all();
@@ -232,22 +232,22 @@ impl CodeEditor {
                 modifiers: KeyModifiers { alt, .. },
                 ..
             }) => {
-                let document = state.document(view_id);
+                let document = state.session(session_id);
                 if let Some(cursor) = self.pick(&document, abs - rect.pos) {
-                    let mut context = state.context(view_id);
+                    let mut view = state.view_mut(session_id);
                     if alt {
-                        context.insert_cursor(cursor);
+                        view.insert_cursor(cursor);
                     } else {
-                        context.set_cursor_pos(cursor);
+                        view.set_cursor_pos(cursor);
                     }
                     cx.redraw_all();
                 }
             }
             Hit::FingerMove(FingerMoveEvent { abs, rect, .. }) => {
-                let document = state.document(view_id);
+                let document = state.session(session_id);
                 if let Some(cursor) = self.pick(&document, abs - rect.pos) {
-                    let mut context = state.context(view_id);
-                    context.move_cursor_to(true, cursor);
+                    let mut view = state.view_mut(session_id);
+                    view.move_cursor_to(true, cursor);
                     cx.redraw_all();
                 }
             }
@@ -255,17 +255,17 @@ impl CodeEditor {
         }
     }
 
-    fn begin(&mut self, cx: &mut Cx2d<'_>, context: &mut ViewMut<'_>) {
+    fn begin(&mut self, cx: &mut Cx2d<'_>, view: &mut ViewMut<'_>) {
         self.viewport_rect = Rect {
             pos: self.scroll_bars.get_scroll_pos(),
             size: cx.turtle().rect().size,
         };
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-        context.set_max_col(Some(
+        view.set_max_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
-        let document = context.document();
+        let document = view.as_view();
         self.start_line =
             document.find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
         self.end_line = document.find_first_line_starting_after_y(
@@ -274,14 +274,14 @@ impl CodeEditor {
         self.scroll_bars.begin(cx, self.walk, Layout::default());
     }
 
-    fn end(&mut self, cx: &mut Cx2d<'_>, context: &mut ViewMut<'_>) {
-        let document = context.document();
+    fn end(&mut self, cx: &mut Cx2d<'_>, view: &mut ViewMut<'_>) {
+        let document = view.as_view();
         cx.turtle_mut().set_used(
             document.compute_width() * self.cell_size.x,
             document.height() * self.cell_size.y,
         );
         self.scroll_bars.end(cx);
-        if context.update_fold_animations() {
+        if view.update_fold_animations() {
             cx.redraw_all();
         }
     }
@@ -291,7 +291,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut col = 0;
+            let mut column = 0;
             match element {
                 view::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -311,22 +311,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.col_to_x(col),
+                                        x: line.column_to_x(column),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_width);
+                                    .column_count(document.settings().tab_width);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
-                            line::WrappedElement::Wrap => {
+                            line::WrappedElement::SoftBreak => {
                                 y += line.scale();
-                                col = line.start_col_after_wrap();
+                                column = line.start_column_after_wrap();
                             }
                         }
                     }
@@ -362,7 +362,7 @@ impl CodeEditor {
         .draw_sels(cx, document)
     }
 
-    fn pick(&self, document: &View<'_>, pos: DVec2) -> Option<BiasedTextPos> {
+    fn pick(&self, document: &View<'_>, pos: DVec2) -> Option<BiasedPos> {
         use crate::{line, str::StrExt, view};
 
         let pos = (pos + self.viewport_rect.pos) / self.cell_size;
@@ -372,29 +372,29 @@ impl CodeEditor {
             match element {
                 view::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_col = col
+                                    let next_column = column
                                         + grapheme
-                                            .col_count(document.settings().tab_width);
+                                            .column_count(document.settings().tab_width);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.col_to_x(col);
-                                    let next_x = line_ref.col_to_x(next_col);
+                                    let x = line_ref.column_to_x(column);
+                                    let next_x = line_ref.column_to_x(next_column);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
-                                            return Some(BiasedTextPos {
-                                                pos: TextPos { line, byte },
+                                            return Some(BiasedPos {
+                                                pos: Pos { line, byte },
                                                 bias: Bias::After,
                                             });
                                         }
                                         if (mid_x..=next_x).contains(&pos.x) {
-                                            return Some(BiasedTextPos {
-                                                pos: TextPos {
+                                            return Some(BiasedPos {
+                                                pos: Pos {
                                                     line,
                                                     byte: next_byte,
                                                 },
@@ -403,45 +403,45 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    col = next_col;
+                                    column = next_column;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_col = col
+                                let next_column = column
                                     + token
                                         .text
-                                        .col_count(document.settings().tab_width);
-                                let x = line_ref.col_to_x(col);
-                                let next_x = line_ref.col_to_x(next_col);
+                                        .column_count(document.settings().tab_width);
+                                let x = line_ref.column_to_x(column);
+                                let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
-                                    return Some(BiasedTextPos {
-                                        pos: TextPos { line, byte },
+                                    return Some(BiasedPos {
+                                        pos: Pos { line, byte },
                                         bias: Bias::Before,
                                     });
                                 }
-                                col = next_col;
+                                column = next_column;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
-                            line::WrappedElement::Wrap => {
+                            line::WrappedElement::SoftBreak => {
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) {
-                                    return Some(BiasedTextPos {
-                                        pos: TextPos { line, byte },
+                                    return Some(BiasedPos {
+                                        pos: Pos { line, byte },
                                         bias: Bias::Before,
                                     });
                                 }
                                 y = next_y;
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
                     let next_y = y + line_ref.scale();
                     if (y..=next_y).contains(&pos.y) {
-                        return Some(BiasedTextPos {
-                            pos: TextPos { line, byte },
+                        return Some(BiasedPos {
+                            pos: Pos { line, byte },
                             bias: Bias::After,
                         });
                     }
@@ -449,10 +449,10 @@ impl CodeEditor {
                     y += next_y;
                 }
                 view::Element::Line(true, line_ref) => {
-                    let next_y = y + line_ref.height();
+                    let next_y = y + line_ref.scaled_height();
                     if (y..=next_y).contains(&pos.y) {
-                        return Some(BiasedTextPos {
-                            pos: TextPos { line, byte: 0 },
+                        return Some(BiasedPos {
+                            pos: Pos { line, byte: 0 },
                             bias: Bias::Before,
                         });
                     }
@@ -483,13 +483,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 view::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Bias::Before,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
@@ -502,44 +502,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Bias::After,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    col +=
-                                        grapheme.col_count(document.settings().tab_width);
+                                    column +=
+                                        grapheme.column_count(document.settings().tab_width);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Bias::Before,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_width);
+                                    .column_count(document.settings().tab_width);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
-                            line::WrappedElement::Wrap => {
-                                col += 1;
+                            line::WrappedElement::SoftBreak => {
+                                column += 1;
                                 if self.active_sel.is_some() {
                                     self.draw_sel(
                                         cx,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -548,19 +548,19 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Bias::After,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
-                    col += 1;
+                    column += 1;
                     if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
+                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
                 }
                 view::Element::Line(true, line_ref) => {
-                    y += line_ref.height();
+                    y += line_ref.scaled_height();
                 }
                 view::Element::Widget(_, widget) => {
                     y += widget.height;
@@ -582,23 +582,23 @@ impl<'a> DrawSelectionsContext<'a> {
         y: f64,
         height: f64,
     ) {
-        let pos = TextPos { line, byte };
+        let pos = Pos { line, byte };
         if self.active_sel.as_ref().map_or(false, |sel| {
-            sel.sel.end() == BiasedTextPos { pos, bias }
+            sel.sel.end() == BiasedPos { pos, bias }
         }) {
             self.draw_sel(cx, x, y, height);
             self.code_editor.draw_sel.end(cx);
             let sel = self.active_sel.take().unwrap().sel;
-            if sel.cursor.pos == (BiasedTextPos { pos, bias }) {
+            if sel.cursor.biased_pos == (BiasedPos { pos, bias }) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self.sels.first().map_or(false, |sel| {
-            sel.start() == BiasedTextPos { pos, bias }
+            sel.start() == BiasedPos { pos, bias }
         }) {
             let (sel, sels) = self.sels.split_first().unwrap();
             self.sels = sels;
-            if sel.cursor.pos == (BiasedTextPos { pos, bias }) {
+            if sel.cursor.biased_pos == (BiasedPos { pos, bias }) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !sel.is_empty() {

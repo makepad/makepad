@@ -78,13 +78,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn col_count(self, tab_col_count: usize) -> usize;
+    fn column_count(self, tab_column_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn col_count(self, tab_col_count: usize) -> usize {
+    fn column_count(self, tab_column_count: usize) -> usize {
         match self {
-            '\t' => tab_col_count,
+            '\t' => tab_column_count,
             _ => 1,
         }
     }
@@ -287,10 +287,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_col_count);
+                        context.fold_line(line, 2 * settings.indent_column_count);
                     }
                 }
                 cx.redraw_all();
@@ -306,7 +306,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -380,7 +380,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut col = 0;
+            let mut column = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -400,22 +400,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.col_to_x(col),
+                                        x: line.column_to_x(column),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                col = line.start_col_after_wrap();
+                                column = line.start_column_after_wrap();
                             }
                         }
                     }
@@ -462,18 +462,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_col = col
+                                    let next_column = column
                                         + grapheme
-                                            .col_count(document.settings().tab_col_count);
+                                            .column_count(document.settings().tab_column_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.col_to_x(col);
-                                    let next_x = line_ref.col_to_x(next_col);
+                                    let x = line_ref.column_to_x(column);
+                                    let next_x = line_ref.column_to_x(next_column);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -490,24 +490,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    col = next_col;
+                                    column = next_column;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_col = col
+                                let next_column = column
                                     + token
                                         .text
-                                        .col_count(document.settings().tab_col_count);
-                                let x = line_ref.col_to_x(col);
-                                let next_x = line_ref.col_to_x(next_col);
+                                        .column_count(document.settings().tab_column_count);
+                                let x = line_ref.column_to_x(column);
+                                let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                col = next_col;
+                                column = next_column;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -515,7 +515,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -558,13 +558,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
@@ -577,44 +577,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    col +=
-                                        grapheme.col_count(document.settings().tab_col_count);
+                                    column +=
+                                        grapheme.column_count(document.settings().tab_column_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
-                                col += 1;
+                                column += 1;
                                 if self.active_sel.is_some() {
                                     self.draw_sel(
                                         cx,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -623,13 +623,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
-                    col += 1;
+                    column += 1;
                     if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
+                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -824,8 +824,8 @@ pub struct Context<'a> {
     inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: &'a mut Vec<Vec<usize>>,
-    start_col_after_wrap: &'a mut Vec<usize>,
-    fold_col: &'a mut Vec<usize>,
+    start_column_after_wrap: &'a mut Vec<usize>,
+    fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -844,8 +844,8 @@ impl<'a> Context<'a> {
         inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
         soft_breaks: &'a mut Vec<Vec<usize>>,
-        start_col_after_wrap: &'a mut Vec<usize>,
-        fold_col: &'a mut Vec<usize>,
+        start_column_after_wrap: &'a mut Vec<usize>,
+        fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -862,8 +862,8 @@ impl<'a> Context<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -883,8 +883,8 @@ impl<'a> Context<'a> {
             self.inline_text_inlays,
             self.inline_widget_inlays,
             self.soft_breaks,
-            self.start_col_after_wrap,
-            self.fold_col,
+            self.start_column_after_wrap,
+            self.fold_column,
             self.scale,
             self.line_inlays,
             self.block_widget_inlays,
@@ -894,7 +894,7 @@ impl<'a> Context<'a> {
         )
     }
 
-    pub fn wrap_lines(&mut self, max_col: usize) {
+    pub fn wrap_lines(&mut self, max_column: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
@@ -903,28 +903,28 @@ impl<'a> Context<'a> {
             let mut soft_breaks = Vec::new();
             mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut col = 0;
+            let mut column = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_col_after_wrap = line_ref
+            let mut start_column_after_wrap = line_ref
                 .text()
                 .indentation()
-                .col_count(document.settings().tab_col_count);
+                .column_count(document.settings().tab_column_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_col_after_wrap
-                                + string.col_count(document.settings().tab_col_count)
-                                > max_col
+                            if start_column_after_wrap
+                                + string.column_count(document.settings().tab_column_count)
+                                > max_column
                             {
-                                start_col_after_wrap = 0;
+                                start_column_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_col_after_wrap + widget.col_count > max_col {
-                            start_col_after_wrap = 0;
+                        if start_column_after_wrap + widget.column_count > max_column {
+                            start_column_after_wrap = 0;
                         }
                     }
                 }
@@ -933,28 +933,28 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_col =
-                                col + string.col_count(document.settings().tab_col_count);
-                            if next_col > max_col {
-                                next_col = start_col_after_wrap;
+                            let mut next_column =
+                                column + string.column_count(document.settings().tab_column_count);
+                            if next_column > max_column {
+                                next_column = start_column_after_wrap;
                                 soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            col = next_col;
+                            column = next_column;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_col = col + widget.col_count;
-                        if next_col > max_col {
-                            next_col = start_col_after_wrap;
+                        let mut next_column = column + widget.column_count;
+                        if next_column > max_column {
+                            next_column = start_column_after_wrap;
                             soft_breaks.push(byte);
                         }
-                        col = next_col;
+                        column = next_column;
                     }
                 }
             }
             self.soft_breaks[line] = soft_breaks;
-            self.start_col_after_wrap[line] = start_col_after_wrap;
+            self.start_column_after_wrap[line] = start_column_after_wrap;
             if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
@@ -1065,7 +1065,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
@@ -1073,7 +1073,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -1107,8 +1107,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
-        self.fold_col[line_index] = fold_col;
+    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
+        self.fold_column[line_index] = fold_column;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -1190,7 +1190,7 @@ impl<'a> Context<'a> {
                 cursor = start;
             }
             self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_col);
+                Selection::new(anchor, cursor, current_sel.preferred_column);
             self.sels.remove(next_sel_index);
             if next_sel_index < *self.latest_sel_index {
                 *self.latest_sel_index -= 1;
@@ -1224,7 +1224,7 @@ impl<'a> Context<'a> {
                 anchor = (diffed_end, sel.end().1);
                 cursor = (diffed_start, sel.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_col);
+            *sel = Selection::new(anchor, cursor, sel.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -1241,8 +1241,8 @@ impl<'a> Context<'a> {
                     self.inline_text_inlays.drain(start_line..end_line);
                     self.inline_widget_inlays.drain(start_line..end_line);
                     self.soft_breaks.drain(start_line..end_line);
-                    self.start_col_after_wrap.drain(start_line..end_line);
-                    self.fold_col.drain(start_line..end_line);
+                    self.start_column_after_wrap.drain(start_line..end_line);
+                    self.fold_column.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -1258,9 +1258,9 @@ impl<'a> Context<'a> {
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_col_after_wrap
+                    self.start_column_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_col
+                    self.fold_column
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -1577,8 +1577,8 @@ pub struct Document<'a> {
     inline_text_inlays: &'a [Vec<(usize, String)>],
     inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
     soft_breaks: &'a [Vec<usize>],
-    start_col_after_wrap: &'a [usize],
-    fold_col: &'a [usize],
+    start_column_after_wrap: &'a [usize],
+    fold_column: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -1595,8 +1595,8 @@ impl<'a> Document<'a> {
         inline_text_inlays: &'a [Vec<(usize, String)>],
         inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
         soft_breaks: &'a [Vec<usize>],
-        start_col_after_wrap: &'a [usize],
-        fold_col: &'a [usize],
+        start_column_after_wrap: &'a [usize],
+        fold_column: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -1611,8 +1611,8 @@ impl<'a> Document<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -1630,7 +1630,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -1678,8 +1678,8 @@ impl<'a> Document<'a> {
             &self.inline_text_inlays[line],
             &self.inline_widget_inlays[line],
             &self.soft_breaks[line],
-            self.start_col_after_wrap[line],
-            self.fold_col[line],
+            self.start_column_after_wrap[line],
+            self.fold_column[line],
             self.scale[line],
         )
     }
@@ -1691,8 +1691,8 @@ impl<'a> Document<'a> {
             inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
             inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
             soft_breaks: self.soft_breaks[start_line..end_line].iter(),
-            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
-            fold_col: self.fold_col[start_line..end_line].iter(),
+            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
+            fold_column: self.fold_column[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -1738,8 +1738,8 @@ pub struct Lines<'a> {
     inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
     inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: slice::Iter<'a, Vec<usize>>,
-    start_col_after_wrap: slice::Iter<'a, usize>,
-    fold_col: slice::Iter<'a, usize>,
+    start_column_after_wrap: slice::Iter<'a, usize>,
+    fold_column: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -1753,8 +1753,8 @@ impl<'a> Iterator for Lines<'a> {
             self.inline_text_inlays.next()?,
             self.inline_widget_inlays.next()?,
             self.soft_breaks.next()?,
-            *self.start_col_after_wrap.next()?,
-            *self.fold_col.next()?,
+            *self.start_column_after_wrap.next()?,
+            *self.fold_column.next()?,
             *self.scale.next()?,
         ))
     }
@@ -2004,8 +2004,8 @@ pub struct Line<'a> {
     inline_text_inlays: &'a [(usize, String)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     soft_breaks: &'a [usize],
-    start_col_after_wrap: usize,
-    fold_col: usize,
+    start_column_after_wrap: usize,
+    fold_column: usize,
     scale: f64,
 }
 
@@ -2016,8 +2016,8 @@ impl<'a> Line<'a> {
         inline_text_inlays: &'a [(usize, String)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         soft_breaks: &'a [usize],
-        start_col_after_wrap: usize,
-        fold_col: usize,
+        start_column_after_wrap: usize,
+        fold_column: usize,
         scale: f64,
     ) -> Self {
         Self {
@@ -2026,129 +2026,129 @@ impl<'a> Line<'a> {
             inline_text_inlays,
             block_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
         }
     }
 
-    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
+    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_col_count = 0;
-        let mut summed_col_count = 0;
+        let mut max_summed_column_count = 0;
+        let mut summed_column_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_col_count += token.text.col_count(tab_col_count);
+                    summed_column_count += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_col_count += widget.col_count;
+                    summed_column_count += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
-                    summed_col_count = self.start_col_after_wrap();
+                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
+                    summed_column_count = self.start_column_after_wrap();
                 }
             }
         }
-        max_summed_col_count.max(summed_col_count)
+        max_summed_column_count.max(summed_column_count)
     }
 
     pub fn row_count(&self) -> usize {
         self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
-        self.col_to_x(self.compute_col_count(tab_col_count))
+    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
+        self.column_to_x(self.compute_column_count(tab_column_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_col(
+    pub fn byte_bias_to_row_column(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_col_count: usize,
+        tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut col = 0;
+        let mut column = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, col);
+            return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, col);
+                            return (row, column);
                         }
                         current_byte += grapheme.len();
-                        col += grapheme.col_count(tab_col_count);
+                        column += grapheme.column_count(tab_column_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, col);
+                            return (row, column);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    col += token.text.col_count(tab_col_count);
+                    column += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    col += widget.col_count;
+                    column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    col = self.start_col_after_wrap();
+                    column = self.start_column_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, col);
+            return (row, column);
         }
         panic!()
     }
 
-    pub fn row_col_to_byte_bias(
+    pub fn row_column_to_byte_bias(
         &self,
-        (row, col): (usize, usize),
-        tab_col_count: usize,
+        (row, column): (usize, usize),
+        tab_column_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_col = 0;
+        let mut current_column = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_col = current_col + grapheme.col_count(tab_col_count);
-                        if current_row == row && (current_col..next_col).contains(&col) {
+                        let next_column = current_column + grapheme.column_count(tab_column_count);
+                        if current_row == row && (current_column..next_column).contains(&column) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_col = next_col;
+                        current_column = next_column;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_col = current_col + token.text.col_count(tab_col_count);
-                    if current_row == row && (current_col..next_col).contains(&col) {
+                    let next_column = current_column + token.text.column_count(tab_column_count);
+                    if current_row == row && (current_column..next_column).contains(&column) {
                         return (byte, Affinity::Before);
                     }
-                    current_col = next_col;
+                    current_column = next_column;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_col += widget.col_count;
+                    current_column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_col = self.start_col_after_wrap();
+                    current_column = self.start_column_after_wrap();
                 }
             }
         }
@@ -2158,10 +2158,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn col_to_x(&self, col: usize) -> f64 {
-        let col_count_before_fold_col = col.min(self.fold_col);
-        let col_count_after_fold_col = col - col_count_before_fold_col;
-        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
+    pub fn column_to_x(&self, column: usize) -> f64 {
+        let column_count_before_fold_column = column.min(self.fold_column);
+        let column_count_after_fold_column = column - column_count_before_fold_column;
+        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -2196,12 +2196,12 @@ impl<'a> Line<'a> {
         }
     }
 
-    pub fn start_col_after_wrap(&self) -> usize {
-        self.start_col_after_wrap
+    pub fn start_column_after_wrap(&self) -> usize {
+        self.start_column_after_wrap
     }
 
-    pub fn fold_col(&self) -> usize {
-        self.fold_col
+    pub fn fold_column(&self) -> usize {
+        self.fold_column
     }
 
     pub fn scale(&self) -> f64 {
@@ -2371,12 +2371,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub col_count: usize,
+    pub column_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, col_count: usize) -> Self {
-        Self { id, col_count }
+    pub fn new(id: usize, column_count: usize) -> Self {
+        Self { id, column_count }
     }
 }
 mod app;
@@ -2415,29 +2415,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_col);
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -2454,9 +2454,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_col(
+        .byte_bias_to_row_column(
             (position.byte, bias),
-            document.settings().tab_col_count,
+            document.settings().tab_column_count,
         )
         .0
         == 0
@@ -2467,9 +2467,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_col(
+    line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
 }
@@ -2551,77 +2551,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
-        (prev_line_ref.row_count() - 1, col),
-        document.settings().tab_col_count,
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
+        (prev_line_ref.row_count() - 1, column),
+        document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(col))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
-    ((Position::new(next_line, byte), bias), Some(col))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -2768,19 +2768,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_col: Option<usize>,
+    pub preferred_column: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_col: Option<usize>,
+        preferred_column: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_col,
+            preferred_column,
         }
     }
 
@@ -2788,7 +2788,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_col: None,
+            preferred_column: None,
         }
     }
 
@@ -2832,25 +2832,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, col) = f(self.cursor, self.preferred_col);
+        let (cursor, column) = f(self.cursor, self.preferred_column);
         Self {
             cursor,
-            preferred_col: col,
+            preferred_column: column,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_col_count: usize,
-    pub indent_col_count: usize,
+    pub tab_column_count: usize,
+    pub indent_column_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_col_count: 4,
-            indent_col_count: 4,
+            tab_column_count: 4,
+            indent_column_count: 4,
         }
     }
 }
@@ -2901,8 +2901,8 @@ impl State {
             &editor.inline_text_inlays,
             &editor.inline_widget_inlays,
             &view.soft_breaks,
-            &view.start_col_after_wrap,
-            &view.fold_col,
+            &view.start_column_after_wrap,
+            &view.fold_column,
             &view.scale,
             &editor.line_inlays,
             &editor.block_widget_inlays,
@@ -2922,8 +2922,8 @@ impl State {
             &mut editor.inline_text_inlays,
             &mut editor.inline_widget_inlays,
             &mut view.soft_breaks,
-            &mut view.start_col_after_wrap,
-            &mut view.fold_col,
+            &mut view.start_column_after_wrap,
+            &mut view.fold_column,
             &mut view.scale,
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
@@ -2945,8 +2945,8 @@ impl State {
             View {
                 editor_id,
                 soft_breaks: (0..line_count).map(|_| [].into()).collect(),
-                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_col: (0..line_count).map(|_| 0).collect(),
+                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
                 sels: [Selection::default()].into(),
@@ -3021,10 +3021,10 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_col: Vec<usize>,
+    fold_column: Vec<usize>,
     scale: Vec<f64>,
     soft_breaks: Vec<Vec<usize>>,
-    start_col_after_wrap: Vec<usize>,
+    start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
     sels: Vec<Selection>,
     latest_sel_index: usize,
@@ -3045,8 +3045,8 @@ struct Editor {
     block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn col_count(&self, tab_col_count: usize) -> usize;
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
+    fn column_count(&self, tab_column_count: usize) -> usize;
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -3054,16 +3054,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn col_count(&self, tab_col_count: usize) -> usize {
+    fn column_count(&self, tab_column_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.col_count(tab_col_count))
+            .map(|char| char.column_count(tab_column_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
-        self.indentation().col_count(tab_col_count) / indent_col_count
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        self.indentation().column_count(tab_column_count) / indent_column_count
     }
 
     fn indentation(&self) -> &str {
@@ -3823,13 +3823,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn col_count(self, tab_col_count: usize) -> usize;
+    fn column_count(self, tab_column_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn col_count(self, tab_col_count: usize) -> usize {
+    fn column_count(self, tab_column_count: usize) -> usize {
         match self {
-            '\t' => tab_col_count,
+            '\t' => tab_column_count,
             _ => 1,
         }
     }
@@ -4032,10 +4032,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_col_count);
+                        context.fold_line(line, 2 * settings.indent_column_count);
                     }
                 }
                 cx.redraw_all();
@@ -4051,7 +4051,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -4125,7 +4125,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut col = 0;
+            let mut column = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -4145,22 +4145,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.col_to_x(col),
+                                        x: line.column_to_x(column),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                col = line.start_col_after_wrap();
+                                column = line.start_column_after_wrap();
                             }
                         }
                     }
@@ -4207,18 +4207,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_col = col
+                                    let next_column = column
                                         + grapheme
-                                            .col_count(document.settings().tab_col_count);
+                                            .column_count(document.settings().tab_column_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.col_to_x(col);
-                                    let next_x = line_ref.col_to_x(next_col);
+                                    let x = line_ref.column_to_x(column);
+                                    let next_x = line_ref.column_to_x(next_column);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -4235,24 +4235,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    col = next_col;
+                                    column = next_column;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_col = col
+                                let next_column = column
                                     + token
                                         .text
-                                        .col_count(document.settings().tab_col_count);
-                                let x = line_ref.col_to_x(col);
-                                let next_x = line_ref.col_to_x(next_col);
+                                        .column_count(document.settings().tab_column_count);
+                                let x = line_ref.column_to_x(column);
+                                let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                col = next_col;
+                                column = next_column;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -4260,7 +4260,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -4303,13 +4303,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
@@ -4322,44 +4322,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    col +=
-                                        grapheme.col_count(document.settings().tab_col_count);
+                                    column +=
+                                        grapheme.column_count(document.settings().tab_column_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
-                                col += 1;
+                                column += 1;
                                 if self.active_sel.is_some() {
                                     self.draw_sel(
                                         cx,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -4368,13 +4368,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
-                    col += 1;
+                    column += 1;
                     if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
+                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -4569,8 +4569,8 @@ pub struct Context<'a> {
     inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: &'a mut Vec<Vec<usize>>,
-    start_col_after_wrap: &'a mut Vec<usize>,
-    fold_col: &'a mut Vec<usize>,
+    start_column_after_wrap: &'a mut Vec<usize>,
+    fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -4589,8 +4589,8 @@ impl<'a> Context<'a> {
         inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
         soft_breaks: &'a mut Vec<Vec<usize>>,
-        start_col_after_wrap: &'a mut Vec<usize>,
-        fold_col: &'a mut Vec<usize>,
+        start_column_after_wrap: &'a mut Vec<usize>,
+        fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -4607,8 +4607,8 @@ impl<'a> Context<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -4628,8 +4628,8 @@ impl<'a> Context<'a> {
             self.inline_text_inlays,
             self.inline_widget_inlays,
             self.soft_breaks,
-            self.start_col_after_wrap,
-            self.fold_col,
+            self.start_column_after_wrap,
+            self.fold_column,
             self.scale,
             self.line_inlays,
             self.block_widget_inlays,
@@ -4639,7 +4639,7 @@ impl<'a> Context<'a> {
         )
     }
 
-    pub fn wrap_lines(&mut self, max_col: usize) {
+    pub fn wrap_lines(&mut self, max_column: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
@@ -4648,28 +4648,28 @@ impl<'a> Context<'a> {
             let mut soft_breaks = Vec::new();
             mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut col = 0;
+            let mut column = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_col_after_wrap = line_ref
+            let mut start_column_after_wrap = line_ref
                 .text()
                 .indentation()
-                .col_count(document.settings().tab_col_count);
+                .column_count(document.settings().tab_column_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_col_after_wrap
-                                + string.col_count(document.settings().tab_col_count)
-                                > max_col
+                            if start_column_after_wrap
+                                + string.column_count(document.settings().tab_column_count)
+                                > max_column
                             {
-                                start_col_after_wrap = 0;
+                                start_column_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_col_after_wrap + widget.col_count > max_col {
-                            start_col_after_wrap = 0;
+                        if start_column_after_wrap + widget.column_count > max_column {
+                            start_column_after_wrap = 0;
                         }
                     }
                 }
@@ -4678,28 +4678,28 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_col =
-                                col + string.col_count(document.settings().tab_col_count);
-                            if next_col > max_col {
-                                next_col = start_col_after_wrap;
+                            let mut next_column =
+                                column + string.column_count(document.settings().tab_column_count);
+                            if next_column > max_column {
+                                next_column = start_column_after_wrap;
                                 soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            col = next_col;
+                            column = next_column;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_col = col + widget.col_count;
-                        if next_col > max_col {
-                            next_col = start_col_after_wrap;
+                        let mut next_column = column + widget.column_count;
+                        if next_column > max_column {
+                            next_column = start_column_after_wrap;
                             soft_breaks.push(byte);
                         }
-                        col = next_col;
+                        column = next_column;
                     }
                 }
             }
             self.soft_breaks[line] = soft_breaks;
-            self.start_col_after_wrap[line] = start_col_after_wrap;
+            self.start_column_after_wrap[line] = start_column_after_wrap;
             if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
@@ -4810,7 +4810,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
@@ -4818,7 +4818,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -4852,8 +4852,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
-        self.fold_col[line_index] = fold_col;
+    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
+        self.fold_column[line_index] = fold_column;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -4935,7 +4935,7 @@ impl<'a> Context<'a> {
                 cursor = start;
             }
             self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_col);
+                Selection::new(anchor, cursor, current_sel.preferred_column);
             self.sels.remove(next_sel_index);
             if next_sel_index < *self.latest_sel_index {
                 *self.latest_sel_index -= 1;
@@ -4969,7 +4969,7 @@ impl<'a> Context<'a> {
                 anchor = (diffed_end, sel.end().1);
                 cursor = (diffed_start, sel.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_col);
+            *sel = Selection::new(anchor, cursor, sel.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -4986,8 +4986,8 @@ impl<'a> Context<'a> {
                     self.inline_text_inlays.drain(start_line..end_line);
                     self.inline_widget_inlays.drain(start_line..end_line);
                     self.soft_breaks.drain(start_line..end_line);
-                    self.start_col_after_wrap.drain(start_line..end_line);
-                    self.fold_col.drain(start_line..end_line);
+                    self.start_column_after_wrap.drain(start_line..end_line);
+                    self.fold_column.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -5003,9 +5003,9 @@ impl<'a> Context<'a> {
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_col_after_wrap
+                    self.start_column_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_col
+                    self.fold_column
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -5322,8 +5322,8 @@ pub struct Document<'a> {
     inline_text_inlays: &'a [Vec<(usize, String)>],
     inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
     soft_breaks: &'a [Vec<usize>],
-    start_col_after_wrap: &'a [usize],
-    fold_col: &'a [usize],
+    start_column_after_wrap: &'a [usize],
+    fold_column: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -5340,8 +5340,8 @@ impl<'a> Document<'a> {
         inline_text_inlays: &'a [Vec<(usize, String)>],
         inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
         soft_breaks: &'a [Vec<usize>],
-        start_col_after_wrap: &'a [usize],
-        fold_col: &'a [usize],
+        start_column_after_wrap: &'a [usize],
+        fold_column: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -5356,8 +5356,8 @@ impl<'a> Document<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -5375,7 +5375,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -5423,8 +5423,8 @@ impl<'a> Document<'a> {
             &self.inline_text_inlays[line],
             &self.inline_widget_inlays[line],
             &self.soft_breaks[line],
-            self.start_col_after_wrap[line],
-            self.fold_col[line],
+            self.start_column_after_wrap[line],
+            self.fold_column[line],
             self.scale[line],
         )
     }
@@ -5436,8 +5436,8 @@ impl<'a> Document<'a> {
             inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
             inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
             soft_breaks: self.soft_breaks[start_line..end_line].iter(),
-            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
-            fold_col: self.fold_col[start_line..end_line].iter(),
+            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
+            fold_column: self.fold_column[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -5483,8 +5483,8 @@ pub struct Lines<'a> {
     inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
     inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: slice::Iter<'a, Vec<usize>>,
-    start_col_after_wrap: slice::Iter<'a, usize>,
-    fold_col: slice::Iter<'a, usize>,
+    start_column_after_wrap: slice::Iter<'a, usize>,
+    fold_column: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -5498,8 +5498,8 @@ impl<'a> Iterator for Lines<'a> {
             self.inline_text_inlays.next()?,
             self.inline_widget_inlays.next()?,
             self.soft_breaks.next()?,
-            *self.start_col_after_wrap.next()?,
-            *self.fold_col.next()?,
+            *self.start_column_after_wrap.next()?,
+            *self.fold_column.next()?,
             *self.scale.next()?,
         ))
     }
@@ -5749,8 +5749,8 @@ pub struct Line<'a> {
     inline_text_inlays: &'a [(usize, String)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     soft_breaks: &'a [usize],
-    start_col_after_wrap: usize,
-    fold_col: usize,
+    start_column_after_wrap: usize,
+    fold_column: usize,
     scale: f64,
 }
 
@@ -5761,8 +5761,8 @@ impl<'a> Line<'a> {
         inline_text_inlays: &'a [(usize, String)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         soft_breaks: &'a [usize],
-        start_col_after_wrap: usize,
-        fold_col: usize,
+        start_column_after_wrap: usize,
+        fold_column: usize,
         scale: f64,
     ) -> Self {
         Self {
@@ -5771,129 +5771,129 @@ impl<'a> Line<'a> {
             inline_text_inlays,
             block_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
         }
     }
 
-    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
+    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_col_count = 0;
-        let mut summed_col_count = 0;
+        let mut max_summed_column_count = 0;
+        let mut summed_column_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_col_count += token.text.col_count(tab_col_count);
+                    summed_column_count += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_col_count += widget.col_count;
+                    summed_column_count += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
-                    summed_col_count = self.start_col_after_wrap();
+                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
+                    summed_column_count = self.start_column_after_wrap();
                 }
             }
         }
-        max_summed_col_count.max(summed_col_count)
+        max_summed_column_count.max(summed_column_count)
     }
 
     pub fn row_count(&self) -> usize {
         self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
-        self.col_to_x(self.compute_col_count(tab_col_count))
+    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
+        self.column_to_x(self.compute_column_count(tab_column_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_col(
+    pub fn byte_bias_to_row_column(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_col_count: usize,
+        tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut col = 0;
+        let mut column = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, col);
+            return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, col);
+                            return (row, column);
                         }
                         current_byte += grapheme.len();
-                        col += grapheme.col_count(tab_col_count);
+                        column += grapheme.column_count(tab_column_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, col);
+                            return (row, column);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    col += token.text.col_count(tab_col_count);
+                    column += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    col += widget.col_count;
+                    column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    col = self.start_col_after_wrap();
+                    column = self.start_column_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, col);
+            return (row, column);
         }
         panic!()
     }
 
-    pub fn row_col_to_byte_bias(
+    pub fn row_column_to_byte_bias(
         &self,
-        (row, col): (usize, usize),
-        tab_col_count: usize,
+        (row, column): (usize, usize),
+        tab_column_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_col = 0;
+        let mut current_column = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_col = current_col + grapheme.col_count(tab_col_count);
-                        if current_row == row && (current_col..next_col).contains(&col) {
+                        let next_column = current_column + grapheme.column_count(tab_column_count);
+                        if current_row == row && (current_column..next_column).contains(&column) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_col = next_col;
+                        current_column = next_column;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_col = current_col + token.text.col_count(tab_col_count);
-                    if current_row == row && (current_col..next_col).contains(&col) {
+                    let next_column = current_column + token.text.column_count(tab_column_count);
+                    if current_row == row && (current_column..next_column).contains(&column) {
                         return (byte, Affinity::Before);
                     }
-                    current_col = next_col;
+                    current_column = next_column;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_col += widget.col_count;
+                    current_column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_col = self.start_col_after_wrap();
+                    current_column = self.start_column_after_wrap();
                 }
             }
         }
@@ -5903,10 +5903,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn col_to_x(&self, col: usize) -> f64 {
-        let col_count_before_fold_col = col.min(self.fold_col);
-        let col_count_after_fold_col = col - col_count_before_fold_col;
-        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
+    pub fn column_to_x(&self, column: usize) -> f64 {
+        let column_count_before_fold_column = column.min(self.fold_column);
+        let column_count_after_fold_column = column - column_count_before_fold_column;
+        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -5941,12 +5941,12 @@ impl<'a> Line<'a> {
         }
     }
 
-    pub fn start_col_after_wrap(&self) -> usize {
-        self.start_col_after_wrap
+    pub fn start_column_after_wrap(&self) -> usize {
+        self.start_column_after_wrap
     }
 
-    pub fn fold_col(&self) -> usize {
-        self.fold_col
+    pub fn fold_column(&self) -> usize {
+        self.fold_column
     }
 
     pub fn scale(&self) -> f64 {
@@ -6116,12 +6116,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub col_count: usize,
+    pub column_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, col_count: usize) -> Self {
-        Self { id, col_count }
+    pub fn new(id: usize, column_count: usize) -> Self {
+        Self { id, column_count }
     }
 }
 mod app;
@@ -6160,29 +6160,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_col);
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -6199,9 +6199,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_col(
+        .byte_bias_to_row_column(
             (position.byte, bias),
-            document.settings().tab_col_count,
+            document.settings().tab_column_count,
         )
         .0
         == 0
@@ -6212,9 +6212,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_col(
+    line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
 }
@@ -6296,77 +6296,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
-        (prev_line_ref.row_count() - 1, col),
-        document.settings().tab_col_count,
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
+        (prev_line_ref.row_count() - 1, column),
+        document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(col))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
-    ((Position::new(next_line, byte), bias), Some(col))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -6513,19 +6513,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_col: Option<usize>,
+    pub preferred_column: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_col: Option<usize>,
+        preferred_column: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_col,
+            preferred_column,
         }
     }
 
@@ -6533,7 +6533,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_col: None,
+            preferred_column: None,
         }
     }
 
@@ -6577,25 +6577,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, col) = f(self.cursor, self.preferred_col);
+        let (cursor, column) = f(self.cursor, self.preferred_column);
         Self {
             cursor,
-            preferred_col: col,
+            preferred_column: column,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_col_count: usize,
-    pub indent_col_count: usize,
+    pub tab_column_count: usize,
+    pub indent_column_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_col_count: 4,
-            indent_col_count: 4,
+            tab_column_count: 4,
+            indent_column_count: 4,
         }
     }
 }
@@ -6646,8 +6646,8 @@ impl State {
             &editor.inline_text_inlays,
             &editor.inline_widget_inlays,
             &view.soft_breaks,
-            &view.start_col_after_wrap,
-            &view.fold_col,
+            &view.start_column_after_wrap,
+            &view.fold_column,
             &view.scale,
             &editor.line_inlays,
             &editor.block_widget_inlays,
@@ -6667,8 +6667,8 @@ impl State {
             &mut editor.inline_text_inlays,
             &mut editor.inline_widget_inlays,
             &mut view.soft_breaks,
-            &mut view.start_col_after_wrap,
-            &mut view.fold_col,
+            &mut view.start_column_after_wrap,
+            &mut view.fold_column,
             &mut view.scale,
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
@@ -6690,8 +6690,8 @@ impl State {
             View {
                 editor_id,
                 soft_breaks: (0..line_count).map(|_| [].into()).collect(),
-                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_col: (0..line_count).map(|_| 0).collect(),
+                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
                 sels: [Selection::default()].into(),
@@ -6766,10 +6766,10 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_col: Vec<usize>,
+    fold_column: Vec<usize>,
     scale: Vec<f64>,
     soft_breaks: Vec<Vec<usize>>,
-    start_col_after_wrap: Vec<usize>,
+    start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
     sels: Vec<Selection>,
     latest_sel_index: usize,
@@ -6790,8 +6790,8 @@ struct Editor {
     block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn col_count(&self, tab_col_count: usize) -> usize;
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
+    fn column_count(&self, tab_column_count: usize) -> usize;
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -6799,16 +6799,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn col_count(&self, tab_col_count: usize) -> usize {
+    fn column_count(&self, tab_column_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.col_count(tab_col_count))
+            .map(|char| char.column_count(tab_column_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
-        self.indentation().col_count(tab_col_count) / indent_col_count
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        self.indentation().column_count(tab_column_count) / indent_column_count
     }
 
     fn indentation(&self) -> &str {
@@ -7568,13 +7568,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn col_count(self, tab_col_count: usize) -> usize;
+    fn column_count(self, tab_column_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn col_count(self, tab_col_count: usize) -> usize {
+    fn column_count(self, tab_column_count: usize) -> usize {
         match self {
-            '\t' => tab_col_count,
+            '\t' => tab_column_count,
             _ => 1,
         }
     }
@@ -7777,10 +7777,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_col_count);
+                        context.fold_line(line, 2 * settings.indent_column_count);
                     }
                 }
                 cx.redraw_all();
@@ -7796,7 +7796,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -7870,7 +7870,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut col = 0;
+            let mut column = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -7890,22 +7890,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.col_to_x(col),
+                                        x: line.column_to_x(column),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                col = line.start_col_after_wrap();
+                                column = line.start_column_after_wrap();
                             }
                         }
                     }
@@ -7952,18 +7952,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_col = col
+                                    let next_column = column
                                         + grapheme
-                                            .col_count(document.settings().tab_col_count);
+                                            .column_count(document.settings().tab_column_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.col_to_x(col);
-                                    let next_x = line_ref.col_to_x(next_col);
+                                    let x = line_ref.column_to_x(column);
+                                    let next_x = line_ref.column_to_x(next_column);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -7980,24 +7980,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    col = next_col;
+                                    column = next_column;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_col = col
+                                let next_column = column
                                     + token
                                         .text
-                                        .col_count(document.settings().tab_col_count);
-                                let x = line_ref.col_to_x(col);
-                                let next_x = line_ref.col_to_x(next_col);
+                                        .column_count(document.settings().tab_column_count);
+                                let x = line_ref.column_to_x(column);
+                                let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                col = next_col;
+                                column = next_column;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -8005,7 +8005,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -8048,13 +8048,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
@@ -8067,44 +8067,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    col +=
-                                        grapheme.col_count(document.settings().tab_col_count);
+                                    column +=
+                                        grapheme.column_count(document.settings().tab_column_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
-                                col += 1;
+                                column += 1;
                                 if self.active_sel.is_some() {
                                     self.draw_sel(
                                         cx,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -8113,13 +8113,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
-                    col += 1;
+                    column += 1;
                     if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
+                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -8314,8 +8314,8 @@ pub struct Context<'a> {
     inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: &'a mut Vec<Vec<usize>>,
-    start_col_after_wrap: &'a mut Vec<usize>,
-    fold_col: &'a mut Vec<usize>,
+    start_column_after_wrap: &'a mut Vec<usize>,
+    fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -8334,8 +8334,8 @@ impl<'a> Context<'a> {
         inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
         soft_breaks: &'a mut Vec<Vec<usize>>,
-        start_col_after_wrap: &'a mut Vec<usize>,
-        fold_col: &'a mut Vec<usize>,
+        start_column_after_wrap: &'a mut Vec<usize>,
+        fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -8352,8 +8352,8 @@ impl<'a> Context<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -8373,8 +8373,8 @@ impl<'a> Context<'a> {
             self.inline_text_inlays,
             self.inline_widget_inlays,
             self.soft_breaks,
-            self.start_col_after_wrap,
-            self.fold_col,
+            self.start_column_after_wrap,
+            self.fold_column,
             self.scale,
             self.line_inlays,
             self.block_widget_inlays,
@@ -8384,7 +8384,7 @@ impl<'a> Context<'a> {
         )
     }
 
-    pub fn wrap_lines(&mut self, max_col: usize) {
+    pub fn wrap_lines(&mut self, max_column: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
@@ -8393,28 +8393,28 @@ impl<'a> Context<'a> {
             let mut soft_breaks = Vec::new();
             mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut col = 0;
+            let mut column = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_col_after_wrap = line_ref
+            let mut start_column_after_wrap = line_ref
                 .text()
                 .indentation()
-                .col_count(document.settings().tab_col_count);
+                .column_count(document.settings().tab_column_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_col_after_wrap
-                                + string.col_count(document.settings().tab_col_count)
-                                > max_col
+                            if start_column_after_wrap
+                                + string.column_count(document.settings().tab_column_count)
+                                > max_column
                             {
-                                start_col_after_wrap = 0;
+                                start_column_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_col_after_wrap + widget.col_count > max_col {
-                            start_col_after_wrap = 0;
+                        if start_column_after_wrap + widget.column_count > max_column {
+                            start_column_after_wrap = 0;
                         }
                     }
                 }
@@ -8423,28 +8423,28 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_col =
-                                col + string.col_count(document.settings().tab_col_count);
-                            if next_col > max_col {
-                                next_col = start_col_after_wrap;
+                            let mut next_column =
+                                column + string.column_count(document.settings().tab_column_count);
+                            if next_column > max_column {
+                                next_column = start_column_after_wrap;
                                 soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            col = next_col;
+                            column = next_column;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_col = col + widget.col_count;
-                        if next_col > max_col {
-                            next_col = start_col_after_wrap;
+                        let mut next_column = column + widget.column_count;
+                        if next_column > max_column {
+                            next_column = start_column_after_wrap;
                             soft_breaks.push(byte);
                         }
-                        col = next_col;
+                        column = next_column;
                     }
                 }
             }
             self.soft_breaks[line] = soft_breaks;
-            self.start_col_after_wrap[line] = start_col_after_wrap;
+            self.start_column_after_wrap[line] = start_column_after_wrap;
             if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
@@ -8555,7 +8555,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
@@ -8563,7 +8563,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -8597,8 +8597,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
-        self.fold_col[line_index] = fold_col;
+    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
+        self.fold_column[line_index] = fold_column;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -8680,7 +8680,7 @@ impl<'a> Context<'a> {
                 cursor = start;
             }
             self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_col);
+                Selection::new(anchor, cursor, current_sel.preferred_column);
             self.sels.remove(next_sel_index);
             if next_sel_index < *self.latest_sel_index {
                 *self.latest_sel_index -= 1;
@@ -8714,7 +8714,7 @@ impl<'a> Context<'a> {
                 anchor = (diffed_end, sel.end().1);
                 cursor = (diffed_start, sel.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_col);
+            *sel = Selection::new(anchor, cursor, sel.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -8731,8 +8731,8 @@ impl<'a> Context<'a> {
                     self.inline_text_inlays.drain(start_line..end_line);
                     self.inline_widget_inlays.drain(start_line..end_line);
                     self.soft_breaks.drain(start_line..end_line);
-                    self.start_col_after_wrap.drain(start_line..end_line);
-                    self.fold_col.drain(start_line..end_line);
+                    self.start_column_after_wrap.drain(start_line..end_line);
+                    self.fold_column.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -8748,9 +8748,9 @@ impl<'a> Context<'a> {
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_col_after_wrap
+                    self.start_column_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_col
+                    self.fold_column
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -9067,8 +9067,8 @@ pub struct Document<'a> {
     inline_text_inlays: &'a [Vec<(usize, String)>],
     inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
     soft_breaks: &'a [Vec<usize>],
-    start_col_after_wrap: &'a [usize],
-    fold_col: &'a [usize],
+    start_column_after_wrap: &'a [usize],
+    fold_column: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -9085,8 +9085,8 @@ impl<'a> Document<'a> {
         inline_text_inlays: &'a [Vec<(usize, String)>],
         inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
         soft_breaks: &'a [Vec<usize>],
-        start_col_after_wrap: &'a [usize],
-        fold_col: &'a [usize],
+        start_column_after_wrap: &'a [usize],
+        fold_column: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -9101,8 +9101,8 @@ impl<'a> Document<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -9120,7 +9120,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -9168,8 +9168,8 @@ impl<'a> Document<'a> {
             &self.inline_text_inlays[line],
             &self.inline_widget_inlays[line],
             &self.soft_breaks[line],
-            self.start_col_after_wrap[line],
-            self.fold_col[line],
+            self.start_column_after_wrap[line],
+            self.fold_column[line],
             self.scale[line],
         )
     }
@@ -9181,8 +9181,8 @@ impl<'a> Document<'a> {
             inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
             inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
             soft_breaks: self.soft_breaks[start_line..end_line].iter(),
-            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
-            fold_col: self.fold_col[start_line..end_line].iter(),
+            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
+            fold_column: self.fold_column[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -9228,8 +9228,8 @@ pub struct Lines<'a> {
     inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
     inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: slice::Iter<'a, Vec<usize>>,
-    start_col_after_wrap: slice::Iter<'a, usize>,
-    fold_col: slice::Iter<'a, usize>,
+    start_column_after_wrap: slice::Iter<'a, usize>,
+    fold_column: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -9243,8 +9243,8 @@ impl<'a> Iterator for Lines<'a> {
             self.inline_text_inlays.next()?,
             self.inline_widget_inlays.next()?,
             self.soft_breaks.next()?,
-            *self.start_col_after_wrap.next()?,
-            *self.fold_col.next()?,
+            *self.start_column_after_wrap.next()?,
+            *self.fold_column.next()?,
             *self.scale.next()?,
         ))
     }
@@ -9494,8 +9494,8 @@ pub struct Line<'a> {
     inline_text_inlays: &'a [(usize, String)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     soft_breaks: &'a [usize],
-    start_col_after_wrap: usize,
-    fold_col: usize,
+    start_column_after_wrap: usize,
+    fold_column: usize,
     scale: f64,
 }
 
@@ -9506,8 +9506,8 @@ impl<'a> Line<'a> {
         inline_text_inlays: &'a [(usize, String)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         soft_breaks: &'a [usize],
-        start_col_after_wrap: usize,
-        fold_col: usize,
+        start_column_after_wrap: usize,
+        fold_column: usize,
         scale: f64,
     ) -> Self {
         Self {
@@ -9516,129 +9516,129 @@ impl<'a> Line<'a> {
             inline_text_inlays,
             block_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
         }
     }
 
-    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
+    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_col_count = 0;
-        let mut summed_col_count = 0;
+        let mut max_summed_column_count = 0;
+        let mut summed_column_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_col_count += token.text.col_count(tab_col_count);
+                    summed_column_count += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_col_count += widget.col_count;
+                    summed_column_count += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
-                    summed_col_count = self.start_col_after_wrap();
+                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
+                    summed_column_count = self.start_column_after_wrap();
                 }
             }
         }
-        max_summed_col_count.max(summed_col_count)
+        max_summed_column_count.max(summed_column_count)
     }
 
     pub fn row_count(&self) -> usize {
         self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
-        self.col_to_x(self.compute_col_count(tab_col_count))
+    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
+        self.column_to_x(self.compute_column_count(tab_column_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_col(
+    pub fn byte_bias_to_row_column(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_col_count: usize,
+        tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut col = 0;
+        let mut column = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, col);
+            return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, col);
+                            return (row, column);
                         }
                         current_byte += grapheme.len();
-                        col += grapheme.col_count(tab_col_count);
+                        column += grapheme.column_count(tab_column_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, col);
+                            return (row, column);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    col += token.text.col_count(tab_col_count);
+                    column += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    col += widget.col_count;
+                    column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    col = self.start_col_after_wrap();
+                    column = self.start_column_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, col);
+            return (row, column);
         }
         panic!()
     }
 
-    pub fn row_col_to_byte_bias(
+    pub fn row_column_to_byte_bias(
         &self,
-        (row, col): (usize, usize),
-        tab_col_count: usize,
+        (row, column): (usize, usize),
+        tab_column_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_col = 0;
+        let mut current_column = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_col = current_col + grapheme.col_count(tab_col_count);
-                        if current_row == row && (current_col..next_col).contains(&col) {
+                        let next_column = current_column + grapheme.column_count(tab_column_count);
+                        if current_row == row && (current_column..next_column).contains(&column) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_col = next_col;
+                        current_column = next_column;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_col = current_col + token.text.col_count(tab_col_count);
-                    if current_row == row && (current_col..next_col).contains(&col) {
+                    let next_column = current_column + token.text.column_count(tab_column_count);
+                    if current_row == row && (current_column..next_column).contains(&column) {
                         return (byte, Affinity::Before);
                     }
-                    current_col = next_col;
+                    current_column = next_column;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_col += widget.col_count;
+                    current_column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_col = self.start_col_after_wrap();
+                    current_column = self.start_column_after_wrap();
                 }
             }
         }
@@ -9648,10 +9648,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn col_to_x(&self, col: usize) -> f64 {
-        let col_count_before_fold_col = col.min(self.fold_col);
-        let col_count_after_fold_col = col - col_count_before_fold_col;
-        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
+    pub fn column_to_x(&self, column: usize) -> f64 {
+        let column_count_before_fold_column = column.min(self.fold_column);
+        let column_count_after_fold_column = column - column_count_before_fold_column;
+        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -9686,12 +9686,12 @@ impl<'a> Line<'a> {
         }
     }
 
-    pub fn start_col_after_wrap(&self) -> usize {
-        self.start_col_after_wrap
+    pub fn start_column_after_wrap(&self) -> usize {
+        self.start_column_after_wrap
     }
 
-    pub fn fold_col(&self) -> usize {
-        self.fold_col
+    pub fn fold_column(&self) -> usize {
+        self.fold_column
     }
 
     pub fn scale(&self) -> f64 {
@@ -9861,12 +9861,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub col_count: usize,
+    pub column_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, col_count: usize) -> Self {
-        Self { id, col_count }
+    pub fn new(id: usize, column_count: usize) -> Self {
+        Self { id, column_count }
     }
 }
 mod app;
@@ -9905,29 +9905,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_col);
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -9944,9 +9944,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_col(
+        .byte_bias_to_row_column(
             (position.byte, bias),
-            document.settings().tab_col_count,
+            document.settings().tab_column_count,
         )
         .0
         == 0
@@ -9957,9 +9957,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_col(
+    line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
 }
@@ -10041,77 +10041,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
-        (prev_line_ref.row_count() - 1, col),
-        document.settings().tab_col_count,
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
+        (prev_line_ref.row_count() - 1, column),
+        document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(col))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
-    ((Position::new(next_line, byte), bias), Some(col))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -10258,19 +10258,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_col: Option<usize>,
+    pub preferred_column: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_col: Option<usize>,
+        preferred_column: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_col,
+            preferred_column,
         }
     }
 
@@ -10278,7 +10278,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_col: None,
+            preferred_column: None,
         }
     }
 
@@ -10322,25 +10322,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, col) = f(self.cursor, self.preferred_col);
+        let (cursor, column) = f(self.cursor, self.preferred_column);
         Self {
             cursor,
-            preferred_col: col,
+            preferred_column: column,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_col_count: usize,
-    pub indent_col_count: usize,
+    pub tab_column_count: usize,
+    pub indent_column_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_col_count: 4,
-            indent_col_count: 4,
+            tab_column_count: 4,
+            indent_column_count: 4,
         }
     }
 }
@@ -10391,8 +10391,8 @@ impl State {
             &editor.inline_text_inlays,
             &editor.inline_widget_inlays,
             &view.soft_breaks,
-            &view.start_col_after_wrap,
-            &view.fold_col,
+            &view.start_column_after_wrap,
+            &view.fold_column,
             &view.scale,
             &editor.line_inlays,
             &editor.block_widget_inlays,
@@ -10412,8 +10412,8 @@ impl State {
             &mut editor.inline_text_inlays,
             &mut editor.inline_widget_inlays,
             &mut view.soft_breaks,
-            &mut view.start_col_after_wrap,
-            &mut view.fold_col,
+            &mut view.start_column_after_wrap,
+            &mut view.fold_column,
             &mut view.scale,
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
@@ -10435,8 +10435,8 @@ impl State {
             View {
                 editor_id,
                 soft_breaks: (0..line_count).map(|_| [].into()).collect(),
-                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_col: (0..line_count).map(|_| 0).collect(),
+                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
                 sels: [Selection::default()].into(),
@@ -10511,10 +10511,10 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_col: Vec<usize>,
+    fold_column: Vec<usize>,
     scale: Vec<f64>,
     soft_breaks: Vec<Vec<usize>>,
-    start_col_after_wrap: Vec<usize>,
+    start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
     sels: Vec<Selection>,
     latest_sel_index: usize,
@@ -10535,8 +10535,8 @@ struct Editor {
     block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn col_count(&self, tab_col_count: usize) -> usize;
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
+    fn column_count(&self, tab_column_count: usize) -> usize;
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -10544,16 +10544,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn col_count(&self, tab_col_count: usize) -> usize {
+    fn column_count(&self, tab_column_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.col_count(tab_col_count))
+            .map(|char| char.column_count(tab_column_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
-        self.indentation().col_count(tab_col_count) / indent_col_count
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        self.indentation().column_count(tab_column_count) / indent_column_count
     }
 
     fn indentation(&self) -> &str {
@@ -11313,13 +11313,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn col_count(self, tab_col_count: usize) -> usize;
+    fn column_count(self, tab_column_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn col_count(self, tab_col_count: usize) -> usize {
+    fn column_count(self, tab_column_count: usize) -> usize {
         match self {
-            '\t' => tab_col_count,
+            '\t' => tab_column_count,
             _ => 1,
         }
     }
@@ -11522,10 +11522,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_col_count);
+                        context.fold_line(line, 2 * settings.indent_column_count);
                     }
                 }
                 cx.redraw_all();
@@ -11541,7 +11541,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -11615,7 +11615,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut col = 0;
+            let mut column = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -11635,22 +11635,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.col_to_x(col),
+                                        x: line.column_to_x(column),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                col = line.start_col_after_wrap();
+                                column = line.start_column_after_wrap();
                             }
                         }
                     }
@@ -11697,18 +11697,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_col = col
+                                    let next_column = column
                                         + grapheme
-                                            .col_count(document.settings().tab_col_count);
+                                            .column_count(document.settings().tab_column_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.col_to_x(col);
-                                    let next_x = line_ref.col_to_x(next_col);
+                                    let x = line_ref.column_to_x(column);
+                                    let next_x = line_ref.column_to_x(next_column);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -11725,24 +11725,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    col = next_col;
+                                    column = next_column;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_col = col
+                                let next_column = column
                                     + token
                                         .text
-                                        .col_count(document.settings().tab_col_count);
-                                let x = line_ref.col_to_x(col);
-                                let next_x = line_ref.col_to_x(next_col);
+                                        .column_count(document.settings().tab_column_count);
+                                let x = line_ref.column_to_x(column);
+                                let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                col = next_col;
+                                column = next_column;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -11750,7 +11750,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -11793,13 +11793,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
@@ -11812,44 +11812,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    col +=
-                                        grapheme.col_count(document.settings().tab_col_count);
+                                    column +=
+                                        grapheme.column_count(document.settings().tab_column_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
-                                col += 1;
+                                column += 1;
                                 if self.active_sel.is_some() {
                                     self.draw_sel(
                                         cx,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -11858,13 +11858,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
-                    col += 1;
+                    column += 1;
                     if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
+                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -12059,8 +12059,8 @@ pub struct Context<'a> {
     inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: &'a mut Vec<Vec<usize>>,
-    start_col_after_wrap: &'a mut Vec<usize>,
-    fold_col: &'a mut Vec<usize>,
+    start_column_after_wrap: &'a mut Vec<usize>,
+    fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -12079,8 +12079,8 @@ impl<'a> Context<'a> {
         inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
         soft_breaks: &'a mut Vec<Vec<usize>>,
-        start_col_after_wrap: &'a mut Vec<usize>,
-        fold_col: &'a mut Vec<usize>,
+        start_column_after_wrap: &'a mut Vec<usize>,
+        fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -12097,8 +12097,8 @@ impl<'a> Context<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -12118,8 +12118,8 @@ impl<'a> Context<'a> {
             self.inline_text_inlays,
             self.inline_widget_inlays,
             self.soft_breaks,
-            self.start_col_after_wrap,
-            self.fold_col,
+            self.start_column_after_wrap,
+            self.fold_column,
             self.scale,
             self.line_inlays,
             self.block_widget_inlays,
@@ -12129,7 +12129,7 @@ impl<'a> Context<'a> {
         )
     }
 
-    pub fn wrap_lines(&mut self, max_col: usize) {
+    pub fn wrap_lines(&mut self, max_column: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
@@ -12138,28 +12138,28 @@ impl<'a> Context<'a> {
             let mut soft_breaks = Vec::new();
             mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut col = 0;
+            let mut column = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_col_after_wrap = line_ref
+            let mut start_column_after_wrap = line_ref
                 .text()
                 .indentation()
-                .col_count(document.settings().tab_col_count);
+                .column_count(document.settings().tab_column_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_col_after_wrap
-                                + string.col_count(document.settings().tab_col_count)
-                                > max_col
+                            if start_column_after_wrap
+                                + string.column_count(document.settings().tab_column_count)
+                                > max_column
                             {
-                                start_col_after_wrap = 0;
+                                start_column_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_col_after_wrap + widget.col_count > max_col {
-                            start_col_after_wrap = 0;
+                        if start_column_after_wrap + widget.column_count > max_column {
+                            start_column_after_wrap = 0;
                         }
                     }
                 }
@@ -12168,28 +12168,28 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_col =
-                                col + string.col_count(document.settings().tab_col_count);
-                            if next_col > max_col {
-                                next_col = start_col_after_wrap;
+                            let mut next_column =
+                                column + string.column_count(document.settings().tab_column_count);
+                            if next_column > max_column {
+                                next_column = start_column_after_wrap;
                                 soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            col = next_col;
+                            column = next_column;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_col = col + widget.col_count;
-                        if next_col > max_col {
-                            next_col = start_col_after_wrap;
+                        let mut next_column = column + widget.column_count;
+                        if next_column > max_column {
+                            next_column = start_column_after_wrap;
                             soft_breaks.push(byte);
                         }
-                        col = next_col;
+                        column = next_column;
                     }
                 }
             }
             self.soft_breaks[line] = soft_breaks;
-            self.start_col_after_wrap[line] = start_col_after_wrap;
+            self.start_column_after_wrap[line] = start_column_after_wrap;
             if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
@@ -12300,7 +12300,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
@@ -12308,7 +12308,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -12342,8 +12342,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
-        self.fold_col[line_index] = fold_col;
+    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
+        self.fold_column[line_index] = fold_column;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -12425,7 +12425,7 @@ impl<'a> Context<'a> {
                 cursor = start;
             }
             self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_col);
+                Selection::new(anchor, cursor, current_sel.preferred_column);
             self.sels.remove(next_sel_index);
             if next_sel_index < *self.latest_sel_index {
                 *self.latest_sel_index -= 1;
@@ -12459,7 +12459,7 @@ impl<'a> Context<'a> {
                 anchor = (diffed_end, sel.end().1);
                 cursor = (diffed_start, sel.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_col);
+            *sel = Selection::new(anchor, cursor, sel.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -12476,8 +12476,8 @@ impl<'a> Context<'a> {
                     self.inline_text_inlays.drain(start_line..end_line);
                     self.inline_widget_inlays.drain(start_line..end_line);
                     self.soft_breaks.drain(start_line..end_line);
-                    self.start_col_after_wrap.drain(start_line..end_line);
-                    self.fold_col.drain(start_line..end_line);
+                    self.start_column_after_wrap.drain(start_line..end_line);
+                    self.fold_column.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -12493,9 +12493,9 @@ impl<'a> Context<'a> {
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_col_after_wrap
+                    self.start_column_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_col
+                    self.fold_column
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -12812,8 +12812,8 @@ pub struct Document<'a> {
     inline_text_inlays: &'a [Vec<(usize, String)>],
     inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
     soft_breaks: &'a [Vec<usize>],
-    start_col_after_wrap: &'a [usize],
-    fold_col: &'a [usize],
+    start_column_after_wrap: &'a [usize],
+    fold_column: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -12830,8 +12830,8 @@ impl<'a> Document<'a> {
         inline_text_inlays: &'a [Vec<(usize, String)>],
         inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
         soft_breaks: &'a [Vec<usize>],
-        start_col_after_wrap: &'a [usize],
-        fold_col: &'a [usize],
+        start_column_after_wrap: &'a [usize],
+        fold_column: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -12846,8 +12846,8 @@ impl<'a> Document<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -12865,7 +12865,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -12913,8 +12913,8 @@ impl<'a> Document<'a> {
             &self.inline_text_inlays[line],
             &self.inline_widget_inlays[line],
             &self.soft_breaks[line],
-            self.start_col_after_wrap[line],
-            self.fold_col[line],
+            self.start_column_after_wrap[line],
+            self.fold_column[line],
             self.scale[line],
         )
     }
@@ -12926,8 +12926,8 @@ impl<'a> Document<'a> {
             inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
             inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
             soft_breaks: self.soft_breaks[start_line..end_line].iter(),
-            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
-            fold_col: self.fold_col[start_line..end_line].iter(),
+            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
+            fold_column: self.fold_column[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -12973,8 +12973,8 @@ pub struct Lines<'a> {
     inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
     inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: slice::Iter<'a, Vec<usize>>,
-    start_col_after_wrap: slice::Iter<'a, usize>,
-    fold_col: slice::Iter<'a, usize>,
+    start_column_after_wrap: slice::Iter<'a, usize>,
+    fold_column: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -12988,8 +12988,8 @@ impl<'a> Iterator for Lines<'a> {
             self.inline_text_inlays.next()?,
             self.inline_widget_inlays.next()?,
             self.soft_breaks.next()?,
-            *self.start_col_after_wrap.next()?,
-            *self.fold_col.next()?,
+            *self.start_column_after_wrap.next()?,
+            *self.fold_column.next()?,
             *self.scale.next()?,
         ))
     }
@@ -13239,8 +13239,8 @@ pub struct Line<'a> {
     inline_text_inlays: &'a [(usize, String)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     soft_breaks: &'a [usize],
-    start_col_after_wrap: usize,
-    fold_col: usize,
+    start_column_after_wrap: usize,
+    fold_column: usize,
     scale: f64,
 }
 
@@ -13251,8 +13251,8 @@ impl<'a> Line<'a> {
         inline_text_inlays: &'a [(usize, String)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         soft_breaks: &'a [usize],
-        start_col_after_wrap: usize,
-        fold_col: usize,
+        start_column_after_wrap: usize,
+        fold_column: usize,
         scale: f64,
     ) -> Self {
         Self {
@@ -13261,129 +13261,129 @@ impl<'a> Line<'a> {
             inline_text_inlays,
             block_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
         }
     }
 
-    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
+    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_col_count = 0;
-        let mut summed_col_count = 0;
+        let mut max_summed_column_count = 0;
+        let mut summed_column_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_col_count += token.text.col_count(tab_col_count);
+                    summed_column_count += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_col_count += widget.col_count;
+                    summed_column_count += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
-                    summed_col_count = self.start_col_after_wrap();
+                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
+                    summed_column_count = self.start_column_after_wrap();
                 }
             }
         }
-        max_summed_col_count.max(summed_col_count)
+        max_summed_column_count.max(summed_column_count)
     }
 
     pub fn row_count(&self) -> usize {
         self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
-        self.col_to_x(self.compute_col_count(tab_col_count))
+    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
+        self.column_to_x(self.compute_column_count(tab_column_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_col(
+    pub fn byte_bias_to_row_column(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_col_count: usize,
+        tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut col = 0;
+        let mut column = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, col);
+            return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, col);
+                            return (row, column);
                         }
                         current_byte += grapheme.len();
-                        col += grapheme.col_count(tab_col_count);
+                        column += grapheme.column_count(tab_column_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, col);
+                            return (row, column);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    col += token.text.col_count(tab_col_count);
+                    column += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    col += widget.col_count;
+                    column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    col = self.start_col_after_wrap();
+                    column = self.start_column_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, col);
+            return (row, column);
         }
         panic!()
     }
 
-    pub fn row_col_to_byte_bias(
+    pub fn row_column_to_byte_bias(
         &self,
-        (row, col): (usize, usize),
-        tab_col_count: usize,
+        (row, column): (usize, usize),
+        tab_column_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_col = 0;
+        let mut current_column = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_col = current_col + grapheme.col_count(tab_col_count);
-                        if current_row == row && (current_col..next_col).contains(&col) {
+                        let next_column = current_column + grapheme.column_count(tab_column_count);
+                        if current_row == row && (current_column..next_column).contains(&column) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_col = next_col;
+                        current_column = next_column;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_col = current_col + token.text.col_count(tab_col_count);
-                    if current_row == row && (current_col..next_col).contains(&col) {
+                    let next_column = current_column + token.text.column_count(tab_column_count);
+                    if current_row == row && (current_column..next_column).contains(&column) {
                         return (byte, Affinity::Before);
                     }
-                    current_col = next_col;
+                    current_column = next_column;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_col += widget.col_count;
+                    current_column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_col = self.start_col_after_wrap();
+                    current_column = self.start_column_after_wrap();
                 }
             }
         }
@@ -13393,10 +13393,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn col_to_x(&self, col: usize) -> f64 {
-        let col_count_before_fold_col = col.min(self.fold_col);
-        let col_count_after_fold_col = col - col_count_before_fold_col;
-        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
+    pub fn column_to_x(&self, column: usize) -> f64 {
+        let column_count_before_fold_column = column.min(self.fold_column);
+        let column_count_after_fold_column = column - column_count_before_fold_column;
+        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -13431,12 +13431,12 @@ impl<'a> Line<'a> {
         }
     }
 
-    pub fn start_col_after_wrap(&self) -> usize {
-        self.start_col_after_wrap
+    pub fn start_column_after_wrap(&self) -> usize {
+        self.start_column_after_wrap
     }
 
-    pub fn fold_col(&self) -> usize {
-        self.fold_col
+    pub fn fold_column(&self) -> usize {
+        self.fold_column
     }
 
     pub fn scale(&self) -> f64 {
@@ -13606,12 +13606,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub col_count: usize,
+    pub column_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, col_count: usize) -> Self {
-        Self { id, col_count }
+    pub fn new(id: usize, column_count: usize) -> Self {
+        Self { id, column_count }
     }
 }
 mod app;
@@ -13650,29 +13650,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_col);
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -13689,9 +13689,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_col(
+        .byte_bias_to_row_column(
             (position.byte, bias),
-            document.settings().tab_col_count,
+            document.settings().tab_column_count,
         )
         .0
         == 0
@@ -13702,9 +13702,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_col(
+    line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
 }
@@ -13786,77 +13786,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
-        (prev_line_ref.row_count() - 1, col),
-        document.settings().tab_col_count,
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
+        (prev_line_ref.row_count() - 1, column),
+        document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(col))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
-    ((Position::new(next_line, byte), bias), Some(col))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -14003,19 +14003,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_col: Option<usize>,
+    pub preferred_column: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_col: Option<usize>,
+        preferred_column: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_col,
+            preferred_column,
         }
     }
 
@@ -14023,7 +14023,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_col: None,
+            preferred_column: None,
         }
     }
 
@@ -14067,25 +14067,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, col) = f(self.cursor, self.preferred_col);
+        let (cursor, column) = f(self.cursor, self.preferred_column);
         Self {
             cursor,
-            preferred_col: col,
+            preferred_column: column,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_col_count: usize,
-    pub indent_col_count: usize,
+    pub tab_column_count: usize,
+    pub indent_column_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_col_count: 4,
-            indent_col_count: 4,
+            tab_column_count: 4,
+            indent_column_count: 4,
         }
     }
 }
@@ -14136,8 +14136,8 @@ impl State {
             &editor.inline_text_inlays,
             &editor.inline_widget_inlays,
             &view.soft_breaks,
-            &view.start_col_after_wrap,
-            &view.fold_col,
+            &view.start_column_after_wrap,
+            &view.fold_column,
             &view.scale,
             &editor.line_inlays,
             &editor.block_widget_inlays,
@@ -14157,8 +14157,8 @@ impl State {
             &mut editor.inline_text_inlays,
             &mut editor.inline_widget_inlays,
             &mut view.soft_breaks,
-            &mut view.start_col_after_wrap,
-            &mut view.fold_col,
+            &mut view.start_column_after_wrap,
+            &mut view.fold_column,
             &mut view.scale,
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
@@ -14180,8 +14180,8 @@ impl State {
             View {
                 editor_id,
                 soft_breaks: (0..line_count).map(|_| [].into()).collect(),
-                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_col: (0..line_count).map(|_| 0).collect(),
+                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
                 sels: [Selection::default()].into(),
@@ -14256,10 +14256,10 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_col: Vec<usize>,
+    fold_column: Vec<usize>,
     scale: Vec<f64>,
     soft_breaks: Vec<Vec<usize>>,
-    start_col_after_wrap: Vec<usize>,
+    start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
     sels: Vec<Selection>,
     latest_sel_index: usize,
@@ -14280,8 +14280,8 @@ struct Editor {
     block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn col_count(&self, tab_col_count: usize) -> usize;
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
+    fn column_count(&self, tab_column_count: usize) -> usize;
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -14289,16 +14289,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn col_count(&self, tab_col_count: usize) -> usize {
+    fn column_count(&self, tab_column_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.col_count(tab_col_count))
+            .map(|char| char.column_count(tab_column_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
-        self.indentation().col_count(tab_col_count) / indent_col_count
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        self.indentation().column_count(tab_column_count) / indent_column_count
     }
 
     fn indentation(&self) -> &str {
@@ -15058,13 +15058,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn col_count(self, tab_col_count: usize) -> usize;
+    fn column_count(self, tab_column_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn col_count(self, tab_col_count: usize) -> usize {
+    fn column_count(self, tab_column_count: usize) -> usize {
         match self {
-            '\t' => tab_col_count,
+            '\t' => tab_column_count,
             _ => 1,
         }
     }
@@ -15267,10 +15267,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_col_count);
+                        context.fold_line(line, 2 * settings.indent_column_count);
                     }
                 }
                 cx.redraw_all();
@@ -15286,7 +15286,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -15360,7 +15360,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut col = 0;
+            let mut column = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -15380,22 +15380,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.col_to_x(col),
+                                        x: line.column_to_x(column),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                col = line.start_col_after_wrap();
+                                column = line.start_column_after_wrap();
                             }
                         }
                     }
@@ -15442,18 +15442,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_col = col
+                                    let next_column = column
                                         + grapheme
-                                            .col_count(document.settings().tab_col_count);
+                                            .column_count(document.settings().tab_column_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.col_to_x(col);
-                                    let next_x = line_ref.col_to_x(next_col);
+                                    let x = line_ref.column_to_x(column);
+                                    let next_x = line_ref.column_to_x(next_column);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -15470,24 +15470,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    col = next_col;
+                                    column = next_column;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_col = col
+                                let next_column = column
                                     + token
                                         .text
-                                        .col_count(document.settings().tab_col_count);
-                                let x = line_ref.col_to_x(col);
-                                let next_x = line_ref.col_to_x(next_col);
+                                        .column_count(document.settings().tab_column_count);
+                                let x = line_ref.column_to_x(column);
+                                let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                col = next_col;
+                                column = next_column;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -15495,7 +15495,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -15538,13 +15538,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
@@ -15557,44 +15557,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    col +=
-                                        grapheme.col_count(document.settings().tab_col_count);
+                                    column +=
+                                        grapheme.column_count(document.settings().tab_column_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
-                                col += 1;
+                                column += 1;
                                 if self.active_sel.is_some() {
                                     self.draw_sel(
                                         cx,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -15603,13 +15603,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
-                    col += 1;
+                    column += 1;
                     if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
+                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -15804,8 +15804,8 @@ pub struct Context<'a> {
     inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: &'a mut Vec<Vec<usize>>,
-    start_col_after_wrap: &'a mut Vec<usize>,
-    fold_col: &'a mut Vec<usize>,
+    start_column_after_wrap: &'a mut Vec<usize>,
+    fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -15824,8 +15824,8 @@ impl<'a> Context<'a> {
         inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
         soft_breaks: &'a mut Vec<Vec<usize>>,
-        start_col_after_wrap: &'a mut Vec<usize>,
-        fold_col: &'a mut Vec<usize>,
+        start_column_after_wrap: &'a mut Vec<usize>,
+        fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -15842,8 +15842,8 @@ impl<'a> Context<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -15863,8 +15863,8 @@ impl<'a> Context<'a> {
             self.inline_text_inlays,
             self.inline_widget_inlays,
             self.soft_breaks,
-            self.start_col_after_wrap,
-            self.fold_col,
+            self.start_column_after_wrap,
+            self.fold_column,
             self.scale,
             self.line_inlays,
             self.block_widget_inlays,
@@ -15874,7 +15874,7 @@ impl<'a> Context<'a> {
         )
     }
 
-    pub fn wrap_lines(&mut self, max_col: usize) {
+    pub fn wrap_lines(&mut self, max_column: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
@@ -15883,28 +15883,28 @@ impl<'a> Context<'a> {
             let mut soft_breaks = Vec::new();
             mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut col = 0;
+            let mut column = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_col_after_wrap = line_ref
+            let mut start_column_after_wrap = line_ref
                 .text()
                 .indentation()
-                .col_count(document.settings().tab_col_count);
+                .column_count(document.settings().tab_column_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_col_after_wrap
-                                + string.col_count(document.settings().tab_col_count)
-                                > max_col
+                            if start_column_after_wrap
+                                + string.column_count(document.settings().tab_column_count)
+                                > max_column
                             {
-                                start_col_after_wrap = 0;
+                                start_column_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_col_after_wrap + widget.col_count > max_col {
-                            start_col_after_wrap = 0;
+                        if start_column_after_wrap + widget.column_count > max_column {
+                            start_column_after_wrap = 0;
                         }
                     }
                 }
@@ -15913,28 +15913,28 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_col =
-                                col + string.col_count(document.settings().tab_col_count);
-                            if next_col > max_col {
-                                next_col = start_col_after_wrap;
+                            let mut next_column =
+                                column + string.column_count(document.settings().tab_column_count);
+                            if next_column > max_column {
+                                next_column = start_column_after_wrap;
                                 soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            col = next_col;
+                            column = next_column;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_col = col + widget.col_count;
-                        if next_col > max_col {
-                            next_col = start_col_after_wrap;
+                        let mut next_column = column + widget.column_count;
+                        if next_column > max_column {
+                            next_column = start_column_after_wrap;
                             soft_breaks.push(byte);
                         }
-                        col = next_col;
+                        column = next_column;
                     }
                 }
             }
             self.soft_breaks[line] = soft_breaks;
-            self.start_col_after_wrap[line] = start_col_after_wrap;
+            self.start_column_after_wrap[line] = start_column_after_wrap;
             if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
@@ -16045,7 +16045,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
@@ -16053,7 +16053,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -16087,8 +16087,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
-        self.fold_col[line_index] = fold_col;
+    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
+        self.fold_column[line_index] = fold_column;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -16170,7 +16170,7 @@ impl<'a> Context<'a> {
                 cursor = start;
             }
             self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_col);
+                Selection::new(anchor, cursor, current_sel.preferred_column);
             self.sels.remove(next_sel_index);
             if next_sel_index < *self.latest_sel_index {
                 *self.latest_sel_index -= 1;
@@ -16204,7 +16204,7 @@ impl<'a> Context<'a> {
                 anchor = (diffed_end, sel.end().1);
                 cursor = (diffed_start, sel.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_col);
+            *sel = Selection::new(anchor, cursor, sel.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -16221,8 +16221,8 @@ impl<'a> Context<'a> {
                     self.inline_text_inlays.drain(start_line..end_line);
                     self.inline_widget_inlays.drain(start_line..end_line);
                     self.soft_breaks.drain(start_line..end_line);
-                    self.start_col_after_wrap.drain(start_line..end_line);
-                    self.fold_col.drain(start_line..end_line);
+                    self.start_column_after_wrap.drain(start_line..end_line);
+                    self.fold_column.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -16238,9 +16238,9 @@ impl<'a> Context<'a> {
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_col_after_wrap
+                    self.start_column_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_col
+                    self.fold_column
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -16557,8 +16557,8 @@ pub struct Document<'a> {
     inline_text_inlays: &'a [Vec<(usize, String)>],
     inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
     soft_breaks: &'a [Vec<usize>],
-    start_col_after_wrap: &'a [usize],
-    fold_col: &'a [usize],
+    start_column_after_wrap: &'a [usize],
+    fold_column: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -16575,8 +16575,8 @@ impl<'a> Document<'a> {
         inline_text_inlays: &'a [Vec<(usize, String)>],
         inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
         soft_breaks: &'a [Vec<usize>],
-        start_col_after_wrap: &'a [usize],
-        fold_col: &'a [usize],
+        start_column_after_wrap: &'a [usize],
+        fold_column: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
@@ -16591,8 +16591,8 @@ impl<'a> Document<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -16610,7 +16610,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -16658,8 +16658,8 @@ impl<'a> Document<'a> {
             &self.inline_text_inlays[line],
             &self.inline_widget_inlays[line],
             &self.soft_breaks[line],
-            self.start_col_after_wrap[line],
-            self.fold_col[line],
+            self.start_column_after_wrap[line],
+            self.fold_column[line],
             self.scale[line],
         )
     }
@@ -16671,8 +16671,8 @@ impl<'a> Document<'a> {
             inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
             inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
             soft_breaks: self.soft_breaks[start_line..end_line].iter(),
-            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
-            fold_col: self.fold_col[start_line..end_line].iter(),
+            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
+            fold_column: self.fold_column[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -16718,8 +16718,8 @@ pub struct Lines<'a> {
     inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
     inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: slice::Iter<'a, Vec<usize>>,
-    start_col_after_wrap: slice::Iter<'a, usize>,
-    fold_col: slice::Iter<'a, usize>,
+    start_column_after_wrap: slice::Iter<'a, usize>,
+    fold_column: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -16733,8 +16733,8 @@ impl<'a> Iterator for Lines<'a> {
             self.inline_text_inlays.next()?,
             self.inline_widget_inlays.next()?,
             self.soft_breaks.next()?,
-            *self.start_col_after_wrap.next()?,
-            *self.fold_col.next()?,
+            *self.start_column_after_wrap.next()?,
+            *self.fold_column.next()?,
             *self.scale.next()?,
         ))
     }
@@ -16984,8 +16984,8 @@ pub struct Line<'a> {
     inline_text_inlays: &'a [(usize, String)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     soft_breaks: &'a [usize],
-    start_col_after_wrap: usize,
-    fold_col: usize,
+    start_column_after_wrap: usize,
+    fold_column: usize,
     scale: f64,
 }
 
@@ -16996,8 +16996,8 @@ impl<'a> Line<'a> {
         inline_text_inlays: &'a [(usize, String)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         soft_breaks: &'a [usize],
-        start_col_after_wrap: usize,
-        fold_col: usize,
+        start_column_after_wrap: usize,
+        fold_column: usize,
         scale: f64,
     ) -> Self {
         Self {
@@ -17006,129 +17006,129 @@ impl<'a> Line<'a> {
             inline_text_inlays,
             block_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
         }
     }
 
-    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
+    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_col_count = 0;
-        let mut summed_col_count = 0;
+        let mut max_summed_column_count = 0;
+        let mut summed_column_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_col_count += token.text.col_count(tab_col_count);
+                    summed_column_count += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_col_count += widget.col_count;
+                    summed_column_count += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
-                    summed_col_count = self.start_col_after_wrap();
+                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
+                    summed_column_count = self.start_column_after_wrap();
                 }
             }
         }
-        max_summed_col_count.max(summed_col_count)
+        max_summed_column_count.max(summed_column_count)
     }
 
     pub fn row_count(&self) -> usize {
         self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
-        self.col_to_x(self.compute_col_count(tab_col_count))
+    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
+        self.column_to_x(self.compute_column_count(tab_column_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_col(
+    pub fn byte_bias_to_row_column(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_col_count: usize,
+        tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut col = 0;
+        let mut column = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, col);
+            return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, col);
+                            return (row, column);
                         }
                         current_byte += grapheme.len();
-                        col += grapheme.col_count(tab_col_count);
+                        column += grapheme.column_count(tab_column_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, col);
+                            return (row, column);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    col += token.text.col_count(tab_col_count);
+                    column += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    col += widget.col_count;
+                    column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    col = self.start_col_after_wrap();
+                    column = self.start_column_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, col);
+            return (row, column);
         }
         panic!()
     }
 
-    pub fn row_col_to_byte_bias(
+    pub fn row_column_to_byte_bias(
         &self,
-        (row, col): (usize, usize),
-        tab_col_count: usize,
+        (row, column): (usize, usize),
+        tab_column_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_col = 0;
+        let mut current_column = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_col = current_col + grapheme.col_count(tab_col_count);
-                        if current_row == row && (current_col..next_col).contains(&col) {
+                        let next_column = current_column + grapheme.column_count(tab_column_count);
+                        if current_row == row && (current_column..next_column).contains(&column) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_col = next_col;
+                        current_column = next_column;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_col = current_col + token.text.col_count(tab_col_count);
-                    if current_row == row && (current_col..next_col).contains(&col) {
+                    let next_column = current_column + token.text.column_count(tab_column_count);
+                    if current_row == row && (current_column..next_column).contains(&column) {
                         return (byte, Affinity::Before);
                     }
-                    current_col = next_col;
+                    current_column = next_column;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_col += widget.col_count;
+                    current_column += widget.column_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_col = self.start_col_after_wrap();
+                    current_column = self.start_column_after_wrap();
                 }
             }
         }
@@ -17138,10 +17138,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn col_to_x(&self, col: usize) -> f64 {
-        let col_count_before_fold_col = col.min(self.fold_col);
-        let col_count_after_fold_col = col - col_count_before_fold_col;
-        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
+    pub fn column_to_x(&self, column: usize) -> f64 {
+        let column_count_before_fold_column = column.min(self.fold_column);
+        let column_count_after_fold_column = column - column_count_before_fold_column;
+        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -17176,12 +17176,12 @@ impl<'a> Line<'a> {
         }
     }
 
-    pub fn start_col_after_wrap(&self) -> usize {
-        self.start_col_after_wrap
+    pub fn start_column_after_wrap(&self) -> usize {
+        self.start_column_after_wrap
     }
 
-    pub fn fold_col(&self) -> usize {
-        self.fold_col
+    pub fn fold_column(&self) -> usize {
+        self.fold_column
     }
 
     pub fn scale(&self) -> f64 {
@@ -17351,12 +17351,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub col_count: usize,
+    pub column_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, col_count: usize) -> Self {
-        Self { id, col_count }
+    pub fn new(id: usize, column_count: usize) -> Self {
+        Self { id, column_count }
     }
 }
 mod app;
@@ -17395,29 +17395,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_col);
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, bias), preferred_col)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -17434,9 +17434,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_col(
+        .byte_bias_to_row_column(
             (position.byte, bias),
-            document.settings().tab_col_count,
+            document.settings().tab_column_count,
         )
         .0
         == 0
@@ -17447,9 +17447,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_col(
+    line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
 }
@@ -17531,77 +17531,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut col) = line.byte_bias_to_row_col(
+    let (row, mut column) = line.byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let (byte, bias) =
-        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
-    ((Position::new(position.line, byte), bias), Some(col))
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
-        (prev_line_ref.row_count() - 1, col),
-        document.settings().tab_col_count,
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
+        (prev_line_ref.row_count() - 1, column),
+        document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(col))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_col: Option<usize>,
+    preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
         (position.byte, bias),
-        document.settings().tab_col_count,
+        document.settings().tab_column_count,
     );
-    if let Some(preferred_col) = preferred_col {
-        col = preferred_col;
+    if let Some(preferred_column) = preferred_column {
+        column = preferred_column;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
-    ((Position::new(next_line, byte), bias), Some(col))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -17748,19 +17748,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_col: Option<usize>,
+    pub preferred_column: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_col: Option<usize>,
+        preferred_column: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_col,
+            preferred_column,
         }
     }
 
@@ -17768,7 +17768,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_col: None,
+            preferred_column: None,
         }
     }
 
@@ -17812,25 +17812,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, col) = f(self.cursor, self.preferred_col);
+        let (cursor, column) = f(self.cursor, self.preferred_column);
         Self {
             cursor,
-            preferred_col: col,
+            preferred_column: column,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_col_count: usize,
-    pub indent_col_count: usize,
+    pub tab_column_count: usize,
+    pub indent_column_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_col_count: 4,
-            indent_col_count: 4,
+            tab_column_count: 4,
+            indent_column_count: 4,
         }
     }
 }
@@ -17881,8 +17881,8 @@ impl State {
             &editor.inline_text_inlays,
             &editor.inline_widget_inlays,
             &view.soft_breaks,
-            &view.start_col_after_wrap,
-            &view.fold_col,
+            &view.start_column_after_wrap,
+            &view.fold_column,
             &view.scale,
             &editor.line_inlays,
             &editor.block_widget_inlays,
@@ -17902,8 +17902,8 @@ impl State {
             &mut editor.inline_text_inlays,
             &mut editor.inline_widget_inlays,
             &mut view.soft_breaks,
-            &mut view.start_col_after_wrap,
-            &mut view.fold_col,
+            &mut view.start_column_after_wrap,
+            &mut view.fold_column,
             &mut view.scale,
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
@@ -17925,8 +17925,8 @@ impl State {
             View {
                 editor_id,
                 soft_breaks: (0..line_count).map(|_| [].into()).collect(),
-                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_col: (0..line_count).map(|_| 0).collect(),
+                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
                 sels: [Selection::default()].into(),
@@ -18001,10 +18001,10 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_col: Vec<usize>,
+    fold_column: Vec<usize>,
     scale: Vec<f64>,
     soft_breaks: Vec<Vec<usize>>,
-    start_col_after_wrap: Vec<usize>,
+    start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
     sels: Vec<Selection>,
     latest_sel_index: usize,
@@ -18025,8 +18025,8 @@ struct Editor {
     block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn col_count(&self, tab_col_count: usize) -> usize;
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
+    fn column_count(&self, tab_column_count: usize) -> usize;
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -18034,16 +18034,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn col_count(&self, tab_col_count: usize) -> usize {
+    fn column_count(&self, tab_column_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.col_count(tab_col_count))
+            .map(|char| char.column_count(tab_column_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
-        self.indentation().col_count(tab_col_count) / indent_col_count
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        self.indentation().column_count(tab_column_count) / indent_column_count
     }
 
     fn indentation(&self) -> &str {
@@ -18803,13 +18803,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn col_count(self, tab_col_count: usize) -> usize;
+    fn column_count(self, tab_column_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn col_count(self, tab_col_count: usize) -> usize {
+    fn column_count(self, tab_column_count: usize) -> usize {
         match self {
-            '\t' => tab_col_count,
+            '\t' => tab_column_count,
             _ => 1,
         }
     }
@@ -19012,10 +19012,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_col_count);
+                        context.fold_line(line, 2 * settings.indent_column_count);
                     }
                 }
                 cx.redraw_all();
@@ -19031,7 +19031,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_col_count, settings.indent_col_count)
+                        .indent_level(settings.tab_column_count, settings.indent_column_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -19105,7 +19105,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut col = 0;
+            let mut column = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -19125,22 +19125,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.col_to_x(col),
+                                        x: line.column_to_x(column),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                col = line.start_col_after_wrap();
+                                column = line.start_column_after_wrap();
                             }
                         }
                     }
@@ -19187,18 +19187,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_col = col
+                                    let next_column = column
                                         + grapheme
-                                            .col_count(document.settings().tab_col_count);
+                                            .column_count(document.settings().tab_column_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.col_to_x(col);
-                                    let next_x = line_ref.col_to_x(next_col);
+                                    let x = line_ref.column_to_x(column);
+                                    let next_x = line_ref.column_to_x(next_column);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -19215,24 +19215,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    col = next_col;
+                                    column = next_column;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_col = col
+                                let next_column = column
                                     + token
                                         .text
-                                        .col_count(document.settings().tab_col_count);
-                                let x = line_ref.col_to_x(col);
-                                let next_x = line_ref.col_to_x(next_col);
+                                        .column_count(document.settings().tab_column_count);
+                                let x = line_ref.column_to_x(column);
+                                let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                col = next_col;
+                                column = next_column;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -19240,7 +19240,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -19283,13 +19283,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut col = 0;
+                    let mut column = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
@@ -19302,44 +19302,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    col +=
-                                        grapheme.col_count(document.settings().tab_col_count);
+                                    column +=
+                                        grapheme.column_count(document.settings().tab_column_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                col += token
+                                column += token
                                     .text
-                                    .col_count(document.settings().tab_col_count);
+                                    .column_count(document.settings().tab_column_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                col += widget.col_count;
+                                column += widget.column_count;
                             }
                             line::WrappedElement::Wrap => {
-                                col += 1;
+                                column += 1;
                                 if self.active_sel.is_some() {
                                     self.draw_sel(
                                         cx,
-                                        line_ref.col_to_x(col),
+                                        line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                col = line_ref.start_col_after_wrap();
+                                column = line_ref.start_column_after_wrap();
                             }
                         }
                     }
@@ -19348,13 +19348,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.col_to_x(col),
+                        line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
                     );
-                    col += 1;
+                    column += 1;
                     if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
+                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -19549,8 +19549,8 @@ pub struct Context<'a> {
     inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
     soft_breaks: &'a mut Vec<Vec<usize>>,
-    start_col_after_wrap: &'a mut Vec<usize>,
-    fold_col: &'a mut Vec<usize>,
+    start_column_after_wrap: &'a mut Vec<usize>,
+    fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -19569,8 +19569,8 @@ impl<'a> Context<'a> {
         inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
         soft_breaks: &'a mut Vec<Vec<usize>>,
-        start_col_after_wrap: &'a mut Vec<usize>,
-        fold_col: &'a mut Vec<usize>,
+        start_column_after_wrap: &'a mut Vec<usize>,
+        fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
@@ -19587,8 +19587,8 @@ impl<'a> Context<'a> {
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -19608,8 +19608,8 @@ impl<'a> Context<'a> {
             self.inline_text_inlays,
             self.inline_widget_inlays,
             self.soft_breaks,
-            self.start_col_after_wrap,
-            self.fold_col,
+            self.start_column_after_wrap,
+            self.fold_column,
             self.scale,
             self.line_inlays,
             self.block_widget_inlays,
@@ -19619,7 +19619,7 @@ impl<'a> Context<'a> {
         )
     }
 
-    pub fn wrap_lines(&mut self, max_col: usize) {
+    pub fn wrap_lines(&mut self, max_column: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
@@ -19628,28 +19628,28 @@ impl<'a> Context<'a> {
             let mut soft_breaks = Vec::new();
             mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut col = 0;
+            let mut column = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_col_after_wrap = line_ref
+            let mut start_column_after_wrap = line_ref
                 .text()
                 .indentation()
-                .col_count(document.settings().tab_col_count);
+                .column_count(document.settings().tab_column_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_col_after_wrap
-                                + string.col_count(document.settings().tab_col_count)
-                                > max_col
+                            if start_column_after_wrap
+                                + string.column_count(document.settings().tab_column_count)
+                                > max_column
                             {
-                                start_col_after_wrap = 0;
+                                start_column_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_col_after_wrap + widget.col_count > max_col {
-                            start_col_after_wrap = 0;
+                        if start_column_after_wrap + widget.column_count > max_column {
+                            start_column_after_wrap = 0;
                         }
                     }
                 }
@@ -19658,28 +19658,28 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_col =
-                                col + string.col_count(document.settings().tab_col_count);
-                            if next_col > max_col {
-                                next_col = start_col_after_wrap;
+                            let mut next_column =
+                                column + string.column_count(document.settings().tab_column_count);
+                            if next_column > max_column {
+                                next_column = start_column_after_wrap;
                                 soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            col = next_col;
+                            column = next_column;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_col = col + widget.col_count;
-                        if next_col > max_col {
-                            next_col = start_col_after_wrap;
+                        let mut next_column = column + widget.column_count;
+                        if next_column > max_column {
+                            next_column = start_column_after_wrap;
                             soft_breaks.push(byte);
                         }
-                        col = next_col;
+                        column = next_column;
                     }
                 }
             }
             self.soft_breaks[line] = soft_breaks;
-            self.start_col_after_wrap[line] = start_col_after_wrap;
+            self.start_column_after_wrap[line] = start_column_after_wrap;
             if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
@@ -19790,7 +19790,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
@@ -19798,7 +19798,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
+            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -19832,8 +19832,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
-        self.fold_col[line_index] = fold_col;
+    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
+        self.fold_column[line_index] = fold_column;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -19915,7 +19915,7 @@ impl<'a> Context<'a> {
                 cursor = start;
             }
             self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_col);
+                Selection::new(anchor, cursor, current_sel.preferred_column);
             self.sels.remove(next_sel_index);
             if next_sel_index < *self.latest_sel_index {
                 *self.latest_sel_index -= 1;
@@ -19949,7 +19949,7 @@ impl<'a> Context<'a> {
                 anchor = (diffed_end, sel.end().1);
                 cursor = (diffed_start, sel.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_col);
+            *sel = Selection::new(anchor, cursor, sel.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -19966,8 +19966,8 @@ impl<'a> Context<'a> {
                     self.inline_text_inlays.drain(start_line..end_line);
                     self.inline_widget_inlays.drain(start_line..end_line);
                     self.soft_breaks.drain(start_line..end_line);
-                    self.start_col_after_wrap.drain(start_line..end_line);
-                    self.fold_col.drain(start_line..end_line);
+                    self.start_column_after_wrap.drain(start_line..end_line);
+                    self.fold_column.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -19983,9 +19983,9 @@ impl<'a> Context<'a> {
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_col_after_wrap
+                    self.start_column_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_col
+                    self.fold_column
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));

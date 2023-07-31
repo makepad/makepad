@@ -1,31 +1,31 @@
-use crate::{BiasedTextPos, Cursor, TextLen, TextPos};
+use crate::{BiasedPos, Cursor, Len, Pos};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Sel {
-    pub anchor: BiasedTextPos,
+    pub anchor: BiasedPos,
     pub cursor: Cursor,
 }
 
 impl Sel {
     pub fn is_empty(self) -> bool {
-        self.anchor == self.cursor.pos
+        self.anchor == self.cursor.biased_pos
     }
 
-    pub fn len(&self) -> TextLen {
+    pub fn len(&self) -> Len {
         self.end().pos - self.start().pos
     }
 
-    pub fn start(self) -> BiasedTextPos {
-        self.anchor.min(self.cursor.pos)
+    pub fn start(self) -> BiasedPos {
+        self.anchor.min(self.cursor.biased_pos)
     }
 
-    pub fn end(self) -> BiasedTextPos {
-        self.anchor.max(self.cursor.pos)
+    pub fn end(self) -> BiasedPos {
+        self.anchor.max(self.cursor.biased_pos)
     }
 
     pub fn reset_anchor(self) -> Self {
         Self {
-            anchor: self.cursor.pos,
+            anchor: self.cursor.biased_pos,
             ..self
         }
     }
@@ -51,7 +51,7 @@ impl Sel {
         if !should_merge {
             return None;
         }
-        Some(if self.anchor <= self.cursor.pos {
+        Some(if self.anchor <= self.cursor.biased_pos {
             Sel {
                 anchor: self.anchor,
                 cursor: other.cursor
@@ -66,14 +66,14 @@ impl Sel {
 
 }
 
-impl From<TextPos> for Sel {
-    fn from(pos: TextPos) -> Self {
-        Sel::from(BiasedTextPos::from(pos))
+impl From<Pos> for Sel {
+    fn from(pos: Pos) -> Self {
+        Sel::from(BiasedPos::from(pos))
     }
 }
 
-impl From<BiasedTextPos> for Sel {
-    fn from(pos: BiasedTextPos) -> Self {
+impl From<BiasedPos> for Sel {
+    fn from(pos: BiasedPos) -> Self {
         Sel::from(Cursor::from(pos))
     }
 }
@@ -81,7 +81,7 @@ impl From<BiasedTextPos> for Sel {
 impl From<Cursor> for Sel {
     fn from(cursor: Cursor) -> Self {
         Self {
-            anchor: cursor.pos,
+            anchor: cursor.biased_pos,
             cursor,
         }
     }
