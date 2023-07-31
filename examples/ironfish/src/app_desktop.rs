@@ -2163,6 +2163,9 @@ live_design!{
                 draw_bg: {color: (COLOR_VIZ_1), color2: (COLOR_VIZ_2)}
                 display_audio = <DisplayAudio> {
                     walk: {height: Fill, width: Fill}
+                    draw_wave:{
+                        fn vu_fill(self)->vec4{return #0000}
+                    }
                 }
             }
             

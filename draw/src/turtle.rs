@@ -122,7 +122,7 @@ pub struct Turtle {
     align_start: usize,
     turtle_walks_start: usize,
     defer_count: usize,
-    //shift: Option<DVec2>,
+    shift: DVec2,
     pos: DVec2,
     origin: DVec2,
     width: f64,
@@ -206,7 +206,7 @@ impl<'a> Cx2d<'a> {
             origin: dvec2(0.0,0.0),
             width: pass_size.x,
             height: pass_size.y,
-            //shift: None,
+            shift: dvec2(0.0,0.0),
             width_used: layout.padding.left,
             height_used: layout.padding.top,
             guard_area: Area::Empty,
@@ -291,13 +291,17 @@ impl<'a> Cx2d<'a> {
             origin,
             width,
             height,
-            //shift: None,
+            shift: dvec2(0.0,0.0),
             width_used: layout.padding.left,
             height_used: layout.padding.top,
             guard_area,
         };
         
         self.turtles.push(turtle);
+    }
+    
+    pub fn turtle_has_align_items(&mut self)->bool{
+        self.align_list.len() != self.turtle().align_start + 1
     }
     
     pub fn end_turtle(&mut self) -> Rect {
@@ -341,7 +345,7 @@ impl<'a> Cx2d<'a> {
                         let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
                     }
                 }
                 else {
@@ -351,7 +355,7 @@ impl<'a> Cx2d<'a> {
                         let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
                     }
                 }
             },
@@ -365,7 +369,7 @@ impl<'a> Cx2d<'a> {
                         let shift_y = walk.defer_index as f64 * part;
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
                     }
                 }
                 else {
@@ -375,7 +379,7 @@ impl<'a> Cx2d<'a> {
                         let shift_y = turtle.layout.align.y * turtle.height_left();
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
-                        self.move_align_list(shift_x, shift_y, align_start, align_end, false);
+                        self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
                     }
                 }
             },
@@ -386,7 +390,7 @@ impl<'a> Cx2d<'a> {
                     let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
                     let align_start = walk.align_start;
                     let align_end = self.get_turtle_walk_align_end(i);
-                    self.move_align_list(shift_x, shift_y, align_start, align_end, false);
+                    self.move_align_list(shift_x, shift_y, align_start, align_end, false, turtle.shift);
                 }
             }
         }
@@ -521,10 +525,10 @@ impl<'a> Cx2d<'a> {
         }
     }
     
-    fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool) {
+    fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize, shift_clip: bool, turtle_shift:DVec2) {
         let current_dpi_factor = self.current_dpi_factor();
-        let dx = if dx.is_nan() {0.0}else {dx};
-        let dy = if dy.is_nan() {0.0}else {dy};
+        let dx = if dx.is_nan() {0.0}else {dx} + turtle_shift.x;
+        let dy = if dy.is_nan() {0.0}else {dy} + turtle_shift.y;
         if dx == 0.0 && dy == 0.0 {
             return 
         }
@@ -592,7 +596,7 @@ impl<'a> Cx2d<'a> {
                 AlignEntry::ShiftTurtle{area, shift, skip} =>{
                     let rect = area.get_rect(self);
                     let skip = *skip;
-                    self.move_align_list(rect.pos.x+shift.x, rect.pos.y+shift.y, i + 1, skip, true);
+                    self.move_align_list(rect.pos.x+shift.x, rect.pos.y+shift.y, i + 1, skip, true, dvec2(0.0,0.0));
                     i = skip;
                     continue;
                 }
@@ -668,10 +672,11 @@ impl Turtle {
     pub fn update_height_min(&mut self, pos:f64, dy: f64) {
         self.height_used = self.height_used.min((pos + dy) - self.origin.y);
     }
-    /*
+    
     pub fn set_shift(&mut self, shift: DVec2) {
-        self.shift = Some(shift);
-    }*/
+        self.shift = shift;
+    }
+    
     pub fn layout(&self)->&Layout{
         &self.layout
     }

@@ -11,7 +11,7 @@ live_design!{
     import makepad_widgets::slider::Slider;
     import makepad_widgets::text_input::TextInput;
     import makepad_widgets::drop_down::DropDown;
-    import makepad_widgets::infinite_list::InfiniteList;
+    import makepad_widgets::list_view::ListView;
     IMG_A = dep("crate://self/resources/neom-THlO6Mkf5uI-unsplash.jpg")
     IMG_B = dep("crate://self/resources/mario-von-rotz-2FxSOXvfXVM-unsplash.jpg")
     IMG_PROFILE_A = dep("crate://self/resources/profile_1.jpg")
@@ -123,10 +123,10 @@ live_design!{
     }
     
     
-    Header = <Box> {
+    Header = <BoxY> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: 4.5}
+        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: vec2(0.5,4.5)}
         
         <Logo> {
             walk: {height: Fit, width: Fill, margin: {top: 30.0}}
@@ -135,10 +135,10 @@ live_design!{
         
     }
     
-    Menu = <Box> {
+    Menu = <BoxY> {
         walk: {width: Fill, height: 100}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
-        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: 4.5}
+        draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5,0.5)}
         
         <Frame> {
             walk: {width: Fill, height: Fit, margin: 0.0}
@@ -244,8 +244,8 @@ live_design!{
         
         hero = <Image> {
             image: (IMG_A),
-            image_scale: 1.0,
-            walk: {margin: 0}
+            //image_scale: 1.0,
+            walk: {margin: 0, width:Fill, height:250}
             layout: {padding: 0}
         }
         
@@ -284,37 +284,13 @@ live_design!{
                 }
             }
             
-            <InfiniteList> {
+            news_feed = <ListView> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
-                <Frame> {walk: {height: 100}}
-                <PostImage> {}
-                <Post> {
-                    body = {profile = {profile_img = {
-                        image: (IMG_PROFILE_B)
-                    }}}
-                }
-                <PostImage> {
-                    hero = {image: (IMG_B),}
-                    post = {body = {profile = {profile_img = {
-                        image: (IMG_PROFILE_B)
-                    }}}}
-                }
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Post> {}
-                <Frame> {walk: {height: 100}}
+                TopSpace = <Frame> {walk: {height: 100}}
+                Post = <Post>{}
+                PostImage = <PostImage>{}
+                BottomSpace = <Frame> {walk: {height: 100}}
             }
             
             <Frame> {
@@ -344,11 +320,47 @@ impl LiveHook for App {
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let news_feeds = self.ui.get_list_view_set(ids!(news_feed));
+        
         if let Event::Draw(event) = event {
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+            let cx = &mut Cx2d::new(cx, event);
+            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+                if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
+                    // lets set our scroll range so the scrollbar has something
+                    list.set_item_range(0, 3000, 1);
+                    // next visible item only returns items that are visible
+                    // this means the performance here is O(visible)
+                    while let Some(item_id) = list.next_visible_item(cx){
+                        let template = match item_id{
+                            0=>id!(TopSpace),
+                            x if x%5 == 0=>id!(PostImage),
+                            _=>id!(Post)
+                        };
+                        let item = list.get_item(cx, item_id, template).unwrap();
+                        let text = match item_id%4{
+                            0=>format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit", item_id),
+                            1=>format!("Item: {} amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
+                            2=>format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
+                            _=>format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.", item_id),
+                        };
+                        item.get_label(id!(content.text)).set_label(&text);
+                        item.get_button(id!(likes)).set_label(&format!("{}", item_id%23));
+                        item.get_button(id!(comments)).set_label(&format!("{}", item_id%6));
+                        item.draw_widget_all(cx);
+                    }
+                }
+            }
+            return
         }
         
         let actions = self.ui.handle_widget_event(cx, event);
+        
+        for (_item_id,item) in news_feeds.items_with_actions(&actions) {
+            // check for actions inside the list item
+            if item.get_button(id!(likes)).clicked(&actions) {
+                //log!("CLICKED LIKES on item {}", item_id);
+            }
+        }
         
         if self.ui.get_button(id!(button1)).clicked(&actions) {
         }

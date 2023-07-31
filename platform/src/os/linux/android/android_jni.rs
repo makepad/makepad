@@ -106,7 +106,7 @@ impl<'a> AndroidToJava<'a> {
             ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id, id);
         }
     }
-
+    
     /// Show software keyboard
     pub fn show_text_ime(&self) {
         unsafe {
@@ -122,7 +122,7 @@ impl<'a> AndroidToJava<'a> {
             ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
         }
     }
-
+    
     /// Hide software keyboard
     pub fn hide_text_ime(&self) {
         unsafe {
@@ -138,7 +138,7 @@ impl<'a> AndroidToJava<'a> {
             ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id);
         }
     }
-
+    
     /// Display clipboard actions menu
     pub fn show_clipboard_actions(&self, selected: &str) {
         unsafe {
@@ -173,11 +173,11 @@ impl<'a> AndroidToJava<'a> {
             ((**self.env).CallVoidMethod.unwrap())(self.env, self.callback, method_id, selected);
         }
     }
-
+    
     pub fn paste_from_clipboard(&self) {
         unsafe {
             let class = ((**self.env).GetObjectClass.unwrap())(self.env, self.callback);
-
+            
             let name = CString::new("pasteFromClipboard").unwrap();
             let signature = CString::new("()V").unwrap();
             let method_id = ((**self.env).GetMethodID.unwrap())(
@@ -213,9 +213,9 @@ impl<'a> AndroidToJava<'a> {
             }
             else {
                 return Some(java_byte_array_to_vec(self.env, byte_array));
-            } 
+            }
         }
-    } 
+    }
     
     pub fn get_audio_devices(&self, flag: jlong) -> Vec<String> {
         unsafe {
@@ -248,19 +248,19 @@ impl<'a> AndroidToJava<'a> {
             ((**self.env).CallLongMethod.unwrap())(self.env, self.callback, method_id, delay);
         }
     }
-
+    
     pub fn http_request(&self, request: HttpRequest) {
         unsafe {
             let url = CString::new(request.url.clone()).unwrap();
             let url = ((**self.env).NewStringUTF.unwrap())(self.env, url.as_ptr());
-
+            
             let method = CString::new(request.method.to_string()).unwrap();
             let method = ((**self.env).NewStringUTF.unwrap())(self.env, method.as_ptr());
-    
+            
             let headers_string = request.get_headers_string();
             let headers = CString::new(headers_string).unwrap();
             let headers = ((**self.env).NewStringUTF.unwrap())(self.env, headers.as_ptr());
-    
+            
             let java_body = match &request.body {
                 Some(body) => {
                     let java_body = (**self.env).NewByteArray.unwrap()(self.env, body.len() as i32);
@@ -275,7 +275,7 @@ impl<'a> AndroidToJava<'a> {
                 }
                 None => std::ptr::null_mut(),
             };
-    
+            
             let name = CString::new("requestHttp").unwrap();
             let signature = CString::new("(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V").unwrap();
             let method_id = (**self.env).GetMethodID.unwrap()(
@@ -284,7 +284,7 @@ impl<'a> AndroidToJava<'a> {
                 name.as_ptr(),
                 signature.as_ptr(),
             );
-    
+            
             (**self.env).CallVoidMethod.unwrap()(
                 self.env,
                 self.callback,
@@ -296,7 +296,7 @@ impl<'a> AndroidToJava<'a> {
                 java_body as jobject,
             );
         }
-    }    
+    }
 }
 
 // The functions here correspond to the static functions on the `Makepad` class in Java.
@@ -452,22 +452,22 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onKeyDown(
         ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
         ((**env).CallIntMethod.unwrap())(env, event, method_id)
     };
-
-    let characters:Option<String> = unsafe {
+    
+    let characters: Option<String> = unsafe {
         let class = ((**env).GetObjectClass.unwrap())(env, event);
         let name = CString::new("getCharacters").unwrap();
         let signature = CString::new("()Ljava/lang/String;").unwrap();
         let method_id =
         ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
         let string_value = ((**env).CallObjectMethod.unwrap())(env, event, method_id);
-
+        
         if string_value == std::ptr::null_mut() {
             None
         } else {
             Some(jstring_to_string(env, string_value))
         }
     };
-
+    
     let meta_state = unsafe {
         let class = ((**env).GetObjectClass.unwrap())(env, event);
         let name = CString::new("getMetaState").unwrap();
@@ -476,7 +476,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onKeyDown(
         ((**env).GetMethodID.unwrap())(env, class, name.as_ptr(), signature.as_ptr());
         ((**env).CallIntMethod.unwrap())(env, event, method_id)
     };
-
+    
     (*(cx as *mut Cx)).from_java_on_key_down(
         key_code,
         characters,
@@ -689,7 +689,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onPasteFromClipboard(
     } else {
         Some(jstring_to_string(env, content))
     };
-
+    
     (*(cx as *mut Cx)).from_java_on_paste_from_clipboard(
         string_content,
         AndroidToJava {
@@ -729,7 +729,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpResponse(
 ) {
     let headers = jstring_to_string(env, headers);
     let body = java_byte_array_to_vec(env, body);
-
+    
     (*(cx as *mut Cx)).from_java_on_http_response(
         request_id as u64,
         status_code as u16,
@@ -761,4 +761,12 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpRequestError(
             phantom: PhantomData,
         },
     );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHookPanic(_: *const std::ffi::c_void, _: *const std::ffi::c_void) {
+    pub fn panic_hook(info: &std::panic::PanicInfo) {
+        crate::error!("{}", info) 
+    }
+    std::panic::set_hook(Box::new(panic_hook));
 }

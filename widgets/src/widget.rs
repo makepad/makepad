@@ -468,8 +468,7 @@ impl WidgetRef {
     
     pub fn draw_walk_widget(&self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            let ret = inner.draw_walk_widget(cx, walk);
-            if let Some(nd) = ret.hook_widget() {
+            if let Some(nd) = inner.draw_walk_widget(cx, walk).hook_widget() {
                 if nd.is_empty() {
                     return WidgetDraw::hook(self.clone())
                 }
@@ -509,7 +508,12 @@ impl WidgetRef {
     
     pub fn draw_widget(&self, cx: &mut Cx2d) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.draw_widget(cx)
+            if let Some(nd) = inner.draw_widget(cx).hook_widget() {
+                if nd.is_empty() {
+                    return WidgetDraw::hook(self.clone())
+                }
+                return WidgetDraw::hook(nd);
+            }
         }
         WidgetDraw::done()
     }
@@ -599,6 +603,7 @@ impl LiveNew for WidgetRef {
 pub struct WidgetActionItem {
     pub widget_uid: WidgetUid,
     pub container_uid: WidgetUid,
+    pub item_uid: WidgetUid,
     pub action: Box<dyn WidgetAction>
 }
 
@@ -633,8 +638,22 @@ impl WidgetActionItem {
     pub fn new(action: Box<dyn WidgetAction>, widget_uid:WidgetUid) -> Self {
         Self {
             container_uid: WidgetUid(0),
+            item_uid: WidgetUid(0),
             widget_uid,
             action
+        }
+    }
+    pub fn with_container(self, container_uid: WidgetUid)->Self{
+        Self{
+            container_uid,
+            ..self
+        }
+    }
+    
+    pub fn with_item(self, item_uid: WidgetUid)->Self{
+        Self{
+            item_uid,
+            ..self
         }
     }
     
@@ -669,9 +688,24 @@ impl<T: Clone> DrawStateWrap<T> {
             false
         }
     }
+
+    pub fn begin_with<F,S>(&mut self, cx: &Cx2d, v:&S, init: F) -> bool where F: FnOnce(&Cx2d, &S)-> T {
+        if self.redraw_id != cx.redraw_id() {
+            self.redraw_id = cx.redraw_id();
+            self.state = Some(init(cx, v));
+            true
+        }
+        else {
+            false
+        }
+    }
     
     pub fn get(&self) -> Option<T> {
         self.state.clone()
+    }
+    
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        self.state.as_mut()
     }
     
     pub fn set(&mut self, value: T) {

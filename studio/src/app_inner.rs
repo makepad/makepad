@@ -2,13 +2,11 @@ use {
     crate::{
         makepad_draw::*,
         makepad_widgets::{
-            Widget,
-            splitter::{SplitterAlign},
-            DesktopWindow,
-            dock::{Dock, DockAction, DragPosition, PanelId},
-            tab_bar::TabId,
-            slides_view::SlidesView,
-            file_tree::{FileTreeAction, FileNodeId, FileTree},
+            *,
+            dock::*,
+            tab_bar::*,
+            file_tree::*,
+            splitter::*
         },
         shader_view::ShaderView,
         collab_client::CollabClient,
@@ -34,56 +32,43 @@ use {
 
 live_design!{
     AppInner= {{AppInner}} {
-        // window: {caption: "Makepad Studio"}
     }
 }
 
 #[derive(Live, LiveHook)]
 pub struct AppInner {
-    
-    window: DesktopWindow,
-    dock: Dock,
-    file_tree: FileTree,
-    log_view: LogView,
-    shader_view: ShaderView,
-    slides_view: SlidesView,
-    run_view: RunView,
-    editors: Editors,
-    collab_client: CollabClient,
-    build_manager: BuildManager,
+    #[live] file_tree: FileTree,
+    #[live] log_view: LogView,
+    #[live] shader_view: ShaderView,
+    #[live] slides_view: SlidesView,
+    #[live] run_view: RunView,
+    #[live] editors: Editors,
+    #[live] collab_client: CollabClient,
+    #[live] build_manager: BuildManager,
 }
 
 impl AppInner {
     
-    pub fn draw(&mut self, cx: &mut Cx2d, state: &AppState) {
-        if self.window.begin(cx).is_redrawing() {
-            self.dock.begin(cx);
-            self.draw_panel(cx, state, live_id!(root).into());
-            self.dock.end(cx);
-            self.window.end(cx);
-        }
-    }
-    
-    fn draw_panel(&mut self, cx: &mut Cx2d, state: &AppState, panel_id: PanelId) {
+    pub fn draw_panel(&mut self, cx: &mut Cx2d, dock: &mut Dock, state: &AppState, panel_id: PanelId) {
         let panel = &state.panels[panel_id];
         match panel {
             Panel::Split(SplitPanel {child_panel_ids, axis, align}) => {
-                self.dock.begin_split_panel(cx, panel_id, *axis, *align);
-                self.draw_panel(cx, state, child_panel_ids[0]);
-                self.dock.middle_split_panel(cx);
-                self.draw_panel(cx, state, child_panel_ids[01]);
-                self.dock.end_split_panel(cx);
+                dock.begin_split_panel(cx, panel_id,*axis, *align);
+                self.draw_panel(cx, dock, state, child_panel_ids[0]);
+                dock.middle_split_panel(cx);
+                self.draw_panel(cx, dock, state, child_panel_ids[01]);
+                dock.end_split_panel(cx);
             }
             Panel::Tab(TabPanel {tab_ids, selected_tab}) => {
-                self.dock.begin_tab_panel(cx, panel_id);
-                self.dock.begin_tab_bar(cx, *selected_tab);
+                dock.begin_tab_panel(cx, panel_id);
+                dock.begin_tab_bar(cx, *selected_tab);
                 for tab_id in tab_ids {
                     let tab = &state.tabs[*tab_id];
-                    self.dock.draw_tab(cx, *tab_id, &tab.name);
+                    dock.draw_tab(cx, *tab_id, &tab.name);
                 }
-                self.dock.end_tab_bar(cx);
-                if self.dock.begin_contents(cx).is_redrawing() {
-                    if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
+                dock.end_tab_bar(cx);
+                if dock.begin_contents(cx).is_redrawing() {
+                    if let Some(tab_id) = dock.selected_tab_id(cx, panel_id) {
                         let tab = &state.tabs[tab_id];
                         match tab.kind {
                             TabKind::ShaderView => {
@@ -99,7 +84,7 @@ impl AppInner {
                                 self.log_view.draw(cx, &state.editor_state)
                             }
                             TabKind::FileTree => {
-                                self.file_tree.begin(cx);
+                                self.file_tree.begin(cx, Walk::fill());
                                 self.draw_file_node(cx, state, live_id!(root).into());
                                 self.file_tree.end(cx);
                             }
@@ -112,9 +97,9 @@ impl AppInner {
                             }
                         }
                     }
-                    self.dock.end_contents(cx);
+                    dock.end_contents(cx);
                 }
-                self.dock.end_tab_panel(cx);
+                dock.end_tab_panel(cx);
             }
         }
     }
@@ -123,8 +108,7 @@ impl AppInner {
         let file_node = &state.file_nodes[file_node_id];
         match &file_node.child_edges {
             Some(child_edges) => {
-                if self.file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok()
-                {
+                if self.file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok(){
                     for child_edge in child_edges {
                         self.draw_file_node(cx, state, child_edge.file_node_id);
                     }
@@ -137,46 +121,16 @@ impl AppInner {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) {
-        self.window.handle_event_with(cx, event, &mut | _, _ | {});
-        
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dock:&mut Dock, state: &mut AppState) {
         match event {
             Event::Construct => {
                 self.collab_client.send_request(CollabRequest::LoadFileTree {with_data: false});
-                /*self.create_code_editor_tab(
-                    cx,
-                    state,
-                    live_id!(content1).into(),
-                    None,
-                    state.file_path_join(&["examples/numbers/src/main.rs"]),
-                    true
-                );
-                self.create_code_editor_tab(
-                    cx,
-                    state,
-                    live_id!(content1).into(),
-                    None,
-                    state.file_path_join(&["examples/fractal_zoom/src/mandelbrot.rs"]),
-                    true
-                );*/
-                /*
-                self.create_code_editor_tab(
-                    cx,
-                    state,
-                    live_id!(content1).into(),
-                    None,
-                    state.file_path_join(&["examples/fractal_zoom/src/mandelbrot_simd.rs"]),
-                    true
-                );*/
                 self.build_manager.init(cx, state);
             }
-            Event::Draw(event) => {
-                return self.draw(&mut Cx2d::new(cx, event), state);
-            }
-            _ => ()
+            _=>()
         }
         
-        for action in self.dock.handle_event(cx, event) {
+        for action in dock.handle_event(cx, event) {
             match action {
                 DockAction::SplitPanelChanged {panel_id, axis, align} => {
                     if let Panel::Split(panel) = &mut state.panels[panel_id] {
@@ -184,17 +138,17 @@ impl AppInner {
                         panel.align = align;
                     }
                     // do shit here
-                    self.dock.redraw(cx);
-                    self.redraw_panel(cx, state, panel_id);
+                    dock.redraw(cx);
+                    self.redraw_panel(cx, dock, state, panel_id);
                 }
                 DockAction::TabBarReceivedDraggedItem(panel_id, item) => {
                     for file_url in &item.file_urls {
                         let path = UnixPath::new(&file_url[7..]).to_unix_path_buf();
-                        self.create_code_editor_tab(cx, state, panel_id, None, path, true);
+                        self.create_code_editor_tab(cx, dock, state, panel_id, None, path, true);
                     }
                 }
                 DockAction::TabWasPressed(panel_id, tab_id) => {
-                    self.select_tab(cx, state, panel_id, tab_id, Animate::Yes)
+                    self.select_tab(cx, dock, state, panel_id, tab_id, Animate::Yes)
                 }
                 DockAction::TabCloseWasPressed(panel_id, tab_id) => {
                     let tab = &state.tabs[tab_id];
@@ -213,8 +167,8 @@ impl AppInner {
                             panel.tab_ids.remove(panel.tab_position(tab_id));
                             state.tabs.remove(&tab_id);
                             
-                            self.dock.set_next_selected_tab(cx, panel_id, tab_id, Animate::Yes);
-                            self.dock.redraw_tab_bar(cx, panel_id);
+                            dock.set_next_selected_tab(cx, panel_id, tab_id, Animate::Yes);
+                            dock.redraw_tab_bar(cx, panel_id);
                         }
                         _ => {}
                     }
@@ -222,17 +176,17 @@ impl AppInner {
                 DockAction::TabReceivedDraggedItem(panel_id, tab_id, item) => {
                     for file_url in &item.file_urls {
                         let path = UnixPath::new(&file_url[7..]).to_unix_path_buf();
-                        self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path, true);
+                        self.create_code_editor_tab(cx, dock, state, panel_id, Some(tab_id), path, true);
                     }
                 }
                 DockAction::ContentsReceivedDraggedItem(panel_id, position, item) => {
                     let panel_id = match position {
                         DragPosition::Center => panel_id,
-                        _ => self.split_tab_panel(cx, state, panel_id, position),
+                        _ => self.split_tab_panel(cx, dock, state, panel_id, position),
                     };
                     for file_url in &item.file_urls {
                         let path = UnixPath::new(&file_url[7..]).to_unix_path_buf();
-                        self.create_code_editor_tab(cx, state, panel_id, None, path, true);
+                        self.create_code_editor_tab(cx, dock, state, panel_id, None, path, true);
                     }
                 }
             }
@@ -244,7 +198,7 @@ impl AppInner {
                     let node = &state.file_nodes[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
-                        self.create_code_editor_tab(cx, state, live_id!(content1).into(), None, path, true);
+                        self.create_code_editor_tab(cx, dock, state, live_id!(content1).into(), None, path, true);
                     }
                 }
                 FileTreeAction::ShouldStartDragging(file_node_id) => {
@@ -259,6 +213,7 @@ impl AppInner {
                         },
                     )
                 }
+                _=>()
             }
         }
         
@@ -292,7 +247,7 @@ impl AppInner {
                 CollabClientAction::Response(response) => match response {
                     CollabResponse::LoadFileTree(response) => {
                         self.load_file_tree(cx, state, response.unwrap());
-                        self.select_tab(cx, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
+                        self.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
                     response=>{
                         self.build_manager.handle_collab_response(cx, state, &response);
@@ -337,6 +292,7 @@ impl AppInner {
     fn split_tab_panel(
         &mut self,
         cx: &mut Cx,
+        dock: &mut Dock,
         state: &mut AppState,
         panel_id: PanelId,
         position: DragPosition,
@@ -372,8 +328,8 @@ impl AppInner {
             parent_panel.child_panel_ids[position] = new_parent_panel_id;
         }
         
-        self.dock.redraw(cx);
-        self.redraw_panel(cx, state, panel_id);
+        dock.redraw(cx);
+        self.redraw_panel(cx, dock, state, panel_id);
         
         new_panel_id
     }
@@ -381,6 +337,7 @@ impl AppInner {
     fn create_code_editor_tab(
         &mut self,
         cx: &mut Cx,
+        dock: &mut Dock,
         state: &mut AppState,
         panel_id: PanelId,
         next_tab_id: Option<TabId>,
@@ -406,16 +363,16 @@ impl AppInner {
             None => panel.tab_ids.push(tab_id),
         }
         if select {
-            self.select_tab(cx, state, panel_id, tab_id, Animate::No);
+            self.select_tab(cx, dock, state, panel_id, tab_id, Animate::No);
         }
     }
     
-    fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId, animate: Animate) {
+    fn select_tab(&mut self, cx: &mut Cx, dock:&mut Dock, state: &mut AppState, panel_id: PanelId, tab_id: TabId, animate: Animate) {
         let tab_panel = state.panels[panel_id].as_tab_panel_mut();
         let tab = &state.tabs[tab_id];
         tab_panel.selected_tab = Some(tab_panel.tab_position(tab_id));
-        self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id), animate);
-        self.dock.redraw_tab_bar(cx, panel_id);
+        dock.set_selected_tab_id(cx, panel_id, Some(tab_id), animate);
+        dock.redraw_tab_bar(cx, panel_id);
         match tab.kind {
             TabKind::CodeEditor {session_id} => {
                 self.editors.set_view_session_id(
@@ -427,20 +384,20 @@ impl AppInner {
             }
             _ => {}
         }
-        self.redraw_panel(cx, state, panel_id);
+        self.redraw_panel(cx, dock, state, panel_id);
     }
     
-    fn redraw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {
+    fn redraw_panel(&mut self, cx: &mut Cx, dock:&mut Dock, state: &AppState, panel_id: PanelId) {
         match &state.panels[panel_id] {
             Panel::Split(panel) => {
                 for child_panel_id in panel.child_panel_ids {
-                    self.redraw_panel(cx, state, child_panel_id);
+                    self.redraw_panel(cx, dock, state, child_panel_id);
                 }
             }
             Panel::Tab(_) => {
-                self.dock.redraw_tab_bar(cx, panel_id);
+                dock.redraw_tab_bar(cx, panel_id);
                 
-                if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
+                if let Some(tab_id) = dock.selected_tab_id(cx, panel_id) {
                     let tab = &state.tabs[tab_id];
                     match tab.kind {
                         TabKind::RunView => {

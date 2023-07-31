@@ -112,11 +112,7 @@ impl Cx {
                 // lets check if our vao is still valid
                 if draw_item.os.vao.is_none() {
                     draw_item.os.vao = Some(CxOsDrawCallVao {
-                        vao: unsafe {
-                            let mut vao = std::mem::MaybeUninit::uninit();
-                            gl_sys::GenVertexArrays(1, vao.as_mut_ptr());
-                            vao.assume_init()
-                        },
+                        vao: None,
                         shader_id: None,
                         inst_vb: None,
                         geom_vb: None,
@@ -130,12 +126,22 @@ impl Cx {
                     || vao.geom_ib != geometry.os.ib.gl_buffer
                     || vao.shader_id != Some(draw_call.draw_shader.draw_shader_id) {
                     
+                    if let Some(vao) = vao.vao.take(){
+                        unsafe{gl_sys::DeleteVertexArrays(1, &vao)};
+                    }
+                        
+                    vao.vao = Some(unsafe {
+                        let mut vao = 0u32;
+                        gl_sys::GenVertexArrays(1, &mut vao);
+                        vao
+                    });    
+                    
                     vao.shader_id = Some(draw_call.draw_shader.draw_shader_id);
                     vao.inst_vb = draw_item.os.inst_vb.gl_buffer;
                     vao.geom_vb = geometry.os.vb.gl_buffer;
                     vao.geom_ib = geometry.os.ib.gl_buffer;
                     unsafe {
-                        gl_sys::BindVertexArray(vao.vao);
+                        gl_sys::BindVertexArray(vao.vao.unwrap());
                         
                         // bind the vertex and indexbuffers
                         gl_sys::BindBuffer(gl_sys::ARRAY_BUFFER, vao.geom_vb.unwrap());
@@ -161,7 +167,7 @@ impl Cx {
                 unsafe {
                     gl_sys::UseProgram(shgl.program);
                     
-                    gl_sys::BindVertexArray(draw_item.os.vao.as_ref().unwrap().vao);
+                    gl_sys::BindVertexArray(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
                     let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
                     
                     let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
@@ -754,7 +760,7 @@ pub struct CxOsView {
 
 #[derive(Default, Clone)]
 pub struct CxOsDrawCallVao {
-    pub vao: u32,
+    pub vao: Option<u32>,
     pub shader_id: Option<usize>,
     pub inst_vb: Option<u32>,
     pub geom_vb: Option<u32>,
@@ -763,7 +769,9 @@ pub struct CxOsDrawCallVao {
 
 impl CxOsDrawCallVao {
     pub fn free(self){
-        unsafe{gl_sys::DeleteVertexArrays(1, &self.vao)};
+        if let Some(vao) = self.vao{
+            unsafe{gl_sys::DeleteVertexArrays(1, &vao)};
+        }
     }    
 }
 
