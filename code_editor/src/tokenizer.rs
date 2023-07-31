@@ -1,6 +1,6 @@
 use crate::{
     token::{TokenInfo, TokenKind},
-    Text, Diff,
+    Diff, Text,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

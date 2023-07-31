@@ -1,13 +1,14 @@
 use {
     crate::{
         token::{TokenInfo, TokenKind},
-        Bias, BiasedUsize, Point, Token,
+        Bias, BiasedUsize, Point, Settings, Token,
     },
     std::slice,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Line<'a> {
+    settings: &'a Settings,
     text: &'a str,
     token_infos: &'a [TokenInfo],
     inline_text_inlays: &'a [(usize, String)],
@@ -20,20 +21,22 @@ pub struct Line<'a> {
 
 impl<'a> Line<'a> {
     pub fn new(
+        settings: &'a Settings,
         text: &'a str,
         token_infos: &'a [TokenInfo],
         inline_text_inlays: &'a [(usize, String)],
-        block_widget_inlays: &'a [((usize, Bias), Widget)],
+        inline_widget_inlays: &'a [((usize, Bias), Widget)],
         soft_breaks: &'a [usize],
         start_column_after_wrap: usize,
         fold_column: usize,
         scale: f64,
     ) -> Self {
         Self {
+            settings,
             text,
             token_infos,
             inline_text_inlays,
-            inline_widget_inlays: block_widget_inlays,
+            inline_widget_inlays,
             soft_breaks,
             start_column_after_wrap,
             fold_column,
@@ -41,7 +44,7 @@ impl<'a> Line<'a> {
         }
     }
 
-    pub fn compute_width(&self, tab_width: usize) -> usize {
+    pub fn compute_width(&self) -> usize {
         use crate::str::StrExt;
 
         let mut max_width = 0;
@@ -49,7 +52,7 @@ impl<'a> Line<'a> {
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    width += token.text.column_count(tab_width);
+                    width += token.text.column_count(self.settings.tab_width);
                 }
                 WrappedElement::Widget(_, widget) => {
                     width += widget.column_count;
@@ -67,15 +70,15 @@ impl<'a> Line<'a> {
         self.soft_breaks.len() + 1
     }
 
-    pub fn compute_scaled_width(&self, tab_width: usize) -> f64 {
-        self.column_to_x(self.compute_width(tab_width))
+    pub fn compute_scaled_width(&self) -> f64 {
+        self.column_to_x(self.compute_width())
     }
 
     pub fn scaled_height(&self) -> f64 {
         self.scale * self.height() as f64
     }
 
-    pub fn biased_byte_to_point(&self, biased_byte: BiasedUsize, tab_width: usize) -> Point {
+    pub fn biased_byte_to_point(&self, biased_byte: BiasedUsize) -> Point {
         use crate::str::StrExt;
 
         let mut byte = 0;
@@ -91,14 +94,14 @@ impl<'a> Line<'a> {
                             return point;
                         }
                         byte += grapheme.len();
-                        point.column += grapheme.column_count(tab_width);
+                        point.column += grapheme.column_count(self.settings.tab_width);
                         if biased_byte.value == byte && biased_byte.bias == Bias::Before {
                             return point;
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    point.column += token.text.column_count(tab_width);
+                    point.column += token.text.column_count(self.settings.tab_width);
                 }
                 WrappedElement::Widget(_, widget) => {
                     point.column += widget.column_count;
@@ -115,7 +118,7 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn point_to_biased_byte(&self, point: Point, tab_width: usize) -> BiasedUsize {
+    pub fn point_to_biased_byte(&self, point: Point) -> BiasedUsize {
         use crate::str::StrExt;
 
         let mut row = 0;
@@ -125,7 +128,7 @@ impl<'a> Line<'a> {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_column = column + grapheme.column_count(tab_width);
+                        let next_column = column + grapheme.column_count(self.settings.tab_width);
                         if point.row == row && (column..next_column).contains(&point.column) {
                             return BiasedUsize {
                                 value: byte,
@@ -137,7 +140,7 @@ impl<'a> Line<'a> {
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_column = column + token.text.column_count(tab_width);
+                    let next_column = column + token.text.column_count(self.settings.tab_width);
                     if point.row == row && (column..next_column).contains(&point.column) {
                         return BiasedUsize {
                             value: byte,
@@ -269,8 +272,9 @@ impl<'a> Iterator for InlineElements<'a> {
                 *byte == self.byte && *bias == Bias::Before
             })
         {
-            let ((_, widget), block_widget_inlays) = self.inline_widget_inlays.split_first().unwrap();
-            self.inline_widget_inlays = block_widget_inlays;
+            let ((_, widget), inline_widget_inlays) =
+                self.inline_widget_inlays.split_first().unwrap();
+            self.inline_widget_inlays = inline_widget_inlays;
             return Some(Element::Widget(Bias::Before, *widget));
         }
         if self
@@ -289,8 +293,9 @@ impl<'a> Iterator for InlineElements<'a> {
                 *byte == self.byte && *bias == Bias::After
             })
         {
-            let ((_, widget), block_widget_inlays) = self.inline_widget_inlays.split_first().unwrap();
-            self.inline_widget_inlays = block_widget_inlays;
+            let ((_, widget), inline_widget_inlays) =
+                self.inline_widget_inlays.split_first().unwrap();
+            self.inline_widget_inlays = inline_widget_inlays;
             return Some(Element::Widget(Bias::After, *widget));
         }
         let token = self.token.take()?;
