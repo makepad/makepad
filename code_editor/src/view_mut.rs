@@ -1,7 +1,7 @@
 use {
     crate::{
-        line, view, view::LineInlay, Bias, BiasedTextPos, Sel, Settings, Text, TextDiff,
-        TextPos, TextRange, Tokenizer, View,
+        line, view, view::LineInlay, Bias, BiasedPos, Sel, Settings, Text, Diff,
+        Pos, Range, Tokenizer, View,
     },
     std::collections::HashSet,
 };
@@ -9,14 +9,14 @@ use {
 #[derive(Debug, PartialEq)]
 pub struct ViewMut<'a> {
     settings: &'a mut Settings,
-    max_col: &'a mut Option<usize>,
+    max_column: &'a mut Option<usize>,
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
     inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
     inline_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
     soft_breaks: &'a mut Vec<Vec<usize>>,
-    start_col_after_wrap: &'a mut Vec<usize>,
-    fold_col: &'a mut Vec<usize>,
+    start_column_after_wrap: &'a mut Vec<usize>,
+    fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
@@ -30,14 +30,14 @@ pub struct ViewMut<'a> {
 impl<'a> ViewMut<'a> {
     pub fn new(
         settings: &'a mut Settings,
-        max_col: &'a mut Option<usize>,
+        max_column: &'a mut Option<usize>,
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
         inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
         inline_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
         soft_breaks: &'a mut Vec<Vec<usize>>,
-        start_col_after_wrap: &'a mut Vec<usize>,
-        fold_col: &'a mut Vec<usize>,
+        start_column_after_wrap: &'a mut Vec<usize>,
+        fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
@@ -49,14 +49,14 @@ impl<'a> ViewMut<'a> {
     ) -> Self {
         Self {
             settings,
-            max_col,
+            max_column,
             text,
             tokenizer,
             inline_text_inlays,
             inline_widget_inlays,
             soft_breaks,
-            start_col_after_wrap,
-            fold_col,
+            start_column_after_wrap,
+            fold_column,
             scale,
             line_inlays,
             block_widget_inlays,
@@ -68,7 +68,7 @@ impl<'a> ViewMut<'a> {
         }
     }
 
-    pub fn document(&self) -> View<'_> {
+    pub fn as_view(&self) -> View<'_> {
         View::new(
             self.settings,
             self.text,
@@ -76,8 +76,8 @@ impl<'a> ViewMut<'a> {
             self.inline_text_inlays,
             self.inline_widget_inlays,
             self.soft_breaks,
-            self.start_col_after_wrap,
-            self.fold_col,
+            self.start_column_after_wrap,
+            self.fold_column,
             self.scale,
             self.line_inlays,
             self.block_widget_inlays,
@@ -87,11 +87,11 @@ impl<'a> ViewMut<'a> {
         )
     }
 
-    pub fn set_max_col(&mut self, max_col: Option<usize>) {
-        if *self.max_col == max_col {
+    pub fn set_max_column(&mut self, max_column: Option<usize>) {
+        if *self.max_column == max_column {
             return;
         }
-        *self.max_col = max_col;
+        *self.max_column = max_column;
         self.wrap_lines();
     }
 
@@ -119,7 +119,7 @@ impl<'a> ViewMut<'a> {
         self.modify_text(edit_ops::backspace)
     }
 
-    pub fn set_cursor_pos(&mut self, pos: BiasedTextPos) {
+    pub fn set_cursor_pos(&mut self, pos: BiasedPos) {
         use crate::Cursor;
 
         self.sels.clear();
@@ -127,7 +127,7 @@ impl<'a> ViewMut<'a> {
         *self.latest_sel_index = 0;
     }
 
-    pub fn insert_cursor(&mut self, pos: BiasedTextPos) {
+    pub fn insert_cursor(&mut self, pos: BiasedPos) {
         use {crate::Cursor, std::cmp::Ordering};
 
         let sel = Sel::from(Cursor::from(pos));
@@ -151,9 +151,9 @@ impl<'a> ViewMut<'a> {
         };
     }
 
-    pub fn move_cursor_to(&mut self, select: bool, pos: BiasedTextPos) {
+    pub fn move_cursor_to(&mut self, select: bool, pos: BiasedPos) {
         let latest_sel = &mut self.sels[*self.latest_sel_index];
-        latest_sel.cursor.pos = pos;
+        latest_sel.cursor.biased_pos = pos;
         if !select {
             latest_sel.anchor = pos;
         }
@@ -185,11 +185,11 @@ impl<'a> ViewMut<'a> {
 
         self.modify_sels(select, |view, sel| {
             sel.update_cursor(|cursor| Cursor {
-                pos: BiasedTextPos {
-                    pos: move_ops::move_left(view.text().as_lines(), cursor.pos.pos),
+                biased_pos: BiasedPos {
+                    pos: move_ops::move_left(view.text().as_lines(), cursor.biased_pos.pos),
                     bias: Bias::Before,
                 },
-                col: None,
+                column: None,
             })
         });
     }
@@ -199,11 +199,11 @@ impl<'a> ViewMut<'a> {
 
         self.modify_sels(select, |view, sel| {
             sel.update_cursor(|cursor| Cursor {
-                pos: BiasedTextPos {
-                    pos: move_ops::move_right(view.text().as_lines(), cursor.pos.pos),
+                biased_pos: BiasedPos {
+                    pos: move_ops::move_right(view.text().as_lines(), cursor.biased_pos.pos),
                     bias: Bias::After,
                 },
-                col: None,
+                column: None,
             })
         });
     }
@@ -237,16 +237,16 @@ impl<'a> ViewMut<'a> {
         };
         let mut summed_heights = mem::take(self.summed_heights);
         for element in self
-            .document()
-            .elements(start, self.document().line_count())
+            .as_view()
+            .elements(start, self.as_view().line_count())
         {
             match element {
                 view::Element::Line(false, line) => {
-                    summed_height += line.height();
+                    summed_height += line.scaled_height();
                     summed_heights.push(summed_height);
                 }
                 view::Element::Line(true, line) => {
-                    summed_height += line.height();
+                    summed_height += line.scaled_height();
                 }
                 view::Element::Widget(_, widget) => {
                     summed_height += widget.height;
@@ -256,8 +256,8 @@ impl<'a> ViewMut<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
-        self.fold_col[line_index] = fold_col;
+    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
+        self.fold_column[line_index] = fold_column;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -304,34 +304,34 @@ impl<'a> ViewMut<'a> {
     fn wrap_lines(&mut self) {
         use crate::str::StrExt;
 
-        for line in 0..self.document().line_count() {
+        for line in 0..self.as_view().line_count() {
             let old_wrap_byte_count = self.soft_breaks[line].len();
             self.soft_breaks[line].clear();
-            self.start_col_after_wrap[line] = 0;
-            if let Some(&max_col) = self.max_col.as_ref() {
+            self.start_column_after_wrap[line] = 0;
+            if let Some(&max_column) = self.max_column.as_ref() {
                 let mut byte = 0;
-                let mut col = 0;
-                let document = self.document();
+                let mut column = 0;
+                let document = self.as_view();
                 let line_ref = document.line(line);
-                let mut start_col_after_wrap = line_ref
+                let mut start_column_after_wrap = line_ref
                     .text()
                     .indentation()
-                    .col_count(document.settings().tab_width);
+                    .column_count(document.settings().tab_width);
                 for element in line_ref.inline_elements() {
                     match element {
                         line::Element::Token(_, token) => {
                             for string in token.text.split_whitespace_boundaries() {
-                                if start_col_after_wrap
-                                    + string.col_count(document.settings().tab_width)
-                                    > max_col
+                                if start_column_after_wrap
+                                    + string.column_count(document.settings().tab_width)
+                                    > max_column
                                 {
-                                    start_col_after_wrap = 0;
+                                    start_column_after_wrap = 0;
                                 }
                             }
                         }
                         line::Element::Widget(_, widget) => {
-                            if start_col_after_wrap + widget.col_count > max_col {
-                                start_col_after_wrap = 0;
+                            if start_column_after_wrap + widget.column_count > max_column {
+                                start_column_after_wrap = 0;
                             }
                         }
                     }
@@ -341,28 +341,28 @@ impl<'a> ViewMut<'a> {
                     match element {
                         line::Element::Token(_, token) => {
                             for string in token.text.split_whitespace_boundaries() {
-                                let mut next_col = col
-                                    + string.col_count(document.settings().tab_width);
-                                if next_col > max_col {
-                                    next_col = start_col_after_wrap;
+                                let mut next_column = column
+                                    + string.column_count(document.settings().tab_width);
+                                if next_column > max_column {
+                                    next_column = start_column_after_wrap;
                                     soft_breaks.push(byte);
                                 }
                                 byte += string.len();
-                                col = next_col;
+                                column = next_column;
                             }
                         }
                         line::Element::Widget(_, widget) => {
-                            let mut next_col = col + widget.col_count;
-                            if next_col > max_col {
-                                next_col = start_col_after_wrap;
+                            let mut next_column = column + widget.column_count;
+                            if next_column > max_column {
+                                next_column = start_column_after_wrap;
                                 soft_breaks.push(byte);
                             }
-                            col = next_col;
+                            column = next_column;
                         }
                     }
                 }
                 self.soft_breaks[line] = soft_breaks;
-                self.start_col_after_wrap[line] = start_col_after_wrap;
+                self.start_column_after_wrap[line] = start_column_after_wrap;
             }
             if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
@@ -379,7 +379,7 @@ impl<'a> ViewMut<'a> {
         use std::mem;
 
         let mut sels = mem::take(self.sels);
-        let document = self.document();
+        let document = self.as_view();
         for sel in &mut sels {
             *sel = f(&document, *sel);
             if !select {
@@ -405,17 +405,17 @@ impl<'a> ViewMut<'a> {
         }
     }
 
-    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, TextRange) -> TextDiff) {
-        use crate::{text_pos::ApplyDiffMode, Cursor};
+    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
+        use crate::{pos::ApplyDiffMode, Cursor};
 
-        let mut composite_diff = TextDiff::new();
-        let mut prev_end = TextPos::default();
-        let mut diffed_prev_end = TextPos::default();
+        let mut composite_diff = Diff::new();
+        let mut prev_end = Pos::default();
+        let mut diffed_prev_end = Pos::default();
         for sel in &mut *self.sels {
             let distance_from_prev_end = sel.start().pos - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
             let diffed_end = diffed_start + sel.len();
-            let diff = f(&mut self.text, TextRange::new(diffed_start, diffed_end));
+            let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             self.text.apply_diff(diff.clone());
@@ -424,21 +424,21 @@ impl<'a> ViewMut<'a> {
             diffed_prev_end = diffed_end;
             let anchor_pos;
             let cursor_pos;
-            if sel.anchor <= sel.cursor.pos {
-                anchor_pos = BiasedTextPos {
+            if sel.anchor <= sel.cursor.biased_pos {
+                anchor_pos = BiasedPos {
                     pos: diffed_start,
                     bias: sel.start().bias,
                 };
-                cursor_pos = BiasedTextPos {
+                cursor_pos = BiasedPos {
                     pos: diffed_end,
                     bias: sel.end().bias,
                 };
             } else {
-                anchor_pos = BiasedTextPos {
+                anchor_pos = BiasedPos {
                     pos: diffed_end,
                     bias: sel.end().bias,
                 };
-                cursor_pos = BiasedTextPos {
+                cursor_pos = BiasedPos {
                     pos: diffed_start,
                     bias: sel.start().bias,
                 };
@@ -446,16 +446,16 @@ impl<'a> ViewMut<'a> {
             *sel = Sel {
                 anchor: anchor_pos,
                 cursor: Cursor {
-                    pos: cursor_pos,
-                    col: None,
+                    biased_pos: cursor_pos,
+                    column: None,
                 },
             };
         }
         self.update_after_modify_text(composite_diff);
     }
 
-    fn update_after_modify_text(&mut self, diff: TextDiff) {
-        use crate::text_diff::OpInfo;
+    fn update_after_modify_text(&mut self, diff: Diff) {
+        use crate::diff::OpInfo;
 
         let mut line = 0;
         for operation in &diff {
@@ -466,8 +466,8 @@ impl<'a> ViewMut<'a> {
                     self.inline_text_inlays.drain(start_line..end_line);
                     self.inline_widget_inlays.drain(start_line..end_line);
                     self.soft_breaks.drain(start_line..end_line);
-                    self.start_col_after_wrap.drain(start_line..end_line);
-                    self.fold_col.drain(start_line..end_line);
+                    self.start_column_after_wrap.drain(start_line..end_line);
+                    self.fold_column.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -483,9 +483,9 @@ impl<'a> ViewMut<'a> {
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_col_after_wrap
+                    self.start_column_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_col
+                    self.fold_column
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));

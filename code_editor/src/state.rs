@@ -12,10 +12,10 @@ use {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct State {
     settings: Settings,
-    view_id: usize,
-    views: HashMap<ViewId, Session>,
-    editor_id: usize,
-    editors: HashMap<EditorId, Editor>,
+    session_id: usize,
+    sessions: HashMap<SessionId, Session>,
+    document: usize,
+    docs: HashMap<DocumentId, Document>,
 }
 
 impl State {
@@ -34,43 +34,43 @@ impl State {
         &self.settings
     }
 
-    pub fn document(&self, view_id: ViewId) -> View<'_> {
-        let view = &self.views[&view_id];
-        let editor = &self.editors[&view.editor_id];
+    pub fn session(&self, session: SessionId) -> View<'_> {
+        let session = &self.sessions[&session];
+        let doc = &self.docs[&session.document_id];
         View::new(
             &self.settings,
-            &editor.text,
-            &editor.tokenizer,
-            &editor.inline_text_inlays,
-            &editor.inline_widget_inlays,
-            &view.soft_breaks,
-            &view.start_col_after_wrap,
-            &view.fold_col,
-            &view.scale,
-            &editor.line_inlays,
-            &editor.block_widget_inlays,
-            &view.summed_heights,
-            &view.sels,
-            view.latest_sel_index,
+            &doc.text,
+            &doc.tokenizer,
+            &doc.inline_text_inlays,
+            &doc.inline_widget_inlays,
+            &session.soft_breaks,
+            &session.start_column_after_wrap,
+            &session.fold_column,
+            &session.scale,
+            &doc.line_inlays,
+            &doc.block_widget_inlays,
+            &session.summed_heights,
+            &session.sels,
+            session.latest_sel_index,
         )
     }
 
-    pub fn context(&mut self, view_id: ViewId) -> ViewMut<'_> {
-        let view = self.views.get_mut(&view_id).unwrap();
-        let editor = self.editors.get_mut(&view.editor_id).unwrap();
+    pub fn view_mut(&mut self, session: SessionId) -> ViewMut<'_> {
+        let view = self.sessions.get_mut(&session).unwrap();
+        let doc = self.docs.get_mut(&view.document_id).unwrap();
         ViewMut::new(
             &mut self.settings,
-            &mut view.max_col,
-            &mut editor.text,
-            &mut editor.tokenizer,
-            &mut editor.inline_text_inlays,
-            &mut editor.inline_widget_inlays,
+            &mut view.max_column,
+            &mut doc.text,
+            &mut doc.tokenizer,
+            &mut doc.inline_text_inlays,
+            &mut doc.inline_widget_inlays,
             &mut view.soft_breaks,
-            &mut view.start_col_after_wrap,
-            &mut view.fold_col,
+            &mut view.start_column_after_wrap,
+            &mut view.fold_column,
             &mut view.scale,
-            &mut editor.line_inlays,
-            &mut editor.block_widget_inlays,
+            &mut doc.line_inlays,
+            &mut doc.block_widget_inlays,
             &mut view.summed_heights,
             &mut view.sels,
             &mut view.latest_sel_index,
@@ -79,19 +79,19 @@ impl State {
         )
     }
 
-    pub fn open_view(&mut self, path: impl AsRef<Path>) -> io::Result<ViewId> {
-        let editor_id = self.open_editor(path)?;
-        let view_id = ViewId(self.view_id);
-        self.view_id += 1;
-        let line_count = self.editors[&editor_id].text.as_lines().len();
-        self.views.insert(
-            view_id,
+    pub fn open_session(&mut self, path: impl AsRef<Path>) -> io::Result<SessionId> {
+        let document = self.open_document(path)?;
+        let session = SessionId(self.session_id);
+        self.session_id += 1;
+        let line_count = self.docs[&document].text.as_lines().len();
+        self.sessions.insert(
+            session,
             Session {
-                editor_id,
-                max_col: None,
+                document_id: document,
+                max_column: None,
                 soft_breaks: (0..line_count).map(|_| [].into()).collect(),
-                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_col: (0..line_count).map(|_| 0).collect(),
+                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
                 sels: [Sel::default()].into(),
@@ -100,22 +100,22 @@ impl State {
                 unfolding_lines: HashSet::new(),
             },
         );
-        self.context(view_id).update_summed_heights();
-        Ok(view_id)
+        self.view_mut(session).update_summed_heights();
+        Ok(session)
     }
 
-    fn open_editor(&mut self, path: impl AsRef<Path>) -> io::Result<EditorId> {
+    fn open_document(&mut self, path: impl AsRef<Path>) -> io::Result<DocumentId> {
         use std::fs;
 
-        let editor_id = EditorId(self.editor_id);
-        self.editor_id += 1;
+        let document = DocumentId(self.document);
+        self.document += 1;
         let bytes = fs::read(path.as_ref())?;
         let text: Text = String::from_utf8_lossy(&bytes).into();
         let tokenizer = Tokenizer::new(&text);
         let line_count = text.as_lines().len();
-        self.editors.insert(
-            editor_id,
-            Editor {
+        self.docs.insert(
+            document,
+            Document {
                 text,
                 tokenizer,
                 inline_text_inlays: (0..line_count)
@@ -156,21 +156,21 @@ impl State {
                 block_widget_inlays: [].into(),
             },
         );
-        Ok(editor_id)
+        Ok(document)
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ViewId(usize);
+pub struct SessionId(usize);
 
 #[derive(Clone, Debug, PartialEq)]
 struct Session {
-    max_col: Option<usize>,
-    editor_id: EditorId,
-    fold_col: Vec<usize>,
+    max_column: Option<usize>,
+    document_id: DocumentId,
+    fold_column: Vec<usize>,
     scale: Vec<f64>,
     soft_breaks: Vec<Vec<usize>>,
-    start_col_after_wrap: Vec<usize>,
+    start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
     sels: Vec<Sel>,
     latest_sel_index: usize,
@@ -179,10 +179,10 @@ struct Session {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct EditorId(usize);
+struct DocumentId(usize);
 
 #[derive(Clone, Debug, PartialEq)]
-struct Editor {
+struct Document {
     text: Text,
     tokenizer: Tokenizer,
     inline_text_inlays: Vec<Vec<(usize, String)>>,
