@@ -1,12 +1,12 @@
 use crate::{BiasedTextPos, Cursor, TextLen, TextPos};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Selection {
+pub struct Sel {
     pub anchor: BiasedTextPos,
     pub cursor: Cursor,
 }
 
-impl Selection {
+impl Sel {
     pub fn is_empty(self) -> bool {
         self.anchor == self.cursor.pos
     }
@@ -52,12 +52,12 @@ impl Selection {
             return None;
         }
         Some(if self.anchor <= self.cursor.pos {
-            Selection {
+            Sel {
                 anchor: self.anchor,
                 cursor: other.cursor
             }
         } else {
-            Selection {
+            Sel {
                 anchor: other.anchor,
                 cursor: self.cursor,
             }
@@ -66,19 +66,19 @@ impl Selection {
 
 }
 
-impl From<TextPos> for Selection {
+impl From<TextPos> for Sel {
     fn from(pos: TextPos) -> Self {
-        Selection::from(BiasedTextPos::from(pos))
+        Sel::from(BiasedTextPos::from(pos))
     }
 }
 
-impl From<BiasedTextPos> for Selection {
+impl From<BiasedTextPos> for Sel {
     fn from(pos: BiasedTextPos) -> Self {
-        Selection::from(Cursor::from(pos))
+        Sel::from(Cursor::from(pos))
     }
 }
 
-impl From<Cursor> for Selection {
+impl From<Cursor> for Sel {
     fn from(cursor: Cursor) -> Self {
         Self {
             anchor: cursor.pos,

@@ -1,5 +1,5 @@
 use {
-    crate::{line, token::TokenInfo, Bias, Line, Selection, Settings, Text, Tokenizer},
+    crate::{line, token::TokenInfo, Bias, Line, Sel, Settings, Text, Tokenizer},
     std::slice,
 };
 
@@ -8,17 +8,17 @@ pub struct View<'a> {
     settings: &'a Settings,
     text: &'a Text,
     tokenizer: &'a Tokenizer,
-    text_inlays: &'a [Vec<(usize, String)>],
-    line_widget_inlays: &'a [Vec<((usize, Bias), line::Widget)>],
-    wrap_bytes: &'a [Vec<usize>],
-    start_column_after_wrap: &'a [usize],
-    fold_column: &'a [usize],
+    inline_text_inlays: &'a [Vec<(usize, String)>],
+    inline_widget_inlays: &'a [Vec<((usize, Bias), line::Widget)>],
+    soft_breaks: &'a [Vec<usize>],
+    start_col_after_wrap: &'a [usize],
+    fold_col: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Bias), Widget)],
+    block_widget_inlays: &'a [((usize, Bias), Widget)],
     summed_heights: &'a [f64],
-    selections: &'a [Selection],
-    latest_selection_index: usize,
+    sels: &'a [Sel],
+    latest_sel_index: usize,
 }
 
 impl<'a> View<'a> {
@@ -26,33 +26,33 @@ impl<'a> View<'a> {
         settings: &'a Settings,
         text: &'a Text,
         tokenizer: &'a Tokenizer,
-        text_inlays: &'a [Vec<(usize, String)>],
-        line_widget_inlays: &'a [Vec<((usize, Bias), line::Widget)>],
-        wrap_bytes: &'a [Vec<usize>],
-        start_column_after_wrap: &'a [usize],
-        fold_column: &'a [usize],
+        inline_text_inlays: &'a [Vec<(usize, String)>],
+        inline_widget_inlays: &'a [Vec<((usize, Bias), line::Widget)>],
+        soft_breaks: &'a [Vec<usize>],
+        start_col_after_wrap: &'a [usize],
+        fold_col: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
-        widget_inlays: &'a [((usize, Bias), Widget)],
+        block_widget_inlays: &'a [((usize, Bias), Widget)],
         summed_heights: &'a [f64],
-        selections: &'a [Selection],
-        latest_selection_index: usize,
+        sels: &'a [Sel],
+        latest_sel_index: usize,
     ) -> Self {
         Self {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            widget_inlays,
+            block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
         }
     }
 
@@ -64,7 +64,7 @@ impl<'a> View<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_width),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -113,11 +113,11 @@ impl<'a> View<'a> {
         Line::new(
             &self.text.as_lines()[line],
             &self.tokenizer.token_infos()[line],
-            &self.text_inlays[line],
-            &self.line_widget_inlays[line],
-            &self.wrap_bytes[line],
-            self.start_column_after_wrap[line],
-            self.fold_column[line],
+            &self.inline_text_inlays[line],
+            &self.inline_widget_inlays[line],
+            &self.soft_breaks[line],
+            self.start_col_after_wrap[line],
+            self.fold_col[line],
             self.scale[line],
         )
     }
@@ -126,11 +126,11 @@ impl<'a> View<'a> {
         Lines {
             text: self.text.as_lines()[start_line..end_line].iter(),
             token_infos: self.tokenizer.token_infos()[start_line..end_line].iter(),
-            text_inlays: self.text_inlays[start_line..end_line].iter(),
-            line_widget_inlays: self.line_widget_inlays[start_line..end_line].iter(),
-            wrap_bytes: self.wrap_bytes[start_line..end_line].iter(),
-            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
-            fold_column: self.fold_column[start_line..end_line].iter(),
+            inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
+            inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
+            soft_breaks: self.soft_breaks[start_line..end_line].iter(),
+            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
+            fold_col: self.fold_col[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -151,21 +151,21 @@ impl<'a> View<'a> {
                 .iter()
                 .position(|(line, _)| *line >= start_line)
                 .unwrap_or(self.line_inlays.len())..],
-            widget_inlays: &self.widget_inlays[self
-                .widget_inlays
+            block_widget_inlays: &self.block_widget_inlays[self
+                .block_widget_inlays
                 .iter()
                 .position(|((line, _), _)| *line >= start_line)
-                .unwrap_or(self.widget_inlays.len())..],
+                .unwrap_or(self.block_widget_inlays.len())..],
             line: start_line,
         }
     }
 
-    pub fn selections(&self) -> &'a [Selection] {
-        self.selections
+    pub fn sels(&self) -> &'a [Sel] {
+        self.sels
     }
 
-    pub fn latest_selection_index(&self) -> usize {
-        self.latest_selection_index
+    pub fn latest_sel_index(&self) -> usize {
+        self.latest_sel_index
     }
 }
 
@@ -173,11 +173,11 @@ impl<'a> View<'a> {
 pub struct Lines<'a> {
     text: slice::Iter<'a, String>,
     token_infos: slice::Iter<'a, Vec<TokenInfo>>,
-    text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
-    line_widget_inlays: slice::Iter<'a, Vec<((usize, Bias), line::Widget)>>,
-    wrap_bytes: slice::Iter<'a, Vec<usize>>,
-    start_column_after_wrap: slice::Iter<'a, usize>,
-    fold_column: slice::Iter<'a, usize>,
+    inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
+    inline_widget_inlays: slice::Iter<'a, Vec<((usize, Bias), line::Widget)>>,
+    soft_breaks: slice::Iter<'a, Vec<usize>>,
+    start_col_after_wrap: slice::Iter<'a, usize>,
+    fold_col: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -188,11 +188,11 @@ impl<'a> Iterator for Lines<'a> {
         Some(Line::new(
             self.text.next()?,
             self.token_infos.next()?,
-            self.text_inlays.next()?,
-            self.line_widget_inlays.next()?,
-            self.wrap_bytes.next()?,
-            *self.start_column_after_wrap.next()?,
-            *self.fold_column.next()?,
+            self.inline_text_inlays.next()?,
+            self.inline_widget_inlays.next()?,
+            self.soft_breaks.next()?,
+            *self.start_col_after_wrap.next()?,
+            *self.fold_col.next()?,
             *self.scale.next()?,
         ))
     }
@@ -202,7 +202,7 @@ impl<'a> Iterator for Lines<'a> {
 pub struct Elements<'a> {
     lines: Lines<'a>,
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Bias), Widget)],
+    block_widget_inlays: &'a [((usize, Bias), Widget)],
     line: usize,
 }
 
@@ -211,14 +211,14 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Bias::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Bias::Before, *widget));
         }
         if self
@@ -231,14 +231,14 @@ impl<'a> Iterator for Elements<'a> {
             return Some(Element::Line(true, line.as_line()));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Bias::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Bias::After, *widget));
         }
         let line = self.lines.next()?;
