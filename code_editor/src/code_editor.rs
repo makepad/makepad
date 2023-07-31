@@ -1,5 +1,5 @@
 use {
-    crate::{state::SessionId, Bias, BiasedPos, ViewMut, Sel, State, Pos, View},
+    crate::{state::SessionId, Bias, BiasedPos, Pos, Sel, State, View, ViewMut},
     makepad_widgets::*,
 };
 
@@ -120,7 +120,13 @@ impl CodeEditor {
         self.end(cx, view);
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, state: &mut State, session_id: SessionId, event: &Event) {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut State,
+        session_id: SessionId,
+        event: &Event,
+    ) {
         use crate::str::StrExt;
 
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
@@ -317,9 +323,7 @@ impl CodeEditor {
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                column += token
-                                    .text
-                                    .column_count(document.settings().tab_width);
+                                column += token.text.column_count(document.settings().tab_width);
                             }
                             line::WrappedElement::Widget(_, widget) => {
                                 column += widget.column_count;
@@ -342,14 +346,16 @@ impl CodeEditor {
     fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
         let mut active_sel = None;
         let mut sels = document.sels();
-        while sels.first().map_or(false, |sel| {
-            sel.end().pos.line < self.start_line
-        }) {
+        while sels
+            .first()
+            .map_or(false, |sel| sel.end().pos.line < self.start_line)
+        {
             sels = &sels[1..];
         }
-        if sels.first().map_or(false, |sel| {
-            sel.start().pos.line < self.start_line
-        }) {
+        if sels
+            .first()
+            .map_or(false, |sel| sel.start().pos.line < self.start_line)
+        {
             let (sel, remaining_sels) = sels.split_first().unwrap();
             sels = remaining_sels;
             active_sel = Some(ActiveSelection::new(*sel, 0.0));
@@ -379,8 +385,7 @@ impl CodeEditor {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
                                     let next_column = column
-                                        + grapheme
-                                            .column_count(document.settings().tab_width);
+                                        + grapheme.column_count(document.settings().tab_width);
                                     let next_y = y + line_ref.scale();
                                     let x = line_ref.column_to_x(column);
                                     let next_x = line_ref.column_to_x(next_column);
@@ -407,10 +412,8 @@ impl CodeEditor {
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_column = column
-                                    + token
-                                        .text
-                                        .column_count(document.settings().tab_width);
+                                let next_column =
+                                    column + token.text.column_count(document.settings().tab_width);
                                 let x = line_ref.column_to_x(column);
                                 let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
@@ -507,8 +510,7 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count(document.settings().tab_width);
+                                    column += grapheme.column_count(document.settings().tab_width);
                                     self.handle_event(
                                         cx,
                                         line,
@@ -521,9 +523,7 @@ impl<'a> DrawSelectionsContext<'a> {
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                column += token
-                                    .text
-                                    .column_count(document.settings().tab_width);
+                                column += token.text.column_count(document.settings().tab_width);
                             }
                             line::WrappedElement::Widget(_, widget) => {
                                 column += widget.column_count;
@@ -583,9 +583,11 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let pos = Pos { line, byte };
-        if self.active_sel.as_ref().map_or(false, |sel| {
-            sel.sel.end() == BiasedPos { pos, bias }
-        }) {
+        if self
+            .active_sel
+            .as_ref()
+            .map_or(false, |sel| sel.sel.end() == BiasedPos { pos, bias })
+        {
             self.draw_sel(cx, x, y, height);
             self.code_editor.draw_sel.end(cx);
             let sel = self.active_sel.take().unwrap().sel;
@@ -593,9 +595,11 @@ impl<'a> DrawSelectionsContext<'a> {
                 self.draw_cursor(cx, x, y, height);
             }
         }
-        if self.sels.first().map_or(false, |sel| {
-            sel.start() == BiasedPos { pos, bias }
-        }) {
+        if self
+            .sels
+            .first()
+            .map_or(false, |sel| sel.start() == BiasedPos { pos, bias })
+        {
             let (sel, sels) = self.sels.split_first().unwrap();
             self.sels = sels;
             if sel.cursor.biased_pos == (BiasedPos { pos, bias }) {

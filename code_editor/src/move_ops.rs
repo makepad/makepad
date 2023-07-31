@@ -20,22 +20,26 @@ pub fn move_right(lines: &[String], pos: Pos) -> Pos {
     pos
 }
 
-pub fn move_up(view: &View<'_>, cursor: Cursor, tab_width: usize) -> Cursor {
+pub fn move_up(view: &View<'_>, cursor: Cursor) -> Cursor {
     if !cursor.biased_pos.is_at_first_row_of_line(view) {
-        return move_to_prev_row_of_line(view, cursor, tab_width);
+        return move_to_prev_row_of_line(view, cursor);
     }
     if !cursor.biased_pos.pos.is_at_first_line() {
-        return move_to_last_row_of_prev_line(view, cursor, tab_width);
+        return move_to_last_row_of_prev_line(view, cursor);
     }
     cursor
 }
 
-pub fn move_down(view: &View<'_>, cursor: Cursor, tab_width: usize) -> Cursor {
+pub fn move_down(view: &View<'_>, cursor: Cursor) -> Cursor {
     if !cursor.biased_pos.is_at_last_row_of_line(view) {
-        return move_to_next_row_of_line(view, cursor, tab_width);
+        return move_to_next_row_of_line(view, cursor);
     }
-    if !cursor.biased_pos.pos.is_at_last_line(view.text().as_lines().len()) {
-        return move_to_first_row_of_next_line(view, cursor, tab_width);
+    if !cursor
+        .biased_pos
+        .pos
+        .is_at_last_line(view.text().as_lines().len())
+    {
+        return move_to_first_row_of_next_line(view, cursor);
     }
     cursor
 }
@@ -82,14 +86,11 @@ fn move_to_start_of_next_line(pos: Pos) -> Pos {
     }
 }
 
-fn move_to_prev_row_of_line(view: &View<'_>, cursor: Cursor, tab_width: usize) -> Cursor {
+fn move_to_prev_row_of_line(view: &View<'_>, cursor: Cursor) -> Cursor {
     use crate::Point;
-    
+
     let line = view.line(cursor.biased_pos.pos.line);
-    let mut point = line.biased_byte_to_point(
-        cursor.biased_pos.biased_byte(),
-        tab_width,
-    );
+    let mut point = line.biased_byte_to_point(cursor.biased_pos.biased_byte());
     if let Some(column) = cursor.column {
         point.column = column;
     }
@@ -97,8 +98,7 @@ fn move_to_prev_row_of_line(view: &View<'_>, cursor: Cursor, tab_width: usize) -
         Point {
             row: point.row - 1,
             ..point
-        },
-        tab_width,
+        }
     );
     Cursor {
         biased_pos: BiasedPos::from_line_and_biased_byte(cursor.biased_pos.pos.line, biased_byte),
@@ -106,14 +106,11 @@ fn move_to_prev_row_of_line(view: &View<'_>, cursor: Cursor, tab_width: usize) -
     }
 }
 
-fn move_to_next_row_of_line(view: &View<'_>, cursor: Cursor, tab_width: usize) -> Cursor {
+fn move_to_next_row_of_line(view: &View<'_>, cursor: Cursor) -> Cursor {
     use crate::Point;
 
     let line = view.line(cursor.biased_pos.pos.line);
-    let mut point = line.biased_byte_to_point(
-        cursor.biased_pos.biased_byte(),
-        tab_width
-    );
+    let mut point = line.biased_byte_to_point(cursor.biased_pos.biased_byte());
     if let Some(column) = cursor.column {
         point.column = column;
     }
@@ -121,8 +118,7 @@ fn move_to_next_row_of_line(view: &View<'_>, cursor: Cursor, tab_width: usize) -
         Point {
             row: point.row + 1,
             ..point
-        },
-        tab_width,
+        }
     );
     Cursor {
         biased_pos: BiasedPos::from_line_and_biased_byte(cursor.biased_pos.pos.line, biased_byte),
@@ -130,13 +126,12 @@ fn move_to_next_row_of_line(view: &View<'_>, cursor: Cursor, tab_width: usize) -
     }
 }
 
-fn move_to_last_row_of_prev_line(view: &View<'_>, cursor: Cursor, tab_width: usize) -> Cursor {
+fn move_to_last_row_of_prev_line(view: &View<'_>, cursor: Cursor) -> Cursor {
     use crate::Point;
 
-    let mut point = view.line(cursor.biased_pos.pos.line).biased_byte_to_point(
-        cursor.biased_pos.biased_byte(),
-        tab_width,
-    );
+    let mut point = view
+        .line(cursor.biased_pos.pos.line)
+        .biased_byte_to_point(cursor.biased_pos.biased_byte());
     if let Some(column) = cursor.column {
         point.column = column;
     }
@@ -146,8 +141,7 @@ fn move_to_last_row_of_prev_line(view: &View<'_>, cursor: Cursor, tab_width: usi
         Point {
             row: prev_line_ref.height() - 1,
             column: point.column,
-        },
-        tab_width,
+        }
     );
     Cursor {
         biased_pos: BiasedPos::from_line_and_biased_byte(prev_line, biased_byte),
@@ -155,20 +149,21 @@ fn move_to_last_row_of_prev_line(view: &View<'_>, cursor: Cursor, tab_width: usi
     }
 }
 
-fn move_to_first_row_of_next_line(view: &View<'_>, cursor: Cursor, tab_width: usize) -> Cursor {
+fn move_to_first_row_of_next_line(view: &View<'_>, cursor: Cursor) -> Cursor {
     use crate::Point;
 
-    let mut point = view.line(cursor.biased_pos.pos.line).biased_byte_to_point(
-        cursor.biased_pos.biased_byte(),
-        tab_width,
-    );
+    let mut point = view
+        .line(cursor.biased_pos.pos.line)
+        .biased_byte_to_point(cursor.biased_pos.biased_byte());
     if let Some(column) = cursor.column {
         point.column = column;
     }
     let next_line = cursor.biased_pos.pos.line + 1;
     let biased_byte = view.line(next_line).point_to_biased_byte(
-        Point { row: 0, column: point.column },
-        tab_width,
+        Point {
+            row: 0,
+            column: point.column,
+        }
     );
     Cursor {
         biased_pos: BiasedPos::from_line_and_biased_byte(next_line, biased_byte),

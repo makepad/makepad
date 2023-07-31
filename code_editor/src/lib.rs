@@ -1,31 +1,30 @@
 pub mod bias;
-pub mod biased_usize;
 pub mod biased_pos;
+pub mod biased_usize;
 pub mod char;
 pub mod code_editor;
-pub mod view_mut;
 pub mod cursor;
+pub mod diff;
 pub mod edit_ops;
-pub mod point;
+pub mod len;
 pub mod line;
 pub mod move_ops;
+pub mod point;
+pub mod pos;
+pub mod range;
 pub mod sel;
 pub mod settings;
 pub mod state;
 pub mod str;
 pub mod text;
-pub mod diff;
-pub mod len;
-pub mod pos;
-pub mod range;
 pub mod token;
 pub mod tokenizer;
 pub mod view;
+pub mod view_mut;
 
 pub use crate::{
-    bias::Bias, biased_usize::BiasedUsize, biased_pos::BiasedPos,
-    code_editor::CodeEditor, view_mut::ViewMut, cursor::Cursor, point::Point, line::Line,
-    sel::Sel, settings::Settings, state::State, text::Text, diff::Diff,
-    len::Len, pos::Pos, range::Range, token::Token,
-    tokenizer::Tokenizer, view::View,
+    bias::Bias, biased_pos::BiasedPos, biased_usize::BiasedUsize, code_editor::CodeEditor,
+    cursor::Cursor, diff::Diff, len::Len, line::Line, point::Point, pos::Pos, range::Range,
+    sel::Sel, settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
+    view::View, view_mut::ViewMut,
 };

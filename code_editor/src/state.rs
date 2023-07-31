@@ -1,7 +1,5 @@
 use {
-    crate::{
-        line, view, view::LineInlay, Bias, ViewMut, Sel, Settings, Text, Tokenizer, View,
-    },
+    crate::{line, view, Bias, Sel, Settings, Text, Tokenizer, View, ViewMut},
     std::{
         collections::{HashMap, HashSet},
         io,
@@ -47,7 +45,6 @@ impl State {
             &session.start_column_after_wrap,
             &session.fold_column,
             &session.scale,
-            &doc.line_inlays,
             &doc.block_widget_inlays,
             &session.summed_heights,
             &session.sels,
@@ -69,7 +66,6 @@ impl State {
             &mut view.start_column_after_wrap,
             &mut view.fold_column,
             &mut view.scale,
-            &mut doc.line_inlays,
             &mut doc.block_widget_inlays,
             &mut view.summed_heights,
             &mut view.sels,
@@ -133,25 +129,6 @@ impl State {
                         }
                     })
                     .collect(),
-                line_inlays: [
-                    (
-                        10,
-                        LineInlay::new("##################################################".into()),
-                    ),
-                    (
-                        20,
-                        LineInlay::new("##################################################".into()),
-                    ),
-                    (
-                        30,
-                        LineInlay::new("##################################################".into()),
-                    ),
-                    (
-                        40,
-                        LineInlay::new("##################################################".into()),
-                    ),
-                ]
-                .into(),
                 inline_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
                 block_widget_inlays: [].into(),
             },
@@ -167,10 +144,10 @@ pub struct SessionId(usize);
 struct Session {
     max_column: Option<usize>,
     document_id: DocumentId,
-    fold_column: Vec<usize>,
-    scale: Vec<f64>,
     soft_breaks: Vec<Vec<usize>>,
     start_column_after_wrap: Vec<usize>,
+    fold_column: Vec<usize>,
+    scale: Vec<f64>,
     summed_heights: Vec<f64>,
     sels: Vec<Sel>,
     latest_sel_index: usize,
@@ -187,6 +164,5 @@ struct Document {
     tokenizer: Tokenizer,
     inline_text_inlays: Vec<Vec<(usize, String)>>,
     inline_widget_inlays: Vec<Vec<((usize, Bias), line::Widget)>>,
-    line_inlays: Vec<(usize, LineInlay)>,
     block_widget_inlays: Vec<((usize, Bias), view::Widget)>,
 }

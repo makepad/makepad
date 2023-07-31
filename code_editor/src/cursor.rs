@@ -14,6 +14,9 @@ impl From<Pos> for Cursor {
 
 impl From<BiasedPos> for Cursor {
     fn from(biased_pos: BiasedPos) -> Self {
-        Self { biased_pos, column: None }
+        Self {
+            biased_pos,
+            column: None,
+        }
     }
 }
