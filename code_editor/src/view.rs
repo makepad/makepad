@@ -1,5 +1,5 @@
 use {
-    crate::{line, token::TokenInfo, Bias, Line, Sel, Settings, Text, Tokenizer},
+    crate::{line, token::TokenInfo, Bias, Line, Selection, Settings, Text, Tokenizer},
     std::slice,
 };
 
@@ -16,8 +16,8 @@ pub struct View<'a> {
     scale: &'a [f64],
     block_widget_inlays: &'a [((usize, Bias), Widget)],
     summed_heights: &'a [f64],
-    sels: &'a [Sel],
-    latest_sel_index: usize,
+    selections: &'a [Selection],
+    latest_selection_index: usize,
 }
 
 impl<'a> View<'a> {
@@ -33,8 +33,8 @@ impl<'a> View<'a> {
         scale: &'a [f64],
         block_widget_inlays: &'a [((usize, Bias), Widget)],
         summed_heights: &'a [f64],
-        sels: &'a [Sel],
-        latest_sel_index: usize,
+        selections: &'a [Selection],
+        latest_selection_index: usize,
     ) -> Self {
         Self {
             settings,
@@ -48,8 +48,8 @@ impl<'a> View<'a> {
             scale,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
         }
     }
 
@@ -154,12 +154,12 @@ impl<'a> View<'a> {
         }
     }
 
-    pub fn sels(&self) -> &'a [Sel] {
-        self.sels
+    pub fn selections(&self) -> &'a [Selection] {
+        self.selections
     }
 
-    pub fn latest_sel_index(&self) -> usize {
-        self.latest_sel_index
+    pub fn latest_selection_index(&self) -> usize {
+        self.latest_selection_index
     }
 }
 

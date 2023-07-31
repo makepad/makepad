@@ -1,5 +1,5 @@
 use {
-    crate::{line, view, Bias, Sel, Settings, Text, Tokenizer, View, ViewMut},
+    crate::{line, view, Bias, Selection, Settings, Text, Tokenizer, View, ViewMut},
     std::{
         collections::{HashMap, HashSet},
         io,
@@ -47,8 +47,8 @@ impl State {
             &session.scale,
             &doc.block_widget_inlays,
             &session.summed_heights,
-            &session.sels,
-            session.latest_sel_index,
+            &session.selections,
+            session.latest_selection_index,
         )
     }
 
@@ -68,8 +68,8 @@ impl State {
             &mut view.scale,
             &mut doc.block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.sels,
-            &mut view.latest_sel_index,
+            &mut view.selections,
+            &mut view.latest_selection_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -90,8 +90,8 @@ impl State {
                 fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                sels: [Sel::default()].into(),
-                latest_sel_index: 0,
+                selections: [Selection::default()].into(),
+                latest_selection_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -149,8 +149,8 @@ struct Session {
     fold_column: Vec<usize>,
     scale: Vec<f64>,
     summed_heights: Vec<f64>,
-    sels: Vec<Sel>,
-    latest_sel_index: usize,
+    selections: Vec<Selection>,
+    latest_selection_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }

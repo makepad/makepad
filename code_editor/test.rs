@@ -168,7 +168,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_sel: {
+        draw_selection: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -187,7 +187,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_sel: DrawSelection,
+    draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -207,7 +207,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_sels(cx, &document);
+        self.draw_selections(cx, &document);
         self.end(cx, context);
     }
 
@@ -428,28 +428,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_sel = None;
-        let mut sels = document.sels();
-        while sels
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_selection = None;
+        let mut selections = document.selections();
+        while selections
             .first()
-            .map_or(false, |sel| sel.end().0.line < self.start_line)
+            .map_or(false, |selection| selection.end().0.line < self.start_line)
         {
-            sels = &sels[1..];
+            selections = &selections[1..];
         }
-        if sels.first().map_or(false, |sel| {
-            sel.start().0.line < self.start_line
+        if selections.first().map_or(false, |selection| {
+            selection.start().0.line < self.start_line
         }) {
-            let (sel, remaining_sels) = sels.split_first().unwrap();
-            sels = remaining_sels;
-            active_sel = Some(ActiveSelection::new(*sel, 0.0));
+            let (selection, remaining_selections) = selections.split_first().unwrap();
+            selections = remaining_selections;
+            active_selection = Some(ActiveSelection::new(*selection, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_sel,
-            sels,
+            active_selection,
+            selections,
         }
-        .draw_sels(cx, document)
+        .draw_selections(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -544,12 +544,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_sel: Option<ActiveSelection>,
-    sels: &'a [Selection],
+    active_selection: Option<ActiveSelection>,
+    selections: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -605,8 +605,8 @@ impl<'a> DrawSelectionsContext<'a> {
                             }
                             line::WrappedElement::Wrap => {
                                 column += 1;
-                                if self.active_sel.is_some() {
-                                    self.draw_sel(
+                                if self.active_selection.is_some() {
+                                    self.draw_selection(
                                         cx,
                                         line_ref.column_to_x(column),
                                         y,
@@ -628,8 +628,8 @@ impl<'a> DrawSelectionsContext<'a> {
                         line_ref.scale(),
                     );
                     column += 1;
-                    if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    if self.active_selection.is_some() {
+                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -642,8 +642,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_sel.is_some() {
-            self.code_editor.draw_sel.end(cx);
+        if self.active_selection.is_some() {
+            self.code_editor.draw_selection.end(cx);
         }
     }
 
@@ -658,41 +658,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_sel.as_ref().map_or(false, |sel| {
-            sel.sel.end() == (position, bias)
+        if self.active_selection.as_ref().map_or(false, |selection| {
+            selection.selection.end() == (position, bias)
         }) {
-            self.draw_sel(cx, x, y, height);
-            self.code_editor.draw_sel.end(cx);
-            let sel = self.active_sel.take().unwrap().sel;
-            if sel.cursor == (position, bias) {
+            self.draw_selection(cx, x, y, height);
+            self.code_editor.draw_selection.end(cx);
+            let selection = self.active_selection.take().unwrap().selection;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .sels
+            .selections
             .first()
-            .map_or(false, |sel| sel.start() == (position, bias))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
-            let (sel, sels) = self.sels.split_first().unwrap();
-            self.sels = sels;
-            if sel.cursor == (position, bias) {
+            let (selection, selections) = self.selections.split_first().unwrap();
+            self.selections = selections;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !sel.is_empty() {
-                self.active_sel = Some(ActiveSelection {
-                    sel: *sel,
+            if !selection.is_empty() {
+                self.active_selection = Some(ActiveSelection {
+                    selection: *selection,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_sel.begin();
+            self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
-        self.code_editor.draw_sel.draw(
+        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
+        self.code_editor.draw_selection.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -722,13 +722,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    sel: Selection,
+    selection: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(sel: Selection, start_x: f64) -> Self {
-        Self { sel, start_x }
+    fn new(selection: Selection, start_x: f64) -> Self {
+        Self { selection, start_x }
     }
 }
 
@@ -830,8 +830,8 @@ pub struct Context<'a> {
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    sels: &'a mut Vec<Selection>,
-    latest_sel_index: &'a mut usize,
+    selections: &'a mut Vec<Selection>,
+    latest_selection_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -850,8 +850,8 @@ impl<'a> Context<'a> {
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        sels: &'a mut Vec<Selection>,
-        latest_sel_index: &'a mut usize,
+        selections: &'a mut Vec<Selection>,
+        latest_selection_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -868,8 +868,8 @@ impl<'a> Context<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
             folding_lines,
             unfolding_lines,
         }
@@ -889,8 +889,8 @@ impl<'a> Context<'a> {
             self.line_inlays,
             self.block_widget_inlays,
             self.summed_heights,
-            self.sels,
-            *self.latest_sel_index,
+            self.selections,
+            *self.latest_selection_index,
         )
     }
 
@@ -987,58 +987,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.sels.clear();
-        self.sels.push(Selection::from_cursor(cursor));
-        *self.latest_sel_index = 0;
+        self.selections.clear();
+        self.selections.push(Selection::from_cursor(cursor));
+        *self.latest_selection_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let sel = Selection::from_cursor(cursor);
-        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
-            if sel.end() <= cursor {
+        let selection = Selection::from_cursor(cursor);
+        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
+            if selection.end() <= cursor {
                 return Ordering::Less;
             }
-            if sel.start() >= cursor {
+            if selection.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.sels[index] = sel;
+                self.selections[index] = selection;
                 index
             }
             Err(index) => {
-                self.sels.insert(index, sel);
+                self.selections.insert(index, selection);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_sel = &mut self.sels[*self.latest_sel_index];
-        latest_sel.cursor = cursor;
+        let latest_selection = &mut self.selections[*self.latest_selection_index];
+        latest_selection.cursor = cursor;
         if !select {
-            latest_sel.anchor = cursor;
+            latest_selection.anchor = cursor;
         }
-        while *self.latest_sel_index > 0 {
-            let previous_sel_index = *self.latest_sel_index - 1;
-            let previous_sel = self.sels[previous_sel_index];
-            let latest_sel = self.sels[*self.latest_sel_index];
-            if previous_sel.should_merge(latest_sel) {
-                self.sels.remove(previous_sel_index);
-                *self.latest_sel_index -= 1;
+        while *self.latest_selection_index > 0 {
+            let previous_selection_index = *self.latest_selection_index - 1;
+            let previous_selection = self.selections[previous_selection_index];
+            let latest_selection = self.selections[*self.latest_selection_index];
+            if previous_selection.should_merge(latest_selection) {
+                self.selections.remove(previous_selection_index);
+                *self.latest_selection_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_sel_index + 1 < self.sels.len() {
-            let next_sel_index = *self.latest_sel_index + 1;
-            let latest_sel = self.sels[*self.latest_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            if latest_sel.should_merge(next_sel) {
-                self.sels.remove(next_sel_index);
+        while *self.latest_selection_index + 1 < self.selections.len() {
+            let next_selection_index = *self.latest_selection_index + 1;
+            let latest_selection = self.selections[*self.latest_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            if latest_selection.should_merge(next_selection) {
+                self.selections.remove(next_selection_index);
             } else {
                 break;
             }
@@ -1048,32 +1048,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -1152,48 +1152,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_sels(
+    fn modify_selections(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut sels = mem::take(self.sels);
+        let mut selections = mem::take(self.selections);
         let document = self.document();
-        for sel in &mut sels {
-            *sel = f(&document, *sel);
+        for selection in &mut selections {
+            *selection = f(&document, *selection);
             if !select {
-                *sel = sel.reset_anchor();
+                *selection = selection.reset_anchor();
             }
         }
-        *self.sels = sels;
-        let mut current_sel_index = 0;
-        while current_sel_index + 1 < self.sels.len() {
-            let next_sel_index = current_sel_index + 1;
-            let current_sel = self.sels[current_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            assert!(current_sel.start() <= next_sel.start());
-            if !current_sel.should_merge(next_sel) {
-                current_sel_index += 1;
+        *self.selections = selections;
+        let mut current_selection_index = 0;
+        while current_selection_index + 1 < self.selections.len() {
+            let next_selection_index = current_selection_index + 1;
+            let current_selection = self.selections[current_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if !current_selection.should_merge(next_selection) {
+                current_selection_index += 1;
                 continue;
             }
-            let start = current_sel.start().min(next_sel.start());
-            let end = current_sel.end().max(next_sel.end());
+            let start = current_selection.start().min(next_selection.start());
+            let end = current_selection.end().max(next_selection.end());
             let anchor;
             let cursor;
-            if current_sel.anchor <= next_sel.cursor {
+            if current_selection.anchor <= next_selection.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_column);
-            self.sels.remove(next_sel_index);
-            if next_sel_index < *self.latest_sel_index {
-                *self.latest_sel_index -= 1;
+            self.selections[current_selection_index] =
+                Selection::new(anchor, cursor, current_selection.preferred_column);
+            self.selections.remove(next_selection_index);
+            if next_selection_index < *self.latest_selection_index {
+                *self.latest_selection_index -= 1;
             }
         }
     }
@@ -1204,27 +1204,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for sel in &mut *self.sels {
-            let distance_from_prev_end = sel.start().0 - prev_end;
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + sel.length();
+            let diffed_end = diffed_start + selection.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = sel.end().0;
+            prev_end = selection.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if sel.anchor <= sel.cursor {
-                anchor = (diffed_start, sel.start().1);
-                cursor = (diffed_end, sel.end().1);
+            if selection.anchor <= selection.cursor {
+                anchor = (diffed_start, selection.start().1);
+                cursor = (diffed_end, selection.end().1);
             } else {
-                anchor = (diffed_end, sel.end().1);
-                cursor = (diffed_start, sel.start().1);
+                anchor = (diffed_end, selection.end().1);
+                cursor = (diffed_start, selection.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_column);
+            *selection = Selection::new(anchor, cursor, selection.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -1583,8 +1583,8 @@ pub struct Document<'a> {
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    sels: &'a [Selection],
-    latest_sel_index: usize,
+    selections: &'a [Selection],
+    latest_selection_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -1601,8 +1601,8 @@ impl<'a> Document<'a> {
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        sels: &'a [Selection],
-        latest_sel_index: usize,
+        selections: &'a [Selection],
+        latest_selection_index: usize,
     ) -> Self {
         Self {
             settings,
@@ -1617,8 +1617,8 @@ impl<'a> Document<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
         }
     }
 
@@ -1722,12 +1722,12 @@ impl<'a> Document<'a> {
         }
     }
 
-    pub fn sels(&self) -> &'a [Selection] {
-        self.sels
+    pub fn selections(&self) -> &'a [Selection] {
+        self.selections
     }
 
-    pub fn latest_sel_index(&self) -> usize {
-        self.latest_sel_index
+    pub fn latest_selection_index(&self) -> usize {
+        self.latest_selection_index
     }
 }
 
@@ -1976,7 +1976,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod sel;
+pub mod selection;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -1986,7 +1986,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, sel::Selection,
+    length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -2907,8 +2907,8 @@ impl State {
             &editor.line_inlays,
             &editor.block_widget_inlays,
             &view.summed_heights,
-            &view.sels,
-            view.latest_sel_index,
+            &view.selections,
+            view.latest_selection_index,
         )
     }
 
@@ -2928,8 +2928,8 @@ impl State {
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.sels,
-            &mut view.latest_sel_index,
+            &mut view.selections,
+            &mut view.latest_selection_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -2949,8 +2949,8 @@ impl State {
                 fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                sels: [Selection::default()].into(),
-                latest_sel_index: 0,
+                selections: [Selection::default()].into(),
+                latest_selection_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -3026,8 +3026,8 @@ struct View {
     soft_breaks: Vec<Vec<usize>>,
     start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    sels: Vec<Selection>,
-    latest_sel_index: usize,
+    selections: Vec<Selection>,
+    latest_selection_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -3913,7 +3913,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_sel: {
+        draw_selection: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -3932,7 +3932,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_sel: DrawSelection,
+    draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -3952,7 +3952,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_sels(cx, &document);
+        self.draw_selections(cx, &document);
         self.end(cx, context);
     }
 
@@ -4173,28 +4173,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_sel = None;
-        let mut sels = document.sels();
-        while sels
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_selection = None;
+        let mut selections = document.selections();
+        while selections
             .first()
-            .map_or(false, |sel| sel.end().0.line < self.start_line)
+            .map_or(false, |selection| selection.end().0.line < self.start_line)
         {
-            sels = &sels[1..];
+            selections = &selections[1..];
         }
-        if sels.first().map_or(false, |sel| {
-            sel.start().0.line < self.start_line
+        if selections.first().map_or(false, |selection| {
+            selection.start().0.line < self.start_line
         }) {
-            let (sel, remaining_sels) = sels.split_first().unwrap();
-            sels = remaining_sels;
-            active_sel = Some(ActiveSelection::new(*sel, 0.0));
+            let (selection, remaining_selections) = selections.split_first().unwrap();
+            selections = remaining_selections;
+            active_selection = Some(ActiveSelection::new(*selection, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_sel,
-            sels,
+            active_selection,
+            selections,
         }
-        .draw_sels(cx, document)
+        .draw_selections(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -4289,12 +4289,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_sel: Option<ActiveSelection>,
-    sels: &'a [Selection],
+    active_selection: Option<ActiveSelection>,
+    selections: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -4350,8 +4350,8 @@ impl<'a> DrawSelectionsContext<'a> {
                             }
                             line::WrappedElement::Wrap => {
                                 column += 1;
-                                if self.active_sel.is_some() {
-                                    self.draw_sel(
+                                if self.active_selection.is_some() {
+                                    self.draw_selection(
                                         cx,
                                         line_ref.column_to_x(column),
                                         y,
@@ -4373,8 +4373,8 @@ impl<'a> DrawSelectionsContext<'a> {
                         line_ref.scale(),
                     );
                     column += 1;
-                    if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    if self.active_selection.is_some() {
+                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -4387,8 +4387,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_sel.is_some() {
-            self.code_editor.draw_sel.end(cx);
+        if self.active_selection.is_some() {
+            self.code_editor.draw_selection.end(cx);
         }
     }
 
@@ -4403,41 +4403,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_sel.as_ref().map_or(false, |sel| {
-            sel.sel.end() == (position, bias)
+        if self.active_selection.as_ref().map_or(false, |selection| {
+            selection.selection.end() == (position, bias)
         }) {
-            self.draw_sel(cx, x, y, height);
-            self.code_editor.draw_sel.end(cx);
-            let sel = self.active_sel.take().unwrap().sel;
-            if sel.cursor == (position, bias) {
+            self.draw_selection(cx, x, y, height);
+            self.code_editor.draw_selection.end(cx);
+            let selection = self.active_selection.take().unwrap().selection;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .sels
+            .selections
             .first()
-            .map_or(false, |sel| sel.start() == (position, bias))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
-            let (sel, sels) = self.sels.split_first().unwrap();
-            self.sels = sels;
-            if sel.cursor == (position, bias) {
+            let (selection, selections) = self.selections.split_first().unwrap();
+            self.selections = selections;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !sel.is_empty() {
-                self.active_sel = Some(ActiveSelection {
-                    sel: *sel,
+            if !selection.is_empty() {
+                self.active_selection = Some(ActiveSelection {
+                    selection: *selection,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_sel.begin();
+            self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
-        self.code_editor.draw_sel.draw(
+        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
+        self.code_editor.draw_selection.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -4467,13 +4467,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    sel: Selection,
+    selection: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(sel: Selection, start_x: f64) -> Self {
-        Self { sel, start_x }
+    fn new(selection: Selection, start_x: f64) -> Self {
+        Self { selection, start_x }
     }
 }
 
@@ -4575,8 +4575,8 @@ pub struct Context<'a> {
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    sels: &'a mut Vec<Selection>,
-    latest_sel_index: &'a mut usize,
+    selections: &'a mut Vec<Selection>,
+    latest_selection_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -4595,8 +4595,8 @@ impl<'a> Context<'a> {
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        sels: &'a mut Vec<Selection>,
-        latest_sel_index: &'a mut usize,
+        selections: &'a mut Vec<Selection>,
+        latest_selection_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -4613,8 +4613,8 @@ impl<'a> Context<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
             folding_lines,
             unfolding_lines,
         }
@@ -4634,8 +4634,8 @@ impl<'a> Context<'a> {
             self.line_inlays,
             self.block_widget_inlays,
             self.summed_heights,
-            self.sels,
-            *self.latest_sel_index,
+            self.selections,
+            *self.latest_selection_index,
         )
     }
 
@@ -4732,58 +4732,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.sels.clear();
-        self.sels.push(Selection::from_cursor(cursor));
-        *self.latest_sel_index = 0;
+        self.selections.clear();
+        self.selections.push(Selection::from_cursor(cursor));
+        *self.latest_selection_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let sel = Selection::from_cursor(cursor);
-        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
-            if sel.end() <= cursor {
+        let selection = Selection::from_cursor(cursor);
+        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
+            if selection.end() <= cursor {
                 return Ordering::Less;
             }
-            if sel.start() >= cursor {
+            if selection.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.sels[index] = sel;
+                self.selections[index] = selection;
                 index
             }
             Err(index) => {
-                self.sels.insert(index, sel);
+                self.selections.insert(index, selection);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_sel = &mut self.sels[*self.latest_sel_index];
-        latest_sel.cursor = cursor;
+        let latest_selection = &mut self.selections[*self.latest_selection_index];
+        latest_selection.cursor = cursor;
         if !select {
-            latest_sel.anchor = cursor;
+            latest_selection.anchor = cursor;
         }
-        while *self.latest_sel_index > 0 {
-            let previous_sel_index = *self.latest_sel_index - 1;
-            let previous_sel = self.sels[previous_sel_index];
-            let latest_sel = self.sels[*self.latest_sel_index];
-            if previous_sel.should_merge(latest_sel) {
-                self.sels.remove(previous_sel_index);
-                *self.latest_sel_index -= 1;
+        while *self.latest_selection_index > 0 {
+            let previous_selection_index = *self.latest_selection_index - 1;
+            let previous_selection = self.selections[previous_selection_index];
+            let latest_selection = self.selections[*self.latest_selection_index];
+            if previous_selection.should_merge(latest_selection) {
+                self.selections.remove(previous_selection_index);
+                *self.latest_selection_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_sel_index + 1 < self.sels.len() {
-            let next_sel_index = *self.latest_sel_index + 1;
-            let latest_sel = self.sels[*self.latest_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            if latest_sel.should_merge(next_sel) {
-                self.sels.remove(next_sel_index);
+        while *self.latest_selection_index + 1 < self.selections.len() {
+            let next_selection_index = *self.latest_selection_index + 1;
+            let latest_selection = self.selections[*self.latest_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            if latest_selection.should_merge(next_selection) {
+                self.selections.remove(next_selection_index);
             } else {
                 break;
             }
@@ -4793,32 +4793,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -4897,48 +4897,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_sels(
+    fn modify_selections(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut sels = mem::take(self.sels);
+        let mut selections = mem::take(self.selections);
         let document = self.document();
-        for sel in &mut sels {
-            *sel = f(&document, *sel);
+        for selection in &mut selections {
+            *selection = f(&document, *selection);
             if !select {
-                *sel = sel.reset_anchor();
+                *selection = selection.reset_anchor();
             }
         }
-        *self.sels = sels;
-        let mut current_sel_index = 0;
-        while current_sel_index + 1 < self.sels.len() {
-            let next_sel_index = current_sel_index + 1;
-            let current_sel = self.sels[current_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            assert!(current_sel.start() <= next_sel.start());
-            if !current_sel.should_merge(next_sel) {
-                current_sel_index += 1;
+        *self.selections = selections;
+        let mut current_selection_index = 0;
+        while current_selection_index + 1 < self.selections.len() {
+            let next_selection_index = current_selection_index + 1;
+            let current_selection = self.selections[current_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if !current_selection.should_merge(next_selection) {
+                current_selection_index += 1;
                 continue;
             }
-            let start = current_sel.start().min(next_sel.start());
-            let end = current_sel.end().max(next_sel.end());
+            let start = current_selection.start().min(next_selection.start());
+            let end = current_selection.end().max(next_selection.end());
             let anchor;
             let cursor;
-            if current_sel.anchor <= next_sel.cursor {
+            if current_selection.anchor <= next_selection.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_column);
-            self.sels.remove(next_sel_index);
-            if next_sel_index < *self.latest_sel_index {
-                *self.latest_sel_index -= 1;
+            self.selections[current_selection_index] =
+                Selection::new(anchor, cursor, current_selection.preferred_column);
+            self.selections.remove(next_selection_index);
+            if next_selection_index < *self.latest_selection_index {
+                *self.latest_selection_index -= 1;
             }
         }
     }
@@ -4949,27 +4949,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for sel in &mut *self.sels {
-            let distance_from_prev_end = sel.start().0 - prev_end;
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + sel.length();
+            let diffed_end = diffed_start + selection.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = sel.end().0;
+            prev_end = selection.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if sel.anchor <= sel.cursor {
-                anchor = (diffed_start, sel.start().1);
-                cursor = (diffed_end, sel.end().1);
+            if selection.anchor <= selection.cursor {
+                anchor = (diffed_start, selection.start().1);
+                cursor = (diffed_end, selection.end().1);
             } else {
-                anchor = (diffed_end, sel.end().1);
-                cursor = (diffed_start, sel.start().1);
+                anchor = (diffed_end, selection.end().1);
+                cursor = (diffed_start, selection.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_column);
+            *selection = Selection::new(anchor, cursor, selection.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -5328,8 +5328,8 @@ pub struct Document<'a> {
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    sels: &'a [Selection],
-    latest_sel_index: usize,
+    selections: &'a [Selection],
+    latest_selection_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -5346,8 +5346,8 @@ impl<'a> Document<'a> {
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        sels: &'a [Selection],
-        latest_sel_index: usize,
+        selections: &'a [Selection],
+        latest_selection_index: usize,
     ) -> Self {
         Self {
             settings,
@@ -5362,8 +5362,8 @@ impl<'a> Document<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
         }
     }
 
@@ -5467,12 +5467,12 @@ impl<'a> Document<'a> {
         }
     }
 
-    pub fn sels(&self) -> &'a [Selection] {
-        self.sels
+    pub fn selections(&self) -> &'a [Selection] {
+        self.selections
     }
 
-    pub fn latest_sel_index(&self) -> usize {
-        self.latest_sel_index
+    pub fn latest_selection_index(&self) -> usize {
+        self.latest_selection_index
     }
 }
 
@@ -5721,7 +5721,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod sel;
+pub mod selection;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -5731,7 +5731,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, sel::Selection,
+    length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -6652,8 +6652,8 @@ impl State {
             &editor.line_inlays,
             &editor.block_widget_inlays,
             &view.summed_heights,
-            &view.sels,
-            view.latest_sel_index,
+            &view.selections,
+            view.latest_selection_index,
         )
     }
 
@@ -6673,8 +6673,8 @@ impl State {
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.sels,
-            &mut view.latest_sel_index,
+            &mut view.selections,
+            &mut view.latest_selection_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -6694,8 +6694,8 @@ impl State {
                 fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                sels: [Selection::default()].into(),
-                latest_sel_index: 0,
+                selections: [Selection::default()].into(),
+                latest_selection_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -6771,8 +6771,8 @@ struct View {
     soft_breaks: Vec<Vec<usize>>,
     start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    sels: Vec<Selection>,
-    latest_sel_index: usize,
+    selections: Vec<Selection>,
+    latest_selection_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -7658,7 +7658,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_sel: {
+        draw_selection: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -7677,7 +7677,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_sel: DrawSelection,
+    draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -7697,7 +7697,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_sels(cx, &document);
+        self.draw_selections(cx, &document);
         self.end(cx, context);
     }
 
@@ -7918,28 +7918,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_sel = None;
-        let mut sels = document.sels();
-        while sels
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_selection = None;
+        let mut selections = document.selections();
+        while selections
             .first()
-            .map_or(false, |sel| sel.end().0.line < self.start_line)
+            .map_or(false, |selection| selection.end().0.line < self.start_line)
         {
-            sels = &sels[1..];
+            selections = &selections[1..];
         }
-        if sels.first().map_or(false, |sel| {
-            sel.start().0.line < self.start_line
+        if selections.first().map_or(false, |selection| {
+            selection.start().0.line < self.start_line
         }) {
-            let (sel, remaining_sels) = sels.split_first().unwrap();
-            sels = remaining_sels;
-            active_sel = Some(ActiveSelection::new(*sel, 0.0));
+            let (selection, remaining_selections) = selections.split_first().unwrap();
+            selections = remaining_selections;
+            active_selection = Some(ActiveSelection::new(*selection, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_sel,
-            sels,
+            active_selection,
+            selections,
         }
-        .draw_sels(cx, document)
+        .draw_selections(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -8034,12 +8034,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_sel: Option<ActiveSelection>,
-    sels: &'a [Selection],
+    active_selection: Option<ActiveSelection>,
+    selections: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -8095,8 +8095,8 @@ impl<'a> DrawSelectionsContext<'a> {
                             }
                             line::WrappedElement::Wrap => {
                                 column += 1;
-                                if self.active_sel.is_some() {
-                                    self.draw_sel(
+                                if self.active_selection.is_some() {
+                                    self.draw_selection(
                                         cx,
                                         line_ref.column_to_x(column),
                                         y,
@@ -8118,8 +8118,8 @@ impl<'a> DrawSelectionsContext<'a> {
                         line_ref.scale(),
                     );
                     column += 1;
-                    if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    if self.active_selection.is_some() {
+                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -8132,8 +8132,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_sel.is_some() {
-            self.code_editor.draw_sel.end(cx);
+        if self.active_selection.is_some() {
+            self.code_editor.draw_selection.end(cx);
         }
     }
 
@@ -8148,41 +8148,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_sel.as_ref().map_or(false, |sel| {
-            sel.sel.end() == (position, bias)
+        if self.active_selection.as_ref().map_or(false, |selection| {
+            selection.selection.end() == (position, bias)
         }) {
-            self.draw_sel(cx, x, y, height);
-            self.code_editor.draw_sel.end(cx);
-            let sel = self.active_sel.take().unwrap().sel;
-            if sel.cursor == (position, bias) {
+            self.draw_selection(cx, x, y, height);
+            self.code_editor.draw_selection.end(cx);
+            let selection = self.active_selection.take().unwrap().selection;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .sels
+            .selections
             .first()
-            .map_or(false, |sel| sel.start() == (position, bias))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
-            let (sel, sels) = self.sels.split_first().unwrap();
-            self.sels = sels;
-            if sel.cursor == (position, bias) {
+            let (selection, selections) = self.selections.split_first().unwrap();
+            self.selections = selections;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !sel.is_empty() {
-                self.active_sel = Some(ActiveSelection {
-                    sel: *sel,
+            if !selection.is_empty() {
+                self.active_selection = Some(ActiveSelection {
+                    selection: *selection,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_sel.begin();
+            self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
-        self.code_editor.draw_sel.draw(
+        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
+        self.code_editor.draw_selection.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -8212,13 +8212,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    sel: Selection,
+    selection: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(sel: Selection, start_x: f64) -> Self {
-        Self { sel, start_x }
+    fn new(selection: Selection, start_x: f64) -> Self {
+        Self { selection, start_x }
     }
 }
 
@@ -8320,8 +8320,8 @@ pub struct Context<'a> {
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    sels: &'a mut Vec<Selection>,
-    latest_sel_index: &'a mut usize,
+    selections: &'a mut Vec<Selection>,
+    latest_selection_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -8340,8 +8340,8 @@ impl<'a> Context<'a> {
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        sels: &'a mut Vec<Selection>,
-        latest_sel_index: &'a mut usize,
+        selections: &'a mut Vec<Selection>,
+        latest_selection_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -8358,8 +8358,8 @@ impl<'a> Context<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
             folding_lines,
             unfolding_lines,
         }
@@ -8379,8 +8379,8 @@ impl<'a> Context<'a> {
             self.line_inlays,
             self.block_widget_inlays,
             self.summed_heights,
-            self.sels,
-            *self.latest_sel_index,
+            self.selections,
+            *self.latest_selection_index,
         )
     }
 
@@ -8477,58 +8477,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.sels.clear();
-        self.sels.push(Selection::from_cursor(cursor));
-        *self.latest_sel_index = 0;
+        self.selections.clear();
+        self.selections.push(Selection::from_cursor(cursor));
+        *self.latest_selection_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let sel = Selection::from_cursor(cursor);
-        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
-            if sel.end() <= cursor {
+        let selection = Selection::from_cursor(cursor);
+        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
+            if selection.end() <= cursor {
                 return Ordering::Less;
             }
-            if sel.start() >= cursor {
+            if selection.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.sels[index] = sel;
+                self.selections[index] = selection;
                 index
             }
             Err(index) => {
-                self.sels.insert(index, sel);
+                self.selections.insert(index, selection);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_sel = &mut self.sels[*self.latest_sel_index];
-        latest_sel.cursor = cursor;
+        let latest_selection = &mut self.selections[*self.latest_selection_index];
+        latest_selection.cursor = cursor;
         if !select {
-            latest_sel.anchor = cursor;
+            latest_selection.anchor = cursor;
         }
-        while *self.latest_sel_index > 0 {
-            let previous_sel_index = *self.latest_sel_index - 1;
-            let previous_sel = self.sels[previous_sel_index];
-            let latest_sel = self.sels[*self.latest_sel_index];
-            if previous_sel.should_merge(latest_sel) {
-                self.sels.remove(previous_sel_index);
-                *self.latest_sel_index -= 1;
+        while *self.latest_selection_index > 0 {
+            let previous_selection_index = *self.latest_selection_index - 1;
+            let previous_selection = self.selections[previous_selection_index];
+            let latest_selection = self.selections[*self.latest_selection_index];
+            if previous_selection.should_merge(latest_selection) {
+                self.selections.remove(previous_selection_index);
+                *self.latest_selection_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_sel_index + 1 < self.sels.len() {
-            let next_sel_index = *self.latest_sel_index + 1;
-            let latest_sel = self.sels[*self.latest_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            if latest_sel.should_merge(next_sel) {
-                self.sels.remove(next_sel_index);
+        while *self.latest_selection_index + 1 < self.selections.len() {
+            let next_selection_index = *self.latest_selection_index + 1;
+            let latest_selection = self.selections[*self.latest_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            if latest_selection.should_merge(next_selection) {
+                self.selections.remove(next_selection_index);
             } else {
                 break;
             }
@@ -8538,32 +8538,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -8642,48 +8642,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_sels(
+    fn modify_selections(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut sels = mem::take(self.sels);
+        let mut selections = mem::take(self.selections);
         let document = self.document();
-        for sel in &mut sels {
-            *sel = f(&document, *sel);
+        for selection in &mut selections {
+            *selection = f(&document, *selection);
             if !select {
-                *sel = sel.reset_anchor();
+                *selection = selection.reset_anchor();
             }
         }
-        *self.sels = sels;
-        let mut current_sel_index = 0;
-        while current_sel_index + 1 < self.sels.len() {
-            let next_sel_index = current_sel_index + 1;
-            let current_sel = self.sels[current_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            assert!(current_sel.start() <= next_sel.start());
-            if !current_sel.should_merge(next_sel) {
-                current_sel_index += 1;
+        *self.selections = selections;
+        let mut current_selection_index = 0;
+        while current_selection_index + 1 < self.selections.len() {
+            let next_selection_index = current_selection_index + 1;
+            let current_selection = self.selections[current_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if !current_selection.should_merge(next_selection) {
+                current_selection_index += 1;
                 continue;
             }
-            let start = current_sel.start().min(next_sel.start());
-            let end = current_sel.end().max(next_sel.end());
+            let start = current_selection.start().min(next_selection.start());
+            let end = current_selection.end().max(next_selection.end());
             let anchor;
             let cursor;
-            if current_sel.anchor <= next_sel.cursor {
+            if current_selection.anchor <= next_selection.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_column);
-            self.sels.remove(next_sel_index);
-            if next_sel_index < *self.latest_sel_index {
-                *self.latest_sel_index -= 1;
+            self.selections[current_selection_index] =
+                Selection::new(anchor, cursor, current_selection.preferred_column);
+            self.selections.remove(next_selection_index);
+            if next_selection_index < *self.latest_selection_index {
+                *self.latest_selection_index -= 1;
             }
         }
     }
@@ -8694,27 +8694,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for sel in &mut *self.sels {
-            let distance_from_prev_end = sel.start().0 - prev_end;
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + sel.length();
+            let diffed_end = diffed_start + selection.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = sel.end().0;
+            prev_end = selection.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if sel.anchor <= sel.cursor {
-                anchor = (diffed_start, sel.start().1);
-                cursor = (diffed_end, sel.end().1);
+            if selection.anchor <= selection.cursor {
+                anchor = (diffed_start, selection.start().1);
+                cursor = (diffed_end, selection.end().1);
             } else {
-                anchor = (diffed_end, sel.end().1);
-                cursor = (diffed_start, sel.start().1);
+                anchor = (diffed_end, selection.end().1);
+                cursor = (diffed_start, selection.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_column);
+            *selection = Selection::new(anchor, cursor, selection.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -9073,8 +9073,8 @@ pub struct Document<'a> {
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    sels: &'a [Selection],
-    latest_sel_index: usize,
+    selections: &'a [Selection],
+    latest_selection_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -9091,8 +9091,8 @@ impl<'a> Document<'a> {
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        sels: &'a [Selection],
-        latest_sel_index: usize,
+        selections: &'a [Selection],
+        latest_selection_index: usize,
     ) -> Self {
         Self {
             settings,
@@ -9107,8 +9107,8 @@ impl<'a> Document<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
         }
     }
 
@@ -9212,12 +9212,12 @@ impl<'a> Document<'a> {
         }
     }
 
-    pub fn sels(&self) -> &'a [Selection] {
-        self.sels
+    pub fn selections(&self) -> &'a [Selection] {
+        self.selections
     }
 
-    pub fn latest_sel_index(&self) -> usize {
-        self.latest_sel_index
+    pub fn latest_selection_index(&self) -> usize {
+        self.latest_selection_index
     }
 }
 
@@ -9466,7 +9466,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod sel;
+pub mod selection;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -9476,7 +9476,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, sel::Selection,
+    length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -10397,8 +10397,8 @@ impl State {
             &editor.line_inlays,
             &editor.block_widget_inlays,
             &view.summed_heights,
-            &view.sels,
-            view.latest_sel_index,
+            &view.selections,
+            view.latest_selection_index,
         )
     }
 
@@ -10418,8 +10418,8 @@ impl State {
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.sels,
-            &mut view.latest_sel_index,
+            &mut view.selections,
+            &mut view.latest_selection_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -10439,8 +10439,8 @@ impl State {
                 fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                sels: [Selection::default()].into(),
-                latest_sel_index: 0,
+                selections: [Selection::default()].into(),
+                latest_selection_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -10516,8 +10516,8 @@ struct View {
     soft_breaks: Vec<Vec<usize>>,
     start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    sels: Vec<Selection>,
-    latest_sel_index: usize,
+    selections: Vec<Selection>,
+    latest_selection_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -11403,7 +11403,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_sel: {
+        draw_selection: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -11422,7 +11422,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_sel: DrawSelection,
+    draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -11442,7 +11442,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_sels(cx, &document);
+        self.draw_selections(cx, &document);
         self.end(cx, context);
     }
 
@@ -11663,28 +11663,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_sel = None;
-        let mut sels = document.sels();
-        while sels
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_selection = None;
+        let mut selections = document.selections();
+        while selections
             .first()
-            .map_or(false, |sel| sel.end().0.line < self.start_line)
+            .map_or(false, |selection| selection.end().0.line < self.start_line)
         {
-            sels = &sels[1..];
+            selections = &selections[1..];
         }
-        if sels.first().map_or(false, |sel| {
-            sel.start().0.line < self.start_line
+        if selections.first().map_or(false, |selection| {
+            selection.start().0.line < self.start_line
         }) {
-            let (sel, remaining_sels) = sels.split_first().unwrap();
-            sels = remaining_sels;
-            active_sel = Some(ActiveSelection::new(*sel, 0.0));
+            let (selection, remaining_selections) = selections.split_first().unwrap();
+            selections = remaining_selections;
+            active_selection = Some(ActiveSelection::new(*selection, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_sel,
-            sels,
+            active_selection,
+            selections,
         }
-        .draw_sels(cx, document)
+        .draw_selections(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -11779,12 +11779,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_sel: Option<ActiveSelection>,
-    sels: &'a [Selection],
+    active_selection: Option<ActiveSelection>,
+    selections: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -11840,8 +11840,8 @@ impl<'a> DrawSelectionsContext<'a> {
                             }
                             line::WrappedElement::Wrap => {
                                 column += 1;
-                                if self.active_sel.is_some() {
-                                    self.draw_sel(
+                                if self.active_selection.is_some() {
+                                    self.draw_selection(
                                         cx,
                                         line_ref.column_to_x(column),
                                         y,
@@ -11863,8 +11863,8 @@ impl<'a> DrawSelectionsContext<'a> {
                         line_ref.scale(),
                     );
                     column += 1;
-                    if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    if self.active_selection.is_some() {
+                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -11877,8 +11877,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_sel.is_some() {
-            self.code_editor.draw_sel.end(cx);
+        if self.active_selection.is_some() {
+            self.code_editor.draw_selection.end(cx);
         }
     }
 
@@ -11893,41 +11893,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_sel.as_ref().map_or(false, |sel| {
-            sel.sel.end() == (position, bias)
+        if self.active_selection.as_ref().map_or(false, |selection| {
+            selection.selection.end() == (position, bias)
         }) {
-            self.draw_sel(cx, x, y, height);
-            self.code_editor.draw_sel.end(cx);
-            let sel = self.active_sel.take().unwrap().sel;
-            if sel.cursor == (position, bias) {
+            self.draw_selection(cx, x, y, height);
+            self.code_editor.draw_selection.end(cx);
+            let selection = self.active_selection.take().unwrap().selection;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .sels
+            .selections
             .first()
-            .map_or(false, |sel| sel.start() == (position, bias))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
-            let (sel, sels) = self.sels.split_first().unwrap();
-            self.sels = sels;
-            if sel.cursor == (position, bias) {
+            let (selection, selections) = self.selections.split_first().unwrap();
+            self.selections = selections;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !sel.is_empty() {
-                self.active_sel = Some(ActiveSelection {
-                    sel: *sel,
+            if !selection.is_empty() {
+                self.active_selection = Some(ActiveSelection {
+                    selection: *selection,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_sel.begin();
+            self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
-        self.code_editor.draw_sel.draw(
+        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
+        self.code_editor.draw_selection.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -11957,13 +11957,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    sel: Selection,
+    selection: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(sel: Selection, start_x: f64) -> Self {
-        Self { sel, start_x }
+    fn new(selection: Selection, start_x: f64) -> Self {
+        Self { selection, start_x }
     }
 }
 
@@ -12065,8 +12065,8 @@ pub struct Context<'a> {
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    sels: &'a mut Vec<Selection>,
-    latest_sel_index: &'a mut usize,
+    selections: &'a mut Vec<Selection>,
+    latest_selection_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -12085,8 +12085,8 @@ impl<'a> Context<'a> {
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        sels: &'a mut Vec<Selection>,
-        latest_sel_index: &'a mut usize,
+        selections: &'a mut Vec<Selection>,
+        latest_selection_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -12103,8 +12103,8 @@ impl<'a> Context<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
             folding_lines,
             unfolding_lines,
         }
@@ -12124,8 +12124,8 @@ impl<'a> Context<'a> {
             self.line_inlays,
             self.block_widget_inlays,
             self.summed_heights,
-            self.sels,
-            *self.latest_sel_index,
+            self.selections,
+            *self.latest_selection_index,
         )
     }
 
@@ -12222,58 +12222,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.sels.clear();
-        self.sels.push(Selection::from_cursor(cursor));
-        *self.latest_sel_index = 0;
+        self.selections.clear();
+        self.selections.push(Selection::from_cursor(cursor));
+        *self.latest_selection_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let sel = Selection::from_cursor(cursor);
-        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
-            if sel.end() <= cursor {
+        let selection = Selection::from_cursor(cursor);
+        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
+            if selection.end() <= cursor {
                 return Ordering::Less;
             }
-            if sel.start() >= cursor {
+            if selection.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.sels[index] = sel;
+                self.selections[index] = selection;
                 index
             }
             Err(index) => {
-                self.sels.insert(index, sel);
+                self.selections.insert(index, selection);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_sel = &mut self.sels[*self.latest_sel_index];
-        latest_sel.cursor = cursor;
+        let latest_selection = &mut self.selections[*self.latest_selection_index];
+        latest_selection.cursor = cursor;
         if !select {
-            latest_sel.anchor = cursor;
+            latest_selection.anchor = cursor;
         }
-        while *self.latest_sel_index > 0 {
-            let previous_sel_index = *self.latest_sel_index - 1;
-            let previous_sel = self.sels[previous_sel_index];
-            let latest_sel = self.sels[*self.latest_sel_index];
-            if previous_sel.should_merge(latest_sel) {
-                self.sels.remove(previous_sel_index);
-                *self.latest_sel_index -= 1;
+        while *self.latest_selection_index > 0 {
+            let previous_selection_index = *self.latest_selection_index - 1;
+            let previous_selection = self.selections[previous_selection_index];
+            let latest_selection = self.selections[*self.latest_selection_index];
+            if previous_selection.should_merge(latest_selection) {
+                self.selections.remove(previous_selection_index);
+                *self.latest_selection_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_sel_index + 1 < self.sels.len() {
-            let next_sel_index = *self.latest_sel_index + 1;
-            let latest_sel = self.sels[*self.latest_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            if latest_sel.should_merge(next_sel) {
-                self.sels.remove(next_sel_index);
+        while *self.latest_selection_index + 1 < self.selections.len() {
+            let next_selection_index = *self.latest_selection_index + 1;
+            let latest_selection = self.selections[*self.latest_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            if latest_selection.should_merge(next_selection) {
+                self.selections.remove(next_selection_index);
             } else {
                 break;
             }
@@ -12283,32 +12283,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -12387,48 +12387,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_sels(
+    fn modify_selections(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut sels = mem::take(self.sels);
+        let mut selections = mem::take(self.selections);
         let document = self.document();
-        for sel in &mut sels {
-            *sel = f(&document, *sel);
+        for selection in &mut selections {
+            *selection = f(&document, *selection);
             if !select {
-                *sel = sel.reset_anchor();
+                *selection = selection.reset_anchor();
             }
         }
-        *self.sels = sels;
-        let mut current_sel_index = 0;
-        while current_sel_index + 1 < self.sels.len() {
-            let next_sel_index = current_sel_index + 1;
-            let current_sel = self.sels[current_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            assert!(current_sel.start() <= next_sel.start());
-            if !current_sel.should_merge(next_sel) {
-                current_sel_index += 1;
+        *self.selections = selections;
+        let mut current_selection_index = 0;
+        while current_selection_index + 1 < self.selections.len() {
+            let next_selection_index = current_selection_index + 1;
+            let current_selection = self.selections[current_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if !current_selection.should_merge(next_selection) {
+                current_selection_index += 1;
                 continue;
             }
-            let start = current_sel.start().min(next_sel.start());
-            let end = current_sel.end().max(next_sel.end());
+            let start = current_selection.start().min(next_selection.start());
+            let end = current_selection.end().max(next_selection.end());
             let anchor;
             let cursor;
-            if current_sel.anchor <= next_sel.cursor {
+            if current_selection.anchor <= next_selection.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_column);
-            self.sels.remove(next_sel_index);
-            if next_sel_index < *self.latest_sel_index {
-                *self.latest_sel_index -= 1;
+            self.selections[current_selection_index] =
+                Selection::new(anchor, cursor, current_selection.preferred_column);
+            self.selections.remove(next_selection_index);
+            if next_selection_index < *self.latest_selection_index {
+                *self.latest_selection_index -= 1;
             }
         }
     }
@@ -12439,27 +12439,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for sel in &mut *self.sels {
-            let distance_from_prev_end = sel.start().0 - prev_end;
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + sel.length();
+            let diffed_end = diffed_start + selection.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = sel.end().0;
+            prev_end = selection.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if sel.anchor <= sel.cursor {
-                anchor = (diffed_start, sel.start().1);
-                cursor = (diffed_end, sel.end().1);
+            if selection.anchor <= selection.cursor {
+                anchor = (diffed_start, selection.start().1);
+                cursor = (diffed_end, selection.end().1);
             } else {
-                anchor = (diffed_end, sel.end().1);
-                cursor = (diffed_start, sel.start().1);
+                anchor = (diffed_end, selection.end().1);
+                cursor = (diffed_start, selection.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_column);
+            *selection = Selection::new(anchor, cursor, selection.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -12818,8 +12818,8 @@ pub struct Document<'a> {
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    sels: &'a [Selection],
-    latest_sel_index: usize,
+    selections: &'a [Selection],
+    latest_selection_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -12836,8 +12836,8 @@ impl<'a> Document<'a> {
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        sels: &'a [Selection],
-        latest_sel_index: usize,
+        selections: &'a [Selection],
+        latest_selection_index: usize,
     ) -> Self {
         Self {
             settings,
@@ -12852,8 +12852,8 @@ impl<'a> Document<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
         }
     }
 
@@ -12957,12 +12957,12 @@ impl<'a> Document<'a> {
         }
     }
 
-    pub fn sels(&self) -> &'a [Selection] {
-        self.sels
+    pub fn selections(&self) -> &'a [Selection] {
+        self.selections
     }
 
-    pub fn latest_sel_index(&self) -> usize {
-        self.latest_sel_index
+    pub fn latest_selection_index(&self) -> usize {
+        self.latest_selection_index
     }
 }
 
@@ -13211,7 +13211,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod sel;
+pub mod selection;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -13221,7 +13221,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, sel::Selection,
+    length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -14142,8 +14142,8 @@ impl State {
             &editor.line_inlays,
             &editor.block_widget_inlays,
             &view.summed_heights,
-            &view.sels,
-            view.latest_sel_index,
+            &view.selections,
+            view.latest_selection_index,
         )
     }
 
@@ -14163,8 +14163,8 @@ impl State {
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.sels,
-            &mut view.latest_sel_index,
+            &mut view.selections,
+            &mut view.latest_selection_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -14184,8 +14184,8 @@ impl State {
                 fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                sels: [Selection::default()].into(),
-                latest_sel_index: 0,
+                selections: [Selection::default()].into(),
+                latest_selection_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -14261,8 +14261,8 @@ struct View {
     soft_breaks: Vec<Vec<usize>>,
     start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    sels: Vec<Selection>,
-    latest_sel_index: usize,
+    selections: Vec<Selection>,
+    latest_selection_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -15148,7 +15148,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_sel: {
+        draw_selection: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -15167,7 +15167,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_sel: DrawSelection,
+    draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -15187,7 +15187,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_sels(cx, &document);
+        self.draw_selections(cx, &document);
         self.end(cx, context);
     }
 
@@ -15408,28 +15408,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_sel = None;
-        let mut sels = document.sels();
-        while sels
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_selection = None;
+        let mut selections = document.selections();
+        while selections
             .first()
-            .map_or(false, |sel| sel.end().0.line < self.start_line)
+            .map_or(false, |selection| selection.end().0.line < self.start_line)
         {
-            sels = &sels[1..];
+            selections = &selections[1..];
         }
-        if sels.first().map_or(false, |sel| {
-            sel.start().0.line < self.start_line
+        if selections.first().map_or(false, |selection| {
+            selection.start().0.line < self.start_line
         }) {
-            let (sel, remaining_sels) = sels.split_first().unwrap();
-            sels = remaining_sels;
-            active_sel = Some(ActiveSelection::new(*sel, 0.0));
+            let (selection, remaining_selections) = selections.split_first().unwrap();
+            selections = remaining_selections;
+            active_selection = Some(ActiveSelection::new(*selection, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_sel,
-            sels,
+            active_selection,
+            selections,
         }
-        .draw_sels(cx, document)
+        .draw_selections(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -15524,12 +15524,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_sel: Option<ActiveSelection>,
-    sels: &'a [Selection],
+    active_selection: Option<ActiveSelection>,
+    selections: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -15585,8 +15585,8 @@ impl<'a> DrawSelectionsContext<'a> {
                             }
                             line::WrappedElement::Wrap => {
                                 column += 1;
-                                if self.active_sel.is_some() {
-                                    self.draw_sel(
+                                if self.active_selection.is_some() {
+                                    self.draw_selection(
                                         cx,
                                         line_ref.column_to_x(column),
                                         y,
@@ -15608,8 +15608,8 @@ impl<'a> DrawSelectionsContext<'a> {
                         line_ref.scale(),
                     );
                     column += 1;
-                    if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    if self.active_selection.is_some() {
+                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -15622,8 +15622,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_sel.is_some() {
-            self.code_editor.draw_sel.end(cx);
+        if self.active_selection.is_some() {
+            self.code_editor.draw_selection.end(cx);
         }
     }
 
@@ -15638,41 +15638,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_sel.as_ref().map_or(false, |sel| {
-            sel.sel.end() == (position, bias)
+        if self.active_selection.as_ref().map_or(false, |selection| {
+            selection.selection.end() == (position, bias)
         }) {
-            self.draw_sel(cx, x, y, height);
-            self.code_editor.draw_sel.end(cx);
-            let sel = self.active_sel.take().unwrap().sel;
-            if sel.cursor == (position, bias) {
+            self.draw_selection(cx, x, y, height);
+            self.code_editor.draw_selection.end(cx);
+            let selection = self.active_selection.take().unwrap().selection;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .sels
+            .selections
             .first()
-            .map_or(false, |sel| sel.start() == (position, bias))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
-            let (sel, sels) = self.sels.split_first().unwrap();
-            self.sels = sels;
-            if sel.cursor == (position, bias) {
+            let (selection, selections) = self.selections.split_first().unwrap();
+            self.selections = selections;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !sel.is_empty() {
-                self.active_sel = Some(ActiveSelection {
-                    sel: *sel,
+            if !selection.is_empty() {
+                self.active_selection = Some(ActiveSelection {
+                    selection: *selection,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_sel.begin();
+            self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
-        self.code_editor.draw_sel.draw(
+        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
+        self.code_editor.draw_selection.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -15702,13 +15702,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    sel: Selection,
+    selection: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(sel: Selection, start_x: f64) -> Self {
-        Self { sel, start_x }
+    fn new(selection: Selection, start_x: f64) -> Self {
+        Self { selection, start_x }
     }
 }
 
@@ -15810,8 +15810,8 @@ pub struct Context<'a> {
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    sels: &'a mut Vec<Selection>,
-    latest_sel_index: &'a mut usize,
+    selections: &'a mut Vec<Selection>,
+    latest_selection_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -15830,8 +15830,8 @@ impl<'a> Context<'a> {
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        sels: &'a mut Vec<Selection>,
-        latest_sel_index: &'a mut usize,
+        selections: &'a mut Vec<Selection>,
+        latest_selection_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -15848,8 +15848,8 @@ impl<'a> Context<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
             folding_lines,
             unfolding_lines,
         }
@@ -15869,8 +15869,8 @@ impl<'a> Context<'a> {
             self.line_inlays,
             self.block_widget_inlays,
             self.summed_heights,
-            self.sels,
-            *self.latest_sel_index,
+            self.selections,
+            *self.latest_selection_index,
         )
     }
 
@@ -15967,58 +15967,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.sels.clear();
-        self.sels.push(Selection::from_cursor(cursor));
-        *self.latest_sel_index = 0;
+        self.selections.clear();
+        self.selections.push(Selection::from_cursor(cursor));
+        *self.latest_selection_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let sel = Selection::from_cursor(cursor);
-        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
-            if sel.end() <= cursor {
+        let selection = Selection::from_cursor(cursor);
+        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
+            if selection.end() <= cursor {
                 return Ordering::Less;
             }
-            if sel.start() >= cursor {
+            if selection.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.sels[index] = sel;
+                self.selections[index] = selection;
                 index
             }
             Err(index) => {
-                self.sels.insert(index, sel);
+                self.selections.insert(index, selection);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_sel = &mut self.sels[*self.latest_sel_index];
-        latest_sel.cursor = cursor;
+        let latest_selection = &mut self.selections[*self.latest_selection_index];
+        latest_selection.cursor = cursor;
         if !select {
-            latest_sel.anchor = cursor;
+            latest_selection.anchor = cursor;
         }
-        while *self.latest_sel_index > 0 {
-            let previous_sel_index = *self.latest_sel_index - 1;
-            let previous_sel = self.sels[previous_sel_index];
-            let latest_sel = self.sels[*self.latest_sel_index];
-            if previous_sel.should_merge(latest_sel) {
-                self.sels.remove(previous_sel_index);
-                *self.latest_sel_index -= 1;
+        while *self.latest_selection_index > 0 {
+            let previous_selection_index = *self.latest_selection_index - 1;
+            let previous_selection = self.selections[previous_selection_index];
+            let latest_selection = self.selections[*self.latest_selection_index];
+            if previous_selection.should_merge(latest_selection) {
+                self.selections.remove(previous_selection_index);
+                *self.latest_selection_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_sel_index + 1 < self.sels.len() {
-            let next_sel_index = *self.latest_sel_index + 1;
-            let latest_sel = self.sels[*self.latest_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            if latest_sel.should_merge(next_sel) {
-                self.sels.remove(next_sel_index);
+        while *self.latest_selection_index + 1 < self.selections.len() {
+            let next_selection_index = *self.latest_selection_index + 1;
+            let latest_selection = self.selections[*self.latest_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            if latest_selection.should_merge(next_selection) {
+                self.selections.remove(next_selection_index);
             } else {
                 break;
             }
@@ -16028,32 +16028,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -16132,48 +16132,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_sels(
+    fn modify_selections(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut sels = mem::take(self.sels);
+        let mut selections = mem::take(self.selections);
         let document = self.document();
-        for sel in &mut sels {
-            *sel = f(&document, *sel);
+        for selection in &mut selections {
+            *selection = f(&document, *selection);
             if !select {
-                *sel = sel.reset_anchor();
+                *selection = selection.reset_anchor();
             }
         }
-        *self.sels = sels;
-        let mut current_sel_index = 0;
-        while current_sel_index + 1 < self.sels.len() {
-            let next_sel_index = current_sel_index + 1;
-            let current_sel = self.sels[current_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            assert!(current_sel.start() <= next_sel.start());
-            if !current_sel.should_merge(next_sel) {
-                current_sel_index += 1;
+        *self.selections = selections;
+        let mut current_selection_index = 0;
+        while current_selection_index + 1 < self.selections.len() {
+            let next_selection_index = current_selection_index + 1;
+            let current_selection = self.selections[current_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if !current_selection.should_merge(next_selection) {
+                current_selection_index += 1;
                 continue;
             }
-            let start = current_sel.start().min(next_sel.start());
-            let end = current_sel.end().max(next_sel.end());
+            let start = current_selection.start().min(next_selection.start());
+            let end = current_selection.end().max(next_selection.end());
             let anchor;
             let cursor;
-            if current_sel.anchor <= next_sel.cursor {
+            if current_selection.anchor <= next_selection.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_column);
-            self.sels.remove(next_sel_index);
-            if next_sel_index < *self.latest_sel_index {
-                *self.latest_sel_index -= 1;
+            self.selections[current_selection_index] =
+                Selection::new(anchor, cursor, current_selection.preferred_column);
+            self.selections.remove(next_selection_index);
+            if next_selection_index < *self.latest_selection_index {
+                *self.latest_selection_index -= 1;
             }
         }
     }
@@ -16184,27 +16184,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for sel in &mut *self.sels {
-            let distance_from_prev_end = sel.start().0 - prev_end;
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + sel.length();
+            let diffed_end = diffed_start + selection.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = sel.end().0;
+            prev_end = selection.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if sel.anchor <= sel.cursor {
-                anchor = (diffed_start, sel.start().1);
-                cursor = (diffed_end, sel.end().1);
+            if selection.anchor <= selection.cursor {
+                anchor = (diffed_start, selection.start().1);
+                cursor = (diffed_end, selection.end().1);
             } else {
-                anchor = (diffed_end, sel.end().1);
-                cursor = (diffed_start, sel.start().1);
+                anchor = (diffed_end, selection.end().1);
+                cursor = (diffed_start, selection.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_column);
+            *selection = Selection::new(anchor, cursor, selection.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -16563,8 +16563,8 @@ pub struct Document<'a> {
     line_inlays: &'a [(usize, LineInlay)],
     block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    sels: &'a [Selection],
-    latest_sel_index: usize,
+    selections: &'a [Selection],
+    latest_selection_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -16581,8 +16581,8 @@ impl<'a> Document<'a> {
         line_inlays: &'a [(usize, LineInlay)],
         block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        sels: &'a [Selection],
-        latest_sel_index: usize,
+        selections: &'a [Selection],
+        latest_selection_index: usize,
     ) -> Self {
         Self {
             settings,
@@ -16597,8 +16597,8 @@ impl<'a> Document<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
         }
     }
 
@@ -16702,12 +16702,12 @@ impl<'a> Document<'a> {
         }
     }
 
-    pub fn sels(&self) -> &'a [Selection] {
-        self.sels
+    pub fn selections(&self) -> &'a [Selection] {
+        self.selections
     }
 
-    pub fn latest_sel_index(&self) -> usize {
-        self.latest_sel_index
+    pub fn latest_selection_index(&self) -> usize {
+        self.latest_selection_index
     }
 }
 
@@ -16956,7 +16956,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod sel;
+pub mod selection;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -16966,7 +16966,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, sel::Selection,
+    length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -17887,8 +17887,8 @@ impl State {
             &editor.line_inlays,
             &editor.block_widget_inlays,
             &view.summed_heights,
-            &view.sels,
-            view.latest_sel_index,
+            &view.selections,
+            view.latest_selection_index,
         )
     }
 
@@ -17908,8 +17908,8 @@ impl State {
             &mut editor.line_inlays,
             &mut editor.block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.sels,
-            &mut view.latest_sel_index,
+            &mut view.selections,
+            &mut view.latest_selection_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -17929,8 +17929,8 @@ impl State {
                 fold_column: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                sels: [Selection::default()].into(),
-                latest_sel_index: 0,
+                selections: [Selection::default()].into(),
+                latest_selection_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -18006,8 +18006,8 @@ struct View {
     soft_breaks: Vec<Vec<usize>>,
     start_column_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    sels: Vec<Selection>,
-    latest_sel_index: usize,
+    selections: Vec<Selection>,
+    latest_selection_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -18893,7 +18893,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_sel: {
+        draw_selection: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -18912,7 +18912,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_sel: DrawSelection,
+    draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -18932,7 +18932,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_sels(cx, &document);
+        self.draw_selections(cx, &document);
         self.end(cx, context);
     }
 
@@ -19153,28 +19153,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_sel = None;
-        let mut sels = document.sels();
-        while sels
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_selection = None;
+        let mut selections = document.selections();
+        while selections
             .first()
-            .map_or(false, |sel| sel.end().0.line < self.start_line)
+            .map_or(false, |selection| selection.end().0.line < self.start_line)
         {
-            sels = &sels[1..];
+            selections = &selections[1..];
         }
-        if sels.first().map_or(false, |sel| {
-            sel.start().0.line < self.start_line
+        if selections.first().map_or(false, |selection| {
+            selection.start().0.line < self.start_line
         }) {
-            let (sel, remaining_sels) = sels.split_first().unwrap();
-            sels = remaining_sels;
-            active_sel = Some(ActiveSelection::new(*sel, 0.0));
+            let (selection, remaining_selections) = selections.split_first().unwrap();
+            selections = remaining_selections;
+            active_selection = Some(ActiveSelection::new(*selection, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_sel,
-            sels,
+            active_selection,
+            selections,
         }
-        .draw_sels(cx, document)
+        .draw_selections(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -19269,12 +19269,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_sel: Option<ActiveSelection>,
-    sels: &'a [Selection],
+    active_selection: Option<ActiveSelection>,
+    selections: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -19330,8 +19330,8 @@ impl<'a> DrawSelectionsContext<'a> {
                             }
                             line::WrappedElement::Wrap => {
                                 column += 1;
-                                if self.active_sel.is_some() {
-                                    self.draw_sel(
+                                if self.active_selection.is_some() {
+                                    self.draw_selection(
                                         cx,
                                         line_ref.column_to_x(column),
                                         y,
@@ -19353,8 +19353,8 @@ impl<'a> DrawSelectionsContext<'a> {
                         line_ref.scale(),
                     );
                     column += 1;
-                    if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    if self.active_selection.is_some() {
+                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -19367,8 +19367,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_sel.is_some() {
-            self.code_editor.draw_sel.end(cx);
+        if self.active_selection.is_some() {
+            self.code_editor.draw_selection.end(cx);
         }
     }
 
@@ -19383,41 +19383,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_sel.as_ref().map_or(false, |sel| {
-            sel.sel.end() == (position, bias)
+        if self.active_selection.as_ref().map_or(false, |selection| {
+            selection.selection.end() == (position, bias)
         }) {
-            self.draw_sel(cx, x, y, height);
-            self.code_editor.draw_sel.end(cx);
-            let sel = self.active_sel.take().unwrap().sel;
-            if sel.cursor == (position, bias) {
+            self.draw_selection(cx, x, y, height);
+            self.code_editor.draw_selection.end(cx);
+            let selection = self.active_selection.take().unwrap().selection;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .sels
+            .selections
             .first()
-            .map_or(false, |sel| sel.start() == (position, bias))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
-            let (sel, sels) = self.sels.split_first().unwrap();
-            self.sels = sels;
-            if sel.cursor == (position, bias) {
+            let (selection, selections) = self.selections.split_first().unwrap();
+            self.selections = selections;
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !sel.is_empty() {
-                self.active_sel = Some(ActiveSelection {
-                    sel: *sel,
+            if !selection.is_empty() {
+                self.active_selection = Some(ActiveSelection {
+                    selection: *selection,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_sel.begin();
+            self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
-        self.code_editor.draw_sel.draw(
+        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
+        self.code_editor.draw_selection.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -19447,13 +19447,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    sel: Selection,
+    selection: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(sel: Selection, start_x: f64) -> Self {
-        Self { sel, start_x }
+    fn new(selection: Selection, start_x: f64) -> Self {
+        Self { selection, start_x }
     }
 }
 
@@ -19555,8 +19555,8 @@ pub struct Context<'a> {
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    sels: &'a mut Vec<Selection>,
-    latest_sel_index: &'a mut usize,
+    selections: &'a mut Vec<Selection>,
+    latest_selection_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -19575,8 +19575,8 @@ impl<'a> Context<'a> {
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        sels: &'a mut Vec<Selection>,
-        latest_sel_index: &'a mut usize,
+        selections: &'a mut Vec<Selection>,
+        latest_selection_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -19593,8 +19593,8 @@ impl<'a> Context<'a> {
             line_inlays,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
             folding_lines,
             unfolding_lines,
         }
@@ -19614,8 +19614,8 @@ impl<'a> Context<'a> {
             self.line_inlays,
             self.block_widget_inlays,
             self.summed_heights,
-            self.sels,
-            *self.latest_sel_index,
+            self.selections,
+            *self.latest_selection_index,
         )
     }
 
@@ -19712,58 +19712,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.sels.clear();
-        self.sels.push(Selection::from_cursor(cursor));
-        *self.latest_sel_index = 0;
+        self.selections.clear();
+        self.selections.push(Selection::from_cursor(cursor));
+        *self.latest_selection_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let sel = Selection::from_cursor(cursor);
-        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
-            if sel.end() <= cursor {
+        let selection = Selection::from_cursor(cursor);
+        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
+            if selection.end() <= cursor {
                 return Ordering::Less;
             }
-            if sel.start() >= cursor {
+            if selection.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.sels[index] = sel;
+                self.selections[index] = selection;
                 index
             }
             Err(index) => {
-                self.sels.insert(index, sel);
+                self.selections.insert(index, selection);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_sel = &mut self.sels[*self.latest_sel_index];
-        latest_sel.cursor = cursor;
+        let latest_selection = &mut self.selections[*self.latest_selection_index];
+        latest_selection.cursor = cursor;
         if !select {
-            latest_sel.anchor = cursor;
+            latest_selection.anchor = cursor;
         }
-        while *self.latest_sel_index > 0 {
-            let previous_sel_index = *self.latest_sel_index - 1;
-            let previous_sel = self.sels[previous_sel_index];
-            let latest_sel = self.sels[*self.latest_sel_index];
-            if previous_sel.should_merge(latest_sel) {
-                self.sels.remove(previous_sel_index);
-                *self.latest_sel_index -= 1;
+        while *self.latest_selection_index > 0 {
+            let previous_selection_index = *self.latest_selection_index - 1;
+            let previous_selection = self.selections[previous_selection_index];
+            let latest_selection = self.selections[*self.latest_selection_index];
+            if previous_selection.should_merge(latest_selection) {
+                self.selections.remove(previous_selection_index);
+                *self.latest_selection_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_sel_index + 1 < self.sels.len() {
-            let next_sel_index = *self.latest_sel_index + 1;
-            let latest_sel = self.sels[*self.latest_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            if latest_sel.should_merge(next_sel) {
-                self.sels.remove(next_sel_index);
+        while *self.latest_selection_index + 1 < self.selections.len() {
+            let next_selection_index = *self.latest_selection_index + 1;
+            let latest_selection = self.selections[*self.latest_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            if latest_selection.should_merge(next_selection) {
+                self.selections.remove(next_selection_index);
             } else {
                 break;
             }
@@ -19773,32 +19773,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
         });
     }
 
@@ -19877,48 +19877,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_sels(
+    fn modify_selections(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut sels = mem::take(self.sels);
+        let mut selections = mem::take(self.selections);
         let document = self.document();
-        for sel in &mut sels {
-            *sel = f(&document, *sel);
+        for selection in &mut selections {
+            *selection = f(&document, *selection);
             if !select {
-                *sel = sel.reset_anchor();
+                *selection = selection.reset_anchor();
             }
         }
-        *self.sels = sels;
-        let mut current_sel_index = 0;
-        while current_sel_index + 1 < self.sels.len() {
-            let next_sel_index = current_sel_index + 1;
-            let current_sel = self.sels[current_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            assert!(current_sel.start() <= next_sel.start());
-            if !current_sel.should_merge(next_sel) {
-                current_sel_index += 1;
+        *self.selections = selections;
+        let mut current_selection_index = 0;
+        while current_selection_index + 1 < self.selections.len() {
+            let next_selection_index = current_selection_index + 1;
+            let current_selection = self.selections[current_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if !current_selection.should_merge(next_selection) {
+                current_selection_index += 1;
                 continue;
             }
-            let start = current_sel.start().min(next_sel.start());
-            let end = current_sel.end().max(next_sel.end());
+            let start = current_selection.start().min(next_selection.start());
+            let end = current_selection.end().max(next_selection.end());
             let anchor;
             let cursor;
-            if current_sel.anchor <= next_sel.cursor {
+            if current_selection.anchor <= next_selection.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.sels[current_sel_index] =
-                Selection::new(anchor, cursor, current_sel.preferred_column);
-            self.sels.remove(next_sel_index);
-            if next_sel_index < *self.latest_sel_index {
-                *self.latest_sel_index -= 1;
+            self.selections[current_selection_index] =
+                Selection::new(anchor, cursor, current_selection.preferred_column);
+            self.selections.remove(next_selection_index);
+            if next_selection_index < *self.latest_selection_index {
+                *self.latest_selection_index -= 1;
             }
         }
     }
@@ -19929,27 +19929,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for sel in &mut *self.sels {
-            let distance_from_prev_end = sel.start().0 - prev_end;
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + sel.length();
+            let diffed_end = diffed_start + selection.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = sel.end().0;
+            prev_end = selection.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if sel.anchor <= sel.cursor {
-                anchor = (diffed_start, sel.start().1);
-                cursor = (diffed_end, sel.end().1);
+            if selection.anchor <= selection.cursor {
+                anchor = (diffed_start, selection.start().1);
+                cursor = (diffed_end, selection.end().1);
             } else {
-                anchor = (diffed_end, sel.end().1);
-                cursor = (diffed_start, sel.start().1);
+                anchor = (diffed_end, selection.end().1);
+                cursor = (diffed_start, selection.start().1);
             }
-            *sel = Selection::new(anchor, cursor, sel.preferred_column);
+            *selection = Selection::new(anchor, cursor, selection.preferred_column);
         }
         self.update_after_modify_text(composite_diff);
     }
