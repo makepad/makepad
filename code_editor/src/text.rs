@@ -67,8 +67,7 @@ impl Text {
 
     pub fn insert(&mut self, pos: Pos, mut text: Self) {
         if text.len().lines == 0 {
-            self.lines[pos.line]
-                .replace_range(pos.byte..pos.byte, text.lines.first().unwrap());
+            self.lines[pos.line].replace_range(pos.byte..pos.byte, text.lines.first().unwrap());
         } else {
             text.lines
                 .first_mut()
@@ -78,8 +77,7 @@ impl Text {
                 .last_mut()
                 .unwrap()
                 .push_str(&self.lines[pos.line][pos.byte..]);
-            self.lines
-                .splice(pos.line..pos.line + 1, text.lines);
+            self.lines.splice(pos.line..pos.line + 1, text.lines);
         }
     }
 
@@ -87,15 +85,12 @@ impl Text {
         use std::iter;
 
         if len.lines == 0 {
-            self.lines[pos.line]
-                .replace_range(pos.byte..pos.byte + len.bytes, "");
+            self.lines[pos.line].replace_range(pos.byte..pos.byte + len.bytes, "");
         } else {
             let mut line = self.lines[pos.line][..pos.byte].to_string();
             line.push_str(&self.lines[pos.line + len.lines][len.bytes..]);
-            self.lines.splice(
-                pos.line..pos.line + len.lines + 1,
-                iter::once(line),
-            );
+            self.lines
+                .splice(pos.line..pos.line + len.lines + 1, iter::once(line));
         }
     }
 
