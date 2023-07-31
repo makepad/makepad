@@ -1,5 +1,5 @@
 use {
-    crate::{Diff, TextLen, TextPos, TextRange},
+    crate::{TextDiff, TextLen, TextPos, TextRange},
     std::{borrow::Cow, ops::AddAssign},
 };
 
@@ -94,7 +94,7 @@ impl Text {
         }
     }
 
-    pub fn apply_diff(&mut self, diff: Diff) {
+    pub fn apply_diff(&mut self, diff: TextDiff) {
         use super::text_diff::Op;
 
         let mut pos = TextPos::default();

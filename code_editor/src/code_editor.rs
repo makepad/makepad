@@ -1,5 +1,5 @@
 use {
-    crate::{state::ViewId, Bias, BiasedTextPos, Context, TextPos, Selection, State, View},
+    crate::{state::ViewId, Bias, BiasedTextPos, Context, Selection, State, TextPos, View},
     makepad_widgets::*,
 };
 

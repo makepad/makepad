@@ -1,7 +1,7 @@
 use {
     crate::{
-        line, view, view::LineInlay, Bias, BiasedTextPos, Diff, TextPos, TextRange, Selection, Settings, Text,
-        Tokenizer, View,
+        line, view, view::LineInlay, Bias, BiasedTextPos, Selection, Settings, Text, TextDiff,
+        TextPos, TextRange, Tokenizer, View,
     },
     std::collections::HashSet,
 };
@@ -211,16 +211,18 @@ impl<'a> Context<'a> {
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
+        let tab_width = self.settings.tab_column_count;
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor| move_ops::move_up(document, cursor))
+            selection.update_cursor(|cursor| move_ops::move_up(document, cursor, tab_width))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
+        let tab_width = self.settings.tab_column_count;
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor| move_ops::move_down(document, cursor))
+            selection.update_cursor(|cursor| move_ops::move_down(document, cursor, tab_width))
         });
     }
 
@@ -412,7 +414,10 @@ impl<'a> Context<'a> {
                     col: current_selection.cursor.col,
                 };
             }
-            self.selections[current_selection_index] = Selection { anchor: anchor_pos, cursor };
+            self.selections[current_selection_index] = Selection {
+                anchor: anchor_pos,
+                cursor,
+            };
             self.selections.remove(next_selection_index);
             if next_selection_index < *self.latest_selection_index {
                 *self.latest_selection_index -= 1;
@@ -420,10 +425,10 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, TextRange) -> Diff) {
+    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, TextRange) -> TextDiff) {
         use crate::{text_pos::ApplyDiffMode, Cursor};
 
-        let mut composite_diff = Diff::new();
+        let mut composite_diff = TextDiff::new();
         let mut prev_end = TextPos::default();
         let mut diffed_prev_end = TextPos::default();
         for selection in &mut *self.selections {
@@ -469,7 +474,7 @@ impl<'a> Context<'a> {
         self.update_after_modify_text(composite_diff);
     }
 
-    fn update_after_modify_text(&mut self, diff: Diff) {
+    fn update_after_modify_text(&mut self, diff: TextDiff) {
         use crate::text_diff::OpInfo;
 
         let mut line = 0;
