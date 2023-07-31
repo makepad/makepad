@@ -1,5 +1,5 @@
 use {
-    crate::{Diff, Length, Position, Range},
+    crate::{Diff, Length, Point, Range},
     std::{borrow::Cow, ops::AddAssign},
 };
 
@@ -68,7 +68,7 @@ impl Text {
             .replace_range(..len.byte_count, "");
     }
 
-    pub fn insert(&mut self, position: Position, mut text: Self) {
+    pub fn insert(&mut self, position: Point, mut text: Self) {
         if text.length().line_count == 0 {
             self.lines[position.line]
                 .replace_range(position.byte..position.byte, text.lines.first().unwrap());
@@ -86,7 +86,7 @@ impl Text {
         }
     }
 
-    pub fn delete(&mut self, position: Position, length: Length) {
+    pub fn delete(&mut self, position: Point, length: Length) {
         use std::iter;
 
         if length.line_count == 0 {
@@ -105,7 +105,7 @@ impl Text {
     pub fn apply_diff(&mut self, diff: Diff) {
         use super::diff::Operation;
 
-        let mut position = Position::default();
+        let mut position = Point::default();
         for operation in diff {
             match operation {
                 Operation::Delete(length) => self.delete(position, length),

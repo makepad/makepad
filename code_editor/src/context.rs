@@ -1,6 +1,6 @@
 use {
     crate::{
-        document, document::LineInlay, line, Affinity, Diff, Document, Position, Range, Selection,
+        document, document::LineInlay, line, Affinity, Diff, Document, Point, Range, Selection,
         Settings, Text, Tokenizer,
     },
     std::collections::HashSet,
@@ -119,13 +119,13 @@ impl<'a> Context<'a> {
         self.modify_text(edit_ops::backspace)
     }
 
-    pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
+    pub fn set_cursor(&mut self, cursor: (Point, Affinity)) {
         self.selections.clear();
         self.selections.push(Selection::from_cursor(cursor));
         *self.latest_selection_index = 0;
     }
 
-    pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
+    pub fn insert_cursor(&mut self, cursor: (Point, Affinity)) {
         use std::cmp::Ordering;
 
         let selection = Selection::from_cursor(cursor);
@@ -149,7 +149,7 @@ impl<'a> Context<'a> {
         };
     }
 
-    pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
+    pub fn move_cursor_to(&mut self, select: bool, cursor: (Point, Affinity)) {
         let latest_selection = &mut self.selections[*self.latest_selection_index];
         latest_selection.cursor = cursor;
         if !select {
@@ -402,18 +402,18 @@ impl<'a> Context<'a> {
     }
 
     fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
-        use crate::diff::Strategy;
+        use crate::point::ApplyDiffMode;
 
         let mut composite_diff = Diff::new();
-        let mut prev_end = Position::default();
-        let mut diffed_prev_end = Position::default();
+        let mut prev_end = Point::default();
+        let mut diffed_prev_end = Point::default();
         for selection in &mut *self.selections {
             let distance_from_prev_end = selection.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
             let diffed_end = diffed_start + selection.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
-            let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
-            let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
+            let diffed_start = diffed_start.apply_diff(&diff, ApplyDiffMode::InsertBefore);
+            let diffed_end = diffed_end.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
             prev_end = selection.end().0;
