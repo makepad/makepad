@@ -1,6 +1,6 @@
 pub trait StrExt {
-    fn col_count(&self, tab_col_count: usize) -> usize;
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
+    fn column_count(&self, tab_column_count: usize) -> usize;
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -8,16 +8,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn col_count(&self, tab_col_count: usize) -> usize {
+    fn column_count(&self, tab_column_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.col_count(tab_col_count))
+            .map(|char| char.column_count(tab_column_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
-        self.indentation().col_count(tab_col_count) / indent_col_count
+    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
+        self.indentation().column_count(tab_column_count) / indent_column_count
     }
 
     fn indentation(&self) -> &str {

@@ -1,13 +1,13 @@
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct TextLen {
+pub struct Len {
     pub lines: usize,
     pub bytes: usize,
 }
 
-impl Add for TextLen {
-    type Output = TextLen;
+impl Add for Len {
+    type Output = Len;
 
     fn add(self, other: Self) -> Self::Output {
         if other.lines == 0 {
@@ -24,14 +24,14 @@ impl Add for TextLen {
     }
 }
 
-impl AddAssign for TextLen {
+impl AddAssign for Len {
     fn add_assign(&mut self, other: Self) {
         *self = *self + other;
     }
 }
 
-impl Sub for TextLen {
-    type Output = TextLen;
+impl Sub for Len {
+    type Output = Len;
 
     fn sub(self, other: Self) -> Self::Output {
         if self.lines == other.lines {
@@ -48,7 +48,7 @@ impl Sub for TextLen {
     }
 }
 
-impl SubAssign for TextLen {
+impl SubAssign for Len {
     fn sub_assign(&mut self, other: Self) {
         *self = *self - other;
     }

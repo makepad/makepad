@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_micro_serde::*,
-        makepad_code_editor::TextRange,
+        makepad_code_editor::Range,
         build::{
             build_protocol::*,
             child_process::{
@@ -235,7 +235,7 @@ pub trait MsgSender: Send {
     }
     
     
-    fn send_location_msg(&self, cmd_id: BuildCmdId, level: BuildMsgLevel, file_name: String, range: TextRange, msg: String) {
+    fn send_location_msg(&self, cmd_id: BuildCmdId, level: BuildMsgLevel, file_name: String, range: Range, msg: String) {
         self.send_message(
             cmd_id.wrap_msg(BuildMsg::Location(BuildMsgLocation {
                 level,

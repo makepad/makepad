@@ -1,5 +1,5 @@
 use {
-    crate::{TextDiff, TextLen, TextPos, TextRange},
+    crate::{Diff, Len, Pos, Range},
     std::{borrow::Cow, ops::AddAssign},
 };
 
@@ -14,11 +14,11 @@ impl Text {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == TextLen::default()
+        self.len() == Len::default()
     }
 
-    pub fn len(&self) -> TextLen {
-        TextLen {
+    pub fn len(&self) -> Len {
+        Len {
             lines: self.lines.len() - 1,
             bytes: self.lines.last().unwrap().len(),
         }
@@ -28,7 +28,7 @@ impl Text {
         &self.lines
     }
 
-    pub fn slice(&self, range: TextRange) -> Self {
+    pub fn slice(&self, range: Range) -> Self {
         let mut lines = Vec::new();
         if range.start().line == range.end().line {
             lines.push(
@@ -47,7 +47,7 @@ impl Text {
         Text { lines }
     }
 
-    pub fn take(&mut self, len: TextLen) -> Self {
+    pub fn take(&mut self, len: Len) -> Self {
         let mut lines = self.lines.drain(..len.lines as usize).collect::<Vec<_>>();
         lines.push(self.lines.first().unwrap()[..len.bytes].to_string());
         self.lines
@@ -57,7 +57,7 @@ impl Text {
         Text { lines }
     }
 
-    pub fn skip(&mut self, len: TextLen) {
+    pub fn skip(&mut self, len: Len) {
         self.lines.drain(..len.lines);
         self.lines
             .first_mut()
@@ -65,7 +65,7 @@ impl Text {
             .replace_range(..len.bytes, "");
     }
 
-    pub fn insert(&mut self, pos: TextPos, mut text: Self) {
+    pub fn insert(&mut self, pos: Pos, mut text: Self) {
         if text.len().lines == 0 {
             self.lines[pos.line].replace_range(pos.byte..pos.byte, text.lines.first().unwrap());
         } else {
@@ -81,7 +81,7 @@ impl Text {
         }
     }
 
-    pub fn delete(&mut self, pos: TextPos, len: TextLen) {
+    pub fn delete(&mut self, pos: Pos, len: Len) {
         use std::iter;
 
         if len.lines == 0 {
@@ -94,10 +94,10 @@ impl Text {
         }
     }
 
-    pub fn apply_diff(&mut self, diff: TextDiff) {
-        use super::text_diff::Op;
+    pub fn apply_diff(&mut self, diff: Diff) {
+        use super::diff::Op;
 
-        let mut pos = TextPos::default();
+        let mut pos = Pos::default();
         for operation in diff {
             match operation {
                 Op::Delete(len) => self.delete(pos, len),

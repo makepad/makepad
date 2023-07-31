@@ -1,5 +1,5 @@
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct GridPos {
+pub struct Point {
     pub row: usize,
-    pub col: usize,
+    pub column: usize,
 }
