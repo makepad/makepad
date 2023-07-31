@@ -5,7 +5,6 @@ pub mod code_editor;
 pub mod context;
 pub mod cursor;
 pub mod diff;
-pub mod document;
 pub mod edit_ops;
 pub mod len;
 pub mod line;
@@ -19,9 +18,10 @@ pub mod str;
 pub mod text;
 pub mod token;
 pub mod tokenizer;
+pub mod view;
 
 pub use crate::{
-    bias::Bias, biased_pos::BiasedPos, code_editor::CodeEditor, context::Context, cursor::Cursor, diff::Diff,
-    document::Document, len::Len, line::Line, pos::Pos, range::Range, selection::Selection,
-    settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
+    bias::Bias, biased_pos::BiasedPos, code_editor::CodeEditor, context::Context, cursor::Cursor,
+    diff::Diff, len::Len, line::Line, pos::Pos, range::Range, selection::Selection,
+    settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer, view::View,
 };
