@@ -1,5 +1,5 @@
 use {
-    crate::{Diff, TextLen},
+    crate::{TextDiff, TextLen},
     std::ops::{Add, AddAssign, Sub},
 };
 
@@ -26,7 +26,7 @@ impl TextPos {
         self.byte == lines[self.line].len()
     }
 
-    pub fn apply_diff(self, diff: &Diff, mode: ApplyDiffMode) -> TextPos {
+    pub fn apply_diff(self, diff: &TextDiff, mode: ApplyDiffMode) -> TextPos {
         use {crate::text_diff::OpInfo, std::cmp::Ordering};
 
         let mut diffed_pos = TextPos::default();

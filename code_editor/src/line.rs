@@ -1,7 +1,7 @@
 use {
     crate::{
         token::{TokenInfo, TokenKind},
-        Bias, Token,
+        Bias, BiasedLinePos, GridPos, Token,
     },
     std::slice,
 };
@@ -75,94 +75,117 @@ impl<'a> Line<'a> {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_column(
-        &self,
-        (byte, bias): (usize, Bias),
-        tab_column_count: usize,
-    ) -> (usize, usize) {
+    pub fn pos_to_grid_pos(&self, pos: BiasedLinePos, tab_column_count: usize) -> GridPos {
         use crate::str::StrExt;
 
-        let mut current_byte = 0;
-        let mut row = 0;
-        let mut column = 0;
-        if byte == current_byte && bias == Bias::Before {
-            return (row, column);
+        let mut current_pos = 0;
+        let mut grid_pos = GridPos::default();
+        if pos
+            == (BiasedLinePos {
+                pos: current_pos,
+                bias: Bias::Before,
+            })
+        {
+            return grid_pos;
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        if byte == current_byte && bias == Bias::After {
-                            return (row, column);
+                        if pos
+                            == (BiasedLinePos {
+                                pos: current_pos,
+                                bias: Bias::After,
+                            })
+                        {
+                            return grid_pos;
                         }
-                        current_byte += grapheme.len();
-                        column += grapheme.column_count(tab_column_count);
-                        if byte == current_byte && bias == Bias::Before {
-                            return (row, column);
+                        current_pos += grapheme.len();
+                        grid_pos.col += grapheme.column_count(tab_column_count);
+                        if pos
+                            == (BiasedLinePos {
+                                pos: current_pos,
+                                bias: Bias::Before,
+                            })
+                        {
+                            return grid_pos;
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    column += token.text.column_count(tab_column_count);
+                    grid_pos.col += token.text.column_count(tab_column_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    column += widget.column_count;
+                    grid_pos.col += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    row += 1;
-                    column = self.start_column_after_wrap();
+                    grid_pos.row += 1;
+                    grid_pos.col = self.start_column_after_wrap();
                 }
             }
         }
-        if byte == current_byte && bias == Bias::After {
-            return (row, column);
+        if pos
+            == (BiasedLinePos {
+                pos: current_pos,
+                bias: Bias::After,
+            })
+        {
+            return grid_pos;
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_bias(
-        &self,
-        (row, column): (usize, usize),
-        tab_column_count: usize,
-    ) -> (usize, Bias) {
+    pub fn grid_pos_to_pos(&self, grid_pos: GridPos, tab_column_count: usize) -> BiasedLinePos {
         use crate::str::StrExt;
 
-        let mut byte = 0;
-        let mut current_row = 0;
-        let mut current_column = 0;
+        let mut row = 0;
+        let mut col = 0;
+        let mut pos = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_column = current_column + grapheme.column_count(tab_column_count);
-                        if current_row == row && (current_column..next_column).contains(&column) {
-                            return (byte, Bias::After);
+                        let next_column = col + grapheme.column_count(tab_column_count);
+                        if grid_pos.row == row && (col..next_column).contains(&grid_pos.col) {
+                            return BiasedLinePos {
+                                pos,
+                                bias: Bias::After,
+                            };
                         }
-                        byte = byte + grapheme.len();
-                        current_column = next_column;
+                        pos = pos + grapheme.len();
+                        col = next_column;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_column = current_column + token.text.column_count(tab_column_count);
-                    if current_row == row && (current_column..next_column).contains(&column) {
-                        return (byte, Bias::Before);
+                    let next_column = col + token.text.column_count(tab_column_count);
+                    if grid_pos.row == row && (col..next_column).contains(&grid_pos.col) {
+                        return BiasedLinePos {
+                            pos,
+                            bias: Bias::Before,
+                        };
                     }
-                    current_column = next_column;
+                    col = next_column;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_column += widget.column_count;
+                    col += widget.column_count;
                 }
                 WrappedElement::Wrap => {
-                    if current_row == row {
-                        return (byte, Bias::Before);
+                    if grid_pos.row == row {
+                        return BiasedLinePos {
+                            pos,
+                            bias: Bias::Before,
+                        };
                     }
-                    current_row += 1;
-                    current_column = self.start_column_after_wrap();
+                    row += 1;
+                    col = self.start_column_after_wrap();
                 }
             }
         }
-        if current_row == row {
-            return (byte, Bias::After);
+        if grid_pos.row == row {
+            return BiasedLinePos {
+                pos,
+                bias: Bias::After,
+            };
         }
         panic!()
     }
