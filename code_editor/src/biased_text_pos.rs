@@ -1,4 +1,4 @@
-use crate::{Bias, TextPos, View};
+use crate::{Bias, BiasedLinePos, TextPos, View};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BiasedTextPos {
@@ -7,18 +7,35 @@ pub struct BiasedTextPos {
 }
 
 impl BiasedTextPos {
+    pub fn from_line_and_biased_line_pos(line: usize, pos: BiasedLinePos) -> Self {
+        Self {
+            pos: TextPos {
+                line,
+                byte: pos.pos
+            },
+            bias: pos.bias
+        }
+    }
+
     pub fn is_at_first_row_of_line(self, view: &View<'_>) -> bool {
         view.line(self.pos.line)
-            .byte_bias_to_row_column((self.pos.byte, self.bias), view.settings().tab_column_count)
-            .0
+            .pos_to_grid_pos(self.biased_line_pos(), view.settings().tab_column_count)
+            .row
             == 0
     }
 
     pub fn is_at_last_row_of_line(self, view: &View<'_>) -> bool {
         let line = view.line(self.pos.line);
-        line.byte_bias_to_row_column((self.pos.byte, self.bias), view.settings().tab_column_count)
-            .0
+        line.pos_to_grid_pos(self.biased_line_pos(), view.settings().tab_column_count)
+            .row
             == line.row_count() - 1
+    }
+
+    pub fn biased_line_pos(self) -> BiasedLinePos {
+        BiasedLinePos {
+            pos: self.pos.byte,
+            bias: self.bias,
+        }
     }
 }
 
@@ -26,7 +43,7 @@ impl From<TextPos> for BiasedTextPos {
     fn from(pos: TextPos) -> Self {
         Self {
             pos,
-            bias: Bias::default(),
+            ..Self::default()
         }
     }
 }

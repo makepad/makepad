@@ -1,6 +1,6 @@
 use crate::{
     token::{TokenInfo, TokenKind},
-    Diff, Text,
+    Text, TextDiff,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -16,7 +16,7 @@ impl Tokenizer {
             state: (0..line_count).map(|_| None).collect(),
             token_infos: (0..line_count).map(|_| Vec::new()).collect(),
         };
-        tokenizer.retokenize(&Diff::new(), text);
+        tokenizer.retokenize(&TextDiff::new(), text);
         tokenizer
     }
 
@@ -24,7 +24,7 @@ impl Tokenizer {
         &self.token_infos
     }
 
-    pub fn retokenize(&mut self, diff: &Diff, text: &Text) {
+    pub fn retokenize(&mut self, diff: &TextDiff, text: &Text) {
         use crate::text_diff::OpInfo;
 
         let mut line = 0;

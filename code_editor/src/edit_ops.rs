@@ -1,6 +1,6 @@
-use crate::{Diff, TextPos, TextRange, Text};
+use crate::{Text, TextDiff, TextPos, TextRange};
 
-pub fn replace(range: TextRange, replace_with: Text) -> Diff {
+pub fn replace(range: TextRange, replace_with: Text) -> TextDiff {
     use crate::text_diff::Builder;
 
     let mut builder = Builder::new();
@@ -10,11 +10,11 @@ pub fn replace(range: TextRange, replace_with: Text) -> Diff {
     builder.finish()
 }
 
-pub fn enter(range: TextRange) -> Diff {
+pub fn enter(range: TextRange) -> TextDiff {
     replace(range, "\n".into())
 }
 
-pub fn delete(range: TextRange) -> Diff {
+pub fn delete(range: TextRange) -> TextDiff {
     use crate::text_diff::Builder;
 
     let mut builder = Builder::new();
@@ -23,7 +23,7 @@ pub fn delete(range: TextRange) -> Diff {
     builder.finish()
 }
 
-pub fn backspace(text: &mut Text, range: TextRange) -> Diff {
+pub fn backspace(text: &mut Text, range: TextRange) -> TextDiff {
     use crate::text_diff::Builder;
 
     if range.is_empty() {
