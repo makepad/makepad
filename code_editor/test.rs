@@ -652,30 +652,30 @@ impl<'a> DrawSelectionsContext<'a> {
         cx: &mut Cx2d<'_>,
         line: usize,
         byte: usize,
-        affinity: Affinity,
+        bias: Affinity,
         x: f64,
         y: f64,
         height: f64,
     ) {
         let position = Position::new(line, byte);
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, affinity)
+            selection.selection.end() == (position, bias)
         }) {
             self.draw_selection(cx, x, y, height);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
             .selections
             .first()
-            .map_or(false, |selection| selection.start() == (position, affinity))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
             let (selection, selections) = self.selections.split_first().unwrap();
             self.selections = selections;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !selection.is_empty() {
@@ -1775,8 +1775,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::Before
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -1795,8 +1795,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::After
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -1964,7 +1964,7 @@ impl SubAssign for Length {
         *self = *self - other;
     }
 }
-pub mod affinity;
+pub mod bias;
 pub mod char;
 pub mod code_editor;
 pub mod context;
@@ -1985,7 +1985,7 @@ pub mod token;
 pub mod tokenizer;
 
 pub use crate::{
-    affinity::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
+    bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
     length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
@@ -2066,9 +2066,9 @@ impl<'a> Line<'a> {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_affinity_to_row_column(
+    pub fn byte_bias_to_row_column(
         &self,
-        (byte, affinity): (usize, Affinity),
+        (byte, bias): (usize, Affinity),
         tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
@@ -2076,19 +2076,19 @@ impl<'a> Line<'a> {
         let mut current_byte = 0;
         let mut row = 0;
         let mut column = 0;
-        if byte == current_byte && affinity == Affinity::Before {
+        if byte == current_byte && bias == Affinity::Before {
             return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        if byte == current_byte && affinity == Affinity::After {
+                        if byte == current_byte && bias == Affinity::After {
                             return (row, column);
                         }
                         current_byte += grapheme.len();
                         column += grapheme.column_count(tab_column_count);
-                        if byte == current_byte && affinity == Affinity::Before {
+                        if byte == current_byte && bias == Affinity::Before {
                             return (row, column);
                         }
                     }
@@ -2105,13 +2105,13 @@ impl<'a> Line<'a> {
                 }
             }
         }
-        if byte == current_byte && affinity == Affinity::After {
+        if byte == current_byte && bias == Affinity::After {
             return (row, column);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_affinity(
+    pub fn row_column_to_byte_bias(
         &self,
         (row, column): (usize, usize),
         tab_column_count: usize,
@@ -2253,8 +2253,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::Before
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -2273,8 +2273,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::After
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -2414,30 +2414,30 @@ pub fn move_right(
 
 pub fn move_up(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_first_row_of_line(document, (position, affinity)) {
-        return move_to_prev_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_first_row_of_line(document, (position, bias)) {
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, affinity), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_last_row_of_line(document, (position, affinity)) {
-        return move_to_next_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_last_row_of_line(document, (position, bias)) {
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, affinity), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -2450,12 +2450,12 @@ fn is_at_end_of_line(document: &Document<'_>, position: Position) -> bool {
 
 fn is_at_first_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     document
         .line(position.line)
-        .byte_affinity_to_row_column(
-            (position.byte, affinity),
+        .byte_bias_to_row_column(
+            (position.byte, bias),
             document.settings().tab_column_count,
         )
         .0
@@ -2464,11 +2464,11 @@ fn is_at_first_row_of_line(
 
 fn is_at_last_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
@@ -2550,47 +2550,47 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
@@ -2598,30 +2598,30 @@ fn move_to_last_row_of_prev_line(
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, affinity) = prev_line_ref.row_column_to_byte_affinity(
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
         (prev_line_ref.row_count() - 1, column),
         document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), affinity), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
     let next_line = position.line + 1;
-    let (byte, affinity) = document
+    let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_affinity((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), affinity), Some(column))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -4397,30 +4397,30 @@ impl<'a> DrawSelectionsContext<'a> {
         cx: &mut Cx2d<'_>,
         line: usize,
         byte: usize,
-        affinity: Affinity,
+        bias: Affinity,
         x: f64,
         y: f64,
         height: f64,
     ) {
         let position = Position::new(line, byte);
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, affinity)
+            selection.selection.end() == (position, bias)
         }) {
             self.draw_selection(cx, x, y, height);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
             .selections
             .first()
-            .map_or(false, |selection| selection.start() == (position, affinity))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
             let (selection, selections) = self.selections.split_first().unwrap();
             self.selections = selections;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !selection.is_empty() {
@@ -5520,8 +5520,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::Before
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -5540,8 +5540,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::After
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -5709,7 +5709,7 @@ impl SubAssign for Length {
         *self = *self - other;
     }
 }
-pub mod affinity;
+pub mod bias;
 pub mod char;
 pub mod code_editor;
 pub mod context;
@@ -5730,7 +5730,7 @@ pub mod token;
 pub mod tokenizer;
 
 pub use crate::{
-    affinity::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
+    bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
     length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
@@ -5811,9 +5811,9 @@ impl<'a> Line<'a> {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_affinity_to_row_column(
+    pub fn byte_bias_to_row_column(
         &self,
-        (byte, affinity): (usize, Affinity),
+        (byte, bias): (usize, Affinity),
         tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
@@ -5821,19 +5821,19 @@ impl<'a> Line<'a> {
         let mut current_byte = 0;
         let mut row = 0;
         let mut column = 0;
-        if byte == current_byte && affinity == Affinity::Before {
+        if byte == current_byte && bias == Affinity::Before {
             return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        if byte == current_byte && affinity == Affinity::After {
+                        if byte == current_byte && bias == Affinity::After {
                             return (row, column);
                         }
                         current_byte += grapheme.len();
                         column += grapheme.column_count(tab_column_count);
-                        if byte == current_byte && affinity == Affinity::Before {
+                        if byte == current_byte && bias == Affinity::Before {
                             return (row, column);
                         }
                     }
@@ -5850,13 +5850,13 @@ impl<'a> Line<'a> {
                 }
             }
         }
-        if byte == current_byte && affinity == Affinity::After {
+        if byte == current_byte && bias == Affinity::After {
             return (row, column);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_affinity(
+    pub fn row_column_to_byte_bias(
         &self,
         (row, column): (usize, usize),
         tab_column_count: usize,
@@ -5998,8 +5998,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::Before
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -6018,8 +6018,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::After
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -6159,30 +6159,30 @@ pub fn move_right(
 
 pub fn move_up(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_first_row_of_line(document, (position, affinity)) {
-        return move_to_prev_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_first_row_of_line(document, (position, bias)) {
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, affinity), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_last_row_of_line(document, (position, affinity)) {
-        return move_to_next_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_last_row_of_line(document, (position, bias)) {
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, affinity), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -6195,12 +6195,12 @@ fn is_at_end_of_line(document: &Document<'_>, position: Position) -> bool {
 
 fn is_at_first_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     document
         .line(position.line)
-        .byte_affinity_to_row_column(
-            (position.byte, affinity),
+        .byte_bias_to_row_column(
+            (position.byte, bias),
             document.settings().tab_column_count,
         )
         .0
@@ -6209,11 +6209,11 @@ fn is_at_first_row_of_line(
 
 fn is_at_last_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
@@ -6295,47 +6295,47 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
@@ -6343,30 +6343,30 @@ fn move_to_last_row_of_prev_line(
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, affinity) = prev_line_ref.row_column_to_byte_affinity(
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
         (prev_line_ref.row_count() - 1, column),
         document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), affinity), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
     let next_line = position.line + 1;
-    let (byte, affinity) = document
+    let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_affinity((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), affinity), Some(column))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -8142,30 +8142,30 @@ impl<'a> DrawSelectionsContext<'a> {
         cx: &mut Cx2d<'_>,
         line: usize,
         byte: usize,
-        affinity: Affinity,
+        bias: Affinity,
         x: f64,
         y: f64,
         height: f64,
     ) {
         let position = Position::new(line, byte);
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, affinity)
+            selection.selection.end() == (position, bias)
         }) {
             self.draw_selection(cx, x, y, height);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
             .selections
             .first()
-            .map_or(false, |selection| selection.start() == (position, affinity))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
             let (selection, selections) = self.selections.split_first().unwrap();
             self.selections = selections;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !selection.is_empty() {
@@ -9265,8 +9265,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::Before
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -9285,8 +9285,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::After
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -9454,7 +9454,7 @@ impl SubAssign for Length {
         *self = *self - other;
     }
 }
-pub mod affinity;
+pub mod bias;
 pub mod char;
 pub mod code_editor;
 pub mod context;
@@ -9475,7 +9475,7 @@ pub mod token;
 pub mod tokenizer;
 
 pub use crate::{
-    affinity::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
+    bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
     length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
@@ -9556,9 +9556,9 @@ impl<'a> Line<'a> {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_affinity_to_row_column(
+    pub fn byte_bias_to_row_column(
         &self,
-        (byte, affinity): (usize, Affinity),
+        (byte, bias): (usize, Affinity),
         tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
@@ -9566,19 +9566,19 @@ impl<'a> Line<'a> {
         let mut current_byte = 0;
         let mut row = 0;
         let mut column = 0;
-        if byte == current_byte && affinity == Affinity::Before {
+        if byte == current_byte && bias == Affinity::Before {
             return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        if byte == current_byte && affinity == Affinity::After {
+                        if byte == current_byte && bias == Affinity::After {
                             return (row, column);
                         }
                         current_byte += grapheme.len();
                         column += grapheme.column_count(tab_column_count);
-                        if byte == current_byte && affinity == Affinity::Before {
+                        if byte == current_byte && bias == Affinity::Before {
                             return (row, column);
                         }
                     }
@@ -9595,13 +9595,13 @@ impl<'a> Line<'a> {
                 }
             }
         }
-        if byte == current_byte && affinity == Affinity::After {
+        if byte == current_byte && bias == Affinity::After {
             return (row, column);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_affinity(
+    pub fn row_column_to_byte_bias(
         &self,
         (row, column): (usize, usize),
         tab_column_count: usize,
@@ -9743,8 +9743,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::Before
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -9763,8 +9763,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::After
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -9904,30 +9904,30 @@ pub fn move_right(
 
 pub fn move_up(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_first_row_of_line(document, (position, affinity)) {
-        return move_to_prev_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_first_row_of_line(document, (position, bias)) {
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, affinity), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_last_row_of_line(document, (position, affinity)) {
-        return move_to_next_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_last_row_of_line(document, (position, bias)) {
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, affinity), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -9940,12 +9940,12 @@ fn is_at_end_of_line(document: &Document<'_>, position: Position) -> bool {
 
 fn is_at_first_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     document
         .line(position.line)
-        .byte_affinity_to_row_column(
-            (position.byte, affinity),
+        .byte_bias_to_row_column(
+            (position.byte, bias),
             document.settings().tab_column_count,
         )
         .0
@@ -9954,11 +9954,11 @@ fn is_at_first_row_of_line(
 
 fn is_at_last_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
@@ -10040,47 +10040,47 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
@@ -10088,30 +10088,30 @@ fn move_to_last_row_of_prev_line(
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, affinity) = prev_line_ref.row_column_to_byte_affinity(
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
         (prev_line_ref.row_count() - 1, column),
         document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), affinity), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
     let next_line = position.line + 1;
-    let (byte, affinity) = document
+    let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_affinity((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), affinity), Some(column))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -11887,30 +11887,30 @@ impl<'a> DrawSelectionsContext<'a> {
         cx: &mut Cx2d<'_>,
         line: usize,
         byte: usize,
-        affinity: Affinity,
+        bias: Affinity,
         x: f64,
         y: f64,
         height: f64,
     ) {
         let position = Position::new(line, byte);
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, affinity)
+            selection.selection.end() == (position, bias)
         }) {
             self.draw_selection(cx, x, y, height);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
             .selections
             .first()
-            .map_or(false, |selection| selection.start() == (position, affinity))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
             let (selection, selections) = self.selections.split_first().unwrap();
             self.selections = selections;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !selection.is_empty() {
@@ -13010,8 +13010,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::Before
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -13030,8 +13030,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::After
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -13199,7 +13199,7 @@ impl SubAssign for Length {
         *self = *self - other;
     }
 }
-pub mod affinity;
+pub mod bias;
 pub mod char;
 pub mod code_editor;
 pub mod context;
@@ -13220,7 +13220,7 @@ pub mod token;
 pub mod tokenizer;
 
 pub use crate::{
-    affinity::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
+    bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
     length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
@@ -13301,9 +13301,9 @@ impl<'a> Line<'a> {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_affinity_to_row_column(
+    pub fn byte_bias_to_row_column(
         &self,
-        (byte, affinity): (usize, Affinity),
+        (byte, bias): (usize, Affinity),
         tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
@@ -13311,19 +13311,19 @@ impl<'a> Line<'a> {
         let mut current_byte = 0;
         let mut row = 0;
         let mut column = 0;
-        if byte == current_byte && affinity == Affinity::Before {
+        if byte == current_byte && bias == Affinity::Before {
             return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        if byte == current_byte && affinity == Affinity::After {
+                        if byte == current_byte && bias == Affinity::After {
                             return (row, column);
                         }
                         current_byte += grapheme.len();
                         column += grapheme.column_count(tab_column_count);
-                        if byte == current_byte && affinity == Affinity::Before {
+                        if byte == current_byte && bias == Affinity::Before {
                             return (row, column);
                         }
                     }
@@ -13340,13 +13340,13 @@ impl<'a> Line<'a> {
                 }
             }
         }
-        if byte == current_byte && affinity == Affinity::After {
+        if byte == current_byte && bias == Affinity::After {
             return (row, column);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_affinity(
+    pub fn row_column_to_byte_bias(
         &self,
         (row, column): (usize, usize),
         tab_column_count: usize,
@@ -13488,8 +13488,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::Before
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -13508,8 +13508,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::After
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -13649,30 +13649,30 @@ pub fn move_right(
 
 pub fn move_up(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_first_row_of_line(document, (position, affinity)) {
-        return move_to_prev_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_first_row_of_line(document, (position, bias)) {
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, affinity), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_last_row_of_line(document, (position, affinity)) {
-        return move_to_next_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_last_row_of_line(document, (position, bias)) {
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, affinity), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -13685,12 +13685,12 @@ fn is_at_end_of_line(document: &Document<'_>, position: Position) -> bool {
 
 fn is_at_first_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     document
         .line(position.line)
-        .byte_affinity_to_row_column(
-            (position.byte, affinity),
+        .byte_bias_to_row_column(
+            (position.byte, bias),
             document.settings().tab_column_count,
         )
         .0
@@ -13699,11 +13699,11 @@ fn is_at_first_row_of_line(
 
 fn is_at_last_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
@@ -13785,47 +13785,47 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
@@ -13833,30 +13833,30 @@ fn move_to_last_row_of_prev_line(
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, affinity) = prev_line_ref.row_column_to_byte_affinity(
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
         (prev_line_ref.row_count() - 1, column),
         document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), affinity), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
     let next_line = position.line + 1;
-    let (byte, affinity) = document
+    let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_affinity((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), affinity), Some(column))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -15632,30 +15632,30 @@ impl<'a> DrawSelectionsContext<'a> {
         cx: &mut Cx2d<'_>,
         line: usize,
         byte: usize,
-        affinity: Affinity,
+        bias: Affinity,
         x: f64,
         y: f64,
         height: f64,
     ) {
         let position = Position::new(line, byte);
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, affinity)
+            selection.selection.end() == (position, bias)
         }) {
             self.draw_selection(cx, x, y, height);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
             .selections
             .first()
-            .map_or(false, |selection| selection.start() == (position, affinity))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
             let (selection, selections) = self.selections.split_first().unwrap();
             self.selections = selections;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !selection.is_empty() {
@@ -16755,8 +16755,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::Before
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -16775,8 +16775,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::After
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -16944,7 +16944,7 @@ impl SubAssign for Length {
         *self = *self - other;
     }
 }
-pub mod affinity;
+pub mod bias;
 pub mod char;
 pub mod code_editor;
 pub mod context;
@@ -16965,7 +16965,7 @@ pub mod token;
 pub mod tokenizer;
 
 pub use crate::{
-    affinity::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
+    bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
     length::Length, line::Line, position::Position, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
@@ -17046,9 +17046,9 @@ impl<'a> Line<'a> {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_affinity_to_row_column(
+    pub fn byte_bias_to_row_column(
         &self,
-        (byte, affinity): (usize, Affinity),
+        (byte, bias): (usize, Affinity),
         tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
@@ -17056,19 +17056,19 @@ impl<'a> Line<'a> {
         let mut current_byte = 0;
         let mut row = 0;
         let mut column = 0;
-        if byte == current_byte && affinity == Affinity::Before {
+        if byte == current_byte && bias == Affinity::Before {
             return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        if byte == current_byte && affinity == Affinity::After {
+                        if byte == current_byte && bias == Affinity::After {
                             return (row, column);
                         }
                         current_byte += grapheme.len();
                         column += grapheme.column_count(tab_column_count);
-                        if byte == current_byte && affinity == Affinity::Before {
+                        if byte == current_byte && bias == Affinity::Before {
                             return (row, column);
                         }
                     }
@@ -17085,13 +17085,13 @@ impl<'a> Line<'a> {
                 }
             }
         }
-        if byte == current_byte && affinity == Affinity::After {
+        if byte == current_byte && bias == Affinity::After {
             return (row, column);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_affinity(
+    pub fn row_column_to_byte_bias(
         &self,
         (row, column): (usize, usize),
         tab_column_count: usize,
@@ -17233,8 +17233,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::Before
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -17253,8 +17253,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::After
+            .map_or(false, |((byte, bias), _)| {
+                *byte == self.byte && *bias == Affinity::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -17394,30 +17394,30 @@ pub fn move_right(
 
 pub fn move_up(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_first_row_of_line(document, (position, affinity)) {
-        return move_to_prev_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_first_row_of_line(document, (position, bias)) {
+        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, affinity), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_last_row_of_line(document, (position, affinity)) {
-        return move_to_next_row_of_line(document, (position, affinity), preferred_column);
+    if !is_at_last_row_of_line(document, (position, bias)) {
+        return move_to_next_row_of_line(document, (position, bias), preferred_column);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, affinity), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
     }
-    ((position, affinity), preferred_column)
+    ((position, bias), preferred_column)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -17430,12 +17430,12 @@ fn is_at_end_of_line(document: &Document<'_>, position: Position) -> bool {
 
 fn is_at_first_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     document
         .line(position.line)
-        .byte_affinity_to_row_column(
-            (position.byte, affinity),
+        .byte_bias_to_row_column(
+            (position.byte, bias),
             document.settings().tab_column_count,
         )
         .0
@@ -17444,11 +17444,11 @@ fn is_at_first_row_of_line(
 
 fn is_at_last_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
@@ -17530,47 +17530,47 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (row, mut column) = line.byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+    let (byte, bias) =
+        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
+    ((Position::new(position.line, byte), bias), Some(column))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
@@ -17578,30 +17578,30 @@ fn move_to_last_row_of_prev_line(
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, affinity) = prev_line_ref.row_column_to_byte_affinity(
+    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
         (prev_line_ref.row_count() - 1, column),
         document.settings().tab_column_count,
     );
-    ((Position::new(prev_line, byte), affinity), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(column))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    (position, bias): (Position, Affinity),
     preferred_column: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+        (position.byte, bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
     let next_line = position.line + 1;
-    let (byte, affinity) = document
+    let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_affinity((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), affinity), Some(column))
+        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
+    ((Position::new(next_line, byte), bias), Some(column))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -19377,30 +19377,30 @@ impl<'a> DrawSelectionsContext<'a> {
         cx: &mut Cx2d<'_>,
         line: usize,
         byte: usize,
-        affinity: Affinity,
+        bias: Affinity,
         x: f64,
         y: f64,
         height: f64,
     ) {
         let position = Position::new(line, byte);
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, affinity)
+            selection.selection.end() == (position, bias)
         }) {
             self.draw_selection(cx, x, y, height);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
             .selections
             .first()
-            .map_or(false, |selection| selection.start() == (position, affinity))
+            .map_or(false, |selection| selection.start() == (position, bias))
         {
             let (selection, selections) = self.selections.split_first().unwrap();
             self.selections = selections;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !selection.is_empty() {

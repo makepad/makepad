@@ -10,6 +10,22 @@ pub struct Pos {
 }
 
 impl Pos {
+    pub fn is_at_first_line(self) -> bool {
+        self.line == 0
+    }
+
+    pub fn is_at_last_line(self, line_count: usize) -> bool {
+        self.line == line_count
+    }
+
+    pub fn is_at_start_of_line(self) -> bool {
+        self.byte == 0
+    }
+
+    pub fn is_at_end_of_line(self, lines: &[String]) -> bool {
+        self.byte == lines[self.line].len()
+    }
+
     pub fn apply_diff(self, diff: &Diff, mode: ApplyDiffMode) -> Pos {
         use {crate::diff::OpInfo, std::cmp::Ordering};
 

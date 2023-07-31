@@ -4,7 +4,7 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Document<'a> {
+pub struct View<'a> {
     settings: &'a Settings,
     text: &'a Text,
     tokenizer: &'a Tokenizer,
@@ -21,7 +21,7 @@ pub struct Document<'a> {
     latest_selection_index: usize,
 }
 
-impl<'a> Document<'a> {
+impl<'a> View<'a> {
     pub fn new(
         settings: &'a Settings,
         text: &'a Text,
@@ -99,6 +99,10 @@ impl<'a> Document<'a> {
                 }
             }
         }
+    }
+
+    pub fn text(self) -> &'a Text {
+        &self.text
     }
 
     pub fn line_count(&self) -> usize {
@@ -209,8 +213,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Bias::Before
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Bias::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
@@ -229,8 +233,8 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Bias::After
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Bias::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
