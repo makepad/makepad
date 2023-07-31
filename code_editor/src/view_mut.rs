@@ -1,68 +1,68 @@
 use {
     crate::{
-        line, view, view::LineInlay, Bias, BiasedTextPos, Selection, Settings, Text, TextDiff,
+        line, view, view::LineInlay, Bias, BiasedTextPos, Sel, Settings, Text, TextDiff,
         TextPos, TextRange, Tokenizer, View,
     },
     std::collections::HashSet,
 };
 
 #[derive(Debug, PartialEq)]
-pub struct Context<'a> {
+pub struct ViewMut<'a> {
     settings: &'a mut Settings,
-    max_column: &'a mut Option<usize>,
+    max_col: &'a mut Option<usize>,
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
-    text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-    line_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
-    wrap_bytes: &'a mut Vec<Vec<usize>>,
-    start_column_after_wrap: &'a mut Vec<usize>,
-    fold_column: &'a mut Vec<usize>,
+    inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
+    soft_breaks: &'a mut Vec<Vec<usize>>,
+    start_col_after_wrap: &'a mut Vec<usize>,
+    fold_col: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
+    document_block_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    selections: &'a mut Vec<Selection>,
-    latest_selection_index: &'a mut usize,
+    sels: &'a mut Vec<Sel>,
+    latest_sel_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
 
-impl<'a> Context<'a> {
+impl<'a> ViewMut<'a> {
     pub fn new(
         settings: &'a mut Settings,
-        max_column: &'a mut Option<usize>,
+        max_col: &'a mut Option<usize>,
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
-        text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-        line_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
-        wrap_bytes: &'a mut Vec<Vec<usize>>,
-        start_column_after_wrap: &'a mut Vec<usize>,
-        fold_column: &'a mut Vec<usize>,
+        inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+        inline_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
+        soft_breaks: &'a mut Vec<Vec<usize>>,
+        start_col_after_wrap: &'a mut Vec<usize>,
+        fold_col: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
+        document_block_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        selections: &'a mut Vec<Selection>,
-        latest_selection_index: &'a mut usize,
+        sels: &'a mut Vec<Sel>,
+        latest_sel_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
         Self {
             settings,
-            max_column,
+            max_col,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            document_widget_inlays,
+            document_block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
             folding_lines,
             unfolding_lines,
         }
@@ -73,25 +73,25 @@ impl<'a> Context<'a> {
             self.settings,
             self.text,
             self.tokenizer,
-            self.text_inlays,
-            self.line_widget_inlays,
-            self.wrap_bytes,
-            self.start_column_after_wrap,
-            self.fold_column,
+            self.inline_text_inlays,
+            self.inline_widget_inlays,
+            self.soft_breaks,
+            self.start_col_after_wrap,
+            self.fold_col,
             self.scale,
             self.line_inlays,
-            self.document_widget_inlays,
+            self.document_block_widget_inlays,
             self.summed_heights,
-            self.selections,
-            *self.latest_selection_index,
+            self.sels,
+            *self.latest_sel_index,
         )
     }
 
-    pub fn set_max_column(&mut self, max_column: Option<usize>) {
-        if *self.max_column == max_column {
+    pub fn set_max_col(&mut self, max_col: Option<usize>) {
+        if *self.max_col == max_col {
             return;
         }
-        *self.max_column = max_column;
+        *self.max_col = max_col;
         self.wrap_lines();
     }
 
@@ -122,58 +122,58 @@ impl<'a> Context<'a> {
     pub fn set_cursor_pos(&mut self, pos: BiasedTextPos) {
         use crate::Cursor;
 
-        self.selections.clear();
-        self.selections.push(Selection::from(Cursor::from(pos)));
-        *self.latest_selection_index = 0;
+        self.sels.clear();
+        self.sels.push(Sel::from(Cursor::from(pos)));
+        *self.latest_sel_index = 0;
     }
 
     pub fn insert_cursor(&mut self, pos: BiasedTextPos) {
         use {crate::Cursor, std::cmp::Ordering};
 
-        let selection = Selection::from(Cursor::from(pos));
-        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
-            if selection.end() <= pos {
+        let sel = Sel::from(Cursor::from(pos));
+        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
+            if sel.end() <= pos {
                 return Ordering::Less;
             }
-            if selection.start() >= pos {
+            if sel.start() >= pos {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.selections[index] = selection;
+                self.sels[index] = sel;
                 index
             }
             Err(index) => {
-                self.selections.insert(index, selection);
+                self.sels.insert(index, sel);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, pos: BiasedTextPos) {
-        let latest_selection = &mut self.selections[*self.latest_selection_index];
-        latest_selection.cursor.pos = pos;
+        let latest_sel = &mut self.sels[*self.latest_sel_index];
+        latest_sel.cursor.pos = pos;
         if !select {
-            latest_selection.anchor = pos;
+            latest_sel.anchor = pos;
         }
-        while *self.latest_selection_index > 0 {
-            let previous_selection_index = *self.latest_selection_index - 1;
-            let previous_selection = self.selections[previous_selection_index];
-            let latest_selection = self.selections[*self.latest_selection_index];
-            if previous_selection.try_merge(latest_selection).is_some() {
-                self.selections.remove(previous_selection_index);
-                *self.latest_selection_index -= 1;
+        while *self.latest_sel_index > 0 {
+            let previous_sel_index = *self.latest_sel_index - 1;
+            let previous_sel = self.sels[previous_sel_index];
+            let latest_sel = self.sels[*self.latest_sel_index];
+            if previous_sel.try_merge(latest_sel).is_some() {
+                self.sels.remove(previous_sel_index);
+                *self.latest_sel_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_selection_index + 1 < self.selections.len() {
-            let next_selection_index = *self.latest_selection_index + 1;
-            let latest_selection = self.selections[*self.latest_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            if latest_selection.try_merge(next_selection).is_some() {
-                self.selections.remove(next_selection_index);
+        while *self.latest_sel_index + 1 < self.sels.len() {
+            let next_sel_index = *self.latest_sel_index + 1;
+            let latest_sel = self.sels[*self.latest_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            if latest_sel.try_merge(next_sel).is_some() {
+                self.sels.remove(next_sel_index);
             } else {
                 break;
             }
@@ -183,8 +183,8 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::{move_ops, Cursor};
 
-        self.modify_selections(select, |view, selection| {
-            selection.update_cursor(|cursor| Cursor {
+        self.modify_sels(select, |view, sel| {
+            sel.update_cursor(|cursor| Cursor {
                 pos: BiasedTextPos {
                     pos: move_ops::move_left(view.text().as_lines(), cursor.pos.pos),
                     bias: Bias::Before,
@@ -197,8 +197,8 @@ impl<'a> Context<'a> {
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::{move_ops, Cursor};
 
-        self.modify_selections(select, |view, selection| {
-            selection.update_cursor(|cursor| Cursor {
+        self.modify_sels(select, |view, sel| {
+            sel.update_cursor(|cursor| Cursor {
                 pos: BiasedTextPos {
                     pos: move_ops::move_right(view.text().as_lines(), cursor.pos.pos),
                     bias: Bias::After,
@@ -211,18 +211,18 @@ impl<'a> Context<'a> {
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        let tab_width = self.settings.tab_column_count;
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor| move_ops::move_up(document, cursor, tab_width))
+        let tab_width = self.settings.tab_width;
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor| move_ops::move_up(document, cursor, tab_width))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        let tab_width = self.settings.tab_column_count;
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor| move_ops::move_down(document, cursor, tab_width))
+        let tab_width = self.settings.tab_width;
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor| move_ops::move_down(document, cursor, tab_width))
         });
     }
 
@@ -256,8 +256,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
-        self.fold_column[line_index] = fold_column;
+    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
+        self.fold_col[line_index] = fold_col;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -305,102 +305,102 @@ impl<'a> Context<'a> {
         use crate::str::StrExt;
 
         for line in 0..self.document().line_count() {
-            let old_wrap_byte_count = self.wrap_bytes[line].len();
-            self.wrap_bytes[line].clear();
-            self.start_column_after_wrap[line] = 0;
-            if let Some(&max_column) = self.max_column.as_ref() {
+            let old_wrap_byte_count = self.soft_breaks[line].len();
+            self.soft_breaks[line].clear();
+            self.start_col_after_wrap[line] = 0;
+            if let Some(&max_col) = self.max_col.as_ref() {
                 let mut byte = 0;
-                let mut column = 0;
+                let mut col = 0;
                 let document = self.document();
                 let line_ref = document.line(line);
-                let mut start_column_after_wrap = line_ref
+                let mut start_col_after_wrap = line_ref
                     .text()
                     .indentation()
-                    .column_count(document.settings().tab_column_count);
-                for element in line_ref.elements() {
+                    .col_count(document.settings().tab_width);
+                for element in line_ref.inline_elements() {
                     match element {
                         line::Element::Token(_, token) => {
                             for string in token.text.split_whitespace_boundaries() {
-                                if start_column_after_wrap
-                                    + string.column_count(document.settings().tab_column_count)
-                                    > max_column
+                                if start_col_after_wrap
+                                    + string.col_count(document.settings().tab_width)
+                                    > max_col
                                 {
-                                    start_column_after_wrap = 0;
+                                    start_col_after_wrap = 0;
                                 }
                             }
                         }
                         line::Element::Widget(_, widget) => {
-                            if start_column_after_wrap + widget.column_count > max_column {
-                                start_column_after_wrap = 0;
+                            if start_col_after_wrap + widget.col_count > max_col {
+                                start_col_after_wrap = 0;
                             }
                         }
                     }
                 }
-                let mut wrap_bytes = Vec::new();
-                for element in line_ref.elements() {
+                let mut soft_breaks = Vec::new();
+                for element in line_ref.inline_elements() {
                     match element {
                         line::Element::Token(_, token) => {
                             for string in token.text.split_whitespace_boundaries() {
-                                let mut next_column = column
-                                    + string.column_count(document.settings().tab_column_count);
-                                if next_column > max_column {
-                                    next_column = start_column_after_wrap;
-                                    wrap_bytes.push(byte);
+                                let mut next_col = col
+                                    + string.col_count(document.settings().tab_width);
+                                if next_col > max_col {
+                                    next_col = start_col_after_wrap;
+                                    soft_breaks.push(byte);
                                 }
                                 byte += string.len();
-                                column = next_column;
+                                col = next_col;
                             }
                         }
                         line::Element::Widget(_, widget) => {
-                            let mut next_column = column + widget.column_count;
-                            if next_column > max_column {
-                                next_column = start_column_after_wrap;
-                                wrap_bytes.push(byte);
+                            let mut next_col = col + widget.col_count;
+                            if next_col > max_col {
+                                next_col = start_col_after_wrap;
+                                soft_breaks.push(byte);
                             }
-                            column = next_column;
+                            col = next_col;
                         }
                     }
                 }
-                self.wrap_bytes[line] = wrap_bytes;
-                self.start_column_after_wrap[line] = start_column_after_wrap;
+                self.soft_breaks[line] = soft_breaks;
+                self.start_col_after_wrap[line] = start_col_after_wrap;
             }
-            if self.wrap_bytes[line].len() != old_wrap_byte_count {
+            if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
         }
         self.update_summed_heights();
     }
 
-    fn modify_selections(
+    fn modify_sels(
         &mut self,
         select: bool,
-        mut f: impl FnMut(&View<'_>, Selection) -> Selection,
+        mut f: impl FnMut(&View<'_>, Sel) -> Sel,
     ) {
         use std::mem;
 
-        let mut selections = mem::take(self.selections);
+        let mut sels = mem::take(self.sels);
         let document = self.document();
-        for selection in &mut selections {
-            *selection = f(&document, *selection);
+        for sel in &mut sels {
+            *sel = f(&document, *sel);
             if !select {
-                *selection = selection.reset_anchor();
+                *sel = sel.reset_anchor();
             }
         }
-        *self.selections = selections;
-        let mut current_selection_index = 0;
-        while current_selection_index + 1 < self.selections.len() {
-            let next_selection_index = current_selection_index + 1;
-            let current_selection = self.selections[current_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            assert!(current_selection.start() <= next_selection.start());
-            if let Some(merged_selection) = current_selection.try_merge(next_selection) {
-                self.selections[current_selection_index] = merged_selection;
-                self.selections.remove(next_selection_index);
-                if next_selection_index < *self.latest_selection_index {
-                    *self.latest_selection_index -= 1;
+        *self.sels = sels;
+        let mut current_sel_index = 0;
+        while current_sel_index + 1 < self.sels.len() {
+            let next_sel_index = current_sel_index + 1;
+            let current_sel = self.sels[current_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            assert!(current_sel.start() <= next_sel.start());
+            if let Some(merged_sel) = current_sel.try_merge(next_sel) {
+                self.sels[current_sel_index] = merged_sel;
+                self.sels.remove(next_sel_index);
+                if next_sel_index < *self.latest_sel_index {
+                    *self.latest_sel_index -= 1;
                 }
             } else {
-                current_selection_index += 1;
+                current_sel_index += 1;
             }
         }
     }
@@ -411,39 +411,39 @@ impl<'a> Context<'a> {
         let mut composite_diff = TextDiff::new();
         let mut prev_end = TextPos::default();
         let mut diffed_prev_end = TextPos::default();
-        for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().pos - prev_end;
+        for sel in &mut *self.sels {
+            let distance_from_prev_end = sel.start().pos - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + selection.len();
+            let diffed_end = diffed_start + sel.len();
             let diff = f(&mut self.text, TextRange::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().pos;
+            prev_end = sel.end().pos;
             diffed_prev_end = diffed_end;
             let anchor_pos;
             let cursor_pos;
-            if selection.anchor <= selection.cursor.pos {
+            if sel.anchor <= sel.cursor.pos {
                 anchor_pos = BiasedTextPos {
                     pos: diffed_start,
-                    bias: selection.start().bias,
+                    bias: sel.start().bias,
                 };
                 cursor_pos = BiasedTextPos {
                     pos: diffed_end,
-                    bias: selection.end().bias,
+                    bias: sel.end().bias,
                 };
             } else {
                 anchor_pos = BiasedTextPos {
                     pos: diffed_end,
-                    bias: selection.end().bias,
+                    bias: sel.end().bias,
                 };
                 cursor_pos = BiasedTextPos {
                     pos: diffed_start,
-                    bias: selection.start().bias,
+                    bias: sel.start().bias,
                 };
             }
-            *selection = Selection {
+            *sel = Sel {
                 anchor: anchor_pos,
                 cursor: Cursor {
                     pos: cursor_pos,
@@ -463,11 +463,11 @@ impl<'a> Context<'a> {
                 OpInfo::Delete(length) => {
                     let start_line = line;
                     let end_line = start_line + length.lines;
-                    self.text_inlays.drain(start_line..end_line);
-                    self.line_widget_inlays.drain(start_line..end_line);
-                    self.wrap_bytes.drain(start_line..end_line);
-                    self.start_column_after_wrap.drain(start_line..end_line);
-                    self.fold_column.drain(start_line..end_line);
+                    self.inline_text_inlays.drain(start_line..end_line);
+                    self.inline_widget_inlays.drain(start_line..end_line);
+                    self.soft_breaks.drain(start_line..end_line);
+                    self.start_col_after_wrap.drain(start_line..end_line);
+                    self.fold_col.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -477,15 +477,15 @@ impl<'a> Context<'a> {
                 OpInfo::Insert(length) => {
                     let next_line = line + 1;
                     let line_count = length.lines;
-                    self.text_inlays
+                    self.inline_text_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.line_widget_inlays
+                    self.inline_widget_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.wrap_bytes
+                    self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_column_after_wrap
+                    self.start_col_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_column
+                    self.fold_col
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
