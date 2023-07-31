@@ -25,7 +25,7 @@ impl Tokenizer {
     }
 
     pub fn retokenize(&mut self, diff: &Diff, text: &Text) {
-        use crate::diff::OpInfo;
+        use crate::text_diff::OpInfo;
 
         let mut line = 0;
         for operation in diff {

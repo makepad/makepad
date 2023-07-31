@@ -1,15 +1,15 @@
 use {
-    crate::{Diff, Len},
+    crate::{Diff, TextLen},
     std::ops::{Add, AddAssign, Sub},
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Pos {
+pub struct TextPos {
     pub line: usize,
     pub byte: usize,
 }
 
-impl Pos {
+impl TextPos {
     pub fn is_at_first_line(self) -> bool {
         self.line == 0
     }
@@ -26,11 +26,11 @@ impl Pos {
         self.byte == lines[self.line].len()
     }
 
-    pub fn apply_diff(self, diff: &Diff, mode: ApplyDiffMode) -> Pos {
-        use {crate::diff::OpInfo, std::cmp::Ordering};
+    pub fn apply_diff(self, diff: &Diff, mode: ApplyDiffMode) -> TextPos {
+        use {crate::text_diff::OpInfo, std::cmp::Ordering};
 
-        let mut diffed_pos = Pos::default();
-        let mut offset_to_pos = self - Pos::default();
+        let mut diffed_pos = TextPos::default();
+        let mut offset_to_pos = self - TextPos::default();
         let mut op_infos = diff.iter().map(|op| op.info());
         let mut op_info_op = op_infos.next();
         loop {
@@ -44,7 +44,7 @@ impl Pos {
                     Ordering::Greater => break diffed_pos + offset_to_pos,
                 },
                 Some(OpInfo::Insert(length)) => {
-                    if offset_to_pos == Len::default() {
+                    if offset_to_pos == TextLen::default() {
                         break match mode {
                             ApplyDiffMode::InsertBefore => diffed_pos + length,
                             ApplyDiffMode::InsertAfter => diffed_pos,
@@ -60,7 +60,7 @@ impl Pos {
                         op_info_op = op_infos.next();
                     }
                     Ordering::Greater => {
-                        offset_to_pos = Len::default();
+                        offset_to_pos = TextLen::default();
                         op_info_op = op_infos.next();
                     }
                 },
@@ -70,10 +70,10 @@ impl Pos {
     }
 }
 
-impl Add<Len> for Pos {
+impl Add<TextLen> for TextPos {
     type Output = Self;
 
-    fn add(self, length: Len) -> Self::Output {
+    fn add(self, length: TextLen) -> Self::Output {
         if length.lines == 0 {
             Self {
                 line: self.line,
@@ -88,23 +88,23 @@ impl Add<Len> for Pos {
     }
 }
 
-impl AddAssign<Len> for Pos {
-    fn add_assign(&mut self, length: Len) {
+impl AddAssign<TextLen> for TextPos {
+    fn add_assign(&mut self, length: TextLen) {
         *self = *self + length;
     }
 }
 
-impl Sub for Pos {
-    type Output = Len;
+impl Sub for TextPos {
+    type Output = TextLen;
 
     fn sub(self, other: Self) -> Self::Output {
         if self.line == other.line {
-            Len {
+            TextLen {
                 lines: 0,
                 bytes: self.byte - other.byte,
             }
         } else {
-            Len {
+            TextLen {
                 lines: self.line - other.line,
                 bytes: self.byte,
             }

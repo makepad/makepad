@@ -1,19 +1,19 @@
-use crate::{BiasedPos, Pos};
+use crate::{BiasedTextPos, TextPos};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Cursor {
-    pub pos: BiasedPos,
+    pub pos: BiasedTextPos,
     pub col: Option<usize>,
 }
 
-impl From<Pos> for Cursor {
-    fn from(pos: Pos) -> Self {
-        Cursor::from(BiasedPos::from(pos))
+impl From<TextPos> for Cursor {
+    fn from(pos: TextPos) -> Self {
+        Cursor::from(BiasedTextPos::from(pos))
     }
 }
 
-impl From<BiasedPos> for Cursor {
-    fn from(pos: BiasedPos) -> Self {
+impl From<BiasedTextPos> for Cursor {
+    fn from(pos: BiasedTextPos) -> Self {
         Self { pos, col: None }
     }
 }
