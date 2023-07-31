@@ -1,7 +1,7 @@
 use {
     crate::{
-        document, document::LineInlay, line, Affinity, Context, Document, Selection, Settings,
-        Text, Tokenizer,
+        document, document::LineInlay, line, Context, Document, Bias, Selection, Settings, Text,
+        Tokenizer,
     },
     std::{
         collections::{HashMap, HashSet},
@@ -187,7 +187,7 @@ struct Editor {
     text: Text,
     tokenizer: Tokenizer,
     text_inlays: Vec<Vec<(usize, String)>>,
-    line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
+    line_widget_inlays: Vec<Vec<((usize, Bias), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,
-    document_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
+    document_widget_inlays: Vec<((usize, Bias), document::Widget)>,
 }

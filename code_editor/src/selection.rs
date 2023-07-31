@@ -1,16 +1,16 @@
-use crate::{Affinity, Len, Pos};
+use crate::{BiasedPos, Len};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Selection {
-    pub anchor: (Pos, Affinity),
-    pub cursor: (Pos, Affinity),
+    pub anchor: BiasedPos,
+    pub cursor: BiasedPos,
     pub preferred_column: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
-        anchor: (Pos, Affinity),
-        cursor: (Pos, Affinity),
+        anchor: BiasedPos,
+        cursor: BiasedPos,
         preferred_column: Option<usize>,
     ) -> Self {
         Self {
@@ -20,7 +20,7 @@ impl Selection {
         }
     }
 
-    pub fn from_cursor(cursor: (Pos, Affinity)) -> Self {
+    pub fn from_cursor(cursor: BiasedPos) -> Self {
         Self {
             anchor: cursor,
             cursor,
@@ -46,14 +46,14 @@ impl Selection {
     }
 
     pub fn length(&self) -> Len {
-        self.end().0 - self.start().0
+        self.end().to_pos() - self.start().to_pos()
     }
 
-    pub fn start(self) -> (Pos, Affinity) {
+    pub fn start(self) -> BiasedPos {
         self.anchor.min(self.cursor)
     }
 
-    pub fn end(self) -> (Pos, Affinity) {
+    pub fn end(self) -> BiasedPos {
         self.anchor.max(self.cursor)
     }
 
@@ -66,7 +66,7 @@ impl Selection {
 
     pub fn update_cursor(
         self,
-        f: impl FnOnce((Pos, Affinity), Option<usize>) -> ((Pos, Affinity), Option<usize>),
+        f: impl FnOnce(BiasedPos, Option<usize>) -> (BiasedPos, Option<usize>),
     ) -> Self {
         let (cursor, column) = f(self.cursor, self.preferred_column);
         Self {

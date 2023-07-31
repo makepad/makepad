@@ -1,51 +1,51 @@
-use crate::{Affinity, Document, Pos};
+use crate::{Document, Bias, BiasedPos, Pos};
 
-pub fn move_left(document: &Document<'_>, position: Pos) -> ((Pos, Affinity), Option<usize>) {
+pub fn move_left(document: &Document<'_>, position: Pos) -> (BiasedPos, Option<usize>) {
     if !is_at_start_of_line(position) {
         return move_to_prev_grapheme(document, position);
     }
     if !is_at_first_line(position) {
         return move_to_end_of_prev_line(document, position);
     }
-    ((position, Affinity::Before), None)
+    (BiasedPos::from_pos_and_bias(position, Bias::Before), None)
 }
 
-pub fn move_right(document: &Document<'_>, position: Pos) -> ((Pos, Affinity), Option<usize>) {
+pub fn move_right(document: &Document<'_>, position: Pos) -> (BiasedPos, Option<usize>) {
     if !is_at_end_of_line(document, position) {
         return move_to_next_grapheme(document, position);
     }
     if !is_at_last_line(document, position) {
         return move_to_start_of_next_line(position);
     }
-    ((position, Affinity::After), None)
+    (BiasedPos::from_pos_and_bias(position, Bias::After), None)
 }
 
 pub fn move_up(
     document: &Document<'_>,
-    (position, affinity): (Pos, Affinity),
+    pos: BiasedPos,
     preferred_column: Option<usize>,
-) -> ((Pos, Affinity), Option<usize>) {
-    if !is_at_first_row_of_line(document, (position, affinity)) {
-        return move_to_prev_row_of_line(document, (position, affinity), preferred_column);
+) -> (BiasedPos, Option<usize>) {
+    if !is_at_first_row_of_line(document, pos) {
+        return move_to_prev_row_of_line(document, pos, preferred_column);
     }
-    if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, affinity), preferred_column);
+    if !is_at_first_line(pos.to_pos()) {
+        return move_to_last_row_of_prev_line(document, pos, preferred_column);
     }
-    ((position, affinity), preferred_column)
+    (pos, preferred_column)
 }
 
 pub fn move_down(
     document: &Document<'_>,
-    (position, affinity): (Pos, Affinity),
+    pos: BiasedPos,
     preferred_column: Option<usize>,
-) -> ((Pos, Affinity), Option<usize>) {
-    if !is_at_last_row_of_line(document, (position, affinity)) {
-        return move_to_next_row_of_line(document, (position, affinity), preferred_column);
+) -> (BiasedPos, Option<usize>) {
+    if !is_at_last_row_of_line(document, pos) {
+        return move_to_next_row_of_line(document, pos, preferred_column);
     }
-    if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, affinity), preferred_column);
+    if !is_at_last_line(document, pos.to_pos()) {
+        return move_to_first_row_of_next_line(document, pos, preferred_column);
     }
-    ((position, affinity), preferred_column)
+    (pos, preferred_column)
 }
 
 fn is_at_start_of_line(position: Pos) -> bool {
@@ -56,21 +56,21 @@ fn is_at_end_of_line(document: &Document<'_>, position: Pos) -> bool {
     position.byte == document.line(position.line).text().len()
 }
 
-fn is_at_first_row_of_line(document: &Document<'_>, (position, affinity): (Pos, Affinity)) -> bool {
+fn is_at_first_row_of_line(document: &Document<'_>, pos: BiasedPos) -> bool {
     document
-        .line(position.line)
+        .line(pos.line)
         .byte_affinity_to_row_column(
-            (position.byte, affinity),
+            (pos.byte, pos.bias),
             document.settings().tab_column_count,
         )
         .0
         == 0
 }
 
-fn is_at_last_row_of_line(document: &Document<'_>, (position, affinity): (Pos, Affinity)) -> bool {
-    let line = document.line(position.line);
+fn is_at_last_row_of_line(document: &Document<'_>, pos: BiasedPos) -> bool {
+    let line = document.line(pos.line);
     line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+        (pos.byte, pos.bias),
         document.settings().tab_column_count,
     )
     .0 == line.row_count() - 1
@@ -87,11 +87,11 @@ fn is_at_last_line(document: &Document<'_>, position: Pos) -> bool {
 fn move_to_prev_grapheme(
     document: &Document<'_>,
     position: Pos,
-) -> ((Pos, Affinity), Option<usize>) {
+) -> (BiasedPos, Option<usize>) {
     use crate::str::StrExt;
 
     (
-        (
+        BiasedPos::from_pos_and_bias(
             Pos {
                 line: position.line,
                 byte: document.line(position.line).text()[..position.byte]
@@ -100,7 +100,7 @@ fn move_to_prev_grapheme(
                     .map(|(byte_index, _)| byte_index)
                     .unwrap(),
             },
-            Affinity::After,
+            Bias::After,
         ),
         None,
     )
@@ -109,12 +109,12 @@ fn move_to_prev_grapheme(
 fn move_to_next_grapheme(
     document: &Document<'_>,
     position: Pos,
-) -> ((Pos, Affinity), Option<usize>) {
+) -> (BiasedPos, Option<usize>) {
     use crate::str::StrExt;
 
     let line = document.line(position.line);
     (
-        (
+        BiasedPos::from_pos_and_bias(
             Pos {
                 line: position.line,
                 byte: line.text()[position.byte..]
@@ -123,7 +123,7 @@ fn move_to_next_grapheme(
                     .map(|(byte, _)| position.byte + byte)
                     .unwrap_or(line.text().len()),
             },
-            Affinity::Before,
+            Bias::Before,
         ),
         None,
     )
@@ -132,28 +132,28 @@ fn move_to_next_grapheme(
 fn move_to_end_of_prev_line(
     document: &Document<'_>,
     position: Pos,
-) -> ((Pos, Affinity), Option<usize>) {
+) -> (BiasedPos, Option<usize>) {
     let prev_line = position.line - 1;
     (
-        (
+        BiasedPos::from_pos_and_bias(
             Pos {
                 line: prev_line,
                 byte: document.line(prev_line).text().len(),
             },
-            Affinity::After,
+            Bias::After,
         ),
         None,
     )
 }
 
-fn move_to_start_of_next_line(position: Pos) -> ((Pos, Affinity), Option<usize>) {
+fn move_to_start_of_next_line(position: Pos) -> (BiasedPos, Option<usize>) {
     (
-        (
+        BiasedPos::from_pos_and_bias(
             Pos {
                 line: position.line + 1,
                 byte: 0,
             },
-            Affinity::Before,
+            Bias::Before,
         ),
         None,
     )
@@ -161,12 +161,12 @@ fn move_to_start_of_next_line(position: Pos) -> ((Pos, Affinity), Option<usize>)
 
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Pos, Affinity),
+    pos: BiasedPos,
     preferred_column: Option<usize>,
-) -> ((Pos, Affinity), Option<usize>) {
-    let line = document.line(position.line);
+) -> (BiasedPos, Option<usize>) {
+    let line = document.line(pos.line);
     let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+        (pos.byte, pos.bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
@@ -175,9 +175,9 @@ fn move_to_prev_row_of_line(
     let (byte, affinity) =
         line.row_column_to_byte_affinity((row - 1, column), document.settings().tab_column_count);
     (
-        (
+        BiasedPos::from_pos_and_bias(
             Pos {
-                line: position.line,
+                line: pos.line,
                 byte,
             },
             affinity,
@@ -188,12 +188,12 @@ fn move_to_prev_row_of_line(
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
-    (position, affinity): (Pos, Affinity),
+    pos: BiasedPos,
     preferred_column: Option<usize>,
-) -> ((Pos, Affinity), Option<usize>) {
-    let line = document.line(position.line);
+) -> (BiasedPos, Option<usize>) {
+    let line = document.line(pos.line);
     let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
+        (pos.byte, pos.bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
@@ -202,9 +202,9 @@ fn move_to_next_row_of_line(
     let (byte, affinity) =
         line.row_column_to_byte_affinity((row + 1, column), document.settings().tab_column_count);
     (
-        (
+        BiasedPos::from_pos_and_bias(
             Pos {
-                line: position.line,
+                line: pos.line,
                 byte,
             },
             affinity,
@@ -215,24 +215,24 @@ fn move_to_next_row_of_line(
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
-    (position, affinity): (Pos, Affinity),
+    pos: BiasedPos,
     preferred_column: Option<usize>,
-) -> ((Pos, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+) -> (BiasedPos, Option<usize>) {
+    let (_, mut column) = document.line(pos.line).byte_affinity_to_row_column(
+        (pos.byte, pos.bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let prev_line = position.line - 1;
+    let prev_line = pos.line - 1;
     let prev_line_ref = document.line(prev_line);
     let (byte, affinity) = prev_line_ref.row_column_to_byte_affinity(
         (prev_line_ref.row_count() - 1, column),
         document.settings().tab_column_count,
     );
     (
-        (
+        BiasedPos::from_pos_and_bias(
             Pos {
                 line: prev_line,
                 byte,
@@ -245,22 +245,22 @@ fn move_to_last_row_of_prev_line(
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
-    (position, affinity): (Pos, Affinity),
+    pos: BiasedPos,
     preferred_column: Option<usize>,
-) -> ((Pos, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
+) -> (BiasedPos, Option<usize>) {
+    let (_, mut column) = document.line(pos.line).byte_affinity_to_row_column(
+        (pos.byte, pos.bias),
         document.settings().tab_column_count,
     );
     if let Some(preferred_column) = preferred_column {
         column = preferred_column;
     }
-    let next_line = position.line + 1;
+    let next_line = pos.line + 1;
     let (byte, affinity) = document
         .line(next_line)
         .row_column_to_byte_affinity((0, column), document.settings().tab_column_count);
     (
-        (
+        BiasedPos::from_pos_and_bias(
             Pos {
                 line: next_line,
                 byte,
