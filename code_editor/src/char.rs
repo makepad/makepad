@@ -1,11 +1,11 @@
 pub trait CharExt {
-    fn column_count(self, tab_column_count: usize) -> usize;
+    fn col_count(self, tab_col_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn column_count(self, tab_column_count: usize) -> usize {
+    fn col_count(self, tab_col_count: usize) -> usize {
         match self {
-            '\t' => tab_column_count,
+            '\t' => tab_col_count,
             _ => 1,
         }
     }
