@@ -1,5 +1,5 @@
 use {
-    crate::{state::SessionId, Bias, BiasedPos, Pos, Sel, State, View, ViewMut},
+    crate::{state::SessionId, Bias, BiasedPos, Pos, Selection, State, View, ViewMut},
     makepad_widgets::*,
 };
 
@@ -77,7 +77,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_sel: {
+        draw_selection: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -96,7 +96,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_sel: DrawSelection,
+    draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -116,7 +116,7 @@ impl CodeEditor {
         self.begin(cx, view);
         let document = view.as_view();
         self.draw_text(cx, &document);
-        self.draw_sels(cx, &document);
+        self.draw_selections(cx, &document);
         self.end(cx, view);
     }
 
@@ -343,29 +343,29 @@ impl CodeEditor {
         }
     }
 
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
-        let mut active_sel = None;
-        let mut sels = document.sels();
-        while sels
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
+        let mut active_selection = None;
+        let mut selections = document.selections();
+        while selections
             .first()
-            .map_or(false, |sel| sel.end().pos.line < self.start_line)
+            .map_or(false, |selection| selection.end().pos.line < self.start_line)
         {
-            sels = &sels[1..];
+            selections = &selections[1..];
         }
-        if sels
+        if selections
             .first()
-            .map_or(false, |sel| sel.start().pos.line < self.start_line)
+            .map_or(false, |selection| selection.start().pos.line < self.start_line)
         {
-            let (sel, remaining_sels) = sels.split_first().unwrap();
-            sels = remaining_sels;
-            active_sel = Some(ActiveSelection::new(*sel, 0.0));
+            let (selection, remaining_selections) = selections.split_first().unwrap();
+            selections = remaining_selections;
+            active_selection = Some(ActiveSelection::new(*selection, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_sel,
-            sels,
+            active_selection,
+            selections,
         }
-        .draw_sels(cx, document)
+        .draw_selections(cx, document)
     }
 
     fn pick(&self, document: &View<'_>, pos: DVec2) -> Option<BiasedPos> {
@@ -472,12 +472,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_sel: Option<ActiveSelection>,
-    sels: &'a [Sel],
+    active_selection: Option<ActiveSelection>,
+    selections: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
         use crate::{line, str::StrExt, view};
 
         let mut line = self.code_editor.start_line;
@@ -530,8 +530,8 @@ impl<'a> DrawSelectionsContext<'a> {
                             }
                             line::WrappedElement::SoftBreak => {
                                 column += 1;
-                                if self.active_sel.is_some() {
-                                    self.draw_sel(
+                                if self.active_selection.is_some() {
+                                    self.draw_selection(
                                         cx,
                                         line_ref.column_to_x(column),
                                         y,
@@ -553,8 +553,8 @@ impl<'a> DrawSelectionsContext<'a> {
                         line_ref.scale(),
                     );
                     column += 1;
-                    if self.active_sel.is_some() {
-                        self.draw_sel(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    if self.active_selection.is_some() {
+                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -567,8 +567,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_sel.is_some() {
-            self.code_editor.draw_sel.end(cx);
+        if self.active_selection.is_some() {
+            self.code_editor.draw_selection.end(cx);
         }
     }
 
@@ -584,42 +584,42 @@ impl<'a> DrawSelectionsContext<'a> {
     ) {
         let pos = Pos { line, byte };
         if self
-            .active_sel
+            .active_selection
             .as_ref()
-            .map_or(false, |sel| sel.sel.end() == BiasedPos { pos, bias })
+            .map_or(false, |selection| selection.selection.end() == BiasedPos { pos, bias })
         {
-            self.draw_sel(cx, x, y, height);
-            self.code_editor.draw_sel.end(cx);
-            let sel = self.active_sel.take().unwrap().sel;
-            if sel.cursor.biased_pos == (BiasedPos { pos, bias }) {
+            self.draw_selection(cx, x, y, height);
+            self.code_editor.draw_selection.end(cx);
+            let selection = self.active_selection.take().unwrap().selection;
+            if selection.cursor.biased_pos == (BiasedPos { pos, bias }) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .sels
+            .selections
             .first()
-            .map_or(false, |sel| sel.start() == BiasedPos { pos, bias })
+            .map_or(false, |selection| selection.start() == BiasedPos { pos, bias })
         {
-            let (sel, sels) = self.sels.split_first().unwrap();
-            self.sels = sels;
-            if sel.cursor.biased_pos == (BiasedPos { pos, bias }) {
+            let (selection, selections) = self.selections.split_first().unwrap();
+            self.selections = selections;
+            if selection.cursor.biased_pos == (BiasedPos { pos, bias }) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !sel.is_empty() {
-                self.active_sel = Some(ActiveSelection {
-                    sel: *sel,
+            if !selection.is_empty() {
+                self.active_selection = Some(ActiveSelection {
+                    selection: *selection,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_sel.begin();
+            self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
-        self.code_editor.draw_sel.draw(
+        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
+        self.code_editor.draw_selection.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -649,13 +649,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    sel: Sel,
+    selection: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(sel: Sel, start_x: f64) -> Self {
-        Self { sel, start_x }
+    fn new(selection: Selection, start_x: f64) -> Self {
+        Self { selection, start_x }
     }
 }
 
