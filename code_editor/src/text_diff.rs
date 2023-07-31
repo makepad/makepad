@@ -1,5 +1,5 @@
 use {
-    crate::{Len, Text},
+    crate::{TextLen, Text},
     std::{slice, vec},
 };
 
@@ -171,10 +171,10 @@ impl Builder {
         Self::default()
     }
 
-    pub fn delete(&mut self, len: Len) {
+    pub fn delete(&mut self, len: TextLen) {
         use std::mem;
 
-        if len == Len::default() {
+        if len == TextLen::default() {
             return;
         }
         match self.ops.as_mut_slice() {
@@ -192,8 +192,8 @@ impl Builder {
         }
     }
 
-    pub fn retain(&mut self, len: Len) {
-        if len == Len::default() {
+    pub fn retain(&mut self, len: TextLen) {
+        if len == TextLen::default() {
             return;
         }
         match self.ops.last_mut() {
@@ -252,8 +252,8 @@ impl Iterator for IntoIter {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Op {
-    Delete(Len),
-    Retain(Len),
+    Delete(TextLen),
+    Retain(TextLen),
     Insert(Text),
 }
 
@@ -269,7 +269,7 @@ impl Op {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OpInfo {
-    Delete(Len),
-    Retain(Len),
-    Insert(Len),
+    Delete(TextLen),
+    Retain(TextLen),
+    Insert(TextLen),
 }
