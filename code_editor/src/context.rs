@@ -1,7 +1,7 @@
 use {
     crate::{
-        BiasedPos, document, document::LineInlay, line, Diff, Document, Bias, Pos, Range, Selection,
-        Settings, Text, Tokenizer,
+        document, document::LineInlay, line, Bias, BiasedPos, Diff, Document, Pos, Range,
+        Selection, Settings, Text, Tokenizer,
     },
     std::collections::HashSet,
 };
@@ -119,21 +119,23 @@ impl<'a> Context<'a> {
         self.modify_text(edit_ops::backspace)
     }
 
-    pub fn set_cursor(&mut self, cursor: BiasedPos) {
+    pub fn set_cursor_pos(&mut self, pos: BiasedPos) {
+        use crate::Cursor;
+
         self.selections.clear();
-        self.selections.push(Selection::from_cursor(cursor));
+        self.selections.push(Selection::from(Cursor::from(pos)));
         *self.latest_selection_index = 0;
     }
 
-    pub fn insert_cursor(&mut self, cursor: BiasedPos) {
-        use std::cmp::Ordering;
+    pub fn insert_cursor(&mut self, pos: BiasedPos) {
+        use {crate::Cursor, std::cmp::Ordering};
 
-        let selection = Selection::from_cursor(cursor);
+        let selection = Selection::from(Cursor::from(pos));
         *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
-            if selection.end() <= cursor {
+            if selection.end() <= pos {
                 return Ordering::Less;
             }
-            if selection.start() >= cursor {
+            if selection.start() >= pos {
                 return Ordering::Greater;
             }
             Ordering::Equal
@@ -149,11 +151,11 @@ impl<'a> Context<'a> {
         };
     }
 
-    pub fn move_cursor_to(&mut self, select: bool, cursor: BiasedPos) {
+    pub fn move_cursor_to(&mut self, select: bool, pos: BiasedPos) {
         let latest_selection = &mut self.selections[*self.latest_selection_index];
-        latest_selection.cursor = cursor;
+        latest_selection.cursor.pos = pos;
         if !select {
-            latest_selection.anchor = cursor;
+            latest_selection.anchor_pos = pos;
         }
         while *self.latest_selection_index > 0 {
             let previous_selection_index = *self.latest_selection_index - 1;
@@ -179,18 +181,34 @@ impl<'a> Context<'a> {
     }
 
     pub fn move_cursors_left(&mut self, select: bool) {
-        use crate::move_ops;
+        use crate::{Cursor, move_ops};
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|pos, _| move_ops::move_left(document, pos.to_pos()))
+            selection.update_cursor(|cursor| {
+                Cursor {
+                    pos: BiasedPos::from_pos_and_bias(
+                        move_ops::move_left(document, cursor.pos.to_pos()),
+                        Bias::Before,
+                    ),
+                    col: None,
+                }
+            })
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
-        use crate::move_ops;
+        use crate::{Cursor, move_ops};
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|pos, _| move_ops::move_right(document, pos.to_pos()))
+            selection.update_cursor(|cursor| {
+                Cursor {
+                    pos: BiasedPos::from_pos_and_bias(
+                        move_ops::move_right(document, cursor.pos.to_pos()),
+                        Bias::After,
+                    ),
+                    col: None,
+                }
+            })
         });
     }
 
@@ -198,7 +216,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+            selection.update_cursor(|cursor| move_ops::move_up(document, cursor))
         });
     }
 
@@ -206,7 +224,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+            selection.update_cursor(|cursor| move_ops::move_down(document, cursor))
         });
     }
 
@@ -360,7 +378,7 @@ impl<'a> Context<'a> {
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
-        use std::mem;
+        use {crate::Cursor, std::mem};
 
         let mut selections = mem::take(self.selections);
         let document = self.document();
@@ -383,17 +401,17 @@ impl<'a> Context<'a> {
             }
             let start = current_selection.start().min(next_selection.start());
             let end = current_selection.end().max(next_selection.end());
-            let anchor;
+            let anchor_pos;
             let cursor;
-            if current_selection.anchor <= next_selection.cursor {
-                anchor = start;
-                cursor = end;
+            if current_selection.anchor_pos <= next_selection.cursor.pos {
+                anchor_pos = start;
+                cursor = Cursor { pos: end, col: next_selection.cursor.col }
             } else {
-                anchor = end;
-                cursor = start;
+                anchor_pos = end;
+                cursor = Cursor { pos: start, col: current_selection.cursor.col };
             }
             self.selections[current_selection_index] =
-                Selection::new(anchor, cursor, current_selection.preferred_column);
+                Selection { anchor_pos, cursor };
             self.selections.remove(next_selection_index);
             if next_selection_index < *self.latest_selection_index {
                 *self.latest_selection_index -= 1;
@@ -402,7 +420,7 @@ impl<'a> Context<'a> {
     }
 
     fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
-        use crate::pos::ApplyDiffMode;
+        use crate::{Cursor, pos::ApplyDiffMode};
 
         let mut composite_diff = Diff::new();
         let mut prev_end = Pos::default();
@@ -418,16 +436,16 @@ impl<'a> Context<'a> {
             composite_diff = composite_diff.compose(diff);
             prev_end = selection.end().to_pos();
             diffed_prev_end = diffed_end;
-            let anchor;
-            let cursor;
-            if selection.anchor <= selection.cursor {
-                anchor = BiasedPos::from_pos_and_bias(diffed_start, selection.start().bias);
-                cursor = BiasedPos::from_pos_and_bias(diffed_end, selection.end().bias);
+            let anchor_pos;
+            let cursor_pos;
+            if selection.anchor_pos <= selection.cursor.pos {
+                anchor_pos = BiasedPos::from_pos_and_bias(diffed_start, selection.start().bias);
+                cursor_pos = BiasedPos::from_pos_and_bias(diffed_end, selection.end().bias);
             } else {
-                anchor = BiasedPos::from_pos_and_bias(diffed_end, selection.end().bias);
-                cursor = BiasedPos::from_pos_and_bias(diffed_start, selection.start().bias);
+                anchor_pos = BiasedPos::from_pos_and_bias(diffed_end, selection.end().bias);
+                cursor_pos = BiasedPos::from_pos_and_bias(diffed_start, selection.start().bias);
             }
-            *selection = Selection::new(anchor, cursor, selection.preferred_column);
+            *selection = Selection { anchor_pos, cursor: Cursor { pos: cursor_pos, col: None } };
         }
         self.update_after_modify_text(composite_diff);
     }

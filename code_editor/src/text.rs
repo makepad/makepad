@@ -136,7 +136,7 @@ impl From<char> for Text {
     fn from(char: char) -> Self {
         Self {
             lines: match char {
-                '\n' | '\r' => vec![String::new(), String::new()],
+                '\n' => vec![String::new(), String::new()],
                 _ => vec![char.into()],
             },
         }
@@ -145,13 +145,14 @@ impl From<char> for Text {
 
 impl From<&str> for Text {
     fn from(string: &str) -> Self {
-        let mut lines: Vec<_> = string.lines().map(|line| line.to_owned()).collect();
+        let mut lines: Vec<_> = string.split("\n").map(|line| line.to_owned()).collect();
         if lines.is_empty() {
             lines.push(String::new());
         }
         Self { lines }
     }
 }
+
 impl From<&String> for Text {
     fn from(string: &String) -> Self {
         string.as_str().into()
