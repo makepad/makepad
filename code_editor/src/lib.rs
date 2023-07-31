@@ -8,7 +8,7 @@ pub mod edit_ops;
 pub mod length;
 pub mod line;
 pub mod move_ops;
-pub mod position;
+pub mod point;
 pub mod range;
 pub mod selection;
 pub mod settings;
@@ -20,6 +20,6 @@ pub mod tokenizer;
 
 pub use crate::{
     affinity::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, selection::Selection,
+    length::Length, line::Line, point::Point, range::Range, selection::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
