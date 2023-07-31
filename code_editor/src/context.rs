@@ -1,6 +1,6 @@
 use {
     crate::{
-        document, document::LineInlay, line, Affinity, Diff, Document, Pos, Range, Selection,
+        BiasedPos, document, document::LineInlay, line, Diff, Document, Bias, Pos, Range, Selection,
         Settings, Text, Tokenizer,
     },
     std::collections::HashSet,
@@ -13,13 +13,13 @@ pub struct Context<'a> {
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
     text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-    line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+    line_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
     wrap_bytes: &'a mut Vec<Vec<usize>>,
     start_column_after_wrap: &'a mut Vec<usize>,
     fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+    document_widget_inlays: &'a mut Vec<((usize, Bias), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
     selections: &'a mut Vec<Selection>,
     latest_selection_index: &'a mut usize,
@@ -34,13 +34,13 @@ impl<'a> Context<'a> {
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
         text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-        line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+        line_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
         wrap_bytes: &'a mut Vec<Vec<usize>>,
         start_column_after_wrap: &'a mut Vec<usize>,
         fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+        document_widget_inlays: &'a mut Vec<((usize, Bias), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
         selections: &'a mut Vec<Selection>,
         latest_selection_index: &'a mut usize,
@@ -119,13 +119,13 @@ impl<'a> Context<'a> {
         self.modify_text(edit_ops::backspace)
     }
 
-    pub fn set_cursor(&mut self, cursor: (Pos, Affinity)) {
+    pub fn set_cursor(&mut self, cursor: BiasedPos) {
         self.selections.clear();
         self.selections.push(Selection::from_cursor(cursor));
         *self.latest_selection_index = 0;
     }
 
-    pub fn insert_cursor(&mut self, cursor: (Pos, Affinity)) {
+    pub fn insert_cursor(&mut self, cursor: BiasedPos) {
         use std::cmp::Ordering;
 
         let selection = Selection::from_cursor(cursor);
@@ -149,7 +149,7 @@ impl<'a> Context<'a> {
         };
     }
 
-    pub fn move_cursor_to(&mut self, select: bool, cursor: (Pos, Affinity)) {
+    pub fn move_cursor_to(&mut self, select: bool, cursor: BiasedPos) {
         let latest_selection = &mut self.selections[*self.latest_selection_index];
         latest_selection.cursor = cursor;
         if !select {
@@ -182,7 +182,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+            selection.update_cursor(|pos, _| move_ops::move_left(document, pos.to_pos()))
         });
     }
 
@@ -190,7 +190,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+            selection.update_cursor(|pos, _| move_ops::move_right(document, pos.to_pos()))
         });
     }
 
@@ -408,7 +408,7 @@ impl<'a> Context<'a> {
         let mut prev_end = Pos::default();
         let mut diffed_prev_end = Pos::default();
         for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().0 - prev_end;
+            let distance_from_prev_end = selection.start().to_pos() - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
             let diffed_end = diffed_start + selection.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
@@ -416,16 +416,16 @@ impl<'a> Context<'a> {
             let diffed_end = diffed_end.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().0;
+            prev_end = selection.end().to_pos();
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
             if selection.anchor <= selection.cursor {
-                anchor = (diffed_start, selection.start().1);
-                cursor = (diffed_end, selection.end().1);
+                anchor = BiasedPos::from_pos_and_bias(diffed_start, selection.start().bias);
+                cursor = BiasedPos::from_pos_and_bias(diffed_end, selection.end().bias);
             } else {
-                anchor = (diffed_end, selection.end().1);
-                cursor = (diffed_start, selection.start().1);
+                anchor = BiasedPos::from_pos_and_bias(diffed_end, selection.end().bias);
+                cursor = BiasedPos::from_pos_and_bias(diffed_start, selection.start().bias);
             }
             *selection = Selection::new(anchor, cursor, selection.preferred_column);
         }

@@ -1,7 +1,7 @@
 use {
     crate::{
         token::{TokenInfo, TokenKind},
-        Affinity, Token,
+        Bias, Token,
     },
     std::slice,
 };
@@ -11,7 +11,7 @@ pub struct Line<'a> {
     text: &'a str,
     token_infos: &'a [TokenInfo],
     text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    widget_inlays: &'a [((usize, Bias), Widget)],
     wrap_bytes: &'a [usize],
     start_column_after_wrap: usize,
     fold_column: usize,
@@ -23,7 +23,7 @@ impl<'a> Line<'a> {
         text: &'a str,
         token_infos: &'a [TokenInfo],
         text_inlays: &'a [(usize, String)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
+        widget_inlays: &'a [((usize, Bias), Widget)],
         wrap_bytes: &'a [usize],
         start_column_after_wrap: usize,
         fold_column: usize,
@@ -77,7 +77,7 @@ impl<'a> Line<'a> {
 
     pub fn byte_affinity_to_row_column(
         &self,
-        (byte, affinity): (usize, Affinity),
+        (byte, affinity): (usize, Bias),
         tab_column_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
@@ -85,19 +85,19 @@ impl<'a> Line<'a> {
         let mut current_byte = 0;
         let mut row = 0;
         let mut column = 0;
-        if byte == current_byte && affinity == Affinity::Before {
+        if byte == current_byte && affinity == Bias::Before {
             return (row, column);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        if byte == current_byte && affinity == Affinity::After {
+                        if byte == current_byte && affinity == Bias::After {
                             return (row, column);
                         }
                         current_byte += grapheme.len();
                         column += grapheme.column_count(tab_column_count);
-                        if byte == current_byte && affinity == Affinity::Before {
+                        if byte == current_byte && affinity == Bias::Before {
                             return (row, column);
                         }
                     }
@@ -114,7 +114,7 @@ impl<'a> Line<'a> {
                 }
             }
         }
-        if byte == current_byte && affinity == Affinity::After {
+        if byte == current_byte && affinity == Bias::After {
             return (row, column);
         }
         panic!()
@@ -124,7 +124,7 @@ impl<'a> Line<'a> {
         &self,
         (row, column): (usize, usize),
         tab_column_count: usize,
-    ) -> (usize, Affinity) {
+    ) -> (usize, Bias) {
         use crate::str::StrExt;
 
         let mut byte = 0;
@@ -136,7 +136,7 @@ impl<'a> Line<'a> {
                     for grapheme in token.text.graphemes() {
                         let next_column = current_column + grapheme.column_count(tab_column_count);
                         if current_row == row && (current_column..next_column).contains(&column) {
-                            return (byte, Affinity::After);
+                            return (byte, Bias::After);
                         }
                         byte = byte + grapheme.len();
                         current_column = next_column;
@@ -145,7 +145,7 @@ impl<'a> Line<'a> {
                 WrappedElement::Token(true, token) => {
                     let next_column = current_column + token.text.column_count(tab_column_count);
                     if current_row == row && (current_column..next_column).contains(&column) {
-                        return (byte, Affinity::Before);
+                        return (byte, Bias::Before);
                     }
                     current_column = next_column;
                 }
@@ -154,7 +154,7 @@ impl<'a> Line<'a> {
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
-                        return (byte, Affinity::Before);
+                        return (byte, Bias::Before);
                     }
                     current_row += 1;
                     current_column = self.start_column_after_wrap();
@@ -162,7 +162,7 @@ impl<'a> Line<'a> {
             }
         }
         if current_row == row {
-            return (byte, Affinity::After);
+            return (byte, Bias::After);
         }
         panic!()
     }
@@ -251,7 +251,7 @@ pub struct Elements<'a> {
     token: Option<Token<'a>>,
     tokens: Tokens<'a>,
     text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    widget_inlays: &'a [((usize, Bias), Widget)],
     byte: usize,
 }
 
@@ -263,12 +263,12 @@ impl<'a> Iterator for Elements<'a> {
             .widget_inlays
             .first()
             .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::Before
+                *byte == self.byte && *affinity == Bias::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
             self.widget_inlays = widget_inlays;
-            return Some(Element::Widget(Affinity::Before, *widget));
+            return Some(Element::Widget(Bias::Before, *widget));
         }
         if self
             .text_inlays
@@ -283,12 +283,12 @@ impl<'a> Iterator for Elements<'a> {
             .widget_inlays
             .first()
             .map_or(false, |((byte, affinity), _)| {
-                *byte == self.byte && *affinity == Affinity::After
+                *byte == self.byte && *affinity == Bias::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
             self.widget_inlays = widget_inlays;
-            return Some(Element::Widget(Affinity::After, *widget));
+            return Some(Element::Widget(Bias::After, *widget));
         }
         let token = self.token.take()?;
         let mut byte_count = token.text.len();
@@ -314,7 +314,7 @@ impl<'a> Iterator for Elements<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Element<'a> {
     Token(bool, Token<'a>),
-    Widget(Affinity, Widget),
+    Widget(Bias, Widget),
 }
 
 #[derive(Clone, Debug)]
@@ -329,12 +329,12 @@ impl<'a> Iterator for WrappedElements<'a> {
     type Item = WrappedElement<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(Element::Widget(Affinity::Before, ..)) = self.element {
+        if let Some(Element::Widget(Bias::Before, ..)) = self.element {
             let Element::Widget(_, widget) = self.element.take().unwrap() else {
                 panic!()
             };
             self.element = self.elements.next();
-            return Some(WrappedElement::Widget(Affinity::Before, widget));
+            return Some(WrappedElement::Widget(Bias::Before, widget));
         }
         if self
             .wrap_bytes
@@ -361,11 +361,11 @@ impl<'a> Iterator for WrappedElements<'a> {
                 self.byte += token.text.len();
                 WrappedElement::Token(is_inlay, token)
             }
-            Element::Widget(Affinity::After, widget) => {
+            Element::Widget(Bias::After, widget) => {
                 self.element = self.elements.next();
-                WrappedElement::Widget(Affinity::After, widget)
+                WrappedElement::Widget(Bias::After, widget)
             }
-            Element::Widget(Affinity::Before, _) => panic!(),
+            Element::Widget(Bias::Before, _) => panic!(),
         })
     }
 }
@@ -373,7 +373,7 @@ impl<'a> Iterator for WrappedElements<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum WrappedElement<'a> {
     Token(bool, Token<'a>),
-    Widget(Affinity, Widget),
+    Widget(Bias, Widget),
     Wrap,
 }
 

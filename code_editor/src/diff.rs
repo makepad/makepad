@@ -37,81 +37,73 @@ impl Diff {
         let mut op_opt_1 = op_iter_1.next();
         loop {
             match (op_opt_0, op_opt_1) {
-                (Some(Op::Retain(len_0)), Some(Op::Retain(len_1))) => {
-                    match len_0.cmp(&len_1) {
-                        Ordering::Less => {
-                            builder.retain(len_0);
-                            op_opt_0 = op_iter_0.next();
-                            op_opt_1 = Some(Op::Retain(len_1 - len_0));
-                        }
-                        Ordering::Equal => {
-                            builder.retain(len_0);
-                            op_opt_0 = op_iter_0.next();
-                            op_opt_1 = op_iter_1.next();
-                        }
-                        Ordering::Greater => {
-                            builder.retain(len_1);
-                            op_opt_0 = Some(Op::Retain(len_0 - len_1));
-                            op_opt_1 = op_iter_1.next();
-                        }
+                (Some(Op::Retain(len_0)), Some(Op::Retain(len_1))) => match len_0.cmp(&len_1) {
+                    Ordering::Less => {
+                        builder.retain(len_0);
+                        op_opt_0 = op_iter_0.next();
+                        op_opt_1 = Some(Op::Retain(len_1 - len_0));
                     }
-                }
-                (Some(Op::Retain(len_0)), Some(Op::Delete(len_1))) => {
-                    match len_0.cmp(&len_1) {
-                        Ordering::Less => {
-                            builder.delete(len_0);
-                            op_opt_0 = op_iter_0.next();
-                            op_opt_1 = Some(Op::Delete(len_1 - len_0));
-                        }
-                        Ordering::Equal => {
-                            builder.delete(len_0);
-                            op_opt_0 = op_iter_0.next();
-                            op_opt_1 = op_iter_1.next();
-                        }
-                        Ordering::Greater => {
-                            builder.delete(len_1);
-                            op_opt_0 = Some(Op::Retain(len_0 - len_1));
-                            op_opt_1 = op_iter_1.next();
-                        }
+                    Ordering::Equal => {
+                        builder.retain(len_0);
+                        op_opt_0 = op_iter_0.next();
+                        op_opt_1 = op_iter_1.next();
                     }
-                }
-                (Some(Op::Insert(mut text)), Some(Op::Retain(len))) => {
-                    match text.len().cmp(&len) {
-                        Ordering::Less => {
-                            let text_len = text.len();
-                            builder.insert(text);
-                            op_opt_0 = op_iter_0.next();
-                            op_opt_1 = Some(Op::Retain(len - text_len));
-                        }
-                        Ordering::Equal => {
-                            builder.insert(text);
-                            op_opt_0 = op_iter_0.next();
-                            op_opt_1 = op_iter_1.next();
-                        }
-                        Ordering::Greater => {
-                            builder.insert(text.take(len));
-                            op_opt_0 = Some(Op::Insert(text));
-                            op_opt_1 = op_iter_1.next();
-                        }
+                    Ordering::Greater => {
+                        builder.retain(len_1);
+                        op_opt_0 = Some(Op::Retain(len_0 - len_1));
+                        op_opt_1 = op_iter_1.next();
                     }
-                }
-                (Some(Op::Insert(mut text)), Some(Op::Delete(len))) => {
-                    match text.len().cmp(&len) {
-                        Ordering::Less => {
-                            op_opt_0 = op_iter_0.next();
-                            op_opt_1 = Some(Op::Delete(text.len() - len));
-                        }
-                        Ordering::Equal => {
-                            op_opt_0 = op_iter_0.next();
-                            op_opt_1 = op_iter_1.next();
-                        }
-                        Ordering::Greater => {
-                            text.skip(len);
-                            op_opt_0 = Some(Op::Insert(text));
-                            op_opt_1 = op_iter_1.next();
-                        }
+                },
+                (Some(Op::Retain(len_0)), Some(Op::Delete(len_1))) => match len_0.cmp(&len_1) {
+                    Ordering::Less => {
+                        builder.delete(len_0);
+                        op_opt_0 = op_iter_0.next();
+                        op_opt_1 = Some(Op::Delete(len_1 - len_0));
                     }
-                }
+                    Ordering::Equal => {
+                        builder.delete(len_0);
+                        op_opt_0 = op_iter_0.next();
+                        op_opt_1 = op_iter_1.next();
+                    }
+                    Ordering::Greater => {
+                        builder.delete(len_1);
+                        op_opt_0 = Some(Op::Retain(len_0 - len_1));
+                        op_opt_1 = op_iter_1.next();
+                    }
+                },
+                (Some(Op::Insert(mut text)), Some(Op::Retain(len))) => match text.len().cmp(&len) {
+                    Ordering::Less => {
+                        let text_len = text.len();
+                        builder.insert(text);
+                        op_opt_0 = op_iter_0.next();
+                        op_opt_1 = Some(Op::Retain(len - text_len));
+                    }
+                    Ordering::Equal => {
+                        builder.insert(text);
+                        op_opt_0 = op_iter_0.next();
+                        op_opt_1 = op_iter_1.next();
+                    }
+                    Ordering::Greater => {
+                        builder.insert(text.take(len));
+                        op_opt_0 = Some(Op::Insert(text));
+                        op_opt_1 = op_iter_1.next();
+                    }
+                },
+                (Some(Op::Insert(mut text)), Some(Op::Delete(len))) => match text.len().cmp(&len) {
+                    Ordering::Less => {
+                        op_opt_0 = op_iter_0.next();
+                        op_opt_1 = Some(Op::Delete(text.len() - len));
+                    }
+                    Ordering::Equal => {
+                        op_opt_0 = op_iter_0.next();
+                        op_opt_1 = op_iter_1.next();
+                    }
+                    Ordering::Greater => {
+                        text.skip(len);
+                        op_opt_0 = Some(Op::Insert(text));
+                        op_opt_1 = op_iter_1.next();
+                    }
+                },
                 (Some(Op::Insert(text)), None) => {
                     builder.insert(text);
                     op_opt_0 = op_iter_0.next();
