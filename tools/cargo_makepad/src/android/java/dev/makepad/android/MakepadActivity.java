@@ -68,6 +68,7 @@ Makepad.Callback{
         }
 
         super.onCreate(savedInstanceState);
+        Makepad.onHookPanic();
         mCx = Makepad.onNewCx();
 
         mHandler = new Handler(Looper.getMainLooper());

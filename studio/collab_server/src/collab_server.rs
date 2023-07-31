@@ -1,9 +1,5 @@
 use {
     crate::{
-        makepad_editor_core::{
-            delta::Delta,
-            text::Text
-        },
         makepad_live_id::LiveIdMap,
         makepad_collab_protocol::{
             DirectoryEntry,
@@ -19,11 +15,10 @@ use {
     },
     std::{ 
         cmp::Ordering,
-        collections::{HashMap, VecDeque},
+        collections::{HashMap},
         fmt,
         fs,
         mem,
-        io::prelude::*,
         path::{Path, PathBuf},
         sync::{Arc, Mutex, RwLock},
     },
@@ -64,7 +59,7 @@ impl CollabServer {
         CollabConnection {
             connection_id,
             shared: self.shared.clone(),
-            notification_sender,
+            _notification_sender:notification_sender
         }
     }
 }
@@ -76,7 +71,7 @@ pub struct CollabConnection {
     // State is shared between every connection.
     shared: Arc<RwLock<Shared>>,
     // Used to send notifications for this connection.
-    notification_sender: Box<dyn NotificationSender>,
+    _notification_sender: Box<dyn NotificationSender>,
 }
 
 impl CollabConnection {
@@ -95,8 +90,8 @@ impl CollabConnection {
                 base_path.push(path);
                 CollabResponse::OpenFile(self.open_file(base_path))
             }
-            CollabRequest::ApplyDelta(text_file_id, revision, delta) => {
-                CollabResponse::ApplyDelta(self.apply_delta(text_file_id, revision, delta))
+            CollabRequest::ApplyDelta(text_file_id, delta) => {
+                CollabResponse::ApplyDelta(self.apply_delta(text_file_id, delta))
             }
             CollabRequest::CloseFile(path) => CollabResponse::CloseFile(self.close_file(path)),
         }
@@ -186,7 +181,7 @@ impl CollabConnection {
     }
     
     // Handles an `OpenFile` request.
-    fn open_file(&self, path: PathBuf) -> Result<(TextFileId, u32, Text), CollabError> {
+    fn open_file(&self, path: PathBuf) -> Result<(TextFileId, String), CollabError> {
         // We need to update the list of files in the shared state, so lock it for writing. This is
         // necessary so other clients cannot close the file while we are still in the process of
         // opening it.
@@ -203,7 +198,7 @@ impl CollabConnection {
                 let mut file_guard = shared_guard.files[file_id].lock().unwrap();
                 
                 // Their (the client) initial revision will be the same as ours (the server).
-                let their_revision = file_guard.our_revision;
+                let _their_revision = file_guard.our_revision;
                 // Get a copy of the contents of the file.
                 let text = file_guard.text.clone();
                 if file_guard
@@ -217,8 +212,8 @@ impl CollabConnection {
                 file_guard.participants_by_connection_id.insert(
                     self.connection_id,
                     Participant {
-                        their_revision,
-                        notification_sender: self.notification_sender.clone(),
+                        //their_revision,
+                        //notification_sender: self.notification_sender.clone(),
                     },
                 );
                 
@@ -227,7 +222,7 @@ impl CollabConnection {
                 
                 drop(shared_guard);
                 
-                Ok((file_id, their_revision, text))
+                Ok((file_id, text))
             }
             None => {
                 // The file was not yet opened, so we need to open it, and then add the client as
@@ -242,18 +237,19 @@ impl CollabConnection {
                 // Converts the file contents to a `Text`. This is necessarily a lossy conversion
                 // because `Text` assumes everything is UTF-8 encoded, and this isn't always the
                 // case for files on disk (is this a problem?)
-                let text: Text = Text::from_lines(String::from_utf8_lossy(&bytes)
+                /*let text: Text = Text::from_lines(String::from_utf8_lossy(&bytes)
                     .lines()
                     .map( | line | line.chars().collect::<Vec<_ >> ())
-                    .collect::<Vec<_ >>());
+                    .collect::<Vec<_ >>());*/
                 
+                let text = String::from_utf8_lossy(&bytes);
                 // Create the list of participants for this file and add the file to it.
                 let mut participants_by_connection_id = HashMap::new();
                 participants_by_connection_id.insert(
                     self.connection_id,
                     Participant {
-                        their_revision: 0,
-                        notification_sender: self.notification_sender.clone(),
+                        //their_revision: 0,
+                        //notification_sender: self.notification_sender.clone(),
                     },
                 );
 
@@ -261,8 +257,8 @@ impl CollabConnection {
                 let file = Mutex::new(File {
                     path: path.clone(),
                     our_revision: 0,
-                    text: text.clone(),
-                    outstanding_deltas: VecDeque::new(),
+                    text: text.to_string(),
+                    //outstanding_deltas: VecDeque::new(),
                     participants_by_connection_id,
                 });
                 
@@ -273,7 +269,7 @@ impl CollabConnection {
                 // It's now safe to drop our locks.
                 drop(shared_guard);
                 
-                Ok((file_id, 0, text))
+                Ok((file_id, text.to_string()))
             }
         }
     }
@@ -282,9 +278,9 @@ impl CollabConnection {
     fn apply_delta(
         &self,
         file_id: TextFileId,
-        their_revision: u32,
-        delta: Delta,
+        _delta: String,
     ) -> Result<TextFileId, CollabError> {
+        /*
         // We need only need to get the list of files in the shared state, so lock it for reading.
         // This is necessary so other clients cannot close the file while we are still in the
         // process of applying the delta to it.
@@ -353,8 +349,8 @@ impl CollabConnection {
         drop(file_guard);
         
         drop(shared_guard);
-        
-        Ok(file_id)
+        */
+         Ok(file_id)
     }
     
     // Handles a `CloseFile` request.
@@ -456,9 +452,9 @@ struct File {
     // The current revision of the file
     our_revision: u32,
     // The current contents of this file
-    text: Text,
+    text: String,
     // The list of deltas that has been seen by the server, but not yet by *every* client.
-    outstanding_deltas: VecDeque<Delta>,
+    //outstanding_deltas: VecDeque<Delta>,
     // A map from connection ids to the participants for this file.
     participants_by_connection_id: HashMap<ConnectionId, Participant>,
 }
@@ -467,7 +463,7 @@ impl File {
     // Sends the given `notification` except for the one with the given `connection_id`. This is
     // usually the participant that sent the request that caused this notification to happen in
     // the first place (so there's no need to notify it that something happened).
-    fn notify_other_participants(&self, connection_id: ConnectionId, notification: CollabNotification) {
+    /*fn notify_other_participants(&self, connection_id: ConnectionId, notification: CollabNotification) {
         for (other_connection_id, other_participant) in &self.participants_by_connection_id {
             if *other_connection_id == connection_id {
                 continue;
@@ -476,14 +472,14 @@ impl File {
                 .notification_sender
                 .send_notification(notification.clone())
         }
-    }
+    }*/
 }
 
 // Information about a participant
 #[derive(Debug)]
 struct Participant {
     // The last revision that has been seen by this participant.
-    their_revision: u32,
+    //_their_revision: u32,
     // Used to send notifications to (the connection of) this participant.
-    notification_sender: Box<dyn NotificationSender>,
+    //notification_sender: Box<dyn NotificationSender>,
 }
