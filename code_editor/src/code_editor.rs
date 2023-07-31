@@ -1,5 +1,5 @@
 use {
-    crate::{state::ViewId, Affinity, Context, Document, Point, Selection, State},
+    crate::{state::ViewId, Affinity, Context, Document, Pos, Selection, State},
     makepad_widgets::*,
 };
 
@@ -262,7 +262,9 @@ impl CodeEditor {
         };
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-        context.set_max_column(Some((self.viewport_rect.size.x / self.cell_size.x) as usize));
+        context.set_max_column(Some(
+            (self.viewport_rect.size.x / self.cell_size.x) as usize,
+        ));
         let document = context.document();
         self.start_line =
             document.find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
@@ -361,7 +363,7 @@ impl CodeEditor {
         .draw_selections(cx, document)
     }
 
-    fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Point, Affinity)> {
+    fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Pos, Affinity)> {
         use crate::{document, line, str::StrExt};
 
         let pos = (pos + self.viewport_rect.pos) / self.cell_size;
@@ -386,14 +388,14 @@ impl CodeEditor {
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
-                                            return Some((
-                                                Point { line, byte },
-                                                Affinity::After,
-                                            ));
+                                            return Some((Pos { line, byte }, Affinity::After));
                                         }
                                         if (mid_x..=next_x).contains(&pos.x) {
                                             return Some((
-                                                Point { line, byte: next_byte },
+                                                Pos {
+                                                    line,
+                                                    byte: next_byte,
+                                                },
                                                 Affinity::Before,
                                             ));
                                         }
@@ -411,7 +413,7 @@ impl CodeEditor {
                                 let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
-                                    return Some((Point { line, byte }, Affinity::Before));
+                                    return Some((Pos { line, byte }, Affinity::Before));
                                 }
                                 column = next_column;
                             }
@@ -421,7 +423,7 @@ impl CodeEditor {
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) {
-                                    return Some((Point { line, byte }, Affinity::Before));
+                                    return Some((Pos { line, byte }, Affinity::Before));
                                 }
                                 y = next_y;
                                 column = line_ref.start_column_after_wrap();
@@ -430,7 +432,7 @@ impl CodeEditor {
                     }
                     let next_y = y + line_ref.scale();
                     if (y..=next_y).contains(&pos.y) {
-                        return Some((Point { line, byte }, Affinity::After));
+                        return Some((Pos { line, byte }, Affinity::After));
                     }
                     line += 1;
                     y += next_y;
@@ -438,7 +440,7 @@ impl CodeEditor {
                 document::Element::Line(true, line_ref) => {
                     let next_y = y + line_ref.height();
                     if (y..=next_y).contains(&pos.y) {
-                        return Some((Point { line, byte: 0 }, Affinity::Before));
+                        return Some((Pos { line, byte: 0 }, Affinity::Before));
                     }
                     y = next_y;
                 }
@@ -566,7 +568,7 @@ impl<'a> DrawSelectionsContext<'a> {
         y: f64,
         height: f64,
     ) {
-        let position = Point { line, byte };
+        let position = Pos { line, byte };
         if self.active_selection.as_ref().map_or(false, |selection| {
             selection.selection.end() == (position, affinity)
         }) {
