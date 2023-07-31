@@ -1,7 +1,7 @@
 use {
     crate::{
-        line, view, view::LineInlay, Bias, BiasedPos, Sel, Settings, Text, Diff,
-        Pos, Range, Tokenizer, View,
+        line, view, Bias, BiasedPos, Diff, Pos, Range, Sel, Settings, Text,
+        Tokenizer, View,
     },
     std::collections::HashSet,
 };
@@ -18,7 +18,6 @@ pub struct ViewMut<'a> {
     start_column_after_wrap: &'a mut Vec<usize>,
     fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
-    line_inlays: &'a mut Vec<(usize, LineInlay)>,
     block_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
     summed_heights: &'a mut Vec<f64>,
     sels: &'a mut Vec<Sel>,
@@ -39,7 +38,6 @@ impl<'a> ViewMut<'a> {
         start_column_after_wrap: &'a mut Vec<usize>,
         fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
-        line_inlays: &'a mut Vec<(usize, LineInlay)>,
         block_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
         summed_heights: &'a mut Vec<f64>,
         sels: &'a mut Vec<Sel>,
@@ -58,7 +56,6 @@ impl<'a> ViewMut<'a> {
             start_column_after_wrap,
             fold_column,
             scale,
-            line_inlays,
             block_widget_inlays,
             summed_heights,
             sels,
@@ -79,7 +76,6 @@ impl<'a> ViewMut<'a> {
             self.start_column_after_wrap,
             self.fold_column,
             self.scale,
-            self.line_inlays,
             self.block_widget_inlays,
             self.summed_heights,
             self.sels,
@@ -211,9 +207,8 @@ impl<'a> ViewMut<'a> {
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        let tab_width = self.settings.tab_width;
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor| move_ops::move_up(document, cursor, tab_width))
+            sel.update_cursor(|cursor| move_ops::move_up(document, cursor))
         });
     }
 
@@ -222,7 +217,7 @@ impl<'a> ViewMut<'a> {
 
         let tab_width = self.settings.tab_width;
         self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor| move_ops::move_down(document, cursor, tab_width))
+            sel.update_cursor(|cursor| move_ops::move_down(document, cursor))
         });
     }
 
@@ -236,10 +231,7 @@ impl<'a> ViewMut<'a> {
             self.summed_heights[start - 1]
         };
         let mut summed_heights = mem::take(self.summed_heights);
-        for element in self
-            .as_view()
-            .elements(start, self.as_view().line_count())
-        {
+        for element in self.as_view().elements(start, self.as_view().line_count()) {
             match element {
                 view::Element::Line(false, line) => {
                     summed_height += line.scaled_height();
@@ -316,13 +308,13 @@ impl<'a> ViewMut<'a> {
                 let mut start_column_after_wrap = line_ref
                     .text()
                     .indentation()
-                    .column_count(document.settings().tab_width);
+                    .column_count(self.as_view().settings().tab_width);
                 for element in line_ref.inline_elements() {
                     match element {
                         line::Element::Token(_, token) => {
                             for string in token.text.split_whitespace_boundaries() {
                                 if start_column_after_wrap
-                                    + string.column_count(document.settings().tab_width)
+                                    + string.column_count(self.as_view().settings().tab_width)
                                     > max_column
                                 {
                                     start_column_after_wrap = 0;
@@ -341,8 +333,8 @@ impl<'a> ViewMut<'a> {
                     match element {
                         line::Element::Token(_, token) => {
                             for string in token.text.split_whitespace_boundaries() {
-                                let mut next_column = column
-                                    + string.column_count(document.settings().tab_width);
+                                let mut next_column =
+                                    column + string.column_count(self.as_view().settings().tab_width);
                                 if next_column > max_column {
                                     next_column = start_column_after_wrap;
                                     soft_breaks.push(byte);
@@ -371,11 +363,7 @@ impl<'a> ViewMut<'a> {
         self.update_summed_heights();
     }
 
-    fn modify_sels(
-        &mut self,
-        select: bool,
-        mut f: impl FnMut(&View<'_>, Sel) -> Sel,
-    ) {
+    fn modify_sels(&mut self, select: bool, mut f: impl FnMut(&View<'_>, Sel) -> Sel) {
         use std::mem;
 
         let mut sels = mem::take(self.sels);

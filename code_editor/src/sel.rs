@@ -54,7 +54,7 @@ impl Sel {
         Some(if self.anchor <= self.cursor.biased_pos {
             Sel {
                 anchor: self.anchor,
-                cursor: other.cursor
+                cursor: other.cursor,
             }
         } else {
             Sel {
@@ -63,7 +63,6 @@ impl Sel {
             }
         })
     }
-
 }
 
 impl From<Pos> for Sel {
