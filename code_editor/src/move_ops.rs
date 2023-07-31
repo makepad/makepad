@@ -88,7 +88,7 @@ fn move_to_prev_row_of_line(view: &View<'_>, cursor: Cursor) -> Cursor {
     let line = view.line(cursor.pos.pos.line);
     let mut grid_pos = line.pos_to_grid_pos(
         cursor.pos.biased_line_pos(),
-        view.settings().tab_column_count,
+        view.settings().tab_width,
     );
     if let Some(col) = cursor.col {
         grid_pos.col = col;
@@ -98,7 +98,7 @@ fn move_to_prev_row_of_line(view: &View<'_>, cursor: Cursor) -> Cursor {
             row: grid_pos.row - 1,
             ..grid_pos
         },
-        view.settings().tab_column_count,
+        view.settings().tab_width,
     );
     Cursor {
         pos: BiasedTextPos::from_line_and_biased_line_pos(cursor.pos.pos.line, pos),

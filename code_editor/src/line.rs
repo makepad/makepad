@@ -10,11 +10,11 @@ use {
 pub struct Line<'a> {
     text: &'a str,
     token_infos: &'a [TokenInfo],
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Bias), Widget)],
-    wrap_bytes: &'a [usize],
-    start_column_after_wrap: usize,
-    fold_column: usize,
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Bias), Widget)],
+    soft_breaks: &'a [usize],
+    start_col_after_wrap: usize,
+    fold_col: usize,
     scale: f64,
 }
 
@@ -22,60 +22,60 @@ impl<'a> Line<'a> {
     pub fn new(
         text: &'a str,
         token_infos: &'a [TokenInfo],
-        text_inlays: &'a [(usize, String)],
-        widget_inlays: &'a [((usize, Bias), Widget)],
-        wrap_bytes: &'a [usize],
-        start_column_after_wrap: usize,
-        fold_column: usize,
+        inline_text_inlays: &'a [(usize, String)],
+        block_widget_inlays: &'a [((usize, Bias), Widget)],
+        soft_breaks: &'a [usize],
+        start_col_after_wrap: usize,
+        fold_col: usize,
         scale: f64,
     ) -> Self {
         Self {
             text,
             token_infos,
-            text_inlays,
-            widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            block_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
         }
     }
 
-    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
+    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_column_count = 0;
-        let mut summed_column_count = 0;
+        let mut max_summed_col_count = 0;
+        let mut summed_col_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_column_count += token.text.column_count(tab_column_count);
+                    summed_col_count += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_column_count += widget.column_count;
+                    summed_col_count += widget.col_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
-                    summed_column_count = self.start_column_after_wrap();
+                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
+                    summed_col_count = self.start_col_after_wrap();
                 }
             }
         }
-        max_summed_column_count.max(summed_column_count)
+        max_summed_col_count.max(summed_col_count)
     }
 
     pub fn row_count(&self) -> usize {
-        self.wrap_bytes.len() + 1
+        self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
-        self.column_to_x(self.compute_column_count(tab_column_count))
+    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
+        self.col_to_x(self.compute_col_count(tab_col_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn pos_to_grid_pos(&self, pos: BiasedLinePos, tab_column_count: usize) -> GridPos {
+    pub fn pos_to_grid_pos(&self, pos: BiasedLinePos, tab_col_count: usize) -> GridPos {
         use crate::str::StrExt;
 
         let mut current_pos = 0;
@@ -101,7 +101,7 @@ impl<'a> Line<'a> {
                             return grid_pos;
                         }
                         current_pos += grapheme.len();
-                        grid_pos.col += grapheme.column_count(tab_column_count);
+                        grid_pos.col += grapheme.col_count(tab_col_count);
                         if pos
                             == (BiasedLinePos {
                                 pos: current_pos,
@@ -113,14 +113,14 @@ impl<'a> Line<'a> {
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    grid_pos.col += token.text.column_count(tab_column_count);
+                    grid_pos.col += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    grid_pos.col += widget.column_count;
+                    grid_pos.col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     grid_pos.row += 1;
-                    grid_pos.col = self.start_column_after_wrap();
+                    grid_pos.col = self.start_col_after_wrap();
                 }
             }
         }
@@ -135,7 +135,7 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn grid_pos_to_pos(&self, grid_pos: GridPos, tab_column_count: usize) -> BiasedLinePos {
+    pub fn grid_pos_to_pos(&self, grid_pos: GridPos, tab_col_count: usize) -> BiasedLinePos {
         use crate::str::StrExt;
 
         let mut row = 0;
@@ -145,29 +145,29 @@ impl<'a> Line<'a> {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_column = col + grapheme.column_count(tab_column_count);
-                        if grid_pos.row == row && (col..next_column).contains(&grid_pos.col) {
+                        let next_col = col + grapheme.col_count(tab_col_count);
+                        if grid_pos.row == row && (col..next_col).contains(&grid_pos.col) {
                             return BiasedLinePos {
                                 pos,
                                 bias: Bias::After,
                             };
                         }
                         pos = pos + grapheme.len();
-                        col = next_column;
+                        col = next_col;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_column = col + token.text.column_count(tab_column_count);
-                    if grid_pos.row == row && (col..next_column).contains(&grid_pos.col) {
+                    let next_col = col + token.text.col_count(tab_col_count);
+                    if grid_pos.row == row && (col..next_col).contains(&grid_pos.col) {
                         return BiasedLinePos {
                             pos,
                             bias: Bias::Before,
                         };
                     }
-                    col = next_column;
+                    col = next_col;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    col += widget.column_count;
+                    col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     if grid_pos.row == row {
@@ -177,7 +177,7 @@ impl<'a> Line<'a> {
                         };
                     }
                     row += 1;
-                    col = self.start_column_after_wrap();
+                    col = self.start_col_after_wrap();
                 }
             }
         }
@@ -190,10 +190,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn column_to_x(&self, column: usize) -> f64 {
-        let column_count_before_fold_column = column.min(self.fold_column);
-        let column_count_after_fold_column = column - column_count_before_fold_column;
-        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
+    pub fn col_to_x(&self, col: usize) -> f64 {
+        let unfolded_cols = col.min(self.fold_col);
+        let folded_cols = col - unfolded_cols;
+        unfolded_cols as f64 + self.scale * folded_cols as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -207,33 +207,33 @@ impl<'a> Line<'a> {
         }
     }
 
-    pub fn elements(&self) -> Elements<'a> {
+    pub fn inline_elements(&self) -> InlineElements<'a> {
         let mut tokens = self.tokens();
-        Elements {
+        InlineElements {
             token: tokens.next(),
             tokens,
-            text_inlays: self.text_inlays,
-            widget_inlays: self.widget_inlays,
+            inline_text_inlays: self.inline_text_inlays,
+            block_widget_inlays: self.block_widget_inlays,
             byte: 0,
         }
     }
 
     pub fn wrapped_elements(&self) -> WrappedElements<'a> {
-        let mut elements = self.elements();
+        let mut elements = self.inline_elements();
         WrappedElements {
             element: elements.next(),
             elements,
-            wrap_bytes: self.wrap_bytes,
+            soft_breaks: self.soft_breaks,
             byte: 0,
         }
     }
 
-    pub fn start_column_after_wrap(&self) -> usize {
-        self.start_column_after_wrap
+    pub fn start_col_after_wrap(&self) -> usize {
+        self.start_col_after_wrap
     }
 
-    pub fn fold_column(&self) -> usize {
-        self.fold_column
+    pub fn fold_col(&self) -> usize {
+        self.fold_col
     }
 
     pub fn scale(&self) -> f64 {
@@ -270,55 +270,55 @@ impl<'a> Iterator for Tokens<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Elements<'a> {
+pub struct InlineElements<'a> {
     token: Option<Token<'a>>,
     tokens: Tokens<'a>,
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Bias), Widget)],
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Bias), Widget)],
     byte: usize,
 }
 
-impl<'a> Iterator for Elements<'a> {
+impl<'a> Iterator for InlineElements<'a> {
     type Item = Element<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Bias::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Bias::Before, *widget));
         }
         if self
-            .text_inlays
+            .inline_text_inlays
             .first()
             .map_or(false, |(byte, _)| *byte == self.byte)
         {
-            let ((_, text), text_inlays) = self.text_inlays.split_first().unwrap();
-            self.text_inlays = text_inlays;
+            let ((_, text), inline_text_inlays) = self.inline_text_inlays.split_first().unwrap();
+            self.inline_text_inlays = inline_text_inlays;
             return Some(Element::Token(true, Token::new(text, TokenKind::Unknown)));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Bias::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Bias::After, *widget));
         }
         let token = self.token.take()?;
         let mut byte_count = token.text.len();
-        if let Some((byte, _)) = self.text_inlays.first() {
+        if let Some((byte, _)) = self.inline_text_inlays.first() {
             byte_count = byte_count.min(*byte - self.byte);
         }
-        if let Some(((byte, _), _)) = self.widget_inlays.first() {
+        if let Some(((byte, _), _)) = self.block_widget_inlays.first() {
             byte_count = byte_count.min(byte - self.byte);
         }
         let token = if byte_count < token.text.len() {
@@ -343,8 +343,8 @@ pub enum Element<'a> {
 #[derive(Clone, Debug)]
 pub struct WrappedElements<'a> {
     element: Option<Element<'a>>,
-    elements: Elements<'a>,
-    wrap_bytes: &'a [usize],
+    elements: InlineElements<'a>,
+    soft_breaks: &'a [usize],
     byte: usize,
 }
 
@@ -360,17 +360,17 @@ impl<'a> Iterator for WrappedElements<'a> {
             return Some(WrappedElement::Widget(Bias::Before, widget));
         }
         if self
-            .wrap_bytes
+            .soft_breaks
             .first()
             .map_or(false, |byte| *byte == self.byte)
         {
-            self.wrap_bytes = &self.wrap_bytes[1..];
+            self.soft_breaks = &self.soft_breaks[1..];
             return Some(WrappedElement::Wrap);
         }
         Some(match self.element.take()? {
             Element::Token(is_inlay, token) => {
                 let mut byte_count = token.text.len();
-                if let Some(byte) = self.wrap_bytes.first() {
+                if let Some(byte) = self.soft_breaks.first() {
                     byte_count = byte_count.min(*byte - self.byte);
                 }
                 let token = if byte_count < token.text.len() {
@@ -403,11 +403,11 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub column_count: usize,
+    pub col_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, column_count: usize) -> Self {
-        Self { id, column_count }
+    pub fn new(id: usize, col_count: usize) -> Self {
+        Self { id, col_count }
     }
 }

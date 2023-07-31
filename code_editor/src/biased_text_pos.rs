@@ -19,14 +19,14 @@ impl BiasedTextPos {
 
     pub fn is_at_first_row_of_line(self, view: &View<'_>) -> bool {
         view.line(self.pos.line)
-            .pos_to_grid_pos(self.biased_line_pos(), view.settings().tab_column_count)
+            .pos_to_grid_pos(self.biased_line_pos(), view.settings().tab_width)
             .row
             == 0
     }
 
     pub fn is_at_last_row_of_line(self, view: &View<'_>) -> bool {
         let line = view.line(self.pos.line);
-        line.pos_to_grid_pos(self.biased_line_pos(), view.settings().tab_column_count)
+        line.pos_to_grid_pos(self.biased_line_pos(), view.settings().tab_width)
             .row
             == line.row_count() - 1
     }

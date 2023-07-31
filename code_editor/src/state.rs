@@ -1,6 +1,6 @@
 use {
     crate::{
-        line, view, view::LineInlay, Bias, Context, Selection, Settings, Text, Tokenizer, View,
+        line, view, view::LineInlay, Bias, ViewMut, Sel, Settings, Text, Tokenizer, View,
     },
     std::{
         collections::{HashMap, HashSet},
@@ -41,39 +41,39 @@ impl State {
             &self.settings,
             &editor.text,
             &editor.tokenizer,
-            &editor.text_inlays,
-            &editor.line_widget_inlays,
-            &view.wrap_bytes,
-            &view.start_column_after_wrap,
-            &view.fold_column,
+            &editor.inline_text_inlays,
+            &editor.inline_widget_inlays,
+            &view.soft_breaks,
+            &view.start_col_after_wrap,
+            &view.fold_col,
             &view.scale,
             &editor.line_inlays,
-            &editor.document_widget_inlays,
+            &editor.document_block_widget_inlays,
             &view.summed_heights,
-            &view.selections,
-            view.latest_selection_index,
+            &view.sels,
+            view.latest_sel_index,
         )
     }
 
-    pub fn context(&mut self, view_id: ViewId) -> Context<'_> {
+    pub fn context(&mut self, view_id: ViewId) -> ViewMut<'_> {
         let view = self.views.get_mut(&view_id).unwrap();
         let editor = self.editors.get_mut(&view.editor_id).unwrap();
-        Context::new(
+        ViewMut::new(
             &mut self.settings,
-            &mut view.max_column,
+            &mut view.max_col,
             &mut editor.text,
             &mut editor.tokenizer,
-            &mut editor.text_inlays,
-            &mut editor.line_widget_inlays,
-            &mut view.wrap_bytes,
-            &mut view.start_column_after_wrap,
-            &mut view.fold_column,
+            &mut editor.inline_text_inlays,
+            &mut editor.inline_widget_inlays,
+            &mut view.soft_breaks,
+            &mut view.start_col_after_wrap,
+            &mut view.fold_col,
             &mut view.scale,
             &mut editor.line_inlays,
-            &mut editor.document_widget_inlays,
+            &mut editor.document_block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.selections,
-            &mut view.latest_selection_index,
+            &mut view.sels,
+            &mut view.latest_sel_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -88,14 +88,14 @@ impl State {
             view_id,
             Session {
                 editor_id,
-                max_column: None,
-                wrap_bytes: (0..line_count).map(|_| [].into()).collect(),
-                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_column: (0..line_count).map(|_| 0).collect(),
+                max_col: None,
+                soft_breaks: (0..line_count).map(|_| [].into()).collect(),
+                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_col: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                selections: [Selection::default()].into(),
-                latest_selection_index: 0,
+                sels: [Sel::default()].into(),
+                latest_sel_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -118,7 +118,7 @@ impl State {
             Editor {
                 text,
                 tokenizer,
-                text_inlays: (0..line_count)
+                inline_text_inlays: (0..line_count)
                     .map(|line| {
                         if line % 2 == 0 {
                             [
@@ -152,8 +152,8 @@ impl State {
                     ),
                 ]
                 .into(),
-                line_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
-                document_widget_inlays: [].into(),
+                inline_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
+                document_block_widget_inlays: [].into(),
             },
         );
         Ok(editor_id)
@@ -165,15 +165,15 @@ pub struct ViewId(usize);
 
 #[derive(Clone, Debug, PartialEq)]
 struct Session {
-    max_column: Option<usize>,
+    max_col: Option<usize>,
     editor_id: EditorId,
-    fold_column: Vec<usize>,
+    fold_col: Vec<usize>,
     scale: Vec<f64>,
-    wrap_bytes: Vec<Vec<usize>>,
-    start_column_after_wrap: Vec<usize>,
+    soft_breaks: Vec<Vec<usize>>,
+    start_col_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    selections: Vec<Selection>,
-    latest_selection_index: usize,
+    sels: Vec<Sel>,
+    latest_sel_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -185,8 +185,8 @@ struct EditorId(usize);
 struct Editor {
     text: Text,
     tokenizer: Tokenizer,
-    text_inlays: Vec<Vec<(usize, String)>>,
-    line_widget_inlays: Vec<Vec<((usize, Bias), line::Widget)>>,
+    inline_text_inlays: Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: Vec<Vec<((usize, Bias), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,
-    document_widget_inlays: Vec<((usize, Bias), view::Widget)>,
+    document_block_widget_inlays: Vec<((usize, Bias), view::Widget)>,
 }

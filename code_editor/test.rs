@@ -78,13 +78,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn column_count(self, tab_column_count: usize) -> usize;
+    fn col_count(self, tab_col_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn column_count(self, tab_column_count: usize) -> usize {
+    fn col_count(self, tab_col_count: usize) -> usize {
         match self {
-            '\t' => tab_column_count,
+            '\t' => tab_col_count,
             _ => 1,
         }
     }
@@ -168,7 +168,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_selection: {
+        draw_sel: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -187,7 +187,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_selection: DrawSelection,
+    draw_sel: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -207,7 +207,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_selections(cx, &document);
+        self.draw_sels(cx, &document);
         self.end(cx, context);
     }
 
@@ -287,10 +287,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_column_count);
+                        context.fold_line(line, 2 * settings.indent_col_count);
                     }
                 }
                 cx.redraw_all();
@@ -306,7 +306,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -380,7 +380,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut column = 0;
+            let mut col = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -400,22 +400,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.column_to_x(column),
+                                        x: line.col_to_x(col),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                column = line.start_column_after_wrap();
+                                col = line.start_col_after_wrap();
                             }
                         }
                     }
@@ -428,28 +428,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_selection = None;
-        let mut selections = document.selections();
-        while selections
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_sel = None;
+        let mut sels = document.sels();
+        while sels
             .first()
-            .map_or(false, |selection| selection.end().0.line < self.start_line)
+            .map_or(false, |sel| sel.end().0.line < self.start_line)
         {
-            selections = &selections[1..];
+            sels = &sels[1..];
         }
-        if selections.first().map_or(false, |selection| {
-            selection.start().0.line < self.start_line
+        if sels.first().map_or(false, |sel| {
+            sel.start().0.line < self.start_line
         }) {
-            let (selection, remaining_selections) = selections.split_first().unwrap();
-            selections = remaining_selections;
-            active_selection = Some(ActiveSelection::new(*selection, 0.0));
+            let (sel, remaining_sels) = sels.split_first().unwrap();
+            sels = remaining_sels;
+            active_sel = Some(ActiveSelection::new(*sel, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_selection,
-            selections,
+            active_sel,
+            sels,
         }
-        .draw_selections(cx, document)
+        .draw_sels(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -462,18 +462,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_column = column
+                                    let next_col = col
                                         + grapheme
-                                            .column_count(document.settings().tab_column_count);
+                                            .col_count(document.settings().tab_col_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.column_to_x(column);
-                                    let next_x = line_ref.column_to_x(next_column);
+                                    let x = line_ref.col_to_x(col);
+                                    let next_x = line_ref.col_to_x(next_col);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -490,24 +490,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    column = next_column;
+                                    col = next_col;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_column = column
+                                let next_col = col
                                     + token
                                         .text
-                                        .column_count(document.settings().tab_column_count);
-                                let x = line_ref.column_to_x(column);
-                                let next_x = line_ref.column_to_x(next_column);
+                                        .col_count(document.settings().tab_col_count);
+                                let x = line_ref.col_to_x(col);
+                                let next_x = line_ref.col_to_x(next_col);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                column = next_column;
+                                col = next_col;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -515,7 +515,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -544,12 +544,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_selection: Option<ActiveSelection>,
-    selections: &'a [Selection],
+    active_sel: Option<ActiveSelection>,
+    sels: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -558,13 +558,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
@@ -577,44 +577,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count(document.settings().tab_column_count);
+                                    col +=
+                                        grapheme.col_count(document.settings().tab_col_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
-                                column += 1;
-                                if self.active_selection.is_some() {
-                                    self.draw_selection(
+                                col += 1;
+                                if self.active_sel.is_some() {
+                                    self.draw_sel(
                                         cx,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -623,13 +623,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
-                    column += 1;
-                    if self.active_selection.is_some() {
-                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    col += 1;
+                    if self.active_sel.is_some() {
+                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -642,8 +642,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_selection.is_some() {
-            self.code_editor.draw_selection.end(cx);
+        if self.active_sel.is_some() {
+            self.code_editor.draw_sel.end(cx);
         }
     }
 
@@ -658,41 +658,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, bias)
+        if self.active_sel.as_ref().map_or(false, |sel| {
+            sel.sel.end() == (position, bias)
         }) {
-            self.draw_selection(cx, x, y, height);
-            self.code_editor.draw_selection.end(cx);
-            let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, bias) {
+            self.draw_sel(cx, x, y, height);
+            self.code_editor.draw_sel.end(cx);
+            let sel = self.active_sel.take().unwrap().sel;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .selections
+            .sels
             .first()
-            .map_or(false, |selection| selection.start() == (position, bias))
+            .map_or(false, |sel| sel.start() == (position, bias))
         {
-            let (selection, selections) = self.selections.split_first().unwrap();
-            self.selections = selections;
-            if selection.cursor == (position, bias) {
+            let (sel, sels) = self.sels.split_first().unwrap();
+            self.sels = sels;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !selection.is_empty() {
-                self.active_selection = Some(ActiveSelection {
-                    selection: *selection,
+            if !sel.is_empty() {
+                self.active_sel = Some(ActiveSelection {
+                    sel: *sel,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_selection.begin();
+            self.code_editor.draw_sel.begin();
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
-        self.code_editor.draw_selection.draw(
+        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
+        self.code_editor.draw_sel.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -722,13 +722,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    selection: Selection,
+    sel: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(selection: Selection, start_x: f64) -> Self {
-        Self { selection, start_x }
+    fn new(sel: Selection, start_x: f64) -> Self {
+        Self { sel, start_x }
     }
 }
 
@@ -821,17 +821,17 @@ pub struct Context<'a> {
     settings: &'a mut Settings,
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
-    text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-    line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: &'a mut Vec<Vec<usize>>,
-    start_column_after_wrap: &'a mut Vec<usize>,
-    fold_column: &'a mut Vec<usize>,
+    inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: &'a mut Vec<Vec<usize>>,
+    start_col_after_wrap: &'a mut Vec<usize>,
+    fold_col: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    selections: &'a mut Vec<Selection>,
-    latest_selection_index: &'a mut usize,
+    sels: &'a mut Vec<Selection>,
+    latest_sel_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -841,17 +841,17 @@ impl<'a> Context<'a> {
         settings: &'a mut Settings,
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
-        text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-        line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-        wrap_bytes: &'a mut Vec<Vec<usize>>,
-        start_column_after_wrap: &'a mut Vec<usize>,
-        fold_column: &'a mut Vec<usize>,
+        inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+        inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+        soft_breaks: &'a mut Vec<Vec<usize>>,
+        start_col_after_wrap: &'a mut Vec<usize>,
+        fold_col: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+        document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        selections: &'a mut Vec<Selection>,
-        latest_selection_index: &'a mut usize,
+        sels: &'a mut Vec<Selection>,
+        latest_sel_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -859,17 +859,17 @@ impl<'a> Context<'a> {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            document_widget_inlays,
+            document_block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
             folding_lines,
             unfolding_lines,
         }
@@ -880,51 +880,51 @@ impl<'a> Context<'a> {
             self.settings,
             self.text,
             self.tokenizer,
-            self.text_inlays,
-            self.line_widget_inlays,
-            self.wrap_bytes,
-            self.start_column_after_wrap,
-            self.fold_column,
+            self.inline_text_inlays,
+            self.inline_widget_inlays,
+            self.soft_breaks,
+            self.start_col_after_wrap,
+            self.fold_col,
             self.scale,
             self.line_inlays,
-            self.document_widget_inlays,
+            self.document_block_widget_inlays,
             self.summed_heights,
-            self.selections,
-            *self.latest_selection_index,
+            self.sels,
+            *self.latest_sel_index,
         )
     }
 
-    pub fn wrap_lines(&mut self, max_column: usize) {
+    pub fn wrap_lines(&mut self, max_col: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
-            let old_wrap_byte_count = self.wrap_bytes[line].len();
-            self.wrap_bytes[line].clear();
-            let mut wrap_bytes = Vec::new();
-            mem::take(&mut self.wrap_bytes[line]);
+            let old_wrap_byte_count = self.soft_breaks[line].len();
+            self.soft_breaks[line].clear();
+            let mut soft_breaks = Vec::new();
+            mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut column = 0;
+            let mut col = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_column_after_wrap = line_ref
+            let mut start_col_after_wrap = line_ref
                 .text()
                 .indentation()
-                .column_count(document.settings().tab_column_count);
+                .col_count(document.settings().tab_col_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_column_after_wrap
-                                + string.column_count(document.settings().tab_column_count)
-                                > max_column
+                            if start_col_after_wrap
+                                + string.col_count(document.settings().tab_col_count)
+                                > max_col
                             {
-                                start_column_after_wrap = 0;
+                                start_col_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_column_after_wrap + widget.column_count > max_column {
-                            start_column_after_wrap = 0;
+                        if start_col_after_wrap + widget.col_count > max_col {
+                            start_col_after_wrap = 0;
                         }
                     }
                 }
@@ -933,29 +933,29 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_column =
-                                column + string.column_count(document.settings().tab_column_count);
-                            if next_column > max_column {
-                                next_column = start_column_after_wrap;
-                                wrap_bytes.push(byte);
+                            let mut next_col =
+                                col + string.col_count(document.settings().tab_col_count);
+                            if next_col > max_col {
+                                next_col = start_col_after_wrap;
+                                soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            column = next_column;
+                            col = next_col;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_column = column + widget.column_count;
-                        if next_column > max_column {
-                            next_column = start_column_after_wrap;
-                            wrap_bytes.push(byte);
+                        let mut next_col = col + widget.col_count;
+                        if next_col > max_col {
+                            next_col = start_col_after_wrap;
+                            soft_breaks.push(byte);
                         }
-                        column = next_column;
+                        col = next_col;
                     }
                 }
             }
-            self.wrap_bytes[line] = wrap_bytes;
-            self.start_column_after_wrap[line] = start_column_after_wrap;
-            if self.wrap_bytes[line].len() != old_wrap_byte_count {
+            self.soft_breaks[line] = soft_breaks;
+            self.start_col_after_wrap[line] = start_col_after_wrap;
+            if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
         }
@@ -987,58 +987,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.selections.clear();
-        self.selections.push(Selection::from_cursor(cursor));
-        *self.latest_selection_index = 0;
+        self.sels.clear();
+        self.sels.push(Selection::from_cursor(cursor));
+        *self.latest_sel_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let selection = Selection::from_cursor(cursor);
-        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
-            if selection.end() <= cursor {
+        let sel = Selection::from_cursor(cursor);
+        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
+            if sel.end() <= cursor {
                 return Ordering::Less;
             }
-            if selection.start() >= cursor {
+            if sel.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.selections[index] = selection;
+                self.sels[index] = sel;
                 index
             }
             Err(index) => {
-                self.selections.insert(index, selection);
+                self.sels.insert(index, sel);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_selection = &mut self.selections[*self.latest_selection_index];
-        latest_selection.cursor = cursor;
+        let latest_sel = &mut self.sels[*self.latest_sel_index];
+        latest_sel.cursor = cursor;
         if !select {
-            latest_selection.anchor = cursor;
+            latest_sel.anchor = cursor;
         }
-        while *self.latest_selection_index > 0 {
-            let previous_selection_index = *self.latest_selection_index - 1;
-            let previous_selection = self.selections[previous_selection_index];
-            let latest_selection = self.selections[*self.latest_selection_index];
-            if previous_selection.should_merge(latest_selection) {
-                self.selections.remove(previous_selection_index);
-                *self.latest_selection_index -= 1;
+        while *self.latest_sel_index > 0 {
+            let previous_sel_index = *self.latest_sel_index - 1;
+            let previous_sel = self.sels[previous_sel_index];
+            let latest_sel = self.sels[*self.latest_sel_index];
+            if previous_sel.should_merge(latest_sel) {
+                self.sels.remove(previous_sel_index);
+                *self.latest_sel_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_selection_index + 1 < self.selections.len() {
-            let next_selection_index = *self.latest_selection_index + 1;
-            let latest_selection = self.selections[*self.latest_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            if latest_selection.should_merge(next_selection) {
-                self.selections.remove(next_selection_index);
+        while *self.latest_sel_index + 1 < self.sels.len() {
+            let next_sel_index = *self.latest_sel_index + 1;
+            let latest_sel = self.sels[*self.latest_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            if latest_sel.should_merge(next_sel) {
+                self.sels.remove(next_sel_index);
             } else {
                 break;
             }
@@ -1048,32 +1048,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
         });
     }
 
@@ -1107,8 +1107,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
-        self.fold_column[line_index] = fold_column;
+    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
+        self.fold_col[line_index] = fold_col;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -1152,48 +1152,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_selections(
+    fn modify_sels(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut selections = mem::take(self.selections);
+        let mut sels = mem::take(self.sels);
         let document = self.document();
-        for selection in &mut selections {
-            *selection = f(&document, *selection);
+        for sel in &mut sels {
+            *sel = f(&document, *sel);
             if !select {
-                *selection = selection.reset_anchor();
+                *sel = sel.reset_anchor();
             }
         }
-        *self.selections = selections;
-        let mut current_selection_index = 0;
-        while current_selection_index + 1 < self.selections.len() {
-            let next_selection_index = current_selection_index + 1;
-            let current_selection = self.selections[current_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            assert!(current_selection.start() <= next_selection.start());
-            if !current_selection.should_merge(next_selection) {
-                current_selection_index += 1;
+        *self.sels = sels;
+        let mut current_sel_index = 0;
+        while current_sel_index + 1 < self.sels.len() {
+            let next_sel_index = current_sel_index + 1;
+            let current_sel = self.sels[current_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            assert!(current_sel.start() <= next_sel.start());
+            if !current_sel.should_merge(next_sel) {
+                current_sel_index += 1;
                 continue;
             }
-            let start = current_selection.start().min(next_selection.start());
-            let end = current_selection.end().max(next_selection.end());
+            let start = current_sel.start().min(next_sel.start());
+            let end = current_sel.end().max(next_sel.end());
             let anchor;
             let cursor;
-            if current_selection.anchor <= next_selection.cursor {
+            if current_sel.anchor <= next_sel.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.selections[current_selection_index] =
-                Selection::new(anchor, cursor, current_selection.preferred_column);
-            self.selections.remove(next_selection_index);
-            if next_selection_index < *self.latest_selection_index {
-                *self.latest_selection_index -= 1;
+            self.sels[current_sel_index] =
+                Selection::new(anchor, cursor, current_sel.preferred_col);
+            self.sels.remove(next_sel_index);
+            if next_sel_index < *self.latest_sel_index {
+                *self.latest_sel_index -= 1;
             }
         }
     }
@@ -1204,27 +1204,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().0 - prev_end;
+        for sel in &mut *self.sels {
+            let distance_from_prev_end = sel.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + selection.length();
+            let diffed_end = diffed_start + sel.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().0;
+            prev_end = sel.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if selection.anchor <= selection.cursor {
-                anchor = (diffed_start, selection.start().1);
-                cursor = (diffed_end, selection.end().1);
+            if sel.anchor <= sel.cursor {
+                anchor = (diffed_start, sel.start().1);
+                cursor = (diffed_end, sel.end().1);
             } else {
-                anchor = (diffed_end, selection.end().1);
-                cursor = (diffed_start, selection.start().1);
+                anchor = (diffed_end, sel.end().1);
+                cursor = (diffed_start, sel.start().1);
             }
-            *selection = Selection::new(anchor, cursor, selection.preferred_column);
+            *sel = Selection::new(anchor, cursor, sel.preferred_col);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -1238,11 +1238,11 @@ impl<'a> Context<'a> {
                 OperationInfo::Delete(length) => {
                     let start_line = line;
                     let end_line = start_line + length.line_count;
-                    self.text_inlays.drain(start_line..end_line);
-                    self.line_widget_inlays.drain(start_line..end_line);
-                    self.wrap_bytes.drain(start_line..end_line);
-                    self.start_column_after_wrap.drain(start_line..end_line);
-                    self.fold_column.drain(start_line..end_line);
+                    self.inline_text_inlays.drain(start_line..end_line);
+                    self.inline_widget_inlays.drain(start_line..end_line);
+                    self.soft_breaks.drain(start_line..end_line);
+                    self.start_col_after_wrap.drain(start_line..end_line);
+                    self.fold_col.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -1252,15 +1252,15 @@ impl<'a> Context<'a> {
                 OperationInfo::Insert(length) => {
                     let next_line = line + 1;
                     let line_count = length.line_count;
-                    self.text_inlays
+                    self.inline_text_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.line_widget_inlays
+                    self.inline_widget_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.wrap_bytes
+                    self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_column_after_wrap
+                    self.start_col_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_column
+                    self.fold_col
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -1574,17 +1574,17 @@ pub struct Document<'a> {
     settings: &'a Settings,
     text: &'a Text,
     tokenizer: &'a Tokenizer,
-    text_inlays: &'a [Vec<(usize, String)>],
-    line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-    wrap_bytes: &'a [Vec<usize>],
-    start_column_after_wrap: &'a [usize],
-    fold_column: &'a [usize],
+    inline_text_inlays: &'a [Vec<(usize, String)>],
+    inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+    soft_breaks: &'a [Vec<usize>],
+    start_col_after_wrap: &'a [usize],
+    fold_col: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    selections: &'a [Selection],
-    latest_selection_index: usize,
+    sels: &'a [Selection],
+    latest_sel_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -1592,33 +1592,33 @@ impl<'a> Document<'a> {
         settings: &'a Settings,
         text: &'a Text,
         tokenizer: &'a Tokenizer,
-        text_inlays: &'a [Vec<(usize, String)>],
-        line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-        wrap_bytes: &'a [Vec<usize>],
-        start_column_after_wrap: &'a [usize],
-        fold_column: &'a [usize],
+        inline_text_inlays: &'a [Vec<(usize, String)>],
+        inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+        soft_breaks: &'a [Vec<usize>],
+        start_col_after_wrap: &'a [usize],
+        fold_col: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        selections: &'a [Selection],
-        latest_selection_index: usize,
+        sels: &'a [Selection],
+        latest_sel_index: usize,
     ) -> Self {
         Self {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            widget_inlays,
+            block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
         }
     }
 
@@ -1630,7 +1630,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -1675,11 +1675,11 @@ impl<'a> Document<'a> {
         Line::new(
             &self.text.as_lines()[line],
             &self.tokenizer.token_infos()[line],
-            &self.text_inlays[line],
-            &self.line_widget_inlays[line],
-            &self.wrap_bytes[line],
-            self.start_column_after_wrap[line],
-            self.fold_column[line],
+            &self.inline_text_inlays[line],
+            &self.inline_widget_inlays[line],
+            &self.soft_breaks[line],
+            self.start_col_after_wrap[line],
+            self.fold_col[line],
             self.scale[line],
         )
     }
@@ -1688,11 +1688,11 @@ impl<'a> Document<'a> {
         Lines {
             text: self.text.as_lines()[start_line..end_line].iter(),
             token_infos: self.tokenizer.token_infos()[start_line..end_line].iter(),
-            text_inlays: self.text_inlays[start_line..end_line].iter(),
-            line_widget_inlays: self.line_widget_inlays[start_line..end_line].iter(),
-            wrap_bytes: self.wrap_bytes[start_line..end_line].iter(),
-            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
-            fold_column: self.fold_column[start_line..end_line].iter(),
+            inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
+            inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
+            soft_breaks: self.soft_breaks[start_line..end_line].iter(),
+            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
+            fold_col: self.fold_col[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -1713,21 +1713,21 @@ impl<'a> Document<'a> {
                 .iter()
                 .position(|(line, _)| *line >= start_line)
                 .unwrap_or(self.line_inlays.len())..],
-            widget_inlays: &self.widget_inlays[self
-                .widget_inlays
+            block_widget_inlays: &self.block_widget_inlays[self
+                .block_widget_inlays
                 .iter()
                 .position(|((line, _), _)| *line >= start_line)
-                .unwrap_or(self.widget_inlays.len())..],
+                .unwrap_or(self.block_widget_inlays.len())..],
             line: start_line,
         }
     }
 
-    pub fn selections(&self) -> &'a [Selection] {
-        self.selections
+    pub fn sels(&self) -> &'a [Selection] {
+        self.sels
     }
 
-    pub fn latest_selection_index(&self) -> usize {
-        self.latest_selection_index
+    pub fn latest_sel_index(&self) -> usize {
+        self.latest_sel_index
     }
 }
 
@@ -1735,11 +1735,11 @@ impl<'a> Document<'a> {
 pub struct Lines<'a> {
     text: slice::Iter<'a, String>,
     token_infos: slice::Iter<'a, Vec<TokenInfo>>,
-    text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
-    line_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: slice::Iter<'a, Vec<usize>>,
-    start_column_after_wrap: slice::Iter<'a, usize>,
-    fold_column: slice::Iter<'a, usize>,
+    inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
+    inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: slice::Iter<'a, Vec<usize>>,
+    start_col_after_wrap: slice::Iter<'a, usize>,
+    fold_col: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -1750,11 +1750,11 @@ impl<'a> Iterator for Lines<'a> {
         Some(Line::new(
             self.text.next()?,
             self.token_infos.next()?,
-            self.text_inlays.next()?,
-            self.line_widget_inlays.next()?,
-            self.wrap_bytes.next()?,
-            *self.start_column_after_wrap.next()?,
-            *self.fold_column.next()?,
+            self.inline_text_inlays.next()?,
+            self.inline_widget_inlays.next()?,
+            self.soft_breaks.next()?,
+            *self.start_col_after_wrap.next()?,
+            *self.fold_col.next()?,
             *self.scale.next()?,
         ))
     }
@@ -1764,7 +1764,7 @@ impl<'a> Iterator for Lines<'a> {
 pub struct Elements<'a> {
     lines: Lines<'a>,
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     line: usize,
 }
 
@@ -1773,14 +1773,14 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
@@ -1793,14 +1793,14 @@ impl<'a> Iterator for Elements<'a> {
             return Some(Element::Line(true, line.as_line()));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let line = self.lines.next()?;
@@ -1976,7 +1976,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod selection;
+pub mod sel;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -1986,7 +1986,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, selection::Selection,
+    length::Length, line::Line, position::Position, range::Range, sel::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -2001,11 +2001,11 @@ use {
 pub struct Line<'a> {
     text: &'a str,
     token_infos: &'a [TokenInfo],
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
-    wrap_bytes: &'a [usize],
-    start_column_after_wrap: usize,
-    fold_column: usize,
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
+    soft_breaks: &'a [usize],
+    start_col_after_wrap: usize,
+    fold_col: usize,
     scale: f64,
 }
 
@@ -2013,142 +2013,142 @@ impl<'a> Line<'a> {
     pub fn new(
         text: &'a str,
         token_infos: &'a [TokenInfo],
-        text_inlays: &'a [(usize, String)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
-        wrap_bytes: &'a [usize],
-        start_column_after_wrap: usize,
-        fold_column: usize,
+        inline_text_inlays: &'a [(usize, String)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
+        soft_breaks: &'a [usize],
+        start_col_after_wrap: usize,
+        fold_col: usize,
         scale: f64,
     ) -> Self {
         Self {
             text,
             token_infos,
-            text_inlays,
-            widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            block_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
         }
     }
 
-    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
+    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_column_count = 0;
-        let mut summed_column_count = 0;
+        let mut max_summed_col_count = 0;
+        let mut summed_col_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_column_count += token.text.column_count(tab_column_count);
+                    summed_col_count += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_column_count += widget.column_count;
+                    summed_col_count += widget.col_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
-                    summed_column_count = self.start_column_after_wrap();
+                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
+                    summed_col_count = self.start_col_after_wrap();
                 }
             }
         }
-        max_summed_column_count.max(summed_column_count)
+        max_summed_col_count.max(summed_col_count)
     }
 
     pub fn row_count(&self) -> usize {
-        self.wrap_bytes.len() + 1
+        self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
-        self.column_to_x(self.compute_column_count(tab_column_count))
+    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
+        self.col_to_x(self.compute_col_count(tab_col_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_column(
+    pub fn byte_bias_to_row_col(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_column_count: usize,
+        tab_col_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut column = 0;
+        let mut col = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, column);
+            return (row, col);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, column);
+                            return (row, col);
                         }
                         current_byte += grapheme.len();
-                        column += grapheme.column_count(tab_column_count);
+                        col += grapheme.col_count(tab_col_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, column);
+                            return (row, col);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    column += token.text.column_count(tab_column_count);
+                    col += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    column += widget.column_count;
+                    col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    column = self.start_column_after_wrap();
+                    col = self.start_col_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, column);
+            return (row, col);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_bias(
+    pub fn row_col_to_byte_bias(
         &self,
-        (row, column): (usize, usize),
-        tab_column_count: usize,
+        (row, col): (usize, usize),
+        tab_col_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_column = 0;
+        let mut current_col = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_column = current_column + grapheme.column_count(tab_column_count);
-                        if current_row == row && (current_column..next_column).contains(&column) {
+                        let next_col = current_col + grapheme.col_count(tab_col_count);
+                        if current_row == row && (current_col..next_col).contains(&col) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_column = next_column;
+                        current_col = next_col;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_column = current_column + token.text.column_count(tab_column_count);
-                    if current_row == row && (current_column..next_column).contains(&column) {
+                    let next_col = current_col + token.text.col_count(tab_col_count);
+                    if current_row == row && (current_col..next_col).contains(&col) {
                         return (byte, Affinity::Before);
                     }
-                    current_column = next_column;
+                    current_col = next_col;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_column += widget.column_count;
+                    current_col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_column = self.start_column_after_wrap();
+                    current_col = self.start_col_after_wrap();
                 }
             }
         }
@@ -2158,10 +2158,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn column_to_x(&self, column: usize) -> f64 {
-        let column_count_before_fold_column = column.min(self.fold_column);
-        let column_count_after_fold_column = column - column_count_before_fold_column;
-        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
+    pub fn col_to_x(&self, col: usize) -> f64 {
+        let col_count_before_fold_col = col.min(self.fold_col);
+        let col_count_after_fold_col = col - col_count_before_fold_col;
+        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -2180,8 +2180,8 @@ impl<'a> Line<'a> {
         Elements {
             token: tokens.next(),
             tokens,
-            text_inlays: self.text_inlays,
-            widget_inlays: self.widget_inlays,
+            inline_text_inlays: self.inline_text_inlays,
+            block_widget_inlays: self.block_widget_inlays,
             byte: 0,
         }
     }
@@ -2191,17 +2191,17 @@ impl<'a> Line<'a> {
         WrappedElements {
             element: elements.next(),
             elements,
-            wrap_bytes: self.wrap_bytes,
+            soft_breaks: self.soft_breaks,
             byte: 0,
         }
     }
 
-    pub fn start_column_after_wrap(&self) -> usize {
-        self.start_column_after_wrap
+    pub fn start_col_after_wrap(&self) -> usize {
+        self.start_col_after_wrap
     }
 
-    pub fn fold_column(&self) -> usize {
-        self.fold_column
+    pub fn fold_col(&self) -> usize {
+        self.fold_col
     }
 
     pub fn scale(&self) -> f64 {
@@ -2241,8 +2241,8 @@ impl<'a> Iterator for Tokens<'a> {
 pub struct Elements<'a> {
     token: Option<Token<'a>>,
     tokens: Tokens<'a>,
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     byte: usize,
 }
 
@@ -2251,42 +2251,42 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
-            .text_inlays
+            .inline_text_inlays
             .first()
             .map_or(false, |(byte, _)| *byte == self.byte)
         {
-            let ((_, text), text_inlays) = self.text_inlays.split_first().unwrap();
-            self.text_inlays = text_inlays;
+            let ((_, text), inline_text_inlays) = self.inline_text_inlays.split_first().unwrap();
+            self.inline_text_inlays = inline_text_inlays;
             return Some(Element::Token(true, Token::new(text, TokenKind::Unknown)));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let token = self.token.take()?;
         let mut byte_count = token.text.len();
-        if let Some((byte, _)) = self.text_inlays.first() {
+        if let Some((byte, _)) = self.inline_text_inlays.first() {
             byte_count = byte_count.min(*byte - self.byte);
         }
-        if let Some(((byte, _), _)) = self.widget_inlays.first() {
+        if let Some(((byte, _), _)) = self.block_widget_inlays.first() {
             byte_count = byte_count.min(byte - self.byte);
         }
         let token = if byte_count < token.text.len() {
@@ -2312,7 +2312,7 @@ pub enum Element<'a> {
 pub struct WrappedElements<'a> {
     element: Option<Element<'a>>,
     elements: Elements<'a>,
-    wrap_bytes: &'a [usize],
+    soft_breaks: &'a [usize],
     byte: usize,
 }
 
@@ -2328,17 +2328,17 @@ impl<'a> Iterator for WrappedElements<'a> {
             return Some(WrappedElement::Widget(Affinity::Before, widget));
         }
         if self
-            .wrap_bytes
+            .soft_breaks
             .first()
             .map_or(false, |byte| *byte == self.byte)
         {
-            self.wrap_bytes = &self.wrap_bytes[1..];
+            self.soft_breaks = &self.soft_breaks[1..];
             return Some(WrappedElement::Wrap);
         }
         Some(match self.element.take()? {
             Element::Token(is_inlay, token) => {
                 let mut byte_count = token.text.len();
-                if let Some(byte) = self.wrap_bytes.first() {
+                if let Some(byte) = self.soft_breaks.first() {
                     byte_count = byte_count.min(*byte - self.byte);
                 }
                 let token = if byte_count < token.text.len() {
@@ -2371,12 +2371,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub column_count: usize,
+    pub col_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, column_count: usize) -> Self {
-        Self { id, column_count }
+    pub fn new(id: usize, col_count: usize) -> Self {
+        Self { id, col_count }
     }
 }
 mod app;
@@ -2415,29 +2415,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_column);
+        return move_to_next_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -2454,9 +2454,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_column(
+        .byte_bias_to_row_col(
             (position.byte, bias),
-            document.settings().tab_column_count,
+            document.settings().tab_col_count,
         )
         .0
         == 0
@@ -2467,9 +2467,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_column(
+    line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     )
     .0 == line.row_count() - 1
 }
@@ -2551,77 +2551,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
-        (prev_line_ref.row_count() - 1, column),
-        document.settings().tab_column_count,
+    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
+        (prev_line_ref.row_count() - 1, col),
+        document.settings().tab_col_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(col))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), bias), Some(column))
+        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
+    ((Position::new(next_line, byte), bias), Some(col))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -2768,19 +2768,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_column: Option<usize>,
+    pub preferred_col: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_column: Option<usize>,
+        preferred_col: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_column,
+            preferred_col,
         }
     }
 
@@ -2788,7 +2788,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_column: None,
+            preferred_col: None,
         }
     }
 
@@ -2832,25 +2832,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, column) = f(self.cursor, self.preferred_column);
+        let (cursor, col) = f(self.cursor, self.preferred_col);
         Self {
             cursor,
-            preferred_column: column,
+            preferred_col: col,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_column_count: usize,
-    pub indent_column_count: usize,
+    pub tab_col_count: usize,
+    pub indent_col_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_column_count: 4,
-            indent_column_count: 4,
+            tab_col_count: 4,
+            indent_col_count: 4,
         }
     }
 }
@@ -2898,17 +2898,17 @@ impl State {
             &self.settings,
             &editor.text,
             &editor.tokenizer,
-            &editor.text_inlays,
-            &editor.line_widget_inlays,
-            &view.wrap_bytes,
-            &view.start_column_after_wrap,
-            &view.fold_column,
+            &editor.inline_text_inlays,
+            &editor.inline_widget_inlays,
+            &view.soft_breaks,
+            &view.start_col_after_wrap,
+            &view.fold_col,
             &view.scale,
             &editor.line_inlays,
-            &editor.document_widget_inlays,
+            &editor.document_block_widget_inlays,
             &view.summed_heights,
-            &view.selections,
-            view.latest_selection_index,
+            &view.sels,
+            view.latest_sel_index,
         )
     }
 
@@ -2919,17 +2919,17 @@ impl State {
             &mut self.settings,
             &mut editor.text,
             &mut editor.tokenizer,
-            &mut editor.text_inlays,
-            &mut editor.line_widget_inlays,
-            &mut view.wrap_bytes,
-            &mut view.start_column_after_wrap,
-            &mut view.fold_column,
+            &mut editor.inline_text_inlays,
+            &mut editor.inline_widget_inlays,
+            &mut view.soft_breaks,
+            &mut view.start_col_after_wrap,
+            &mut view.fold_col,
             &mut view.scale,
             &mut editor.line_inlays,
-            &mut editor.document_widget_inlays,
+            &mut editor.document_block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.selections,
-            &mut view.latest_selection_index,
+            &mut view.sels,
+            &mut view.latest_sel_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -2944,13 +2944,13 @@ impl State {
             view_id,
             View {
                 editor_id,
-                wrap_bytes: (0..line_count).map(|_| [].into()).collect(),
-                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_column: (0..line_count).map(|_| 0).collect(),
+                soft_breaks: (0..line_count).map(|_| [].into()).collect(),
+                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_col: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                selections: [Selection::default()].into(),
-                latest_selection_index: 0,
+                sels: [Selection::default()].into(),
+                latest_sel_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -2973,7 +2973,7 @@ impl State {
             Editor {
                 text,
                 tokenizer,
-                text_inlays: (0..line_count)
+                inline_text_inlays: (0..line_count)
                     .map(|line| {
                         if line % 2 == 0 {
                             [
@@ -3007,8 +3007,8 @@ impl State {
                     ),
                 ]
                 .into(),
-                line_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
-                document_widget_inlays: [].into(),
+                inline_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
+                document_block_widget_inlays: [].into(),
             },
         );
         Ok(editor_id)
@@ -3021,13 +3021,13 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_column: Vec<usize>,
+    fold_col: Vec<usize>,
     scale: Vec<f64>,
-    wrap_bytes: Vec<Vec<usize>>,
-    start_column_after_wrap: Vec<usize>,
+    soft_breaks: Vec<Vec<usize>>,
+    start_col_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    selections: Vec<Selection>,
-    latest_selection_index: usize,
+    sels: Vec<Selection>,
+    latest_sel_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -3039,14 +3039,14 @@ struct EditorId(usize);
 struct Editor {
     text: Text,
     tokenizer: Tokenizer,
-    text_inlays: Vec<Vec<(usize, String)>>,
-    line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
+    inline_text_inlays: Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,
-    document_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn column_count(&self, tab_column_count: usize) -> usize;
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn col_count(&self, tab_col_count: usize) -> usize;
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -3054,16 +3054,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn column_count(&self, tab_column_count: usize) -> usize {
+    fn col_count(&self, tab_col_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.column_count(tab_column_count))
+            .map(|char| char.col_count(tab_col_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
-        self.indentation().column_count(tab_column_count) / indent_column_count
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
+        self.indentation().col_count(tab_col_count) / indent_col_count
     }
 
     fn indentation(&self) -> &str {
@@ -3823,13 +3823,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn column_count(self, tab_column_count: usize) -> usize;
+    fn col_count(self, tab_col_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn column_count(self, tab_column_count: usize) -> usize {
+    fn col_count(self, tab_col_count: usize) -> usize {
         match self {
-            '\t' => tab_column_count,
+            '\t' => tab_col_count,
             _ => 1,
         }
     }
@@ -3913,7 +3913,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_selection: {
+        draw_sel: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -3932,7 +3932,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_selection: DrawSelection,
+    draw_sel: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -3952,7 +3952,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_selections(cx, &document);
+        self.draw_sels(cx, &document);
         self.end(cx, context);
     }
 
@@ -4032,10 +4032,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_column_count);
+                        context.fold_line(line, 2 * settings.indent_col_count);
                     }
                 }
                 cx.redraw_all();
@@ -4051,7 +4051,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -4125,7 +4125,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut column = 0;
+            let mut col = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -4145,22 +4145,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.column_to_x(column),
+                                        x: line.col_to_x(col),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                column = line.start_column_after_wrap();
+                                col = line.start_col_after_wrap();
                             }
                         }
                     }
@@ -4173,28 +4173,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_selection = None;
-        let mut selections = document.selections();
-        while selections
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_sel = None;
+        let mut sels = document.sels();
+        while sels
             .first()
-            .map_or(false, |selection| selection.end().0.line < self.start_line)
+            .map_or(false, |sel| sel.end().0.line < self.start_line)
         {
-            selections = &selections[1..];
+            sels = &sels[1..];
         }
-        if selections.first().map_or(false, |selection| {
-            selection.start().0.line < self.start_line
+        if sels.first().map_or(false, |sel| {
+            sel.start().0.line < self.start_line
         }) {
-            let (selection, remaining_selections) = selections.split_first().unwrap();
-            selections = remaining_selections;
-            active_selection = Some(ActiveSelection::new(*selection, 0.0));
+            let (sel, remaining_sels) = sels.split_first().unwrap();
+            sels = remaining_sels;
+            active_sel = Some(ActiveSelection::new(*sel, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_selection,
-            selections,
+            active_sel,
+            sels,
         }
-        .draw_selections(cx, document)
+        .draw_sels(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -4207,18 +4207,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_column = column
+                                    let next_col = col
                                         + grapheme
-                                            .column_count(document.settings().tab_column_count);
+                                            .col_count(document.settings().tab_col_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.column_to_x(column);
-                                    let next_x = line_ref.column_to_x(next_column);
+                                    let x = line_ref.col_to_x(col);
+                                    let next_x = line_ref.col_to_x(next_col);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -4235,24 +4235,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    column = next_column;
+                                    col = next_col;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_column = column
+                                let next_col = col
                                     + token
                                         .text
-                                        .column_count(document.settings().tab_column_count);
-                                let x = line_ref.column_to_x(column);
-                                let next_x = line_ref.column_to_x(next_column);
+                                        .col_count(document.settings().tab_col_count);
+                                let x = line_ref.col_to_x(col);
+                                let next_x = line_ref.col_to_x(next_col);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                column = next_column;
+                                col = next_col;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -4260,7 +4260,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -4289,12 +4289,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_selection: Option<ActiveSelection>,
-    selections: &'a [Selection],
+    active_sel: Option<ActiveSelection>,
+    sels: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -4303,13 +4303,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
@@ -4322,44 +4322,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count(document.settings().tab_column_count);
+                                    col +=
+                                        grapheme.col_count(document.settings().tab_col_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
-                                column += 1;
-                                if self.active_selection.is_some() {
-                                    self.draw_selection(
+                                col += 1;
+                                if self.active_sel.is_some() {
+                                    self.draw_sel(
                                         cx,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -4368,13 +4368,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
-                    column += 1;
-                    if self.active_selection.is_some() {
-                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    col += 1;
+                    if self.active_sel.is_some() {
+                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -4387,8 +4387,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_selection.is_some() {
-            self.code_editor.draw_selection.end(cx);
+        if self.active_sel.is_some() {
+            self.code_editor.draw_sel.end(cx);
         }
     }
 
@@ -4403,41 +4403,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, bias)
+        if self.active_sel.as_ref().map_or(false, |sel| {
+            sel.sel.end() == (position, bias)
         }) {
-            self.draw_selection(cx, x, y, height);
-            self.code_editor.draw_selection.end(cx);
-            let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, bias) {
+            self.draw_sel(cx, x, y, height);
+            self.code_editor.draw_sel.end(cx);
+            let sel = self.active_sel.take().unwrap().sel;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .selections
+            .sels
             .first()
-            .map_or(false, |selection| selection.start() == (position, bias))
+            .map_or(false, |sel| sel.start() == (position, bias))
         {
-            let (selection, selections) = self.selections.split_first().unwrap();
-            self.selections = selections;
-            if selection.cursor == (position, bias) {
+            let (sel, sels) = self.sels.split_first().unwrap();
+            self.sels = sels;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !selection.is_empty() {
-                self.active_selection = Some(ActiveSelection {
-                    selection: *selection,
+            if !sel.is_empty() {
+                self.active_sel = Some(ActiveSelection {
+                    sel: *sel,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_selection.begin();
+            self.code_editor.draw_sel.begin();
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
-        self.code_editor.draw_selection.draw(
+        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
+        self.code_editor.draw_sel.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -4467,13 +4467,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    selection: Selection,
+    sel: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(selection: Selection, start_x: f64) -> Self {
-        Self { selection, start_x }
+    fn new(sel: Selection, start_x: f64) -> Self {
+        Self { sel, start_x }
     }
 }
 
@@ -4566,17 +4566,17 @@ pub struct Context<'a> {
     settings: &'a mut Settings,
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
-    text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-    line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: &'a mut Vec<Vec<usize>>,
-    start_column_after_wrap: &'a mut Vec<usize>,
-    fold_column: &'a mut Vec<usize>,
+    inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: &'a mut Vec<Vec<usize>>,
+    start_col_after_wrap: &'a mut Vec<usize>,
+    fold_col: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    selections: &'a mut Vec<Selection>,
-    latest_selection_index: &'a mut usize,
+    sels: &'a mut Vec<Selection>,
+    latest_sel_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -4586,17 +4586,17 @@ impl<'a> Context<'a> {
         settings: &'a mut Settings,
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
-        text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-        line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-        wrap_bytes: &'a mut Vec<Vec<usize>>,
-        start_column_after_wrap: &'a mut Vec<usize>,
-        fold_column: &'a mut Vec<usize>,
+        inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+        inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+        soft_breaks: &'a mut Vec<Vec<usize>>,
+        start_col_after_wrap: &'a mut Vec<usize>,
+        fold_col: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+        document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        selections: &'a mut Vec<Selection>,
-        latest_selection_index: &'a mut usize,
+        sels: &'a mut Vec<Selection>,
+        latest_sel_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -4604,17 +4604,17 @@ impl<'a> Context<'a> {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            document_widget_inlays,
+            document_block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
             folding_lines,
             unfolding_lines,
         }
@@ -4625,51 +4625,51 @@ impl<'a> Context<'a> {
             self.settings,
             self.text,
             self.tokenizer,
-            self.text_inlays,
-            self.line_widget_inlays,
-            self.wrap_bytes,
-            self.start_column_after_wrap,
-            self.fold_column,
+            self.inline_text_inlays,
+            self.inline_widget_inlays,
+            self.soft_breaks,
+            self.start_col_after_wrap,
+            self.fold_col,
             self.scale,
             self.line_inlays,
-            self.document_widget_inlays,
+            self.document_block_widget_inlays,
             self.summed_heights,
-            self.selections,
-            *self.latest_selection_index,
+            self.sels,
+            *self.latest_sel_index,
         )
     }
 
-    pub fn wrap_lines(&mut self, max_column: usize) {
+    pub fn wrap_lines(&mut self, max_col: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
-            let old_wrap_byte_count = self.wrap_bytes[line].len();
-            self.wrap_bytes[line].clear();
-            let mut wrap_bytes = Vec::new();
-            mem::take(&mut self.wrap_bytes[line]);
+            let old_wrap_byte_count = self.soft_breaks[line].len();
+            self.soft_breaks[line].clear();
+            let mut soft_breaks = Vec::new();
+            mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut column = 0;
+            let mut col = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_column_after_wrap = line_ref
+            let mut start_col_after_wrap = line_ref
                 .text()
                 .indentation()
-                .column_count(document.settings().tab_column_count);
+                .col_count(document.settings().tab_col_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_column_after_wrap
-                                + string.column_count(document.settings().tab_column_count)
-                                > max_column
+                            if start_col_after_wrap
+                                + string.col_count(document.settings().tab_col_count)
+                                > max_col
                             {
-                                start_column_after_wrap = 0;
+                                start_col_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_column_after_wrap + widget.column_count > max_column {
-                            start_column_after_wrap = 0;
+                        if start_col_after_wrap + widget.col_count > max_col {
+                            start_col_after_wrap = 0;
                         }
                     }
                 }
@@ -4678,29 +4678,29 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_column =
-                                column + string.column_count(document.settings().tab_column_count);
-                            if next_column > max_column {
-                                next_column = start_column_after_wrap;
-                                wrap_bytes.push(byte);
+                            let mut next_col =
+                                col + string.col_count(document.settings().tab_col_count);
+                            if next_col > max_col {
+                                next_col = start_col_after_wrap;
+                                soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            column = next_column;
+                            col = next_col;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_column = column + widget.column_count;
-                        if next_column > max_column {
-                            next_column = start_column_after_wrap;
-                            wrap_bytes.push(byte);
+                        let mut next_col = col + widget.col_count;
+                        if next_col > max_col {
+                            next_col = start_col_after_wrap;
+                            soft_breaks.push(byte);
                         }
-                        column = next_column;
+                        col = next_col;
                     }
                 }
             }
-            self.wrap_bytes[line] = wrap_bytes;
-            self.start_column_after_wrap[line] = start_column_after_wrap;
-            if self.wrap_bytes[line].len() != old_wrap_byte_count {
+            self.soft_breaks[line] = soft_breaks;
+            self.start_col_after_wrap[line] = start_col_after_wrap;
+            if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
         }
@@ -4732,58 +4732,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.selections.clear();
-        self.selections.push(Selection::from_cursor(cursor));
-        *self.latest_selection_index = 0;
+        self.sels.clear();
+        self.sels.push(Selection::from_cursor(cursor));
+        *self.latest_sel_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let selection = Selection::from_cursor(cursor);
-        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
-            if selection.end() <= cursor {
+        let sel = Selection::from_cursor(cursor);
+        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
+            if sel.end() <= cursor {
                 return Ordering::Less;
             }
-            if selection.start() >= cursor {
+            if sel.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.selections[index] = selection;
+                self.sels[index] = sel;
                 index
             }
             Err(index) => {
-                self.selections.insert(index, selection);
+                self.sels.insert(index, sel);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_selection = &mut self.selections[*self.latest_selection_index];
-        latest_selection.cursor = cursor;
+        let latest_sel = &mut self.sels[*self.latest_sel_index];
+        latest_sel.cursor = cursor;
         if !select {
-            latest_selection.anchor = cursor;
+            latest_sel.anchor = cursor;
         }
-        while *self.latest_selection_index > 0 {
-            let previous_selection_index = *self.latest_selection_index - 1;
-            let previous_selection = self.selections[previous_selection_index];
-            let latest_selection = self.selections[*self.latest_selection_index];
-            if previous_selection.should_merge(latest_selection) {
-                self.selections.remove(previous_selection_index);
-                *self.latest_selection_index -= 1;
+        while *self.latest_sel_index > 0 {
+            let previous_sel_index = *self.latest_sel_index - 1;
+            let previous_sel = self.sels[previous_sel_index];
+            let latest_sel = self.sels[*self.latest_sel_index];
+            if previous_sel.should_merge(latest_sel) {
+                self.sels.remove(previous_sel_index);
+                *self.latest_sel_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_selection_index + 1 < self.selections.len() {
-            let next_selection_index = *self.latest_selection_index + 1;
-            let latest_selection = self.selections[*self.latest_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            if latest_selection.should_merge(next_selection) {
-                self.selections.remove(next_selection_index);
+        while *self.latest_sel_index + 1 < self.sels.len() {
+            let next_sel_index = *self.latest_sel_index + 1;
+            let latest_sel = self.sels[*self.latest_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            if latest_sel.should_merge(next_sel) {
+                self.sels.remove(next_sel_index);
             } else {
                 break;
             }
@@ -4793,32 +4793,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
         });
     }
 
@@ -4852,8 +4852,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
-        self.fold_column[line_index] = fold_column;
+    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
+        self.fold_col[line_index] = fold_col;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -4897,48 +4897,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_selections(
+    fn modify_sels(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut selections = mem::take(self.selections);
+        let mut sels = mem::take(self.sels);
         let document = self.document();
-        for selection in &mut selections {
-            *selection = f(&document, *selection);
+        for sel in &mut sels {
+            *sel = f(&document, *sel);
             if !select {
-                *selection = selection.reset_anchor();
+                *sel = sel.reset_anchor();
             }
         }
-        *self.selections = selections;
-        let mut current_selection_index = 0;
-        while current_selection_index + 1 < self.selections.len() {
-            let next_selection_index = current_selection_index + 1;
-            let current_selection = self.selections[current_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            assert!(current_selection.start() <= next_selection.start());
-            if !current_selection.should_merge(next_selection) {
-                current_selection_index += 1;
+        *self.sels = sels;
+        let mut current_sel_index = 0;
+        while current_sel_index + 1 < self.sels.len() {
+            let next_sel_index = current_sel_index + 1;
+            let current_sel = self.sels[current_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            assert!(current_sel.start() <= next_sel.start());
+            if !current_sel.should_merge(next_sel) {
+                current_sel_index += 1;
                 continue;
             }
-            let start = current_selection.start().min(next_selection.start());
-            let end = current_selection.end().max(next_selection.end());
+            let start = current_sel.start().min(next_sel.start());
+            let end = current_sel.end().max(next_sel.end());
             let anchor;
             let cursor;
-            if current_selection.anchor <= next_selection.cursor {
+            if current_sel.anchor <= next_sel.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.selections[current_selection_index] =
-                Selection::new(anchor, cursor, current_selection.preferred_column);
-            self.selections.remove(next_selection_index);
-            if next_selection_index < *self.latest_selection_index {
-                *self.latest_selection_index -= 1;
+            self.sels[current_sel_index] =
+                Selection::new(anchor, cursor, current_sel.preferred_col);
+            self.sels.remove(next_sel_index);
+            if next_sel_index < *self.latest_sel_index {
+                *self.latest_sel_index -= 1;
             }
         }
     }
@@ -4949,27 +4949,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().0 - prev_end;
+        for sel in &mut *self.sels {
+            let distance_from_prev_end = sel.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + selection.length();
+            let diffed_end = diffed_start + sel.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().0;
+            prev_end = sel.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if selection.anchor <= selection.cursor {
-                anchor = (diffed_start, selection.start().1);
-                cursor = (diffed_end, selection.end().1);
+            if sel.anchor <= sel.cursor {
+                anchor = (diffed_start, sel.start().1);
+                cursor = (diffed_end, sel.end().1);
             } else {
-                anchor = (diffed_end, selection.end().1);
-                cursor = (diffed_start, selection.start().1);
+                anchor = (diffed_end, sel.end().1);
+                cursor = (diffed_start, sel.start().1);
             }
-            *selection = Selection::new(anchor, cursor, selection.preferred_column);
+            *sel = Selection::new(anchor, cursor, sel.preferred_col);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -4983,11 +4983,11 @@ impl<'a> Context<'a> {
                 OperationInfo::Delete(length) => {
                     let start_line = line;
                     let end_line = start_line + length.line_count;
-                    self.text_inlays.drain(start_line..end_line);
-                    self.line_widget_inlays.drain(start_line..end_line);
-                    self.wrap_bytes.drain(start_line..end_line);
-                    self.start_column_after_wrap.drain(start_line..end_line);
-                    self.fold_column.drain(start_line..end_line);
+                    self.inline_text_inlays.drain(start_line..end_line);
+                    self.inline_widget_inlays.drain(start_line..end_line);
+                    self.soft_breaks.drain(start_line..end_line);
+                    self.start_col_after_wrap.drain(start_line..end_line);
+                    self.fold_col.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -4997,15 +4997,15 @@ impl<'a> Context<'a> {
                 OperationInfo::Insert(length) => {
                     let next_line = line + 1;
                     let line_count = length.line_count;
-                    self.text_inlays
+                    self.inline_text_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.line_widget_inlays
+                    self.inline_widget_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.wrap_bytes
+                    self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_column_after_wrap
+                    self.start_col_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_column
+                    self.fold_col
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -5319,17 +5319,17 @@ pub struct Document<'a> {
     settings: &'a Settings,
     text: &'a Text,
     tokenizer: &'a Tokenizer,
-    text_inlays: &'a [Vec<(usize, String)>],
-    line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-    wrap_bytes: &'a [Vec<usize>],
-    start_column_after_wrap: &'a [usize],
-    fold_column: &'a [usize],
+    inline_text_inlays: &'a [Vec<(usize, String)>],
+    inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+    soft_breaks: &'a [Vec<usize>],
+    start_col_after_wrap: &'a [usize],
+    fold_col: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    selections: &'a [Selection],
-    latest_selection_index: usize,
+    sels: &'a [Selection],
+    latest_sel_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -5337,33 +5337,33 @@ impl<'a> Document<'a> {
         settings: &'a Settings,
         text: &'a Text,
         tokenizer: &'a Tokenizer,
-        text_inlays: &'a [Vec<(usize, String)>],
-        line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-        wrap_bytes: &'a [Vec<usize>],
-        start_column_after_wrap: &'a [usize],
-        fold_column: &'a [usize],
+        inline_text_inlays: &'a [Vec<(usize, String)>],
+        inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+        soft_breaks: &'a [Vec<usize>],
+        start_col_after_wrap: &'a [usize],
+        fold_col: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        selections: &'a [Selection],
-        latest_selection_index: usize,
+        sels: &'a [Selection],
+        latest_sel_index: usize,
     ) -> Self {
         Self {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            widget_inlays,
+            block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
         }
     }
 
@@ -5375,7 +5375,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -5420,11 +5420,11 @@ impl<'a> Document<'a> {
         Line::new(
             &self.text.as_lines()[line],
             &self.tokenizer.token_infos()[line],
-            &self.text_inlays[line],
-            &self.line_widget_inlays[line],
-            &self.wrap_bytes[line],
-            self.start_column_after_wrap[line],
-            self.fold_column[line],
+            &self.inline_text_inlays[line],
+            &self.inline_widget_inlays[line],
+            &self.soft_breaks[line],
+            self.start_col_after_wrap[line],
+            self.fold_col[line],
             self.scale[line],
         )
     }
@@ -5433,11 +5433,11 @@ impl<'a> Document<'a> {
         Lines {
             text: self.text.as_lines()[start_line..end_line].iter(),
             token_infos: self.tokenizer.token_infos()[start_line..end_line].iter(),
-            text_inlays: self.text_inlays[start_line..end_line].iter(),
-            line_widget_inlays: self.line_widget_inlays[start_line..end_line].iter(),
-            wrap_bytes: self.wrap_bytes[start_line..end_line].iter(),
-            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
-            fold_column: self.fold_column[start_line..end_line].iter(),
+            inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
+            inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
+            soft_breaks: self.soft_breaks[start_line..end_line].iter(),
+            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
+            fold_col: self.fold_col[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -5458,21 +5458,21 @@ impl<'a> Document<'a> {
                 .iter()
                 .position(|(line, _)| *line >= start_line)
                 .unwrap_or(self.line_inlays.len())..],
-            widget_inlays: &self.widget_inlays[self
-                .widget_inlays
+            block_widget_inlays: &self.block_widget_inlays[self
+                .block_widget_inlays
                 .iter()
                 .position(|((line, _), _)| *line >= start_line)
-                .unwrap_or(self.widget_inlays.len())..],
+                .unwrap_or(self.block_widget_inlays.len())..],
             line: start_line,
         }
     }
 
-    pub fn selections(&self) -> &'a [Selection] {
-        self.selections
+    pub fn sels(&self) -> &'a [Selection] {
+        self.sels
     }
 
-    pub fn latest_selection_index(&self) -> usize {
-        self.latest_selection_index
+    pub fn latest_sel_index(&self) -> usize {
+        self.latest_sel_index
     }
 }
 
@@ -5480,11 +5480,11 @@ impl<'a> Document<'a> {
 pub struct Lines<'a> {
     text: slice::Iter<'a, String>,
     token_infos: slice::Iter<'a, Vec<TokenInfo>>,
-    text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
-    line_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: slice::Iter<'a, Vec<usize>>,
-    start_column_after_wrap: slice::Iter<'a, usize>,
-    fold_column: slice::Iter<'a, usize>,
+    inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
+    inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: slice::Iter<'a, Vec<usize>>,
+    start_col_after_wrap: slice::Iter<'a, usize>,
+    fold_col: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -5495,11 +5495,11 @@ impl<'a> Iterator for Lines<'a> {
         Some(Line::new(
             self.text.next()?,
             self.token_infos.next()?,
-            self.text_inlays.next()?,
-            self.line_widget_inlays.next()?,
-            self.wrap_bytes.next()?,
-            *self.start_column_after_wrap.next()?,
-            *self.fold_column.next()?,
+            self.inline_text_inlays.next()?,
+            self.inline_widget_inlays.next()?,
+            self.soft_breaks.next()?,
+            *self.start_col_after_wrap.next()?,
+            *self.fold_col.next()?,
             *self.scale.next()?,
         ))
     }
@@ -5509,7 +5509,7 @@ impl<'a> Iterator for Lines<'a> {
 pub struct Elements<'a> {
     lines: Lines<'a>,
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     line: usize,
 }
 
@@ -5518,14 +5518,14 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
@@ -5538,14 +5538,14 @@ impl<'a> Iterator for Elements<'a> {
             return Some(Element::Line(true, line.as_line()));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let line = self.lines.next()?;
@@ -5721,7 +5721,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod selection;
+pub mod sel;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -5731,7 +5731,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, selection::Selection,
+    length::Length, line::Line, position::Position, range::Range, sel::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -5746,11 +5746,11 @@ use {
 pub struct Line<'a> {
     text: &'a str,
     token_infos: &'a [TokenInfo],
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
-    wrap_bytes: &'a [usize],
-    start_column_after_wrap: usize,
-    fold_column: usize,
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
+    soft_breaks: &'a [usize],
+    start_col_after_wrap: usize,
+    fold_col: usize,
     scale: f64,
 }
 
@@ -5758,142 +5758,142 @@ impl<'a> Line<'a> {
     pub fn new(
         text: &'a str,
         token_infos: &'a [TokenInfo],
-        text_inlays: &'a [(usize, String)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
-        wrap_bytes: &'a [usize],
-        start_column_after_wrap: usize,
-        fold_column: usize,
+        inline_text_inlays: &'a [(usize, String)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
+        soft_breaks: &'a [usize],
+        start_col_after_wrap: usize,
+        fold_col: usize,
         scale: f64,
     ) -> Self {
         Self {
             text,
             token_infos,
-            text_inlays,
-            widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            block_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
         }
     }
 
-    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
+    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_column_count = 0;
-        let mut summed_column_count = 0;
+        let mut max_summed_col_count = 0;
+        let mut summed_col_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_column_count += token.text.column_count(tab_column_count);
+                    summed_col_count += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_column_count += widget.column_count;
+                    summed_col_count += widget.col_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
-                    summed_column_count = self.start_column_after_wrap();
+                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
+                    summed_col_count = self.start_col_after_wrap();
                 }
             }
         }
-        max_summed_column_count.max(summed_column_count)
+        max_summed_col_count.max(summed_col_count)
     }
 
     pub fn row_count(&self) -> usize {
-        self.wrap_bytes.len() + 1
+        self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
-        self.column_to_x(self.compute_column_count(tab_column_count))
+    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
+        self.col_to_x(self.compute_col_count(tab_col_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_column(
+    pub fn byte_bias_to_row_col(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_column_count: usize,
+        tab_col_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut column = 0;
+        let mut col = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, column);
+            return (row, col);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, column);
+                            return (row, col);
                         }
                         current_byte += grapheme.len();
-                        column += grapheme.column_count(tab_column_count);
+                        col += grapheme.col_count(tab_col_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, column);
+                            return (row, col);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    column += token.text.column_count(tab_column_count);
+                    col += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    column += widget.column_count;
+                    col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    column = self.start_column_after_wrap();
+                    col = self.start_col_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, column);
+            return (row, col);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_bias(
+    pub fn row_col_to_byte_bias(
         &self,
-        (row, column): (usize, usize),
-        tab_column_count: usize,
+        (row, col): (usize, usize),
+        tab_col_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_column = 0;
+        let mut current_col = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_column = current_column + grapheme.column_count(tab_column_count);
-                        if current_row == row && (current_column..next_column).contains(&column) {
+                        let next_col = current_col + grapheme.col_count(tab_col_count);
+                        if current_row == row && (current_col..next_col).contains(&col) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_column = next_column;
+                        current_col = next_col;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_column = current_column + token.text.column_count(tab_column_count);
-                    if current_row == row && (current_column..next_column).contains(&column) {
+                    let next_col = current_col + token.text.col_count(tab_col_count);
+                    if current_row == row && (current_col..next_col).contains(&col) {
                         return (byte, Affinity::Before);
                     }
-                    current_column = next_column;
+                    current_col = next_col;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_column += widget.column_count;
+                    current_col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_column = self.start_column_after_wrap();
+                    current_col = self.start_col_after_wrap();
                 }
             }
         }
@@ -5903,10 +5903,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn column_to_x(&self, column: usize) -> f64 {
-        let column_count_before_fold_column = column.min(self.fold_column);
-        let column_count_after_fold_column = column - column_count_before_fold_column;
-        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
+    pub fn col_to_x(&self, col: usize) -> f64 {
+        let col_count_before_fold_col = col.min(self.fold_col);
+        let col_count_after_fold_col = col - col_count_before_fold_col;
+        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -5925,8 +5925,8 @@ impl<'a> Line<'a> {
         Elements {
             token: tokens.next(),
             tokens,
-            text_inlays: self.text_inlays,
-            widget_inlays: self.widget_inlays,
+            inline_text_inlays: self.inline_text_inlays,
+            block_widget_inlays: self.block_widget_inlays,
             byte: 0,
         }
     }
@@ -5936,17 +5936,17 @@ impl<'a> Line<'a> {
         WrappedElements {
             element: elements.next(),
             elements,
-            wrap_bytes: self.wrap_bytes,
+            soft_breaks: self.soft_breaks,
             byte: 0,
         }
     }
 
-    pub fn start_column_after_wrap(&self) -> usize {
-        self.start_column_after_wrap
+    pub fn start_col_after_wrap(&self) -> usize {
+        self.start_col_after_wrap
     }
 
-    pub fn fold_column(&self) -> usize {
-        self.fold_column
+    pub fn fold_col(&self) -> usize {
+        self.fold_col
     }
 
     pub fn scale(&self) -> f64 {
@@ -5986,8 +5986,8 @@ impl<'a> Iterator for Tokens<'a> {
 pub struct Elements<'a> {
     token: Option<Token<'a>>,
     tokens: Tokens<'a>,
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     byte: usize,
 }
 
@@ -5996,42 +5996,42 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
-            .text_inlays
+            .inline_text_inlays
             .first()
             .map_or(false, |(byte, _)| *byte == self.byte)
         {
-            let ((_, text), text_inlays) = self.text_inlays.split_first().unwrap();
-            self.text_inlays = text_inlays;
+            let ((_, text), inline_text_inlays) = self.inline_text_inlays.split_first().unwrap();
+            self.inline_text_inlays = inline_text_inlays;
             return Some(Element::Token(true, Token::new(text, TokenKind::Unknown)));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let token = self.token.take()?;
         let mut byte_count = token.text.len();
-        if let Some((byte, _)) = self.text_inlays.first() {
+        if let Some((byte, _)) = self.inline_text_inlays.first() {
             byte_count = byte_count.min(*byte - self.byte);
         }
-        if let Some(((byte, _), _)) = self.widget_inlays.first() {
+        if let Some(((byte, _), _)) = self.block_widget_inlays.first() {
             byte_count = byte_count.min(byte - self.byte);
         }
         let token = if byte_count < token.text.len() {
@@ -6057,7 +6057,7 @@ pub enum Element<'a> {
 pub struct WrappedElements<'a> {
     element: Option<Element<'a>>,
     elements: Elements<'a>,
-    wrap_bytes: &'a [usize],
+    soft_breaks: &'a [usize],
     byte: usize,
 }
 
@@ -6073,17 +6073,17 @@ impl<'a> Iterator for WrappedElements<'a> {
             return Some(WrappedElement::Widget(Affinity::Before, widget));
         }
         if self
-            .wrap_bytes
+            .soft_breaks
             .first()
             .map_or(false, |byte| *byte == self.byte)
         {
-            self.wrap_bytes = &self.wrap_bytes[1..];
+            self.soft_breaks = &self.soft_breaks[1..];
             return Some(WrappedElement::Wrap);
         }
         Some(match self.element.take()? {
             Element::Token(is_inlay, token) => {
                 let mut byte_count = token.text.len();
-                if let Some(byte) = self.wrap_bytes.first() {
+                if let Some(byte) = self.soft_breaks.first() {
                     byte_count = byte_count.min(*byte - self.byte);
                 }
                 let token = if byte_count < token.text.len() {
@@ -6116,12 +6116,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub column_count: usize,
+    pub col_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, column_count: usize) -> Self {
-        Self { id, column_count }
+    pub fn new(id: usize, col_count: usize) -> Self {
+        Self { id, col_count }
     }
 }
 mod app;
@@ -6160,29 +6160,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_column);
+        return move_to_next_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -6199,9 +6199,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_column(
+        .byte_bias_to_row_col(
             (position.byte, bias),
-            document.settings().tab_column_count,
+            document.settings().tab_col_count,
         )
         .0
         == 0
@@ -6212,9 +6212,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_column(
+    line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     )
     .0 == line.row_count() - 1
 }
@@ -6296,77 +6296,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
-        (prev_line_ref.row_count() - 1, column),
-        document.settings().tab_column_count,
+    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
+        (prev_line_ref.row_count() - 1, col),
+        document.settings().tab_col_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(col))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), bias), Some(column))
+        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
+    ((Position::new(next_line, byte), bias), Some(col))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -6513,19 +6513,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_column: Option<usize>,
+    pub preferred_col: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_column: Option<usize>,
+        preferred_col: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_column,
+            preferred_col,
         }
     }
 
@@ -6533,7 +6533,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_column: None,
+            preferred_col: None,
         }
     }
 
@@ -6577,25 +6577,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, column) = f(self.cursor, self.preferred_column);
+        let (cursor, col) = f(self.cursor, self.preferred_col);
         Self {
             cursor,
-            preferred_column: column,
+            preferred_col: col,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_column_count: usize,
-    pub indent_column_count: usize,
+    pub tab_col_count: usize,
+    pub indent_col_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_column_count: 4,
-            indent_column_count: 4,
+            tab_col_count: 4,
+            indent_col_count: 4,
         }
     }
 }
@@ -6643,17 +6643,17 @@ impl State {
             &self.settings,
             &editor.text,
             &editor.tokenizer,
-            &editor.text_inlays,
-            &editor.line_widget_inlays,
-            &view.wrap_bytes,
-            &view.start_column_after_wrap,
-            &view.fold_column,
+            &editor.inline_text_inlays,
+            &editor.inline_widget_inlays,
+            &view.soft_breaks,
+            &view.start_col_after_wrap,
+            &view.fold_col,
             &view.scale,
             &editor.line_inlays,
-            &editor.document_widget_inlays,
+            &editor.document_block_widget_inlays,
             &view.summed_heights,
-            &view.selections,
-            view.latest_selection_index,
+            &view.sels,
+            view.latest_sel_index,
         )
     }
 
@@ -6664,17 +6664,17 @@ impl State {
             &mut self.settings,
             &mut editor.text,
             &mut editor.tokenizer,
-            &mut editor.text_inlays,
-            &mut editor.line_widget_inlays,
-            &mut view.wrap_bytes,
-            &mut view.start_column_after_wrap,
-            &mut view.fold_column,
+            &mut editor.inline_text_inlays,
+            &mut editor.inline_widget_inlays,
+            &mut view.soft_breaks,
+            &mut view.start_col_after_wrap,
+            &mut view.fold_col,
             &mut view.scale,
             &mut editor.line_inlays,
-            &mut editor.document_widget_inlays,
+            &mut editor.document_block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.selections,
-            &mut view.latest_selection_index,
+            &mut view.sels,
+            &mut view.latest_sel_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -6689,13 +6689,13 @@ impl State {
             view_id,
             View {
                 editor_id,
-                wrap_bytes: (0..line_count).map(|_| [].into()).collect(),
-                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_column: (0..line_count).map(|_| 0).collect(),
+                soft_breaks: (0..line_count).map(|_| [].into()).collect(),
+                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_col: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                selections: [Selection::default()].into(),
-                latest_selection_index: 0,
+                sels: [Selection::default()].into(),
+                latest_sel_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -6718,7 +6718,7 @@ impl State {
             Editor {
                 text,
                 tokenizer,
-                text_inlays: (0..line_count)
+                inline_text_inlays: (0..line_count)
                     .map(|line| {
                         if line % 2 == 0 {
                             [
@@ -6752,8 +6752,8 @@ impl State {
                     ),
                 ]
                 .into(),
-                line_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
-                document_widget_inlays: [].into(),
+                inline_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
+                document_block_widget_inlays: [].into(),
             },
         );
         Ok(editor_id)
@@ -6766,13 +6766,13 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_column: Vec<usize>,
+    fold_col: Vec<usize>,
     scale: Vec<f64>,
-    wrap_bytes: Vec<Vec<usize>>,
-    start_column_after_wrap: Vec<usize>,
+    soft_breaks: Vec<Vec<usize>>,
+    start_col_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    selections: Vec<Selection>,
-    latest_selection_index: usize,
+    sels: Vec<Selection>,
+    latest_sel_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -6784,14 +6784,14 @@ struct EditorId(usize);
 struct Editor {
     text: Text,
     tokenizer: Tokenizer,
-    text_inlays: Vec<Vec<(usize, String)>>,
-    line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
+    inline_text_inlays: Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,
-    document_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn column_count(&self, tab_column_count: usize) -> usize;
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn col_count(&self, tab_col_count: usize) -> usize;
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -6799,16 +6799,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn column_count(&self, tab_column_count: usize) -> usize {
+    fn col_count(&self, tab_col_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.column_count(tab_column_count))
+            .map(|char| char.col_count(tab_col_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
-        self.indentation().column_count(tab_column_count) / indent_column_count
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
+        self.indentation().col_count(tab_col_count) / indent_col_count
     }
 
     fn indentation(&self) -> &str {
@@ -7568,13 +7568,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn column_count(self, tab_column_count: usize) -> usize;
+    fn col_count(self, tab_col_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn column_count(self, tab_column_count: usize) -> usize {
+    fn col_count(self, tab_col_count: usize) -> usize {
         match self {
-            '\t' => tab_column_count,
+            '\t' => tab_col_count,
             _ => 1,
         }
     }
@@ -7658,7 +7658,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_selection: {
+        draw_sel: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -7677,7 +7677,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_selection: DrawSelection,
+    draw_sel: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -7697,7 +7697,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_selections(cx, &document);
+        self.draw_sels(cx, &document);
         self.end(cx, context);
     }
 
@@ -7777,10 +7777,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_column_count);
+                        context.fold_line(line, 2 * settings.indent_col_count);
                     }
                 }
                 cx.redraw_all();
@@ -7796,7 +7796,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -7870,7 +7870,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut column = 0;
+            let mut col = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -7890,22 +7890,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.column_to_x(column),
+                                        x: line.col_to_x(col),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                column = line.start_column_after_wrap();
+                                col = line.start_col_after_wrap();
                             }
                         }
                     }
@@ -7918,28 +7918,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_selection = None;
-        let mut selections = document.selections();
-        while selections
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_sel = None;
+        let mut sels = document.sels();
+        while sels
             .first()
-            .map_or(false, |selection| selection.end().0.line < self.start_line)
+            .map_or(false, |sel| sel.end().0.line < self.start_line)
         {
-            selections = &selections[1..];
+            sels = &sels[1..];
         }
-        if selections.first().map_or(false, |selection| {
-            selection.start().0.line < self.start_line
+        if sels.first().map_or(false, |sel| {
+            sel.start().0.line < self.start_line
         }) {
-            let (selection, remaining_selections) = selections.split_first().unwrap();
-            selections = remaining_selections;
-            active_selection = Some(ActiveSelection::new(*selection, 0.0));
+            let (sel, remaining_sels) = sels.split_first().unwrap();
+            sels = remaining_sels;
+            active_sel = Some(ActiveSelection::new(*sel, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_selection,
-            selections,
+            active_sel,
+            sels,
         }
-        .draw_selections(cx, document)
+        .draw_sels(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -7952,18 +7952,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_column = column
+                                    let next_col = col
                                         + grapheme
-                                            .column_count(document.settings().tab_column_count);
+                                            .col_count(document.settings().tab_col_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.column_to_x(column);
-                                    let next_x = line_ref.column_to_x(next_column);
+                                    let x = line_ref.col_to_x(col);
+                                    let next_x = line_ref.col_to_x(next_col);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -7980,24 +7980,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    column = next_column;
+                                    col = next_col;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_column = column
+                                let next_col = col
                                     + token
                                         .text
-                                        .column_count(document.settings().tab_column_count);
-                                let x = line_ref.column_to_x(column);
-                                let next_x = line_ref.column_to_x(next_column);
+                                        .col_count(document.settings().tab_col_count);
+                                let x = line_ref.col_to_x(col);
+                                let next_x = line_ref.col_to_x(next_col);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                column = next_column;
+                                col = next_col;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -8005,7 +8005,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -8034,12 +8034,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_selection: Option<ActiveSelection>,
-    selections: &'a [Selection],
+    active_sel: Option<ActiveSelection>,
+    sels: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -8048,13 +8048,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
@@ -8067,44 +8067,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count(document.settings().tab_column_count);
+                                    col +=
+                                        grapheme.col_count(document.settings().tab_col_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
-                                column += 1;
-                                if self.active_selection.is_some() {
-                                    self.draw_selection(
+                                col += 1;
+                                if self.active_sel.is_some() {
+                                    self.draw_sel(
                                         cx,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -8113,13 +8113,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
-                    column += 1;
-                    if self.active_selection.is_some() {
-                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    col += 1;
+                    if self.active_sel.is_some() {
+                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -8132,8 +8132,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_selection.is_some() {
-            self.code_editor.draw_selection.end(cx);
+        if self.active_sel.is_some() {
+            self.code_editor.draw_sel.end(cx);
         }
     }
 
@@ -8148,41 +8148,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, bias)
+        if self.active_sel.as_ref().map_or(false, |sel| {
+            sel.sel.end() == (position, bias)
         }) {
-            self.draw_selection(cx, x, y, height);
-            self.code_editor.draw_selection.end(cx);
-            let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, bias) {
+            self.draw_sel(cx, x, y, height);
+            self.code_editor.draw_sel.end(cx);
+            let sel = self.active_sel.take().unwrap().sel;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .selections
+            .sels
             .first()
-            .map_or(false, |selection| selection.start() == (position, bias))
+            .map_or(false, |sel| sel.start() == (position, bias))
         {
-            let (selection, selections) = self.selections.split_first().unwrap();
-            self.selections = selections;
-            if selection.cursor == (position, bias) {
+            let (sel, sels) = self.sels.split_first().unwrap();
+            self.sels = sels;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !selection.is_empty() {
-                self.active_selection = Some(ActiveSelection {
-                    selection: *selection,
+            if !sel.is_empty() {
+                self.active_sel = Some(ActiveSelection {
+                    sel: *sel,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_selection.begin();
+            self.code_editor.draw_sel.begin();
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
-        self.code_editor.draw_selection.draw(
+        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
+        self.code_editor.draw_sel.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -8212,13 +8212,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    selection: Selection,
+    sel: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(selection: Selection, start_x: f64) -> Self {
-        Self { selection, start_x }
+    fn new(sel: Selection, start_x: f64) -> Self {
+        Self { sel, start_x }
     }
 }
 
@@ -8311,17 +8311,17 @@ pub struct Context<'a> {
     settings: &'a mut Settings,
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
-    text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-    line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: &'a mut Vec<Vec<usize>>,
-    start_column_after_wrap: &'a mut Vec<usize>,
-    fold_column: &'a mut Vec<usize>,
+    inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: &'a mut Vec<Vec<usize>>,
+    start_col_after_wrap: &'a mut Vec<usize>,
+    fold_col: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    selections: &'a mut Vec<Selection>,
-    latest_selection_index: &'a mut usize,
+    sels: &'a mut Vec<Selection>,
+    latest_sel_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -8331,17 +8331,17 @@ impl<'a> Context<'a> {
         settings: &'a mut Settings,
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
-        text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-        line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-        wrap_bytes: &'a mut Vec<Vec<usize>>,
-        start_column_after_wrap: &'a mut Vec<usize>,
-        fold_column: &'a mut Vec<usize>,
+        inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+        inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+        soft_breaks: &'a mut Vec<Vec<usize>>,
+        start_col_after_wrap: &'a mut Vec<usize>,
+        fold_col: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+        document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        selections: &'a mut Vec<Selection>,
-        latest_selection_index: &'a mut usize,
+        sels: &'a mut Vec<Selection>,
+        latest_sel_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -8349,17 +8349,17 @@ impl<'a> Context<'a> {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            document_widget_inlays,
+            document_block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
             folding_lines,
             unfolding_lines,
         }
@@ -8370,51 +8370,51 @@ impl<'a> Context<'a> {
             self.settings,
             self.text,
             self.tokenizer,
-            self.text_inlays,
-            self.line_widget_inlays,
-            self.wrap_bytes,
-            self.start_column_after_wrap,
-            self.fold_column,
+            self.inline_text_inlays,
+            self.inline_widget_inlays,
+            self.soft_breaks,
+            self.start_col_after_wrap,
+            self.fold_col,
             self.scale,
             self.line_inlays,
-            self.document_widget_inlays,
+            self.document_block_widget_inlays,
             self.summed_heights,
-            self.selections,
-            *self.latest_selection_index,
+            self.sels,
+            *self.latest_sel_index,
         )
     }
 
-    pub fn wrap_lines(&mut self, max_column: usize) {
+    pub fn wrap_lines(&mut self, max_col: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
-            let old_wrap_byte_count = self.wrap_bytes[line].len();
-            self.wrap_bytes[line].clear();
-            let mut wrap_bytes = Vec::new();
-            mem::take(&mut self.wrap_bytes[line]);
+            let old_wrap_byte_count = self.soft_breaks[line].len();
+            self.soft_breaks[line].clear();
+            let mut soft_breaks = Vec::new();
+            mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut column = 0;
+            let mut col = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_column_after_wrap = line_ref
+            let mut start_col_after_wrap = line_ref
                 .text()
                 .indentation()
-                .column_count(document.settings().tab_column_count);
+                .col_count(document.settings().tab_col_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_column_after_wrap
-                                + string.column_count(document.settings().tab_column_count)
-                                > max_column
+                            if start_col_after_wrap
+                                + string.col_count(document.settings().tab_col_count)
+                                > max_col
                             {
-                                start_column_after_wrap = 0;
+                                start_col_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_column_after_wrap + widget.column_count > max_column {
-                            start_column_after_wrap = 0;
+                        if start_col_after_wrap + widget.col_count > max_col {
+                            start_col_after_wrap = 0;
                         }
                     }
                 }
@@ -8423,29 +8423,29 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_column =
-                                column + string.column_count(document.settings().tab_column_count);
-                            if next_column > max_column {
-                                next_column = start_column_after_wrap;
-                                wrap_bytes.push(byte);
+                            let mut next_col =
+                                col + string.col_count(document.settings().tab_col_count);
+                            if next_col > max_col {
+                                next_col = start_col_after_wrap;
+                                soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            column = next_column;
+                            col = next_col;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_column = column + widget.column_count;
-                        if next_column > max_column {
-                            next_column = start_column_after_wrap;
-                            wrap_bytes.push(byte);
+                        let mut next_col = col + widget.col_count;
+                        if next_col > max_col {
+                            next_col = start_col_after_wrap;
+                            soft_breaks.push(byte);
                         }
-                        column = next_column;
+                        col = next_col;
                     }
                 }
             }
-            self.wrap_bytes[line] = wrap_bytes;
-            self.start_column_after_wrap[line] = start_column_after_wrap;
-            if self.wrap_bytes[line].len() != old_wrap_byte_count {
+            self.soft_breaks[line] = soft_breaks;
+            self.start_col_after_wrap[line] = start_col_after_wrap;
+            if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
         }
@@ -8477,58 +8477,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.selections.clear();
-        self.selections.push(Selection::from_cursor(cursor));
-        *self.latest_selection_index = 0;
+        self.sels.clear();
+        self.sels.push(Selection::from_cursor(cursor));
+        *self.latest_sel_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let selection = Selection::from_cursor(cursor);
-        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
-            if selection.end() <= cursor {
+        let sel = Selection::from_cursor(cursor);
+        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
+            if sel.end() <= cursor {
                 return Ordering::Less;
             }
-            if selection.start() >= cursor {
+            if sel.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.selections[index] = selection;
+                self.sels[index] = sel;
                 index
             }
             Err(index) => {
-                self.selections.insert(index, selection);
+                self.sels.insert(index, sel);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_selection = &mut self.selections[*self.latest_selection_index];
-        latest_selection.cursor = cursor;
+        let latest_sel = &mut self.sels[*self.latest_sel_index];
+        latest_sel.cursor = cursor;
         if !select {
-            latest_selection.anchor = cursor;
+            latest_sel.anchor = cursor;
         }
-        while *self.latest_selection_index > 0 {
-            let previous_selection_index = *self.latest_selection_index - 1;
-            let previous_selection = self.selections[previous_selection_index];
-            let latest_selection = self.selections[*self.latest_selection_index];
-            if previous_selection.should_merge(latest_selection) {
-                self.selections.remove(previous_selection_index);
-                *self.latest_selection_index -= 1;
+        while *self.latest_sel_index > 0 {
+            let previous_sel_index = *self.latest_sel_index - 1;
+            let previous_sel = self.sels[previous_sel_index];
+            let latest_sel = self.sels[*self.latest_sel_index];
+            if previous_sel.should_merge(latest_sel) {
+                self.sels.remove(previous_sel_index);
+                *self.latest_sel_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_selection_index + 1 < self.selections.len() {
-            let next_selection_index = *self.latest_selection_index + 1;
-            let latest_selection = self.selections[*self.latest_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            if latest_selection.should_merge(next_selection) {
-                self.selections.remove(next_selection_index);
+        while *self.latest_sel_index + 1 < self.sels.len() {
+            let next_sel_index = *self.latest_sel_index + 1;
+            let latest_sel = self.sels[*self.latest_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            if latest_sel.should_merge(next_sel) {
+                self.sels.remove(next_sel_index);
             } else {
                 break;
             }
@@ -8538,32 +8538,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
         });
     }
 
@@ -8597,8 +8597,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
-        self.fold_column[line_index] = fold_column;
+    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
+        self.fold_col[line_index] = fold_col;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -8642,48 +8642,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_selections(
+    fn modify_sels(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut selections = mem::take(self.selections);
+        let mut sels = mem::take(self.sels);
         let document = self.document();
-        for selection in &mut selections {
-            *selection = f(&document, *selection);
+        for sel in &mut sels {
+            *sel = f(&document, *sel);
             if !select {
-                *selection = selection.reset_anchor();
+                *sel = sel.reset_anchor();
             }
         }
-        *self.selections = selections;
-        let mut current_selection_index = 0;
-        while current_selection_index + 1 < self.selections.len() {
-            let next_selection_index = current_selection_index + 1;
-            let current_selection = self.selections[current_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            assert!(current_selection.start() <= next_selection.start());
-            if !current_selection.should_merge(next_selection) {
-                current_selection_index += 1;
+        *self.sels = sels;
+        let mut current_sel_index = 0;
+        while current_sel_index + 1 < self.sels.len() {
+            let next_sel_index = current_sel_index + 1;
+            let current_sel = self.sels[current_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            assert!(current_sel.start() <= next_sel.start());
+            if !current_sel.should_merge(next_sel) {
+                current_sel_index += 1;
                 continue;
             }
-            let start = current_selection.start().min(next_selection.start());
-            let end = current_selection.end().max(next_selection.end());
+            let start = current_sel.start().min(next_sel.start());
+            let end = current_sel.end().max(next_sel.end());
             let anchor;
             let cursor;
-            if current_selection.anchor <= next_selection.cursor {
+            if current_sel.anchor <= next_sel.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.selections[current_selection_index] =
-                Selection::new(anchor, cursor, current_selection.preferred_column);
-            self.selections.remove(next_selection_index);
-            if next_selection_index < *self.latest_selection_index {
-                *self.latest_selection_index -= 1;
+            self.sels[current_sel_index] =
+                Selection::new(anchor, cursor, current_sel.preferred_col);
+            self.sels.remove(next_sel_index);
+            if next_sel_index < *self.latest_sel_index {
+                *self.latest_sel_index -= 1;
             }
         }
     }
@@ -8694,27 +8694,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().0 - prev_end;
+        for sel in &mut *self.sels {
+            let distance_from_prev_end = sel.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + selection.length();
+            let diffed_end = diffed_start + sel.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().0;
+            prev_end = sel.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if selection.anchor <= selection.cursor {
-                anchor = (diffed_start, selection.start().1);
-                cursor = (diffed_end, selection.end().1);
+            if sel.anchor <= sel.cursor {
+                anchor = (diffed_start, sel.start().1);
+                cursor = (diffed_end, sel.end().1);
             } else {
-                anchor = (diffed_end, selection.end().1);
-                cursor = (diffed_start, selection.start().1);
+                anchor = (diffed_end, sel.end().1);
+                cursor = (diffed_start, sel.start().1);
             }
-            *selection = Selection::new(anchor, cursor, selection.preferred_column);
+            *sel = Selection::new(anchor, cursor, sel.preferred_col);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -8728,11 +8728,11 @@ impl<'a> Context<'a> {
                 OperationInfo::Delete(length) => {
                     let start_line = line;
                     let end_line = start_line + length.line_count;
-                    self.text_inlays.drain(start_line..end_line);
-                    self.line_widget_inlays.drain(start_line..end_line);
-                    self.wrap_bytes.drain(start_line..end_line);
-                    self.start_column_after_wrap.drain(start_line..end_line);
-                    self.fold_column.drain(start_line..end_line);
+                    self.inline_text_inlays.drain(start_line..end_line);
+                    self.inline_widget_inlays.drain(start_line..end_line);
+                    self.soft_breaks.drain(start_line..end_line);
+                    self.start_col_after_wrap.drain(start_line..end_line);
+                    self.fold_col.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -8742,15 +8742,15 @@ impl<'a> Context<'a> {
                 OperationInfo::Insert(length) => {
                     let next_line = line + 1;
                     let line_count = length.line_count;
-                    self.text_inlays
+                    self.inline_text_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.line_widget_inlays
+                    self.inline_widget_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.wrap_bytes
+                    self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_column_after_wrap
+                    self.start_col_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_column
+                    self.fold_col
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -9064,17 +9064,17 @@ pub struct Document<'a> {
     settings: &'a Settings,
     text: &'a Text,
     tokenizer: &'a Tokenizer,
-    text_inlays: &'a [Vec<(usize, String)>],
-    line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-    wrap_bytes: &'a [Vec<usize>],
-    start_column_after_wrap: &'a [usize],
-    fold_column: &'a [usize],
+    inline_text_inlays: &'a [Vec<(usize, String)>],
+    inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+    soft_breaks: &'a [Vec<usize>],
+    start_col_after_wrap: &'a [usize],
+    fold_col: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    selections: &'a [Selection],
-    latest_selection_index: usize,
+    sels: &'a [Selection],
+    latest_sel_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -9082,33 +9082,33 @@ impl<'a> Document<'a> {
         settings: &'a Settings,
         text: &'a Text,
         tokenizer: &'a Tokenizer,
-        text_inlays: &'a [Vec<(usize, String)>],
-        line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-        wrap_bytes: &'a [Vec<usize>],
-        start_column_after_wrap: &'a [usize],
-        fold_column: &'a [usize],
+        inline_text_inlays: &'a [Vec<(usize, String)>],
+        inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+        soft_breaks: &'a [Vec<usize>],
+        start_col_after_wrap: &'a [usize],
+        fold_col: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        selections: &'a [Selection],
-        latest_selection_index: usize,
+        sels: &'a [Selection],
+        latest_sel_index: usize,
     ) -> Self {
         Self {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            widget_inlays,
+            block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
         }
     }
 
@@ -9120,7 +9120,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -9165,11 +9165,11 @@ impl<'a> Document<'a> {
         Line::new(
             &self.text.as_lines()[line],
             &self.tokenizer.token_infos()[line],
-            &self.text_inlays[line],
-            &self.line_widget_inlays[line],
-            &self.wrap_bytes[line],
-            self.start_column_after_wrap[line],
-            self.fold_column[line],
+            &self.inline_text_inlays[line],
+            &self.inline_widget_inlays[line],
+            &self.soft_breaks[line],
+            self.start_col_after_wrap[line],
+            self.fold_col[line],
             self.scale[line],
         )
     }
@@ -9178,11 +9178,11 @@ impl<'a> Document<'a> {
         Lines {
             text: self.text.as_lines()[start_line..end_line].iter(),
             token_infos: self.tokenizer.token_infos()[start_line..end_line].iter(),
-            text_inlays: self.text_inlays[start_line..end_line].iter(),
-            line_widget_inlays: self.line_widget_inlays[start_line..end_line].iter(),
-            wrap_bytes: self.wrap_bytes[start_line..end_line].iter(),
-            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
-            fold_column: self.fold_column[start_line..end_line].iter(),
+            inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
+            inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
+            soft_breaks: self.soft_breaks[start_line..end_line].iter(),
+            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
+            fold_col: self.fold_col[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -9203,21 +9203,21 @@ impl<'a> Document<'a> {
                 .iter()
                 .position(|(line, _)| *line >= start_line)
                 .unwrap_or(self.line_inlays.len())..],
-            widget_inlays: &self.widget_inlays[self
-                .widget_inlays
+            block_widget_inlays: &self.block_widget_inlays[self
+                .block_widget_inlays
                 .iter()
                 .position(|((line, _), _)| *line >= start_line)
-                .unwrap_or(self.widget_inlays.len())..],
+                .unwrap_or(self.block_widget_inlays.len())..],
             line: start_line,
         }
     }
 
-    pub fn selections(&self) -> &'a [Selection] {
-        self.selections
+    pub fn sels(&self) -> &'a [Selection] {
+        self.sels
     }
 
-    pub fn latest_selection_index(&self) -> usize {
-        self.latest_selection_index
+    pub fn latest_sel_index(&self) -> usize {
+        self.latest_sel_index
     }
 }
 
@@ -9225,11 +9225,11 @@ impl<'a> Document<'a> {
 pub struct Lines<'a> {
     text: slice::Iter<'a, String>,
     token_infos: slice::Iter<'a, Vec<TokenInfo>>,
-    text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
-    line_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: slice::Iter<'a, Vec<usize>>,
-    start_column_after_wrap: slice::Iter<'a, usize>,
-    fold_column: slice::Iter<'a, usize>,
+    inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
+    inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: slice::Iter<'a, Vec<usize>>,
+    start_col_after_wrap: slice::Iter<'a, usize>,
+    fold_col: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -9240,11 +9240,11 @@ impl<'a> Iterator for Lines<'a> {
         Some(Line::new(
             self.text.next()?,
             self.token_infos.next()?,
-            self.text_inlays.next()?,
-            self.line_widget_inlays.next()?,
-            self.wrap_bytes.next()?,
-            *self.start_column_after_wrap.next()?,
-            *self.fold_column.next()?,
+            self.inline_text_inlays.next()?,
+            self.inline_widget_inlays.next()?,
+            self.soft_breaks.next()?,
+            *self.start_col_after_wrap.next()?,
+            *self.fold_col.next()?,
             *self.scale.next()?,
         ))
     }
@@ -9254,7 +9254,7 @@ impl<'a> Iterator for Lines<'a> {
 pub struct Elements<'a> {
     lines: Lines<'a>,
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     line: usize,
 }
 
@@ -9263,14 +9263,14 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
@@ -9283,14 +9283,14 @@ impl<'a> Iterator for Elements<'a> {
             return Some(Element::Line(true, line.as_line()));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let line = self.lines.next()?;
@@ -9466,7 +9466,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod selection;
+pub mod sel;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -9476,7 +9476,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, selection::Selection,
+    length::Length, line::Line, position::Position, range::Range, sel::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -9491,11 +9491,11 @@ use {
 pub struct Line<'a> {
     text: &'a str,
     token_infos: &'a [TokenInfo],
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
-    wrap_bytes: &'a [usize],
-    start_column_after_wrap: usize,
-    fold_column: usize,
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
+    soft_breaks: &'a [usize],
+    start_col_after_wrap: usize,
+    fold_col: usize,
     scale: f64,
 }
 
@@ -9503,142 +9503,142 @@ impl<'a> Line<'a> {
     pub fn new(
         text: &'a str,
         token_infos: &'a [TokenInfo],
-        text_inlays: &'a [(usize, String)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
-        wrap_bytes: &'a [usize],
-        start_column_after_wrap: usize,
-        fold_column: usize,
+        inline_text_inlays: &'a [(usize, String)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
+        soft_breaks: &'a [usize],
+        start_col_after_wrap: usize,
+        fold_col: usize,
         scale: f64,
     ) -> Self {
         Self {
             text,
             token_infos,
-            text_inlays,
-            widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            block_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
         }
     }
 
-    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
+    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_column_count = 0;
-        let mut summed_column_count = 0;
+        let mut max_summed_col_count = 0;
+        let mut summed_col_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_column_count += token.text.column_count(tab_column_count);
+                    summed_col_count += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_column_count += widget.column_count;
+                    summed_col_count += widget.col_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
-                    summed_column_count = self.start_column_after_wrap();
+                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
+                    summed_col_count = self.start_col_after_wrap();
                 }
             }
         }
-        max_summed_column_count.max(summed_column_count)
+        max_summed_col_count.max(summed_col_count)
     }
 
     pub fn row_count(&self) -> usize {
-        self.wrap_bytes.len() + 1
+        self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
-        self.column_to_x(self.compute_column_count(tab_column_count))
+    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
+        self.col_to_x(self.compute_col_count(tab_col_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_column(
+    pub fn byte_bias_to_row_col(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_column_count: usize,
+        tab_col_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut column = 0;
+        let mut col = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, column);
+            return (row, col);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, column);
+                            return (row, col);
                         }
                         current_byte += grapheme.len();
-                        column += grapheme.column_count(tab_column_count);
+                        col += grapheme.col_count(tab_col_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, column);
+                            return (row, col);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    column += token.text.column_count(tab_column_count);
+                    col += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    column += widget.column_count;
+                    col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    column = self.start_column_after_wrap();
+                    col = self.start_col_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, column);
+            return (row, col);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_bias(
+    pub fn row_col_to_byte_bias(
         &self,
-        (row, column): (usize, usize),
-        tab_column_count: usize,
+        (row, col): (usize, usize),
+        tab_col_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_column = 0;
+        let mut current_col = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_column = current_column + grapheme.column_count(tab_column_count);
-                        if current_row == row && (current_column..next_column).contains(&column) {
+                        let next_col = current_col + grapheme.col_count(tab_col_count);
+                        if current_row == row && (current_col..next_col).contains(&col) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_column = next_column;
+                        current_col = next_col;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_column = current_column + token.text.column_count(tab_column_count);
-                    if current_row == row && (current_column..next_column).contains(&column) {
+                    let next_col = current_col + token.text.col_count(tab_col_count);
+                    if current_row == row && (current_col..next_col).contains(&col) {
                         return (byte, Affinity::Before);
                     }
-                    current_column = next_column;
+                    current_col = next_col;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_column += widget.column_count;
+                    current_col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_column = self.start_column_after_wrap();
+                    current_col = self.start_col_after_wrap();
                 }
             }
         }
@@ -9648,10 +9648,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn column_to_x(&self, column: usize) -> f64 {
-        let column_count_before_fold_column = column.min(self.fold_column);
-        let column_count_after_fold_column = column - column_count_before_fold_column;
-        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
+    pub fn col_to_x(&self, col: usize) -> f64 {
+        let col_count_before_fold_col = col.min(self.fold_col);
+        let col_count_after_fold_col = col - col_count_before_fold_col;
+        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -9670,8 +9670,8 @@ impl<'a> Line<'a> {
         Elements {
             token: tokens.next(),
             tokens,
-            text_inlays: self.text_inlays,
-            widget_inlays: self.widget_inlays,
+            inline_text_inlays: self.inline_text_inlays,
+            block_widget_inlays: self.block_widget_inlays,
             byte: 0,
         }
     }
@@ -9681,17 +9681,17 @@ impl<'a> Line<'a> {
         WrappedElements {
             element: elements.next(),
             elements,
-            wrap_bytes: self.wrap_bytes,
+            soft_breaks: self.soft_breaks,
             byte: 0,
         }
     }
 
-    pub fn start_column_after_wrap(&self) -> usize {
-        self.start_column_after_wrap
+    pub fn start_col_after_wrap(&self) -> usize {
+        self.start_col_after_wrap
     }
 
-    pub fn fold_column(&self) -> usize {
-        self.fold_column
+    pub fn fold_col(&self) -> usize {
+        self.fold_col
     }
 
     pub fn scale(&self) -> f64 {
@@ -9731,8 +9731,8 @@ impl<'a> Iterator for Tokens<'a> {
 pub struct Elements<'a> {
     token: Option<Token<'a>>,
     tokens: Tokens<'a>,
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     byte: usize,
 }
 
@@ -9741,42 +9741,42 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
-            .text_inlays
+            .inline_text_inlays
             .first()
             .map_or(false, |(byte, _)| *byte == self.byte)
         {
-            let ((_, text), text_inlays) = self.text_inlays.split_first().unwrap();
-            self.text_inlays = text_inlays;
+            let ((_, text), inline_text_inlays) = self.inline_text_inlays.split_first().unwrap();
+            self.inline_text_inlays = inline_text_inlays;
             return Some(Element::Token(true, Token::new(text, TokenKind::Unknown)));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let token = self.token.take()?;
         let mut byte_count = token.text.len();
-        if let Some((byte, _)) = self.text_inlays.first() {
+        if let Some((byte, _)) = self.inline_text_inlays.first() {
             byte_count = byte_count.min(*byte - self.byte);
         }
-        if let Some(((byte, _), _)) = self.widget_inlays.first() {
+        if let Some(((byte, _), _)) = self.block_widget_inlays.first() {
             byte_count = byte_count.min(byte - self.byte);
         }
         let token = if byte_count < token.text.len() {
@@ -9802,7 +9802,7 @@ pub enum Element<'a> {
 pub struct WrappedElements<'a> {
     element: Option<Element<'a>>,
     elements: Elements<'a>,
-    wrap_bytes: &'a [usize],
+    soft_breaks: &'a [usize],
     byte: usize,
 }
 
@@ -9818,17 +9818,17 @@ impl<'a> Iterator for WrappedElements<'a> {
             return Some(WrappedElement::Widget(Affinity::Before, widget));
         }
         if self
-            .wrap_bytes
+            .soft_breaks
             .first()
             .map_or(false, |byte| *byte == self.byte)
         {
-            self.wrap_bytes = &self.wrap_bytes[1..];
+            self.soft_breaks = &self.soft_breaks[1..];
             return Some(WrappedElement::Wrap);
         }
         Some(match self.element.take()? {
             Element::Token(is_inlay, token) => {
                 let mut byte_count = token.text.len();
-                if let Some(byte) = self.wrap_bytes.first() {
+                if let Some(byte) = self.soft_breaks.first() {
                     byte_count = byte_count.min(*byte - self.byte);
                 }
                 let token = if byte_count < token.text.len() {
@@ -9861,12 +9861,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub column_count: usize,
+    pub col_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, column_count: usize) -> Self {
-        Self { id, column_count }
+    pub fn new(id: usize, col_count: usize) -> Self {
+        Self { id, col_count }
     }
 }
 mod app;
@@ -9905,29 +9905,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_column);
+        return move_to_next_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -9944,9 +9944,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_column(
+        .byte_bias_to_row_col(
             (position.byte, bias),
-            document.settings().tab_column_count,
+            document.settings().tab_col_count,
         )
         .0
         == 0
@@ -9957,9 +9957,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_column(
+    line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     )
     .0 == line.row_count() - 1
 }
@@ -10041,77 +10041,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
-        (prev_line_ref.row_count() - 1, column),
-        document.settings().tab_column_count,
+    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
+        (prev_line_ref.row_count() - 1, col),
+        document.settings().tab_col_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(col))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), bias), Some(column))
+        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
+    ((Position::new(next_line, byte), bias), Some(col))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -10258,19 +10258,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_column: Option<usize>,
+    pub preferred_col: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_column: Option<usize>,
+        preferred_col: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_column,
+            preferred_col,
         }
     }
 
@@ -10278,7 +10278,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_column: None,
+            preferred_col: None,
         }
     }
 
@@ -10322,25 +10322,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, column) = f(self.cursor, self.preferred_column);
+        let (cursor, col) = f(self.cursor, self.preferred_col);
         Self {
             cursor,
-            preferred_column: column,
+            preferred_col: col,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_column_count: usize,
-    pub indent_column_count: usize,
+    pub tab_col_count: usize,
+    pub indent_col_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_column_count: 4,
-            indent_column_count: 4,
+            tab_col_count: 4,
+            indent_col_count: 4,
         }
     }
 }
@@ -10388,17 +10388,17 @@ impl State {
             &self.settings,
             &editor.text,
             &editor.tokenizer,
-            &editor.text_inlays,
-            &editor.line_widget_inlays,
-            &view.wrap_bytes,
-            &view.start_column_after_wrap,
-            &view.fold_column,
+            &editor.inline_text_inlays,
+            &editor.inline_widget_inlays,
+            &view.soft_breaks,
+            &view.start_col_after_wrap,
+            &view.fold_col,
             &view.scale,
             &editor.line_inlays,
-            &editor.document_widget_inlays,
+            &editor.document_block_widget_inlays,
             &view.summed_heights,
-            &view.selections,
-            view.latest_selection_index,
+            &view.sels,
+            view.latest_sel_index,
         )
     }
 
@@ -10409,17 +10409,17 @@ impl State {
             &mut self.settings,
             &mut editor.text,
             &mut editor.tokenizer,
-            &mut editor.text_inlays,
-            &mut editor.line_widget_inlays,
-            &mut view.wrap_bytes,
-            &mut view.start_column_after_wrap,
-            &mut view.fold_column,
+            &mut editor.inline_text_inlays,
+            &mut editor.inline_widget_inlays,
+            &mut view.soft_breaks,
+            &mut view.start_col_after_wrap,
+            &mut view.fold_col,
             &mut view.scale,
             &mut editor.line_inlays,
-            &mut editor.document_widget_inlays,
+            &mut editor.document_block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.selections,
-            &mut view.latest_selection_index,
+            &mut view.sels,
+            &mut view.latest_sel_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -10434,13 +10434,13 @@ impl State {
             view_id,
             View {
                 editor_id,
-                wrap_bytes: (0..line_count).map(|_| [].into()).collect(),
-                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_column: (0..line_count).map(|_| 0).collect(),
+                soft_breaks: (0..line_count).map(|_| [].into()).collect(),
+                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_col: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                selections: [Selection::default()].into(),
-                latest_selection_index: 0,
+                sels: [Selection::default()].into(),
+                latest_sel_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -10463,7 +10463,7 @@ impl State {
             Editor {
                 text,
                 tokenizer,
-                text_inlays: (0..line_count)
+                inline_text_inlays: (0..line_count)
                     .map(|line| {
                         if line % 2 == 0 {
                             [
@@ -10497,8 +10497,8 @@ impl State {
                     ),
                 ]
                 .into(),
-                line_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
-                document_widget_inlays: [].into(),
+                inline_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
+                document_block_widget_inlays: [].into(),
             },
         );
         Ok(editor_id)
@@ -10511,13 +10511,13 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_column: Vec<usize>,
+    fold_col: Vec<usize>,
     scale: Vec<f64>,
-    wrap_bytes: Vec<Vec<usize>>,
-    start_column_after_wrap: Vec<usize>,
+    soft_breaks: Vec<Vec<usize>>,
+    start_col_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    selections: Vec<Selection>,
-    latest_selection_index: usize,
+    sels: Vec<Selection>,
+    latest_sel_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -10529,14 +10529,14 @@ struct EditorId(usize);
 struct Editor {
     text: Text,
     tokenizer: Tokenizer,
-    text_inlays: Vec<Vec<(usize, String)>>,
-    line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
+    inline_text_inlays: Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,
-    document_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn column_count(&self, tab_column_count: usize) -> usize;
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn col_count(&self, tab_col_count: usize) -> usize;
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -10544,16 +10544,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn column_count(&self, tab_column_count: usize) -> usize {
+    fn col_count(&self, tab_col_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.column_count(tab_column_count))
+            .map(|char| char.col_count(tab_col_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
-        self.indentation().column_count(tab_column_count) / indent_column_count
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
+        self.indentation().col_count(tab_col_count) / indent_col_count
     }
 
     fn indentation(&self) -> &str {
@@ -11313,13 +11313,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn column_count(self, tab_column_count: usize) -> usize;
+    fn col_count(self, tab_col_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn column_count(self, tab_column_count: usize) -> usize {
+    fn col_count(self, tab_col_count: usize) -> usize {
         match self {
-            '\t' => tab_column_count,
+            '\t' => tab_col_count,
             _ => 1,
         }
     }
@@ -11403,7 +11403,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_selection: {
+        draw_sel: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -11422,7 +11422,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_selection: DrawSelection,
+    draw_sel: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -11442,7 +11442,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_selections(cx, &document);
+        self.draw_sels(cx, &document);
         self.end(cx, context);
     }
 
@@ -11522,10 +11522,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_column_count);
+                        context.fold_line(line, 2 * settings.indent_col_count);
                     }
                 }
                 cx.redraw_all();
@@ -11541,7 +11541,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -11615,7 +11615,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut column = 0;
+            let mut col = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -11635,22 +11635,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.column_to_x(column),
+                                        x: line.col_to_x(col),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                column = line.start_column_after_wrap();
+                                col = line.start_col_after_wrap();
                             }
                         }
                     }
@@ -11663,28 +11663,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_selection = None;
-        let mut selections = document.selections();
-        while selections
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_sel = None;
+        let mut sels = document.sels();
+        while sels
             .first()
-            .map_or(false, |selection| selection.end().0.line < self.start_line)
+            .map_or(false, |sel| sel.end().0.line < self.start_line)
         {
-            selections = &selections[1..];
+            sels = &sels[1..];
         }
-        if selections.first().map_or(false, |selection| {
-            selection.start().0.line < self.start_line
+        if sels.first().map_or(false, |sel| {
+            sel.start().0.line < self.start_line
         }) {
-            let (selection, remaining_selections) = selections.split_first().unwrap();
-            selections = remaining_selections;
-            active_selection = Some(ActiveSelection::new(*selection, 0.0));
+            let (sel, remaining_sels) = sels.split_first().unwrap();
+            sels = remaining_sels;
+            active_sel = Some(ActiveSelection::new(*sel, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_selection,
-            selections,
+            active_sel,
+            sels,
         }
-        .draw_selections(cx, document)
+        .draw_sels(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -11697,18 +11697,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_column = column
+                                    let next_col = col
                                         + grapheme
-                                            .column_count(document.settings().tab_column_count);
+                                            .col_count(document.settings().tab_col_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.column_to_x(column);
-                                    let next_x = line_ref.column_to_x(next_column);
+                                    let x = line_ref.col_to_x(col);
+                                    let next_x = line_ref.col_to_x(next_col);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -11725,24 +11725,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    column = next_column;
+                                    col = next_col;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_column = column
+                                let next_col = col
                                     + token
                                         .text
-                                        .column_count(document.settings().tab_column_count);
-                                let x = line_ref.column_to_x(column);
-                                let next_x = line_ref.column_to_x(next_column);
+                                        .col_count(document.settings().tab_col_count);
+                                let x = line_ref.col_to_x(col);
+                                let next_x = line_ref.col_to_x(next_col);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                column = next_column;
+                                col = next_col;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -11750,7 +11750,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -11779,12 +11779,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_selection: Option<ActiveSelection>,
-    selections: &'a [Selection],
+    active_sel: Option<ActiveSelection>,
+    sels: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -11793,13 +11793,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
@@ -11812,44 +11812,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count(document.settings().tab_column_count);
+                                    col +=
+                                        grapheme.col_count(document.settings().tab_col_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
-                                column += 1;
-                                if self.active_selection.is_some() {
-                                    self.draw_selection(
+                                col += 1;
+                                if self.active_sel.is_some() {
+                                    self.draw_sel(
                                         cx,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -11858,13 +11858,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
-                    column += 1;
-                    if self.active_selection.is_some() {
-                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    col += 1;
+                    if self.active_sel.is_some() {
+                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -11877,8 +11877,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_selection.is_some() {
-            self.code_editor.draw_selection.end(cx);
+        if self.active_sel.is_some() {
+            self.code_editor.draw_sel.end(cx);
         }
     }
 
@@ -11893,41 +11893,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, bias)
+        if self.active_sel.as_ref().map_or(false, |sel| {
+            sel.sel.end() == (position, bias)
         }) {
-            self.draw_selection(cx, x, y, height);
-            self.code_editor.draw_selection.end(cx);
-            let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, bias) {
+            self.draw_sel(cx, x, y, height);
+            self.code_editor.draw_sel.end(cx);
+            let sel = self.active_sel.take().unwrap().sel;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .selections
+            .sels
             .first()
-            .map_or(false, |selection| selection.start() == (position, bias))
+            .map_or(false, |sel| sel.start() == (position, bias))
         {
-            let (selection, selections) = self.selections.split_first().unwrap();
-            self.selections = selections;
-            if selection.cursor == (position, bias) {
+            let (sel, sels) = self.sels.split_first().unwrap();
+            self.sels = sels;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !selection.is_empty() {
-                self.active_selection = Some(ActiveSelection {
-                    selection: *selection,
+            if !sel.is_empty() {
+                self.active_sel = Some(ActiveSelection {
+                    sel: *sel,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_selection.begin();
+            self.code_editor.draw_sel.begin();
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
-        self.code_editor.draw_selection.draw(
+        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
+        self.code_editor.draw_sel.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -11957,13 +11957,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    selection: Selection,
+    sel: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(selection: Selection, start_x: f64) -> Self {
-        Self { selection, start_x }
+    fn new(sel: Selection, start_x: f64) -> Self {
+        Self { sel, start_x }
     }
 }
 
@@ -12056,17 +12056,17 @@ pub struct Context<'a> {
     settings: &'a mut Settings,
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
-    text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-    line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: &'a mut Vec<Vec<usize>>,
-    start_column_after_wrap: &'a mut Vec<usize>,
-    fold_column: &'a mut Vec<usize>,
+    inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: &'a mut Vec<Vec<usize>>,
+    start_col_after_wrap: &'a mut Vec<usize>,
+    fold_col: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    selections: &'a mut Vec<Selection>,
-    latest_selection_index: &'a mut usize,
+    sels: &'a mut Vec<Selection>,
+    latest_sel_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -12076,17 +12076,17 @@ impl<'a> Context<'a> {
         settings: &'a mut Settings,
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
-        text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-        line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-        wrap_bytes: &'a mut Vec<Vec<usize>>,
-        start_column_after_wrap: &'a mut Vec<usize>,
-        fold_column: &'a mut Vec<usize>,
+        inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+        inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+        soft_breaks: &'a mut Vec<Vec<usize>>,
+        start_col_after_wrap: &'a mut Vec<usize>,
+        fold_col: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+        document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        selections: &'a mut Vec<Selection>,
-        latest_selection_index: &'a mut usize,
+        sels: &'a mut Vec<Selection>,
+        latest_sel_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -12094,17 +12094,17 @@ impl<'a> Context<'a> {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            document_widget_inlays,
+            document_block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
             folding_lines,
             unfolding_lines,
         }
@@ -12115,51 +12115,51 @@ impl<'a> Context<'a> {
             self.settings,
             self.text,
             self.tokenizer,
-            self.text_inlays,
-            self.line_widget_inlays,
-            self.wrap_bytes,
-            self.start_column_after_wrap,
-            self.fold_column,
+            self.inline_text_inlays,
+            self.inline_widget_inlays,
+            self.soft_breaks,
+            self.start_col_after_wrap,
+            self.fold_col,
             self.scale,
             self.line_inlays,
-            self.document_widget_inlays,
+            self.document_block_widget_inlays,
             self.summed_heights,
-            self.selections,
-            *self.latest_selection_index,
+            self.sels,
+            *self.latest_sel_index,
         )
     }
 
-    pub fn wrap_lines(&mut self, max_column: usize) {
+    pub fn wrap_lines(&mut self, max_col: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
-            let old_wrap_byte_count = self.wrap_bytes[line].len();
-            self.wrap_bytes[line].clear();
-            let mut wrap_bytes = Vec::new();
-            mem::take(&mut self.wrap_bytes[line]);
+            let old_wrap_byte_count = self.soft_breaks[line].len();
+            self.soft_breaks[line].clear();
+            let mut soft_breaks = Vec::new();
+            mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut column = 0;
+            let mut col = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_column_after_wrap = line_ref
+            let mut start_col_after_wrap = line_ref
                 .text()
                 .indentation()
-                .column_count(document.settings().tab_column_count);
+                .col_count(document.settings().tab_col_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_column_after_wrap
-                                + string.column_count(document.settings().tab_column_count)
-                                > max_column
+                            if start_col_after_wrap
+                                + string.col_count(document.settings().tab_col_count)
+                                > max_col
                             {
-                                start_column_after_wrap = 0;
+                                start_col_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_column_after_wrap + widget.column_count > max_column {
-                            start_column_after_wrap = 0;
+                        if start_col_after_wrap + widget.col_count > max_col {
+                            start_col_after_wrap = 0;
                         }
                     }
                 }
@@ -12168,29 +12168,29 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_column =
-                                column + string.column_count(document.settings().tab_column_count);
-                            if next_column > max_column {
-                                next_column = start_column_after_wrap;
-                                wrap_bytes.push(byte);
+                            let mut next_col =
+                                col + string.col_count(document.settings().tab_col_count);
+                            if next_col > max_col {
+                                next_col = start_col_after_wrap;
+                                soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            column = next_column;
+                            col = next_col;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_column = column + widget.column_count;
-                        if next_column > max_column {
-                            next_column = start_column_after_wrap;
-                            wrap_bytes.push(byte);
+                        let mut next_col = col + widget.col_count;
+                        if next_col > max_col {
+                            next_col = start_col_after_wrap;
+                            soft_breaks.push(byte);
                         }
-                        column = next_column;
+                        col = next_col;
                     }
                 }
             }
-            self.wrap_bytes[line] = wrap_bytes;
-            self.start_column_after_wrap[line] = start_column_after_wrap;
-            if self.wrap_bytes[line].len() != old_wrap_byte_count {
+            self.soft_breaks[line] = soft_breaks;
+            self.start_col_after_wrap[line] = start_col_after_wrap;
+            if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
         }
@@ -12222,58 +12222,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.selections.clear();
-        self.selections.push(Selection::from_cursor(cursor));
-        *self.latest_selection_index = 0;
+        self.sels.clear();
+        self.sels.push(Selection::from_cursor(cursor));
+        *self.latest_sel_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let selection = Selection::from_cursor(cursor);
-        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
-            if selection.end() <= cursor {
+        let sel = Selection::from_cursor(cursor);
+        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
+            if sel.end() <= cursor {
                 return Ordering::Less;
             }
-            if selection.start() >= cursor {
+            if sel.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.selections[index] = selection;
+                self.sels[index] = sel;
                 index
             }
             Err(index) => {
-                self.selections.insert(index, selection);
+                self.sels.insert(index, sel);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_selection = &mut self.selections[*self.latest_selection_index];
-        latest_selection.cursor = cursor;
+        let latest_sel = &mut self.sels[*self.latest_sel_index];
+        latest_sel.cursor = cursor;
         if !select {
-            latest_selection.anchor = cursor;
+            latest_sel.anchor = cursor;
         }
-        while *self.latest_selection_index > 0 {
-            let previous_selection_index = *self.latest_selection_index - 1;
-            let previous_selection = self.selections[previous_selection_index];
-            let latest_selection = self.selections[*self.latest_selection_index];
-            if previous_selection.should_merge(latest_selection) {
-                self.selections.remove(previous_selection_index);
-                *self.latest_selection_index -= 1;
+        while *self.latest_sel_index > 0 {
+            let previous_sel_index = *self.latest_sel_index - 1;
+            let previous_sel = self.sels[previous_sel_index];
+            let latest_sel = self.sels[*self.latest_sel_index];
+            if previous_sel.should_merge(latest_sel) {
+                self.sels.remove(previous_sel_index);
+                *self.latest_sel_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_selection_index + 1 < self.selections.len() {
-            let next_selection_index = *self.latest_selection_index + 1;
-            let latest_selection = self.selections[*self.latest_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            if latest_selection.should_merge(next_selection) {
-                self.selections.remove(next_selection_index);
+        while *self.latest_sel_index + 1 < self.sels.len() {
+            let next_sel_index = *self.latest_sel_index + 1;
+            let latest_sel = self.sels[*self.latest_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            if latest_sel.should_merge(next_sel) {
+                self.sels.remove(next_sel_index);
             } else {
                 break;
             }
@@ -12283,32 +12283,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
         });
     }
 
@@ -12342,8 +12342,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
-        self.fold_column[line_index] = fold_column;
+    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
+        self.fold_col[line_index] = fold_col;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -12387,48 +12387,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_selections(
+    fn modify_sels(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut selections = mem::take(self.selections);
+        let mut sels = mem::take(self.sels);
         let document = self.document();
-        for selection in &mut selections {
-            *selection = f(&document, *selection);
+        for sel in &mut sels {
+            *sel = f(&document, *sel);
             if !select {
-                *selection = selection.reset_anchor();
+                *sel = sel.reset_anchor();
             }
         }
-        *self.selections = selections;
-        let mut current_selection_index = 0;
-        while current_selection_index + 1 < self.selections.len() {
-            let next_selection_index = current_selection_index + 1;
-            let current_selection = self.selections[current_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            assert!(current_selection.start() <= next_selection.start());
-            if !current_selection.should_merge(next_selection) {
-                current_selection_index += 1;
+        *self.sels = sels;
+        let mut current_sel_index = 0;
+        while current_sel_index + 1 < self.sels.len() {
+            let next_sel_index = current_sel_index + 1;
+            let current_sel = self.sels[current_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            assert!(current_sel.start() <= next_sel.start());
+            if !current_sel.should_merge(next_sel) {
+                current_sel_index += 1;
                 continue;
             }
-            let start = current_selection.start().min(next_selection.start());
-            let end = current_selection.end().max(next_selection.end());
+            let start = current_sel.start().min(next_sel.start());
+            let end = current_sel.end().max(next_sel.end());
             let anchor;
             let cursor;
-            if current_selection.anchor <= next_selection.cursor {
+            if current_sel.anchor <= next_sel.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.selections[current_selection_index] =
-                Selection::new(anchor, cursor, current_selection.preferred_column);
-            self.selections.remove(next_selection_index);
-            if next_selection_index < *self.latest_selection_index {
-                *self.latest_selection_index -= 1;
+            self.sels[current_sel_index] =
+                Selection::new(anchor, cursor, current_sel.preferred_col);
+            self.sels.remove(next_sel_index);
+            if next_sel_index < *self.latest_sel_index {
+                *self.latest_sel_index -= 1;
             }
         }
     }
@@ -12439,27 +12439,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().0 - prev_end;
+        for sel in &mut *self.sels {
+            let distance_from_prev_end = sel.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + selection.length();
+            let diffed_end = diffed_start + sel.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().0;
+            prev_end = sel.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if selection.anchor <= selection.cursor {
-                anchor = (diffed_start, selection.start().1);
-                cursor = (diffed_end, selection.end().1);
+            if sel.anchor <= sel.cursor {
+                anchor = (diffed_start, sel.start().1);
+                cursor = (diffed_end, sel.end().1);
             } else {
-                anchor = (diffed_end, selection.end().1);
-                cursor = (diffed_start, selection.start().1);
+                anchor = (diffed_end, sel.end().1);
+                cursor = (diffed_start, sel.start().1);
             }
-            *selection = Selection::new(anchor, cursor, selection.preferred_column);
+            *sel = Selection::new(anchor, cursor, sel.preferred_col);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -12473,11 +12473,11 @@ impl<'a> Context<'a> {
                 OperationInfo::Delete(length) => {
                     let start_line = line;
                     let end_line = start_line + length.line_count;
-                    self.text_inlays.drain(start_line..end_line);
-                    self.line_widget_inlays.drain(start_line..end_line);
-                    self.wrap_bytes.drain(start_line..end_line);
-                    self.start_column_after_wrap.drain(start_line..end_line);
-                    self.fold_column.drain(start_line..end_line);
+                    self.inline_text_inlays.drain(start_line..end_line);
+                    self.inline_widget_inlays.drain(start_line..end_line);
+                    self.soft_breaks.drain(start_line..end_line);
+                    self.start_col_after_wrap.drain(start_line..end_line);
+                    self.fold_col.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -12487,15 +12487,15 @@ impl<'a> Context<'a> {
                 OperationInfo::Insert(length) => {
                     let next_line = line + 1;
                     let line_count = length.line_count;
-                    self.text_inlays
+                    self.inline_text_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.line_widget_inlays
+                    self.inline_widget_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.wrap_bytes
+                    self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_column_after_wrap
+                    self.start_col_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_column
+                    self.fold_col
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -12809,17 +12809,17 @@ pub struct Document<'a> {
     settings: &'a Settings,
     text: &'a Text,
     tokenizer: &'a Tokenizer,
-    text_inlays: &'a [Vec<(usize, String)>],
-    line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-    wrap_bytes: &'a [Vec<usize>],
-    start_column_after_wrap: &'a [usize],
-    fold_column: &'a [usize],
+    inline_text_inlays: &'a [Vec<(usize, String)>],
+    inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+    soft_breaks: &'a [Vec<usize>],
+    start_col_after_wrap: &'a [usize],
+    fold_col: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    selections: &'a [Selection],
-    latest_selection_index: usize,
+    sels: &'a [Selection],
+    latest_sel_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -12827,33 +12827,33 @@ impl<'a> Document<'a> {
         settings: &'a Settings,
         text: &'a Text,
         tokenizer: &'a Tokenizer,
-        text_inlays: &'a [Vec<(usize, String)>],
-        line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-        wrap_bytes: &'a [Vec<usize>],
-        start_column_after_wrap: &'a [usize],
-        fold_column: &'a [usize],
+        inline_text_inlays: &'a [Vec<(usize, String)>],
+        inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+        soft_breaks: &'a [Vec<usize>],
+        start_col_after_wrap: &'a [usize],
+        fold_col: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        selections: &'a [Selection],
-        latest_selection_index: usize,
+        sels: &'a [Selection],
+        latest_sel_index: usize,
     ) -> Self {
         Self {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            widget_inlays,
+            block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
         }
     }
 
@@ -12865,7 +12865,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -12910,11 +12910,11 @@ impl<'a> Document<'a> {
         Line::new(
             &self.text.as_lines()[line],
             &self.tokenizer.token_infos()[line],
-            &self.text_inlays[line],
-            &self.line_widget_inlays[line],
-            &self.wrap_bytes[line],
-            self.start_column_after_wrap[line],
-            self.fold_column[line],
+            &self.inline_text_inlays[line],
+            &self.inline_widget_inlays[line],
+            &self.soft_breaks[line],
+            self.start_col_after_wrap[line],
+            self.fold_col[line],
             self.scale[line],
         )
     }
@@ -12923,11 +12923,11 @@ impl<'a> Document<'a> {
         Lines {
             text: self.text.as_lines()[start_line..end_line].iter(),
             token_infos: self.tokenizer.token_infos()[start_line..end_line].iter(),
-            text_inlays: self.text_inlays[start_line..end_line].iter(),
-            line_widget_inlays: self.line_widget_inlays[start_line..end_line].iter(),
-            wrap_bytes: self.wrap_bytes[start_line..end_line].iter(),
-            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
-            fold_column: self.fold_column[start_line..end_line].iter(),
+            inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
+            inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
+            soft_breaks: self.soft_breaks[start_line..end_line].iter(),
+            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
+            fold_col: self.fold_col[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -12948,21 +12948,21 @@ impl<'a> Document<'a> {
                 .iter()
                 .position(|(line, _)| *line >= start_line)
                 .unwrap_or(self.line_inlays.len())..],
-            widget_inlays: &self.widget_inlays[self
-                .widget_inlays
+            block_widget_inlays: &self.block_widget_inlays[self
+                .block_widget_inlays
                 .iter()
                 .position(|((line, _), _)| *line >= start_line)
-                .unwrap_or(self.widget_inlays.len())..],
+                .unwrap_or(self.block_widget_inlays.len())..],
             line: start_line,
         }
     }
 
-    pub fn selections(&self) -> &'a [Selection] {
-        self.selections
+    pub fn sels(&self) -> &'a [Selection] {
+        self.sels
     }
 
-    pub fn latest_selection_index(&self) -> usize {
-        self.latest_selection_index
+    pub fn latest_sel_index(&self) -> usize {
+        self.latest_sel_index
     }
 }
 
@@ -12970,11 +12970,11 @@ impl<'a> Document<'a> {
 pub struct Lines<'a> {
     text: slice::Iter<'a, String>,
     token_infos: slice::Iter<'a, Vec<TokenInfo>>,
-    text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
-    line_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: slice::Iter<'a, Vec<usize>>,
-    start_column_after_wrap: slice::Iter<'a, usize>,
-    fold_column: slice::Iter<'a, usize>,
+    inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
+    inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: slice::Iter<'a, Vec<usize>>,
+    start_col_after_wrap: slice::Iter<'a, usize>,
+    fold_col: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -12985,11 +12985,11 @@ impl<'a> Iterator for Lines<'a> {
         Some(Line::new(
             self.text.next()?,
             self.token_infos.next()?,
-            self.text_inlays.next()?,
-            self.line_widget_inlays.next()?,
-            self.wrap_bytes.next()?,
-            *self.start_column_after_wrap.next()?,
-            *self.fold_column.next()?,
+            self.inline_text_inlays.next()?,
+            self.inline_widget_inlays.next()?,
+            self.soft_breaks.next()?,
+            *self.start_col_after_wrap.next()?,
+            *self.fold_col.next()?,
             *self.scale.next()?,
         ))
     }
@@ -12999,7 +12999,7 @@ impl<'a> Iterator for Lines<'a> {
 pub struct Elements<'a> {
     lines: Lines<'a>,
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     line: usize,
 }
 
@@ -13008,14 +13008,14 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
@@ -13028,14 +13028,14 @@ impl<'a> Iterator for Elements<'a> {
             return Some(Element::Line(true, line.as_line()));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let line = self.lines.next()?;
@@ -13211,7 +13211,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod selection;
+pub mod sel;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -13221,7 +13221,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, selection::Selection,
+    length::Length, line::Line, position::Position, range::Range, sel::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -13236,11 +13236,11 @@ use {
 pub struct Line<'a> {
     text: &'a str,
     token_infos: &'a [TokenInfo],
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
-    wrap_bytes: &'a [usize],
-    start_column_after_wrap: usize,
-    fold_column: usize,
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
+    soft_breaks: &'a [usize],
+    start_col_after_wrap: usize,
+    fold_col: usize,
     scale: f64,
 }
 
@@ -13248,142 +13248,142 @@ impl<'a> Line<'a> {
     pub fn new(
         text: &'a str,
         token_infos: &'a [TokenInfo],
-        text_inlays: &'a [(usize, String)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
-        wrap_bytes: &'a [usize],
-        start_column_after_wrap: usize,
-        fold_column: usize,
+        inline_text_inlays: &'a [(usize, String)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
+        soft_breaks: &'a [usize],
+        start_col_after_wrap: usize,
+        fold_col: usize,
         scale: f64,
     ) -> Self {
         Self {
             text,
             token_infos,
-            text_inlays,
-            widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            block_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
         }
     }
 
-    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
+    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_column_count = 0;
-        let mut summed_column_count = 0;
+        let mut max_summed_col_count = 0;
+        let mut summed_col_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_column_count += token.text.column_count(tab_column_count);
+                    summed_col_count += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_column_count += widget.column_count;
+                    summed_col_count += widget.col_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
-                    summed_column_count = self.start_column_after_wrap();
+                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
+                    summed_col_count = self.start_col_after_wrap();
                 }
             }
         }
-        max_summed_column_count.max(summed_column_count)
+        max_summed_col_count.max(summed_col_count)
     }
 
     pub fn row_count(&self) -> usize {
-        self.wrap_bytes.len() + 1
+        self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
-        self.column_to_x(self.compute_column_count(tab_column_count))
+    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
+        self.col_to_x(self.compute_col_count(tab_col_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_column(
+    pub fn byte_bias_to_row_col(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_column_count: usize,
+        tab_col_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut column = 0;
+        let mut col = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, column);
+            return (row, col);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, column);
+                            return (row, col);
                         }
                         current_byte += grapheme.len();
-                        column += grapheme.column_count(tab_column_count);
+                        col += grapheme.col_count(tab_col_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, column);
+                            return (row, col);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    column += token.text.column_count(tab_column_count);
+                    col += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    column += widget.column_count;
+                    col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    column = self.start_column_after_wrap();
+                    col = self.start_col_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, column);
+            return (row, col);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_bias(
+    pub fn row_col_to_byte_bias(
         &self,
-        (row, column): (usize, usize),
-        tab_column_count: usize,
+        (row, col): (usize, usize),
+        tab_col_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_column = 0;
+        let mut current_col = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_column = current_column + grapheme.column_count(tab_column_count);
-                        if current_row == row && (current_column..next_column).contains(&column) {
+                        let next_col = current_col + grapheme.col_count(tab_col_count);
+                        if current_row == row && (current_col..next_col).contains(&col) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_column = next_column;
+                        current_col = next_col;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_column = current_column + token.text.column_count(tab_column_count);
-                    if current_row == row && (current_column..next_column).contains(&column) {
+                    let next_col = current_col + token.text.col_count(tab_col_count);
+                    if current_row == row && (current_col..next_col).contains(&col) {
                         return (byte, Affinity::Before);
                     }
-                    current_column = next_column;
+                    current_col = next_col;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_column += widget.column_count;
+                    current_col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_column = self.start_column_after_wrap();
+                    current_col = self.start_col_after_wrap();
                 }
             }
         }
@@ -13393,10 +13393,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn column_to_x(&self, column: usize) -> f64 {
-        let column_count_before_fold_column = column.min(self.fold_column);
-        let column_count_after_fold_column = column - column_count_before_fold_column;
-        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
+    pub fn col_to_x(&self, col: usize) -> f64 {
+        let col_count_before_fold_col = col.min(self.fold_col);
+        let col_count_after_fold_col = col - col_count_before_fold_col;
+        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -13415,8 +13415,8 @@ impl<'a> Line<'a> {
         Elements {
             token: tokens.next(),
             tokens,
-            text_inlays: self.text_inlays,
-            widget_inlays: self.widget_inlays,
+            inline_text_inlays: self.inline_text_inlays,
+            block_widget_inlays: self.block_widget_inlays,
             byte: 0,
         }
     }
@@ -13426,17 +13426,17 @@ impl<'a> Line<'a> {
         WrappedElements {
             element: elements.next(),
             elements,
-            wrap_bytes: self.wrap_bytes,
+            soft_breaks: self.soft_breaks,
             byte: 0,
         }
     }
 
-    pub fn start_column_after_wrap(&self) -> usize {
-        self.start_column_after_wrap
+    pub fn start_col_after_wrap(&self) -> usize {
+        self.start_col_after_wrap
     }
 
-    pub fn fold_column(&self) -> usize {
-        self.fold_column
+    pub fn fold_col(&self) -> usize {
+        self.fold_col
     }
 
     pub fn scale(&self) -> f64 {
@@ -13476,8 +13476,8 @@ impl<'a> Iterator for Tokens<'a> {
 pub struct Elements<'a> {
     token: Option<Token<'a>>,
     tokens: Tokens<'a>,
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     byte: usize,
 }
 
@@ -13486,42 +13486,42 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
-            .text_inlays
+            .inline_text_inlays
             .first()
             .map_or(false, |(byte, _)| *byte == self.byte)
         {
-            let ((_, text), text_inlays) = self.text_inlays.split_first().unwrap();
-            self.text_inlays = text_inlays;
+            let ((_, text), inline_text_inlays) = self.inline_text_inlays.split_first().unwrap();
+            self.inline_text_inlays = inline_text_inlays;
             return Some(Element::Token(true, Token::new(text, TokenKind::Unknown)));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let token = self.token.take()?;
         let mut byte_count = token.text.len();
-        if let Some((byte, _)) = self.text_inlays.first() {
+        if let Some((byte, _)) = self.inline_text_inlays.first() {
             byte_count = byte_count.min(*byte - self.byte);
         }
-        if let Some(((byte, _), _)) = self.widget_inlays.first() {
+        if let Some(((byte, _), _)) = self.block_widget_inlays.first() {
             byte_count = byte_count.min(byte - self.byte);
         }
         let token = if byte_count < token.text.len() {
@@ -13547,7 +13547,7 @@ pub enum Element<'a> {
 pub struct WrappedElements<'a> {
     element: Option<Element<'a>>,
     elements: Elements<'a>,
-    wrap_bytes: &'a [usize],
+    soft_breaks: &'a [usize],
     byte: usize,
 }
 
@@ -13563,17 +13563,17 @@ impl<'a> Iterator for WrappedElements<'a> {
             return Some(WrappedElement::Widget(Affinity::Before, widget));
         }
         if self
-            .wrap_bytes
+            .soft_breaks
             .first()
             .map_or(false, |byte| *byte == self.byte)
         {
-            self.wrap_bytes = &self.wrap_bytes[1..];
+            self.soft_breaks = &self.soft_breaks[1..];
             return Some(WrappedElement::Wrap);
         }
         Some(match self.element.take()? {
             Element::Token(is_inlay, token) => {
                 let mut byte_count = token.text.len();
-                if let Some(byte) = self.wrap_bytes.first() {
+                if let Some(byte) = self.soft_breaks.first() {
                     byte_count = byte_count.min(*byte - self.byte);
                 }
                 let token = if byte_count < token.text.len() {
@@ -13606,12 +13606,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub column_count: usize,
+    pub col_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, column_count: usize) -> Self {
-        Self { id, column_count }
+    pub fn new(id: usize, col_count: usize) -> Self {
+        Self { id, col_count }
     }
 }
 mod app;
@@ -13650,29 +13650,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_column);
+        return move_to_next_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -13689,9 +13689,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_column(
+        .byte_bias_to_row_col(
             (position.byte, bias),
-            document.settings().tab_column_count,
+            document.settings().tab_col_count,
         )
         .0
         == 0
@@ -13702,9 +13702,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_column(
+    line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     )
     .0 == line.row_count() - 1
 }
@@ -13786,77 +13786,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
-        (prev_line_ref.row_count() - 1, column),
-        document.settings().tab_column_count,
+    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
+        (prev_line_ref.row_count() - 1, col),
+        document.settings().tab_col_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(col))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), bias), Some(column))
+        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
+    ((Position::new(next_line, byte), bias), Some(col))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -14003,19 +14003,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_column: Option<usize>,
+    pub preferred_col: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_column: Option<usize>,
+        preferred_col: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_column,
+            preferred_col,
         }
     }
 
@@ -14023,7 +14023,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_column: None,
+            preferred_col: None,
         }
     }
 
@@ -14067,25 +14067,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, column) = f(self.cursor, self.preferred_column);
+        let (cursor, col) = f(self.cursor, self.preferred_col);
         Self {
             cursor,
-            preferred_column: column,
+            preferred_col: col,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_column_count: usize,
-    pub indent_column_count: usize,
+    pub tab_col_count: usize,
+    pub indent_col_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_column_count: 4,
-            indent_column_count: 4,
+            tab_col_count: 4,
+            indent_col_count: 4,
         }
     }
 }
@@ -14133,17 +14133,17 @@ impl State {
             &self.settings,
             &editor.text,
             &editor.tokenizer,
-            &editor.text_inlays,
-            &editor.line_widget_inlays,
-            &view.wrap_bytes,
-            &view.start_column_after_wrap,
-            &view.fold_column,
+            &editor.inline_text_inlays,
+            &editor.inline_widget_inlays,
+            &view.soft_breaks,
+            &view.start_col_after_wrap,
+            &view.fold_col,
             &view.scale,
             &editor.line_inlays,
-            &editor.document_widget_inlays,
+            &editor.document_block_widget_inlays,
             &view.summed_heights,
-            &view.selections,
-            view.latest_selection_index,
+            &view.sels,
+            view.latest_sel_index,
         )
     }
 
@@ -14154,17 +14154,17 @@ impl State {
             &mut self.settings,
             &mut editor.text,
             &mut editor.tokenizer,
-            &mut editor.text_inlays,
-            &mut editor.line_widget_inlays,
-            &mut view.wrap_bytes,
-            &mut view.start_column_after_wrap,
-            &mut view.fold_column,
+            &mut editor.inline_text_inlays,
+            &mut editor.inline_widget_inlays,
+            &mut view.soft_breaks,
+            &mut view.start_col_after_wrap,
+            &mut view.fold_col,
             &mut view.scale,
             &mut editor.line_inlays,
-            &mut editor.document_widget_inlays,
+            &mut editor.document_block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.selections,
-            &mut view.latest_selection_index,
+            &mut view.sels,
+            &mut view.latest_sel_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -14179,13 +14179,13 @@ impl State {
             view_id,
             View {
                 editor_id,
-                wrap_bytes: (0..line_count).map(|_| [].into()).collect(),
-                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_column: (0..line_count).map(|_| 0).collect(),
+                soft_breaks: (0..line_count).map(|_| [].into()).collect(),
+                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_col: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                selections: [Selection::default()].into(),
-                latest_selection_index: 0,
+                sels: [Selection::default()].into(),
+                latest_sel_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -14208,7 +14208,7 @@ impl State {
             Editor {
                 text,
                 tokenizer,
-                text_inlays: (0..line_count)
+                inline_text_inlays: (0..line_count)
                     .map(|line| {
                         if line % 2 == 0 {
                             [
@@ -14242,8 +14242,8 @@ impl State {
                     ),
                 ]
                 .into(),
-                line_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
-                document_widget_inlays: [].into(),
+                inline_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
+                document_block_widget_inlays: [].into(),
             },
         );
         Ok(editor_id)
@@ -14256,13 +14256,13 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_column: Vec<usize>,
+    fold_col: Vec<usize>,
     scale: Vec<f64>,
-    wrap_bytes: Vec<Vec<usize>>,
-    start_column_after_wrap: Vec<usize>,
+    soft_breaks: Vec<Vec<usize>>,
+    start_col_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    selections: Vec<Selection>,
-    latest_selection_index: usize,
+    sels: Vec<Selection>,
+    latest_sel_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -14274,14 +14274,14 @@ struct EditorId(usize);
 struct Editor {
     text: Text,
     tokenizer: Tokenizer,
-    text_inlays: Vec<Vec<(usize, String)>>,
-    line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
+    inline_text_inlays: Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,
-    document_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn column_count(&self, tab_column_count: usize) -> usize;
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn col_count(&self, tab_col_count: usize) -> usize;
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -14289,16 +14289,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn column_count(&self, tab_column_count: usize) -> usize {
+    fn col_count(&self, tab_col_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.column_count(tab_column_count))
+            .map(|char| char.col_count(tab_col_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
-        self.indentation().column_count(tab_column_count) / indent_column_count
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
+        self.indentation().col_count(tab_col_count) / indent_col_count
     }
 
     fn indentation(&self) -> &str {
@@ -15058,13 +15058,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn column_count(self, tab_column_count: usize) -> usize;
+    fn col_count(self, tab_col_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn column_count(self, tab_column_count: usize) -> usize {
+    fn col_count(self, tab_col_count: usize) -> usize {
         match self {
-            '\t' => tab_column_count,
+            '\t' => tab_col_count,
             _ => 1,
         }
     }
@@ -15148,7 +15148,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_selection: {
+        draw_sel: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -15167,7 +15167,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_selection: DrawSelection,
+    draw_sel: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -15187,7 +15187,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_selections(cx, &document);
+        self.draw_sels(cx, &document);
         self.end(cx, context);
     }
 
@@ -15267,10 +15267,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_column_count);
+                        context.fold_line(line, 2 * settings.indent_col_count);
                     }
                 }
                 cx.redraw_all();
@@ -15286,7 +15286,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -15360,7 +15360,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut column = 0;
+            let mut col = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -15380,22 +15380,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.column_to_x(column),
+                                        x: line.col_to_x(col),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                column = line.start_column_after_wrap();
+                                col = line.start_col_after_wrap();
                             }
                         }
                     }
@@ -15408,28 +15408,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_selection = None;
-        let mut selections = document.selections();
-        while selections
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_sel = None;
+        let mut sels = document.sels();
+        while sels
             .first()
-            .map_or(false, |selection| selection.end().0.line < self.start_line)
+            .map_or(false, |sel| sel.end().0.line < self.start_line)
         {
-            selections = &selections[1..];
+            sels = &sels[1..];
         }
-        if selections.first().map_or(false, |selection| {
-            selection.start().0.line < self.start_line
+        if sels.first().map_or(false, |sel| {
+            sel.start().0.line < self.start_line
         }) {
-            let (selection, remaining_selections) = selections.split_first().unwrap();
-            selections = remaining_selections;
-            active_selection = Some(ActiveSelection::new(*selection, 0.0));
+            let (sel, remaining_sels) = sels.split_first().unwrap();
+            sels = remaining_sels;
+            active_sel = Some(ActiveSelection::new(*sel, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_selection,
-            selections,
+            active_sel,
+            sels,
         }
-        .draw_selections(cx, document)
+        .draw_sels(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -15442,18 +15442,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_column = column
+                                    let next_col = col
                                         + grapheme
-                                            .column_count(document.settings().tab_column_count);
+                                            .col_count(document.settings().tab_col_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.column_to_x(column);
-                                    let next_x = line_ref.column_to_x(next_column);
+                                    let x = line_ref.col_to_x(col);
+                                    let next_x = line_ref.col_to_x(next_col);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -15470,24 +15470,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    column = next_column;
+                                    col = next_col;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_column = column
+                                let next_col = col
                                     + token
                                         .text
-                                        .column_count(document.settings().tab_column_count);
-                                let x = line_ref.column_to_x(column);
-                                let next_x = line_ref.column_to_x(next_column);
+                                        .col_count(document.settings().tab_col_count);
+                                let x = line_ref.col_to_x(col);
+                                let next_x = line_ref.col_to_x(next_col);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                column = next_column;
+                                col = next_col;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -15495,7 +15495,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -15524,12 +15524,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_selection: Option<ActiveSelection>,
-    selections: &'a [Selection],
+    active_sel: Option<ActiveSelection>,
+    sels: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -15538,13 +15538,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
@@ -15557,44 +15557,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count(document.settings().tab_column_count);
+                                    col +=
+                                        grapheme.col_count(document.settings().tab_col_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
-                                column += 1;
-                                if self.active_selection.is_some() {
-                                    self.draw_selection(
+                                col += 1;
+                                if self.active_sel.is_some() {
+                                    self.draw_sel(
                                         cx,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -15603,13 +15603,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
-                    column += 1;
-                    if self.active_selection.is_some() {
-                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    col += 1;
+                    if self.active_sel.is_some() {
+                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -15622,8 +15622,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_selection.is_some() {
-            self.code_editor.draw_selection.end(cx);
+        if self.active_sel.is_some() {
+            self.code_editor.draw_sel.end(cx);
         }
     }
 
@@ -15638,41 +15638,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, bias)
+        if self.active_sel.as_ref().map_or(false, |sel| {
+            sel.sel.end() == (position, bias)
         }) {
-            self.draw_selection(cx, x, y, height);
-            self.code_editor.draw_selection.end(cx);
-            let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, bias) {
+            self.draw_sel(cx, x, y, height);
+            self.code_editor.draw_sel.end(cx);
+            let sel = self.active_sel.take().unwrap().sel;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .selections
+            .sels
             .first()
-            .map_or(false, |selection| selection.start() == (position, bias))
+            .map_or(false, |sel| sel.start() == (position, bias))
         {
-            let (selection, selections) = self.selections.split_first().unwrap();
-            self.selections = selections;
-            if selection.cursor == (position, bias) {
+            let (sel, sels) = self.sels.split_first().unwrap();
+            self.sels = sels;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !selection.is_empty() {
-                self.active_selection = Some(ActiveSelection {
-                    selection: *selection,
+            if !sel.is_empty() {
+                self.active_sel = Some(ActiveSelection {
+                    sel: *sel,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_selection.begin();
+            self.code_editor.draw_sel.begin();
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
-        self.code_editor.draw_selection.draw(
+        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
+        self.code_editor.draw_sel.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -15702,13 +15702,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    selection: Selection,
+    sel: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(selection: Selection, start_x: f64) -> Self {
-        Self { selection, start_x }
+    fn new(sel: Selection, start_x: f64) -> Self {
+        Self { sel, start_x }
     }
 }
 
@@ -15801,17 +15801,17 @@ pub struct Context<'a> {
     settings: &'a mut Settings,
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
-    text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-    line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: &'a mut Vec<Vec<usize>>,
-    start_column_after_wrap: &'a mut Vec<usize>,
-    fold_column: &'a mut Vec<usize>,
+    inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: &'a mut Vec<Vec<usize>>,
+    start_col_after_wrap: &'a mut Vec<usize>,
+    fold_col: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    selections: &'a mut Vec<Selection>,
-    latest_selection_index: &'a mut usize,
+    sels: &'a mut Vec<Selection>,
+    latest_sel_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -15821,17 +15821,17 @@ impl<'a> Context<'a> {
         settings: &'a mut Settings,
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
-        text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-        line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-        wrap_bytes: &'a mut Vec<Vec<usize>>,
-        start_column_after_wrap: &'a mut Vec<usize>,
-        fold_column: &'a mut Vec<usize>,
+        inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+        inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+        soft_breaks: &'a mut Vec<Vec<usize>>,
+        start_col_after_wrap: &'a mut Vec<usize>,
+        fold_col: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+        document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        selections: &'a mut Vec<Selection>,
-        latest_selection_index: &'a mut usize,
+        sels: &'a mut Vec<Selection>,
+        latest_sel_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -15839,17 +15839,17 @@ impl<'a> Context<'a> {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            document_widget_inlays,
+            document_block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
             folding_lines,
             unfolding_lines,
         }
@@ -15860,51 +15860,51 @@ impl<'a> Context<'a> {
             self.settings,
             self.text,
             self.tokenizer,
-            self.text_inlays,
-            self.line_widget_inlays,
-            self.wrap_bytes,
-            self.start_column_after_wrap,
-            self.fold_column,
+            self.inline_text_inlays,
+            self.inline_widget_inlays,
+            self.soft_breaks,
+            self.start_col_after_wrap,
+            self.fold_col,
             self.scale,
             self.line_inlays,
-            self.document_widget_inlays,
+            self.document_block_widget_inlays,
             self.summed_heights,
-            self.selections,
-            *self.latest_selection_index,
+            self.sels,
+            *self.latest_sel_index,
         )
     }
 
-    pub fn wrap_lines(&mut self, max_column: usize) {
+    pub fn wrap_lines(&mut self, max_col: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
-            let old_wrap_byte_count = self.wrap_bytes[line].len();
-            self.wrap_bytes[line].clear();
-            let mut wrap_bytes = Vec::new();
-            mem::take(&mut self.wrap_bytes[line]);
+            let old_wrap_byte_count = self.soft_breaks[line].len();
+            self.soft_breaks[line].clear();
+            let mut soft_breaks = Vec::new();
+            mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut column = 0;
+            let mut col = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_column_after_wrap = line_ref
+            let mut start_col_after_wrap = line_ref
                 .text()
                 .indentation()
-                .column_count(document.settings().tab_column_count);
+                .col_count(document.settings().tab_col_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_column_after_wrap
-                                + string.column_count(document.settings().tab_column_count)
-                                > max_column
+                            if start_col_after_wrap
+                                + string.col_count(document.settings().tab_col_count)
+                                > max_col
                             {
-                                start_column_after_wrap = 0;
+                                start_col_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_column_after_wrap + widget.column_count > max_column {
-                            start_column_after_wrap = 0;
+                        if start_col_after_wrap + widget.col_count > max_col {
+                            start_col_after_wrap = 0;
                         }
                     }
                 }
@@ -15913,29 +15913,29 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_column =
-                                column + string.column_count(document.settings().tab_column_count);
-                            if next_column > max_column {
-                                next_column = start_column_after_wrap;
-                                wrap_bytes.push(byte);
+                            let mut next_col =
+                                col + string.col_count(document.settings().tab_col_count);
+                            if next_col > max_col {
+                                next_col = start_col_after_wrap;
+                                soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            column = next_column;
+                            col = next_col;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_column = column + widget.column_count;
-                        if next_column > max_column {
-                            next_column = start_column_after_wrap;
-                            wrap_bytes.push(byte);
+                        let mut next_col = col + widget.col_count;
+                        if next_col > max_col {
+                            next_col = start_col_after_wrap;
+                            soft_breaks.push(byte);
                         }
-                        column = next_column;
+                        col = next_col;
                     }
                 }
             }
-            self.wrap_bytes[line] = wrap_bytes;
-            self.start_column_after_wrap[line] = start_column_after_wrap;
-            if self.wrap_bytes[line].len() != old_wrap_byte_count {
+            self.soft_breaks[line] = soft_breaks;
+            self.start_col_after_wrap[line] = start_col_after_wrap;
+            if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
         }
@@ -15967,58 +15967,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.selections.clear();
-        self.selections.push(Selection::from_cursor(cursor));
-        *self.latest_selection_index = 0;
+        self.sels.clear();
+        self.sels.push(Selection::from_cursor(cursor));
+        *self.latest_sel_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let selection = Selection::from_cursor(cursor);
-        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
-            if selection.end() <= cursor {
+        let sel = Selection::from_cursor(cursor);
+        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
+            if sel.end() <= cursor {
                 return Ordering::Less;
             }
-            if selection.start() >= cursor {
+            if sel.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.selections[index] = selection;
+                self.sels[index] = sel;
                 index
             }
             Err(index) => {
-                self.selections.insert(index, selection);
+                self.sels.insert(index, sel);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_selection = &mut self.selections[*self.latest_selection_index];
-        latest_selection.cursor = cursor;
+        let latest_sel = &mut self.sels[*self.latest_sel_index];
+        latest_sel.cursor = cursor;
         if !select {
-            latest_selection.anchor = cursor;
+            latest_sel.anchor = cursor;
         }
-        while *self.latest_selection_index > 0 {
-            let previous_selection_index = *self.latest_selection_index - 1;
-            let previous_selection = self.selections[previous_selection_index];
-            let latest_selection = self.selections[*self.latest_selection_index];
-            if previous_selection.should_merge(latest_selection) {
-                self.selections.remove(previous_selection_index);
-                *self.latest_selection_index -= 1;
+        while *self.latest_sel_index > 0 {
+            let previous_sel_index = *self.latest_sel_index - 1;
+            let previous_sel = self.sels[previous_sel_index];
+            let latest_sel = self.sels[*self.latest_sel_index];
+            if previous_sel.should_merge(latest_sel) {
+                self.sels.remove(previous_sel_index);
+                *self.latest_sel_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_selection_index + 1 < self.selections.len() {
-            let next_selection_index = *self.latest_selection_index + 1;
-            let latest_selection = self.selections[*self.latest_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            if latest_selection.should_merge(next_selection) {
-                self.selections.remove(next_selection_index);
+        while *self.latest_sel_index + 1 < self.sels.len() {
+            let next_sel_index = *self.latest_sel_index + 1;
+            let latest_sel = self.sels[*self.latest_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            if latest_sel.should_merge(next_sel) {
+                self.sels.remove(next_sel_index);
             } else {
                 break;
             }
@@ -16028,32 +16028,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
         });
     }
 
@@ -16087,8 +16087,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
-        self.fold_column[line_index] = fold_column;
+    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
+        self.fold_col[line_index] = fold_col;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -16132,48 +16132,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_selections(
+    fn modify_sels(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut selections = mem::take(self.selections);
+        let mut sels = mem::take(self.sels);
         let document = self.document();
-        for selection in &mut selections {
-            *selection = f(&document, *selection);
+        for sel in &mut sels {
+            *sel = f(&document, *sel);
             if !select {
-                *selection = selection.reset_anchor();
+                *sel = sel.reset_anchor();
             }
         }
-        *self.selections = selections;
-        let mut current_selection_index = 0;
-        while current_selection_index + 1 < self.selections.len() {
-            let next_selection_index = current_selection_index + 1;
-            let current_selection = self.selections[current_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            assert!(current_selection.start() <= next_selection.start());
-            if !current_selection.should_merge(next_selection) {
-                current_selection_index += 1;
+        *self.sels = sels;
+        let mut current_sel_index = 0;
+        while current_sel_index + 1 < self.sels.len() {
+            let next_sel_index = current_sel_index + 1;
+            let current_sel = self.sels[current_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            assert!(current_sel.start() <= next_sel.start());
+            if !current_sel.should_merge(next_sel) {
+                current_sel_index += 1;
                 continue;
             }
-            let start = current_selection.start().min(next_selection.start());
-            let end = current_selection.end().max(next_selection.end());
+            let start = current_sel.start().min(next_sel.start());
+            let end = current_sel.end().max(next_sel.end());
             let anchor;
             let cursor;
-            if current_selection.anchor <= next_selection.cursor {
+            if current_sel.anchor <= next_sel.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.selections[current_selection_index] =
-                Selection::new(anchor, cursor, current_selection.preferred_column);
-            self.selections.remove(next_selection_index);
-            if next_selection_index < *self.latest_selection_index {
-                *self.latest_selection_index -= 1;
+            self.sels[current_sel_index] =
+                Selection::new(anchor, cursor, current_sel.preferred_col);
+            self.sels.remove(next_sel_index);
+            if next_sel_index < *self.latest_sel_index {
+                *self.latest_sel_index -= 1;
             }
         }
     }
@@ -16184,27 +16184,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().0 - prev_end;
+        for sel in &mut *self.sels {
+            let distance_from_prev_end = sel.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + selection.length();
+            let diffed_end = diffed_start + sel.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().0;
+            prev_end = sel.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if selection.anchor <= selection.cursor {
-                anchor = (diffed_start, selection.start().1);
-                cursor = (diffed_end, selection.end().1);
+            if sel.anchor <= sel.cursor {
+                anchor = (diffed_start, sel.start().1);
+                cursor = (diffed_end, sel.end().1);
             } else {
-                anchor = (diffed_end, selection.end().1);
-                cursor = (diffed_start, selection.start().1);
+                anchor = (diffed_end, sel.end().1);
+                cursor = (diffed_start, sel.start().1);
             }
-            *selection = Selection::new(anchor, cursor, selection.preferred_column);
+            *sel = Selection::new(anchor, cursor, sel.preferred_col);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -16218,11 +16218,11 @@ impl<'a> Context<'a> {
                 OperationInfo::Delete(length) => {
                     let start_line = line;
                     let end_line = start_line + length.line_count;
-                    self.text_inlays.drain(start_line..end_line);
-                    self.line_widget_inlays.drain(start_line..end_line);
-                    self.wrap_bytes.drain(start_line..end_line);
-                    self.start_column_after_wrap.drain(start_line..end_line);
-                    self.fold_column.drain(start_line..end_line);
+                    self.inline_text_inlays.drain(start_line..end_line);
+                    self.inline_widget_inlays.drain(start_line..end_line);
+                    self.soft_breaks.drain(start_line..end_line);
+                    self.start_col_after_wrap.drain(start_line..end_line);
+                    self.fold_col.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -16232,15 +16232,15 @@ impl<'a> Context<'a> {
                 OperationInfo::Insert(length) => {
                     let next_line = line + 1;
                     let line_count = length.line_count;
-                    self.text_inlays
+                    self.inline_text_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.line_widget_inlays
+                    self.inline_widget_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.wrap_bytes
+                    self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_column_after_wrap
+                    self.start_col_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_column
+                    self.fold_col
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
@@ -16554,17 +16554,17 @@ pub struct Document<'a> {
     settings: &'a Settings,
     text: &'a Text,
     tokenizer: &'a Tokenizer,
-    text_inlays: &'a [Vec<(usize, String)>],
-    line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-    wrap_bytes: &'a [Vec<usize>],
-    start_column_after_wrap: &'a [usize],
-    fold_column: &'a [usize],
+    inline_text_inlays: &'a [Vec<(usize, String)>],
+    inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+    soft_breaks: &'a [Vec<usize>],
+    start_col_after_wrap: &'a [usize],
+    fold_col: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     summed_heights: &'a [f64],
-    selections: &'a [Selection],
-    latest_selection_index: usize,
+    sels: &'a [Selection],
+    latest_sel_index: usize,
 }
 
 impl<'a> Document<'a> {
@@ -16572,33 +16572,33 @@ impl<'a> Document<'a> {
         settings: &'a Settings,
         text: &'a Text,
         tokenizer: &'a Tokenizer,
-        text_inlays: &'a [Vec<(usize, String)>],
-        line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
-        wrap_bytes: &'a [Vec<usize>],
-        start_column_after_wrap: &'a [usize],
-        fold_column: &'a [usize],
+        inline_text_inlays: &'a [Vec<(usize, String)>],
+        inline_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+        soft_breaks: &'a [Vec<usize>],
+        start_col_after_wrap: &'a [usize],
+        fold_col: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
         summed_heights: &'a [f64],
-        selections: &'a [Selection],
-        latest_selection_index: usize,
+        sels: &'a [Selection],
+        latest_sel_index: usize,
     ) -> Self {
         Self {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            widget_inlays,
+            block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
         }
     }
 
@@ -16610,7 +16610,7 @@ impl<'a> Document<'a> {
         let mut max_width = 0.0f64;
         for element in self.elements(0, self.line_count()) {
             max_width = max_width.max(match element {
-                Element::Line(_, line) => line.compute_width(self.settings.tab_column_count),
+                Element::Line(_, line) => line.compute_width(self.settings.tab_col_count),
                 Element::Widget(_, widget) => widget.width,
             });
         }
@@ -16655,11 +16655,11 @@ impl<'a> Document<'a> {
         Line::new(
             &self.text.as_lines()[line],
             &self.tokenizer.token_infos()[line],
-            &self.text_inlays[line],
-            &self.line_widget_inlays[line],
-            &self.wrap_bytes[line],
-            self.start_column_after_wrap[line],
-            self.fold_column[line],
+            &self.inline_text_inlays[line],
+            &self.inline_widget_inlays[line],
+            &self.soft_breaks[line],
+            self.start_col_after_wrap[line],
+            self.fold_col[line],
             self.scale[line],
         )
     }
@@ -16668,11 +16668,11 @@ impl<'a> Document<'a> {
         Lines {
             text: self.text.as_lines()[start_line..end_line].iter(),
             token_infos: self.tokenizer.token_infos()[start_line..end_line].iter(),
-            text_inlays: self.text_inlays[start_line..end_line].iter(),
-            line_widget_inlays: self.line_widget_inlays[start_line..end_line].iter(),
-            wrap_bytes: self.wrap_bytes[start_line..end_line].iter(),
-            start_column_after_wrap: self.start_column_after_wrap[start_line..end_line].iter(),
-            fold_column: self.fold_column[start_line..end_line].iter(),
+            inline_text_inlays: self.inline_text_inlays[start_line..end_line].iter(),
+            inline_widget_inlays: self.inline_widget_inlays[start_line..end_line].iter(),
+            soft_breaks: self.soft_breaks[start_line..end_line].iter(),
+            start_col_after_wrap: self.start_col_after_wrap[start_line..end_line].iter(),
+            fold_col: self.fold_col[start_line..end_line].iter(),
             scale: self.scale[start_line..end_line].iter(),
         }
     }
@@ -16693,21 +16693,21 @@ impl<'a> Document<'a> {
                 .iter()
                 .position(|(line, _)| *line >= start_line)
                 .unwrap_or(self.line_inlays.len())..],
-            widget_inlays: &self.widget_inlays[self
-                .widget_inlays
+            block_widget_inlays: &self.block_widget_inlays[self
+                .block_widget_inlays
                 .iter()
                 .position(|((line, _), _)| *line >= start_line)
-                .unwrap_or(self.widget_inlays.len())..],
+                .unwrap_or(self.block_widget_inlays.len())..],
             line: start_line,
         }
     }
 
-    pub fn selections(&self) -> &'a [Selection] {
-        self.selections
+    pub fn sels(&self) -> &'a [Selection] {
+        self.sels
     }
 
-    pub fn latest_selection_index(&self) -> usize {
-        self.latest_selection_index
+    pub fn latest_sel_index(&self) -> usize {
+        self.latest_sel_index
     }
 }
 
@@ -16715,11 +16715,11 @@ impl<'a> Document<'a> {
 pub struct Lines<'a> {
     text: slice::Iter<'a, String>,
     token_infos: slice::Iter<'a, Vec<TokenInfo>>,
-    text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
-    line_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: slice::Iter<'a, Vec<usize>>,
-    start_column_after_wrap: slice::Iter<'a, usize>,
-    fold_column: slice::Iter<'a, usize>,
+    inline_text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
+    inline_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: slice::Iter<'a, Vec<usize>>,
+    start_col_after_wrap: slice::Iter<'a, usize>,
+    fold_col: slice::Iter<'a, usize>,
     scale: slice::Iter<'a, f64>,
 }
 
@@ -16730,11 +16730,11 @@ impl<'a> Iterator for Lines<'a> {
         Some(Line::new(
             self.text.next()?,
             self.token_infos.next()?,
-            self.text_inlays.next()?,
-            self.line_widget_inlays.next()?,
-            self.wrap_bytes.next()?,
-            *self.start_column_after_wrap.next()?,
-            *self.fold_column.next()?,
+            self.inline_text_inlays.next()?,
+            self.inline_widget_inlays.next()?,
+            self.soft_breaks.next()?,
+            *self.start_col_after_wrap.next()?,
+            *self.fold_col.next()?,
             *self.scale.next()?,
         ))
     }
@@ -16744,7 +16744,7 @@ impl<'a> Iterator for Lines<'a> {
 pub struct Elements<'a> {
     lines: Lines<'a>,
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     line: usize,
 }
 
@@ -16753,14 +16753,14 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
@@ -16773,14 +16773,14 @@ impl<'a> Iterator for Elements<'a> {
             return Some(Element::Line(true, line.as_line()));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((line, bias), _)| {
                 *line == self.line && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let line = self.lines.next()?;
@@ -16956,7 +16956,7 @@ pub mod line;
 pub mod move_ops;
 pub mod position;
 pub mod range;
-pub mod selection;
+pub mod sel;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -16966,7 +16966,7 @@ pub mod tokenizer;
 
 pub use crate::{
     bias::Affinity, code_editor::CodeEditor, context::Context, diff::Diff, document::Document,
-    length::Length, line::Line, position::Position, range::Range, selection::Selection,
+    length::Length, line::Line, position::Position, range::Range, sel::Selection,
     settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
 };
 use {
@@ -16981,11 +16981,11 @@ use {
 pub struct Line<'a> {
     text: &'a str,
     token_infos: &'a [TokenInfo],
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
-    wrap_bytes: &'a [usize],
-    start_column_after_wrap: usize,
-    fold_column: usize,
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
+    soft_breaks: &'a [usize],
+    start_col_after_wrap: usize,
+    fold_col: usize,
     scale: f64,
 }
 
@@ -16993,142 +16993,142 @@ impl<'a> Line<'a> {
     pub fn new(
         text: &'a str,
         token_infos: &'a [TokenInfo],
-        text_inlays: &'a [(usize, String)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
-        wrap_bytes: &'a [usize],
-        start_column_after_wrap: usize,
-        fold_column: usize,
+        inline_text_inlays: &'a [(usize, String)],
+        block_widget_inlays: &'a [((usize, Affinity), Widget)],
+        soft_breaks: &'a [usize],
+        start_col_after_wrap: usize,
+        fold_col: usize,
         scale: f64,
     ) -> Self {
         Self {
             text,
             token_infos,
-            text_inlays,
-            widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            block_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
         }
     }
 
-    pub fn compute_column_count(&self, tab_column_count: usize) -> usize {
+    pub fn compute_col_count(&self, tab_col_count: usize) -> usize {
         use crate::str::StrExt;
 
-        let mut max_summed_column_count = 0;
-        let mut summed_column_count = 0;
+        let mut max_summed_col_count = 0;
+        let mut summed_col_count = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(_, token) => {
-                    summed_column_count += token.text.column_count(tab_column_count);
+                    summed_col_count += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    summed_column_count += widget.column_count;
+                    summed_col_count += widget.col_count;
                 }
                 WrappedElement::Wrap => {
-                    max_summed_column_count = max_summed_column_count.max(summed_column_count);
-                    summed_column_count = self.start_column_after_wrap();
+                    max_summed_col_count = max_summed_col_count.max(summed_col_count);
+                    summed_col_count = self.start_col_after_wrap();
                 }
             }
         }
-        max_summed_column_count.max(summed_column_count)
+        max_summed_col_count.max(summed_col_count)
     }
 
     pub fn row_count(&self) -> usize {
-        self.wrap_bytes.len() + 1
+        self.soft_breaks.len() + 1
     }
 
-    pub fn compute_width(&self, tab_column_count: usize) -> f64 {
-        self.column_to_x(self.compute_column_count(tab_column_count))
+    pub fn compute_width(&self, tab_col_count: usize) -> f64 {
+        self.col_to_x(self.compute_col_count(tab_col_count))
     }
 
     pub fn height(&self) -> f64 {
         self.scale * self.row_count() as f64
     }
 
-    pub fn byte_bias_to_row_column(
+    pub fn byte_bias_to_row_col(
         &self,
         (byte, bias): (usize, Affinity),
-        tab_column_count: usize,
+        tab_col_count: usize,
     ) -> (usize, usize) {
         use crate::str::StrExt;
 
         let mut current_byte = 0;
         let mut row = 0;
-        let mut column = 0;
+        let mut col = 0;
         if byte == current_byte && bias == Affinity::Before {
-            return (row, column);
+            return (row, col);
         }
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
                         if byte == current_byte && bias == Affinity::After {
-                            return (row, column);
+                            return (row, col);
                         }
                         current_byte += grapheme.len();
-                        column += grapheme.column_count(tab_column_count);
+                        col += grapheme.col_count(tab_col_count);
                         if byte == current_byte && bias == Affinity::Before {
-                            return (row, column);
+                            return (row, col);
                         }
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    column += token.text.column_count(tab_column_count);
+                    col += token.text.col_count(tab_col_count);
                 }
                 WrappedElement::Widget(_, widget) => {
-                    column += widget.column_count;
+                    col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     row += 1;
-                    column = self.start_column_after_wrap();
+                    col = self.start_col_after_wrap();
                 }
             }
         }
         if byte == current_byte && bias == Affinity::After {
-            return (row, column);
+            return (row, col);
         }
         panic!()
     }
 
-    pub fn row_column_to_byte_bias(
+    pub fn row_col_to_byte_bias(
         &self,
-        (row, column): (usize, usize),
-        tab_column_count: usize,
+        (row, col): (usize, usize),
+        tab_col_count: usize,
     ) -> (usize, Affinity) {
         use crate::str::StrExt;
 
         let mut byte = 0;
         let mut current_row = 0;
-        let mut current_column = 0;
+        let mut current_col = 0;
         for wrapped_element in self.wrapped_elements() {
             match wrapped_element {
                 WrappedElement::Token(false, token) => {
                     for grapheme in token.text.graphemes() {
-                        let next_column = current_column + grapheme.column_count(tab_column_count);
-                        if current_row == row && (current_column..next_column).contains(&column) {
+                        let next_col = current_col + grapheme.col_count(tab_col_count);
+                        if current_row == row && (current_col..next_col).contains(&col) {
                             return (byte, Affinity::After);
                         }
                         byte = byte + grapheme.len();
-                        current_column = next_column;
+                        current_col = next_col;
                     }
                 }
                 WrappedElement::Token(true, token) => {
-                    let next_column = current_column + token.text.column_count(tab_column_count);
-                    if current_row == row && (current_column..next_column).contains(&column) {
+                    let next_col = current_col + token.text.col_count(tab_col_count);
+                    if current_row == row && (current_col..next_col).contains(&col) {
                         return (byte, Affinity::Before);
                     }
-                    current_column = next_column;
+                    current_col = next_col;
                 }
                 WrappedElement::Widget(_, widget) => {
-                    current_column += widget.column_count;
+                    current_col += widget.col_count;
                 }
                 WrappedElement::Wrap => {
                     if current_row == row {
                         return (byte, Affinity::Before);
                     }
                     current_row += 1;
-                    current_column = self.start_column_after_wrap();
+                    current_col = self.start_col_after_wrap();
                 }
             }
         }
@@ -17138,10 +17138,10 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    pub fn column_to_x(&self, column: usize) -> f64 {
-        let column_count_before_fold_column = column.min(self.fold_column);
-        let column_count_after_fold_column = column - column_count_before_fold_column;
-        column_count_before_fold_column as f64 + self.scale * column_count_after_fold_column as f64
+    pub fn col_to_x(&self, col: usize) -> f64 {
+        let col_count_before_fold_col = col.min(self.fold_col);
+        let col_count_after_fold_col = col - col_count_before_fold_col;
+        col_count_before_fold_col as f64 + self.scale * col_count_after_fold_col as f64
     }
 
     pub fn text(&self) -> &'a str {
@@ -17160,8 +17160,8 @@ impl<'a> Line<'a> {
         Elements {
             token: tokens.next(),
             tokens,
-            text_inlays: self.text_inlays,
-            widget_inlays: self.widget_inlays,
+            inline_text_inlays: self.inline_text_inlays,
+            block_widget_inlays: self.block_widget_inlays,
             byte: 0,
         }
     }
@@ -17171,17 +17171,17 @@ impl<'a> Line<'a> {
         WrappedElements {
             element: elements.next(),
             elements,
-            wrap_bytes: self.wrap_bytes,
+            soft_breaks: self.soft_breaks,
             byte: 0,
         }
     }
 
-    pub fn start_column_after_wrap(&self) -> usize {
-        self.start_column_after_wrap
+    pub fn start_col_after_wrap(&self) -> usize {
+        self.start_col_after_wrap
     }
 
-    pub fn fold_column(&self) -> usize {
-        self.fold_column
+    pub fn fold_col(&self) -> usize {
+        self.fold_col
     }
 
     pub fn scale(&self) -> f64 {
@@ -17221,8 +17221,8 @@ impl<'a> Iterator for Tokens<'a> {
 pub struct Elements<'a> {
     token: Option<Token<'a>>,
     tokens: Tokens<'a>,
-    text_inlays: &'a [(usize, String)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    inline_text_inlays: &'a [(usize, String)],
+    block_widget_inlays: &'a [((usize, Affinity), Widget)],
     byte: usize,
 }
 
@@ -17231,42 +17231,42 @@ impl<'a> Iterator for Elements<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::Before
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::Before, *widget));
         }
         if self
-            .text_inlays
+            .inline_text_inlays
             .first()
             .map_or(false, |(byte, _)| *byte == self.byte)
         {
-            let ((_, text), text_inlays) = self.text_inlays.split_first().unwrap();
-            self.text_inlays = text_inlays;
+            let ((_, text), inline_text_inlays) = self.inline_text_inlays.split_first().unwrap();
+            self.inline_text_inlays = inline_text_inlays;
             return Some(Element::Token(true, Token::new(text, TokenKind::Unknown)));
         }
         if self
-            .widget_inlays
+            .block_widget_inlays
             .first()
             .map_or(false, |((byte, bias), _)| {
                 *byte == self.byte && *bias == Affinity::After
             })
         {
-            let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
-            self.widget_inlays = widget_inlays;
+            let ((_, widget), block_widget_inlays) = self.block_widget_inlays.split_first().unwrap();
+            self.block_widget_inlays = block_widget_inlays;
             return Some(Element::Widget(Affinity::After, *widget));
         }
         let token = self.token.take()?;
         let mut byte_count = token.text.len();
-        if let Some((byte, _)) = self.text_inlays.first() {
+        if let Some((byte, _)) = self.inline_text_inlays.first() {
             byte_count = byte_count.min(*byte - self.byte);
         }
-        if let Some(((byte, _), _)) = self.widget_inlays.first() {
+        if let Some(((byte, _), _)) = self.block_widget_inlays.first() {
             byte_count = byte_count.min(byte - self.byte);
         }
         let token = if byte_count < token.text.len() {
@@ -17292,7 +17292,7 @@ pub enum Element<'a> {
 pub struct WrappedElements<'a> {
     element: Option<Element<'a>>,
     elements: Elements<'a>,
-    wrap_bytes: &'a [usize],
+    soft_breaks: &'a [usize],
     byte: usize,
 }
 
@@ -17308,17 +17308,17 @@ impl<'a> Iterator for WrappedElements<'a> {
             return Some(WrappedElement::Widget(Affinity::Before, widget));
         }
         if self
-            .wrap_bytes
+            .soft_breaks
             .first()
             .map_or(false, |byte| *byte == self.byte)
         {
-            self.wrap_bytes = &self.wrap_bytes[1..];
+            self.soft_breaks = &self.soft_breaks[1..];
             return Some(WrappedElement::Wrap);
         }
         Some(match self.element.take()? {
             Element::Token(is_inlay, token) => {
                 let mut byte_count = token.text.len();
-                if let Some(byte) = self.wrap_bytes.first() {
+                if let Some(byte) = self.soft_breaks.first() {
                     byte_count = byte_count.min(*byte - self.byte);
                 }
                 let token = if byte_count < token.text.len() {
@@ -17351,12 +17351,12 @@ pub enum WrappedElement<'a> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Widget {
     pub id: usize,
-    pub column_count: usize,
+    pub col_count: usize,
 }
 
 impl Widget {
-    pub fn new(id: usize, column_count: usize) -> Self {
-        Self { id, column_count }
+    pub fn new(id: usize, col_count: usize) -> Self {
+        Self { id, col_count }
     }
 }
 mod app;
@@ -17395,29 +17395,29 @@ pub fn move_right(
 pub fn move_up(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_first_row_of_line(document, (position, bias)) {
-        return move_to_prev_row_of_line(document, (position, bias), preferred_column);
+        return move_to_prev_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, bias), preferred_column);
+        return move_to_last_row_of_prev_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 pub fn move_down(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     if !is_at_last_row_of_line(document, (position, bias)) {
-        return move_to_next_row_of_line(document, (position, bias), preferred_column);
+        return move_to_next_row_of_line(document, (position, bias), preferred_col);
     }
     if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, bias), preferred_column);
+        return move_to_first_row_of_next_line(document, (position, bias), preferred_col);
     }
-    ((position, bias), preferred_column)
+    ((position, bias), preferred_col)
 }
 
 fn is_at_start_of_line(position: Position) -> bool {
@@ -17434,9 +17434,9 @@ fn is_at_first_row_of_line(
 ) -> bool {
     document
         .line(position.line)
-        .byte_bias_to_row_column(
+        .byte_bias_to_row_col(
             (position.byte, bias),
-            document.settings().tab_column_count,
+            document.settings().tab_col_count,
         )
         .0
         == 0
@@ -17447,9 +17447,9 @@ fn is_at_last_row_of_line(
     (position, bias): (Position, Affinity),
 ) -> bool {
     let line = document.line(position.line);
-    line.byte_bias_to_row_column(
+    line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     )
     .0 == line.row_count() - 1
 }
@@ -17531,77 +17531,77 @@ fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Opti
 fn move_to_prev_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row - 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_next_row_of_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
     let line = document.line(position.line);
-    let (row, mut column) = line.byte_bias_to_row_column(
+    let (row, mut col) = line.byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let (byte, bias) =
-        line.row_column_to_byte_bias((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), bias), Some(column))
+        line.row_col_to_byte_bias((row + 1, col), document.settings().tab_col_count);
+    ((Position::new(position.line, byte), bias), Some(col))
 }
 
 fn move_to_last_row_of_prev_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let prev_line = position.line - 1;
     let prev_line_ref = document.line(prev_line);
-    let (byte, bias) = prev_line_ref.row_column_to_byte_bias(
-        (prev_line_ref.row_count() - 1, column),
-        document.settings().tab_column_count,
+    let (byte, bias) = prev_line_ref.row_col_to_byte_bias(
+        (prev_line_ref.row_count() - 1, col),
+        document.settings().tab_col_count,
     );
-    ((Position::new(prev_line, byte), bias), Some(column))
+    ((Position::new(prev_line, byte), bias), Some(col))
 }
 
 fn move_to_first_row_of_next_line(
     document: &Document<'_>,
     (position, bias): (Position, Affinity),
-    preferred_column: Option<usize>,
+    preferred_col: Option<usize>,
 ) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_bias_to_row_column(
+    let (_, mut col) = document.line(position.line).byte_bias_to_row_col(
         (position.byte, bias),
-        document.settings().tab_column_count,
+        document.settings().tab_col_count,
     );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
+    if let Some(preferred_col) = preferred_col {
+        col = preferred_col;
     }
     let next_line = position.line + 1;
     let (byte, bias) = document
         .line(next_line)
-        .row_column_to_byte_bias((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), bias), Some(column))
+        .row_col_to_byte_bias((0, col), document.settings().tab_col_count);
+    ((Position::new(next_line, byte), bias), Some(col))
 }
 use {
     crate::{diff::Strategy, Diff, Length},
@@ -17748,19 +17748,19 @@ use crate::{Affinity, Length, Position};
 pub struct Selection {
     pub anchor: (Position, Affinity),
     pub cursor: (Position, Affinity),
-    pub preferred_column: Option<usize>,
+    pub preferred_col: Option<usize>,
 }
 
 impl Selection {
     pub fn new(
         anchor: (Position, Affinity),
         cursor: (Position, Affinity),
-        preferred_column: Option<usize>,
+        preferred_col: Option<usize>,
     ) -> Self {
         Self {
             anchor,
             cursor,
-            preferred_column,
+            preferred_col,
         }
     }
 
@@ -17768,7 +17768,7 @@ impl Selection {
         Self {
             anchor: cursor,
             cursor,
-            preferred_column: None,
+            preferred_col: None,
         }
     }
 
@@ -17812,25 +17812,25 @@ impl Selection {
         self,
         f: impl FnOnce((Position, Affinity), Option<usize>) -> ((Position, Affinity), Option<usize>),
     ) -> Self {
-        let (cursor, column) = f(self.cursor, self.preferred_column);
+        let (cursor, col) = f(self.cursor, self.preferred_col);
         Self {
             cursor,
-            preferred_column: column,
+            preferred_col: col,
             ..self
         }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Settings {
-    pub tab_column_count: usize,
-    pub indent_column_count: usize,
+    pub tab_col_count: usize,
+    pub indent_col_count: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            tab_column_count: 4,
-            indent_column_count: 4,
+            tab_col_count: 4,
+            indent_col_count: 4,
         }
     }
 }
@@ -17878,17 +17878,17 @@ impl State {
             &self.settings,
             &editor.text,
             &editor.tokenizer,
-            &editor.text_inlays,
-            &editor.line_widget_inlays,
-            &view.wrap_bytes,
-            &view.start_column_after_wrap,
-            &view.fold_column,
+            &editor.inline_text_inlays,
+            &editor.inline_widget_inlays,
+            &view.soft_breaks,
+            &view.start_col_after_wrap,
+            &view.fold_col,
             &view.scale,
             &editor.line_inlays,
-            &editor.document_widget_inlays,
+            &editor.document_block_widget_inlays,
             &view.summed_heights,
-            &view.selections,
-            view.latest_selection_index,
+            &view.sels,
+            view.latest_sel_index,
         )
     }
 
@@ -17899,17 +17899,17 @@ impl State {
             &mut self.settings,
             &mut editor.text,
             &mut editor.tokenizer,
-            &mut editor.text_inlays,
-            &mut editor.line_widget_inlays,
-            &mut view.wrap_bytes,
-            &mut view.start_column_after_wrap,
-            &mut view.fold_column,
+            &mut editor.inline_text_inlays,
+            &mut editor.inline_widget_inlays,
+            &mut view.soft_breaks,
+            &mut view.start_col_after_wrap,
+            &mut view.fold_col,
             &mut view.scale,
             &mut editor.line_inlays,
-            &mut editor.document_widget_inlays,
+            &mut editor.document_block_widget_inlays,
             &mut view.summed_heights,
-            &mut view.selections,
-            &mut view.latest_selection_index,
+            &mut view.sels,
+            &mut view.latest_sel_index,
             &mut view.folding_lines,
             &mut view.unfolding_lines,
         )
@@ -17924,13 +17924,13 @@ impl State {
             view_id,
             View {
                 editor_id,
-                wrap_bytes: (0..line_count).map(|_| [].into()).collect(),
-                start_column_after_wrap: (0..line_count).map(|_| 0).collect(),
-                fold_column: (0..line_count).map(|_| 0).collect(),
+                soft_breaks: (0..line_count).map(|_| [].into()).collect(),
+                start_col_after_wrap: (0..line_count).map(|_| 0).collect(),
+                fold_col: (0..line_count).map(|_| 0).collect(),
                 scale: (0..line_count).map(|_| 1.0).collect(),
                 summed_heights: Vec::new(),
-                selections: [Selection::default()].into(),
-                latest_selection_index: 0,
+                sels: [Selection::default()].into(),
+                latest_sel_index: 0,
                 folding_lines: HashSet::new(),
                 unfolding_lines: HashSet::new(),
             },
@@ -17953,7 +17953,7 @@ impl State {
             Editor {
                 text,
                 tokenizer,
-                text_inlays: (0..line_count)
+                inline_text_inlays: (0..line_count)
                     .map(|line| {
                         if line % 2 == 0 {
                             [
@@ -17987,8 +17987,8 @@ impl State {
                     ),
                 ]
                 .into(),
-                line_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
-                document_widget_inlays: [].into(),
+                inline_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
+                document_block_widget_inlays: [].into(),
             },
         );
         Ok(editor_id)
@@ -18001,13 +18001,13 @@ pub struct ViewId(usize);
 #[derive(Clone, Debug, PartialEq)]
 struct View {
     editor_id: EditorId,
-    fold_column: Vec<usize>,
+    fold_col: Vec<usize>,
     scale: Vec<f64>,
-    wrap_bytes: Vec<Vec<usize>>,
-    start_column_after_wrap: Vec<usize>,
+    soft_breaks: Vec<Vec<usize>>,
+    start_col_after_wrap: Vec<usize>,
     summed_heights: Vec<f64>,
-    selections: Vec<Selection>,
-    latest_selection_index: usize,
+    sels: Vec<Selection>,
+    latest_sel_index: usize,
     folding_lines: HashSet<usize>,
     unfolding_lines: HashSet<usize>,
 }
@@ -18019,14 +18019,14 @@ struct EditorId(usize);
 struct Editor {
     text: Text,
     tokenizer: Tokenizer,
-    text_inlays: Vec<Vec<(usize, String)>>,
-    line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
+    inline_text_inlays: Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,
-    document_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
 }
 pub trait StrExt {
-    fn column_count(&self, tab_column_count: usize) -> usize;
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize;
+    fn col_count(&self, tab_col_count: usize) -> usize;
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize;
     fn indentation(&self) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn grapheme_indices(&self) -> GraphemeIndices<'_>;
@@ -18034,16 +18034,16 @@ pub trait StrExt {
 }
 
 impl StrExt for str {
-    fn column_count(&self, tab_column_count: usize) -> usize {
+    fn col_count(&self, tab_col_count: usize) -> usize {
         use crate::char::CharExt;
 
         self.chars()
-            .map(|char| char.column_count(tab_column_count))
+            .map(|char| char.col_count(tab_col_count))
             .sum()
     }
 
-    fn indent_level(&self, tab_column_count: usize, indent_column_count: usize) -> usize {
-        self.indentation().column_count(tab_column_count) / indent_column_count
+    fn indent_level(&self, tab_col_count: usize, indent_col_count: usize) -> usize {
+        self.indentation().col_count(tab_col_count) / indent_col_count
     }
 
     fn indentation(&self) -> &str {
@@ -18803,13 +18803,13 @@ impl Default for State {
 
 app_main!(App);
 pub trait CharExt {
-    fn column_count(self, tab_column_count: usize) -> usize;
+    fn col_count(self, tab_col_count: usize) -> usize;
 }
 
 impl CharExt for char {
-    fn column_count(self, tab_column_count: usize) -> usize {
+    fn col_count(self, tab_col_count: usize) -> usize {
         match self {
-            '\t' => tab_column_count,
+            '\t' => tab_col_count,
             _ => 1,
         }
     }
@@ -18893,7 +18893,7 @@ live_design! {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
         }
-        draw_selection: {
+        draw_sel: {
             draw_depth: 1.0,
         }
         draw_cursor: {
@@ -18912,7 +18912,7 @@ pub struct CodeEditor {
     #[live]
     draw_text: DrawText,
     #[live]
-    draw_selection: DrawSelection,
+    draw_sel: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
     #[live]
@@ -18932,7 +18932,7 @@ impl CodeEditor {
         self.begin(cx, context);
         let document = context.document();
         self.draw_text(cx, &document);
-        self.draw_selections(cx, &document);
+        self.draw_sels(cx, &document);
         self.end(cx, context);
     }
 
@@ -19012,10 +19012,10 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
-                        context.fold_line(line, 2 * settings.indent_column_count);
+                        context.fold_line(line, 2 * settings.indent_col_count);
                     }
                 }
                 cx.redraw_all();
@@ -19031,7 +19031,7 @@ impl CodeEditor {
                     if document
                         .line(line)
                         .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
+                        .indent_level(settings.tab_col_count, settings.indent_col_count)
                         >= 2
                     {
                         context.unfold_line(line);
@@ -19105,7 +19105,7 @@ impl CodeEditor {
 
         let mut y = document.line_y(self.start_line);
         for element in document.elements(self.start_line, self.end_line) {
-            let mut column = 0;
+            let mut col = 0;
             match element {
                 document::Element::Line(_, line) => {
                     self.draw_text.font_scale = line.scale();
@@ -19125,22 +19125,22 @@ impl CodeEditor {
                                 self.draw_text.draw_abs(
                                     cx,
                                     DVec2 {
-                                        x: line.column_to_x(column),
+                                        x: line.col_to_x(col),
                                         y,
                                     } * self.cell_size
                                         - self.viewport_rect.pos,
                                     token.text,
                                 );
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 y += line.scale();
-                                column = line.start_column_after_wrap();
+                                col = line.start_col_after_wrap();
                             }
                         }
                     }
@@ -19153,28 +19153,28 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        let mut active_selection = None;
-        let mut selections = document.selections();
-        while selections
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+        let mut active_sel = None;
+        let mut sels = document.sels();
+        while sels
             .first()
-            .map_or(false, |selection| selection.end().0.line < self.start_line)
+            .map_or(false, |sel| sel.end().0.line < self.start_line)
         {
-            selections = &selections[1..];
+            sels = &sels[1..];
         }
-        if selections.first().map_or(false, |selection| {
-            selection.start().0.line < self.start_line
+        if sels.first().map_or(false, |sel| {
+            sel.start().0.line < self.start_line
         }) {
-            let (selection, remaining_selections) = selections.split_first().unwrap();
-            selections = remaining_selections;
-            active_selection = Some(ActiveSelection::new(*selection, 0.0));
+            let (sel, remaining_sels) = sels.split_first().unwrap();
+            sels = remaining_sels;
+            active_sel = Some(ActiveSelection::new(*sel, 0.0));
         }
         DrawSelectionsContext {
             code_editor: self,
-            active_selection,
-            selections,
+            active_sel,
+            sels,
         }
-        .draw_selections(cx, document)
+        .draw_sels(cx, document)
     }
 
     fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
@@ -19187,18 +19187,18 @@ impl CodeEditor {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     for wrapped_element in line_ref.wrapped_elements() {
                         match wrapped_element {
                             line::WrappedElement::Token(false, token) => {
                                 for grapheme in token.text.graphemes() {
                                     let next_byte = byte + grapheme.len();
-                                    let next_column = column
+                                    let next_col = col
                                         + grapheme
-                                            .column_count(document.settings().tab_column_count);
+                                            .col_count(document.settings().tab_col_count);
                                     let next_y = y + line_ref.scale();
-                                    let x = line_ref.column_to_x(column);
-                                    let next_x = line_ref.column_to_x(next_column);
+                                    let x = line_ref.col_to_x(col);
+                                    let next_x = line_ref.col_to_x(next_col);
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
@@ -19215,24 +19215,24 @@ impl CodeEditor {
                                         }
                                     }
                                     byte = next_byte;
-                                    column = next_column;
+                                    col = next_col;
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                let next_column = column
+                                let next_col = col
                                     + token
                                         .text
-                                        .column_count(document.settings().tab_column_count);
-                                let x = line_ref.column_to_x(column);
-                                let next_x = line_ref.column_to_x(next_column);
+                                        .col_count(document.settings().tab_col_count);
+                                let x = line_ref.col_to_x(col);
+                                let next_x = line_ref.col_to_x(next_col);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
-                                column = next_column;
+                                col = next_col;
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
@@ -19240,7 +19240,7 @@ impl CodeEditor {
                                     return Some((Position::new(line, byte), Affinity::Before));
                                 }
                                 y = next_y;
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -19269,12 +19269,12 @@ impl CodeEditor {
 
 struct DrawSelectionsContext<'a> {
     code_editor: &'a mut CodeEditor,
-    active_selection: Option<ActiveSelection>,
-    selections: &'a [Selection],
+    active_sel: Option<ActiveSelection>,
+    sels: &'a [Selection],
 }
 
 impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_sels(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
         use crate::{document, line, str::StrExt};
 
         let mut line = self.code_editor.start_line;
@@ -19283,13 +19283,13 @@ impl<'a> DrawSelectionsContext<'a> {
             match element {
                 document::Element::Line(false, line_ref) => {
                     let mut byte = 0;
-                    let mut column = 0;
+                    let mut col = 0;
                     self.handle_event(
                         cx,
                         line,
                         byte,
                         Affinity::Before,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
@@ -19302,44 +19302,44 @@ impl<'a> DrawSelectionsContext<'a> {
                                         line,
                                         byte,
                                         Affinity::After,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                     byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count(document.settings().tab_column_count);
+                                    col +=
+                                        grapheme.col_count(document.settings().tab_col_count);
                                     self.handle_event(
                                         cx,
                                         line,
                                         byte,
                                         Affinity::Before,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                             }
                             line::WrappedElement::Token(true, token) => {
-                                column += token
+                                col += token
                                     .text
-                                    .column_count(document.settings().tab_column_count);
+                                    .col_count(document.settings().tab_col_count);
                             }
                             line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
+                                col += widget.col_count;
                             }
                             line::WrappedElement::Wrap => {
-                                column += 1;
-                                if self.active_selection.is_some() {
-                                    self.draw_selection(
+                                col += 1;
+                                if self.active_sel.is_some() {
+                                    self.draw_sel(
                                         cx,
-                                        line_ref.column_to_x(column),
+                                        line_ref.col_to_x(col),
                                         y,
                                         line_ref.scale(),
                                     );
                                 }
                                 y += line_ref.scale();
-                                column = line_ref.start_column_after_wrap();
+                                col = line_ref.start_col_after_wrap();
                             }
                         }
                     }
@@ -19348,13 +19348,13 @@ impl<'a> DrawSelectionsContext<'a> {
                         line,
                         byte,
                         Affinity::After,
-                        line_ref.column_to_x(column),
+                        line_ref.col_to_x(col),
                         y,
                         line_ref.scale(),
                     );
-                    column += 1;
-                    if self.active_selection.is_some() {
-                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    col += 1;
+                    if self.active_sel.is_some() {
+                        self.draw_sel(cx, line_ref.col_to_x(col), y, line_ref.scale());
                     }
                     line += 1;
                     y += line_ref.scale();
@@ -19367,8 +19367,8 @@ impl<'a> DrawSelectionsContext<'a> {
                 }
             }
         }
-        if self.active_selection.is_some() {
-            self.code_editor.draw_selection.end(cx);
+        if self.active_sel.is_some() {
+            self.code_editor.draw_sel.end(cx);
         }
     }
 
@@ -19383,41 +19383,41 @@ impl<'a> DrawSelectionsContext<'a> {
         height: f64,
     ) {
         let position = Position::new(line, byte);
-        if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, bias)
+        if self.active_sel.as_ref().map_or(false, |sel| {
+            sel.sel.end() == (position, bias)
         }) {
-            self.draw_selection(cx, x, y, height);
-            self.code_editor.draw_selection.end(cx);
-            let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, bias) {
+            self.draw_sel(cx, x, y, height);
+            self.code_editor.draw_sel.end(cx);
+            let sel = self.active_sel.take().unwrap().sel;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
-            .selections
+            .sels
             .first()
-            .map_or(false, |selection| selection.start() == (position, bias))
+            .map_or(false, |sel| sel.start() == (position, bias))
         {
-            let (selection, selections) = self.selections.split_first().unwrap();
-            self.selections = selections;
-            if selection.cursor == (position, bias) {
+            let (sel, sels) = self.sels.split_first().unwrap();
+            self.sels = sels;
+            if sel.cursor == (position, bias) {
                 self.draw_cursor(cx, x, y, height);
             }
-            if !selection.is_empty() {
-                self.active_selection = Some(ActiveSelection {
-                    selection: *selection,
+            if !sel.is_empty() {
+                self.active_sel = Some(ActiveSelection {
+                    sel: *sel,
                     start_x: x,
                 });
             }
-            self.code_editor.draw_selection.begin();
+            self.code_editor.draw_sel.begin();
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_sel(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
         use std::mem;
 
-        let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
-        self.code_editor.draw_selection.draw(
+        let start_x = mem::take(&mut self.active_sel.as_mut().unwrap().start_x);
+        self.code_editor.draw_sel.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
@@ -19447,13 +19447,13 @@ impl<'a> DrawSelectionsContext<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
-    selection: Selection,
+    sel: Selection,
     start_x: f64,
 }
 
 impl ActiveSelection {
-    fn new(selection: Selection, start_x: f64) -> Self {
-        Self { selection, start_x }
+    fn new(sel: Selection, start_x: f64) -> Self {
+        Self { sel, start_x }
     }
 }
 
@@ -19546,17 +19546,17 @@ pub struct Context<'a> {
     settings: &'a mut Settings,
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
-    text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-    line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-    wrap_bytes: &'a mut Vec<Vec<usize>>,
-    start_column_after_wrap: &'a mut Vec<usize>,
-    fold_column: &'a mut Vec<usize>,
+    inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+    inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+    soft_breaks: &'a mut Vec<Vec<usize>>,
+    start_col_after_wrap: &'a mut Vec<usize>,
+    fold_col: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+    document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    selections: &'a mut Vec<Selection>,
-    latest_selection_index: &'a mut usize,
+    sels: &'a mut Vec<Selection>,
+    latest_sel_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -19566,17 +19566,17 @@ impl<'a> Context<'a> {
         settings: &'a mut Settings,
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
-        text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-        line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
-        wrap_bytes: &'a mut Vec<Vec<usize>>,
-        start_column_after_wrap: &'a mut Vec<usize>,
-        fold_column: &'a mut Vec<usize>,
+        inline_text_inlays: &'a mut Vec<Vec<(usize, String)>>,
+        inline_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+        soft_breaks: &'a mut Vec<Vec<usize>>,
+        start_col_after_wrap: &'a mut Vec<usize>,
+        fold_col: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+        document_block_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        selections: &'a mut Vec<Selection>,
-        latest_selection_index: &'a mut usize,
+        sels: &'a mut Vec<Selection>,
+        latest_sel_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -19584,17 +19584,17 @@ impl<'a> Context<'a> {
             settings,
             text,
             tokenizer,
-            text_inlays,
-            line_widget_inlays,
-            wrap_bytes,
-            start_column_after_wrap,
-            fold_column,
+            inline_text_inlays,
+            inline_widget_inlays,
+            soft_breaks,
+            start_col_after_wrap,
+            fold_col,
             scale,
             line_inlays,
-            document_widget_inlays,
+            document_block_widget_inlays,
             summed_heights,
-            selections,
-            latest_selection_index,
+            sels,
+            latest_sel_index,
             folding_lines,
             unfolding_lines,
         }
@@ -19605,51 +19605,51 @@ impl<'a> Context<'a> {
             self.settings,
             self.text,
             self.tokenizer,
-            self.text_inlays,
-            self.line_widget_inlays,
-            self.wrap_bytes,
-            self.start_column_after_wrap,
-            self.fold_column,
+            self.inline_text_inlays,
+            self.inline_widget_inlays,
+            self.soft_breaks,
+            self.start_col_after_wrap,
+            self.fold_col,
             self.scale,
             self.line_inlays,
-            self.document_widget_inlays,
+            self.document_block_widget_inlays,
             self.summed_heights,
-            self.selections,
-            *self.latest_selection_index,
+            self.sels,
+            *self.latest_sel_index,
         )
     }
 
-    pub fn wrap_lines(&mut self, max_column: usize) {
+    pub fn wrap_lines(&mut self, max_col: usize) {
         use {crate::str::StrExt, std::mem};
 
         for line in 0..self.document().line_count() {
-            let old_wrap_byte_count = self.wrap_bytes[line].len();
-            self.wrap_bytes[line].clear();
-            let mut wrap_bytes = Vec::new();
-            mem::take(&mut self.wrap_bytes[line]);
+            let old_wrap_byte_count = self.soft_breaks[line].len();
+            self.soft_breaks[line].clear();
+            let mut soft_breaks = Vec::new();
+            mem::take(&mut self.soft_breaks[line]);
             let mut byte = 0;
-            let mut column = 0;
+            let mut col = 0;
             let document = self.document();
             let line_ref = document.line(line);
-            let mut start_column_after_wrap = line_ref
+            let mut start_col_after_wrap = line_ref
                 .text()
                 .indentation()
-                .column_count(document.settings().tab_column_count);
+                .col_count(document.settings().tab_col_count);
             for element in line_ref.elements() {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            if start_column_after_wrap
-                                + string.column_count(document.settings().tab_column_count)
-                                > max_column
+                            if start_col_after_wrap
+                                + string.col_count(document.settings().tab_col_count)
+                                > max_col
                             {
-                                start_column_after_wrap = 0;
+                                start_col_after_wrap = 0;
                             }
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        if start_column_after_wrap + widget.column_count > max_column {
-                            start_column_after_wrap = 0;
+                        if start_col_after_wrap + widget.col_count > max_col {
+                            start_col_after_wrap = 0;
                         }
                     }
                 }
@@ -19658,29 +19658,29 @@ impl<'a> Context<'a> {
                 match element {
                     line::Element::Token(_, token) => {
                         for string in token.text.split_whitespace_boundaries() {
-                            let mut next_column =
-                                column + string.column_count(document.settings().tab_column_count);
-                            if next_column > max_column {
-                                next_column = start_column_after_wrap;
-                                wrap_bytes.push(byte);
+                            let mut next_col =
+                                col + string.col_count(document.settings().tab_col_count);
+                            if next_col > max_col {
+                                next_col = start_col_after_wrap;
+                                soft_breaks.push(byte);
                             }
                             byte += string.len();
-                            column = next_column;
+                            col = next_col;
                         }
                     }
                     line::Element::Widget(_, widget) => {
-                        let mut next_column = column + widget.column_count;
-                        if next_column > max_column {
-                            next_column = start_column_after_wrap;
-                            wrap_bytes.push(byte);
+                        let mut next_col = col + widget.col_count;
+                        if next_col > max_col {
+                            next_col = start_col_after_wrap;
+                            soft_breaks.push(byte);
                         }
-                        column = next_column;
+                        col = next_col;
                     }
                 }
             }
-            self.wrap_bytes[line] = wrap_bytes;
-            self.start_column_after_wrap[line] = start_column_after_wrap;
-            if self.wrap_bytes[line].len() != old_wrap_byte_count {
+            self.soft_breaks[line] = soft_breaks;
+            self.start_col_after_wrap[line] = start_col_after_wrap;
+            if self.soft_breaks[line].len() != old_wrap_byte_count {
                 self.summed_heights.truncate(line);
             }
         }
@@ -19712,58 +19712,58 @@ impl<'a> Context<'a> {
     }
 
     pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
-        self.selections.clear();
-        self.selections.push(Selection::from_cursor(cursor));
-        *self.latest_selection_index = 0;
+        self.sels.clear();
+        self.sels.push(Selection::from_cursor(cursor));
+        *self.latest_sel_index = 0;
     }
 
     pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
         use std::cmp::Ordering;
 
-        let selection = Selection::from_cursor(cursor);
-        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
-            if selection.end() <= cursor {
+        let sel = Selection::from_cursor(cursor);
+        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
+            if sel.end() <= cursor {
                 return Ordering::Less;
             }
-            if selection.start() >= cursor {
+            if sel.start() >= cursor {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.selections[index] = selection;
+                self.sels[index] = sel;
                 index
             }
             Err(index) => {
-                self.selections.insert(index, selection);
+                self.sels.insert(index, sel);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
-        let latest_selection = &mut self.selections[*self.latest_selection_index];
-        latest_selection.cursor = cursor;
+        let latest_sel = &mut self.sels[*self.latest_sel_index];
+        latest_sel.cursor = cursor;
         if !select {
-            latest_selection.anchor = cursor;
+            latest_sel.anchor = cursor;
         }
-        while *self.latest_selection_index > 0 {
-            let previous_selection_index = *self.latest_selection_index - 1;
-            let previous_selection = self.selections[previous_selection_index];
-            let latest_selection = self.selections[*self.latest_selection_index];
-            if previous_selection.should_merge(latest_selection) {
-                self.selections.remove(previous_selection_index);
-                *self.latest_selection_index -= 1;
+        while *self.latest_sel_index > 0 {
+            let previous_sel_index = *self.latest_sel_index - 1;
+            let previous_sel = self.sels[previous_sel_index];
+            let latest_sel = self.sels[*self.latest_sel_index];
+            if previous_sel.should_merge(latest_sel) {
+                self.sels.remove(previous_sel_index);
+                *self.latest_sel_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_selection_index + 1 < self.selections.len() {
-            let next_selection_index = *self.latest_selection_index + 1;
-            let latest_selection = self.selections[*self.latest_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            if latest_selection.should_merge(next_selection) {
-                self.selections.remove(next_selection_index);
+        while *self.latest_sel_index + 1 < self.sels.len() {
+            let next_sel_index = *self.latest_sel_index + 1;
+            let latest_sel = self.sels[*self.latest_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            if latest_sel.should_merge(next_sel) {
+                self.sels.remove(next_sel_index);
             } else {
                 break;
             }
@@ -19773,32 +19773,32 @@ impl<'a> Context<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_left(document, position))
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|(position, _), _| move_ops::move_right(document, position))
         });
     }
 
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_up(document, cursor, col))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+        self.modify_sels(select, |document, sel| {
+            sel.update_cursor(|cursor, col| move_ops::move_down(document, cursor, col))
         });
     }
 
@@ -19832,8 +19832,8 @@ impl<'a> Context<'a> {
         *self.summed_heights = summed_heights;
     }
 
-    pub fn fold_line(&mut self, line_index: usize, fold_column: usize) {
-        self.fold_column[line_index] = fold_column;
+    pub fn fold_line(&mut self, line_index: usize, fold_col: usize) {
+        self.fold_col[line_index] = fold_col;
         self.unfolding_lines.remove(&line_index);
         self.folding_lines.insert(line_index);
     }
@@ -19877,48 +19877,48 @@ impl<'a> Context<'a> {
         true
     }
 
-    fn modify_selections(
+    fn modify_sels(
         &mut self,
         select: bool,
         mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
     ) {
         use std::mem;
 
-        let mut selections = mem::take(self.selections);
+        let mut sels = mem::take(self.sels);
         let document = self.document();
-        for selection in &mut selections {
-            *selection = f(&document, *selection);
+        for sel in &mut sels {
+            *sel = f(&document, *sel);
             if !select {
-                *selection = selection.reset_anchor();
+                *sel = sel.reset_anchor();
             }
         }
-        *self.selections = selections;
-        let mut current_selection_index = 0;
-        while current_selection_index + 1 < self.selections.len() {
-            let next_selection_index = current_selection_index + 1;
-            let current_selection = self.selections[current_selection_index];
-            let next_selection = self.selections[next_selection_index];
-            assert!(current_selection.start() <= next_selection.start());
-            if !current_selection.should_merge(next_selection) {
-                current_selection_index += 1;
+        *self.sels = sels;
+        let mut current_sel_index = 0;
+        while current_sel_index + 1 < self.sels.len() {
+            let next_sel_index = current_sel_index + 1;
+            let current_sel = self.sels[current_sel_index];
+            let next_sel = self.sels[next_sel_index];
+            assert!(current_sel.start() <= next_sel.start());
+            if !current_sel.should_merge(next_sel) {
+                current_sel_index += 1;
                 continue;
             }
-            let start = current_selection.start().min(next_selection.start());
-            let end = current_selection.end().max(next_selection.end());
+            let start = current_sel.start().min(next_sel.start());
+            let end = current_sel.end().max(next_sel.end());
             let anchor;
             let cursor;
-            if current_selection.anchor <= next_selection.cursor {
+            if current_sel.anchor <= next_sel.cursor {
                 anchor = start;
                 cursor = end;
             } else {
                 anchor = end;
                 cursor = start;
             }
-            self.selections[current_selection_index] =
-                Selection::new(anchor, cursor, current_selection.preferred_column);
-            self.selections.remove(next_selection_index);
-            if next_selection_index < *self.latest_selection_index {
-                *self.latest_selection_index -= 1;
+            self.sels[current_sel_index] =
+                Selection::new(anchor, cursor, current_sel.preferred_col);
+            self.sels.remove(next_sel_index);
+            if next_sel_index < *self.latest_sel_index {
+                *self.latest_sel_index -= 1;
             }
         }
     }
@@ -19929,27 +19929,27 @@ impl<'a> Context<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Position::default();
         let mut diffed_prev_end = Position::default();
-        for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().0 - prev_end;
+        for sel in &mut *self.sels {
+            let distance_from_prev_end = sel.start().0 - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + selection.length();
+            let diffed_end = diffed_start + sel.length();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().0;
+            prev_end = sel.end().0;
             diffed_prev_end = diffed_end;
             let anchor;
             let cursor;
-            if selection.anchor <= selection.cursor {
-                anchor = (diffed_start, selection.start().1);
-                cursor = (diffed_end, selection.end().1);
+            if sel.anchor <= sel.cursor {
+                anchor = (diffed_start, sel.start().1);
+                cursor = (diffed_end, sel.end().1);
             } else {
-                anchor = (diffed_end, selection.end().1);
-                cursor = (diffed_start, selection.start().1);
+                anchor = (diffed_end, sel.end().1);
+                cursor = (diffed_start, sel.start().1);
             }
-            *selection = Selection::new(anchor, cursor, selection.preferred_column);
+            *sel = Selection::new(anchor, cursor, sel.preferred_col);
         }
         self.update_after_modify_text(composite_diff);
     }
@@ -19963,11 +19963,11 @@ impl<'a> Context<'a> {
                 OperationInfo::Delete(length) => {
                     let start_line = line;
                     let end_line = start_line + length.line_count;
-                    self.text_inlays.drain(start_line..end_line);
-                    self.line_widget_inlays.drain(start_line..end_line);
-                    self.wrap_bytes.drain(start_line..end_line);
-                    self.start_column_after_wrap.drain(start_line..end_line);
-                    self.fold_column.drain(start_line..end_line);
+                    self.inline_text_inlays.drain(start_line..end_line);
+                    self.inline_widget_inlays.drain(start_line..end_line);
+                    self.soft_breaks.drain(start_line..end_line);
+                    self.start_col_after_wrap.drain(start_line..end_line);
+                    self.fold_col.drain(start_line..end_line);
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
@@ -19977,15 +19977,15 @@ impl<'a> Context<'a> {
                 OperationInfo::Insert(length) => {
                     let next_line = line + 1;
                     let line_count = length.line_count;
-                    self.text_inlays
+                    self.inline_text_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.line_widget_inlays
+                    self.inline_widget_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.wrap_bytes
+                    self.soft_breaks
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
-                    self.start_column_after_wrap
+                    self.start_col_after_wrap
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
-                    self.fold_column
+                    self.fold_col
                         .splice(next_line..next_line, (0..line_count).map(|_| 0));
                     self.scale
                         .splice(next_line..next_line, (0..line_count).map(|_| 1.0));
