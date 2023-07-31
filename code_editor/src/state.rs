@@ -48,7 +48,7 @@ impl State {
             &view.fold_col,
             &view.scale,
             &editor.line_inlays,
-            &editor.document_block_widget_inlays,
+            &editor.block_widget_inlays,
             &view.summed_heights,
             &view.sels,
             view.latest_sel_index,
@@ -70,7 +70,7 @@ impl State {
             &mut view.fold_col,
             &mut view.scale,
             &mut editor.line_inlays,
-            &mut editor.document_block_widget_inlays,
+            &mut editor.block_widget_inlays,
             &mut view.summed_heights,
             &mut view.sels,
             &mut view.latest_sel_index,
@@ -153,7 +153,7 @@ impl State {
                 ]
                 .into(),
                 inline_widget_inlays: (0..line_count).map(|_| [].into()).collect(),
-                document_block_widget_inlays: [].into(),
+                block_widget_inlays: [].into(),
             },
         );
         Ok(editor_id)
@@ -188,5 +188,5 @@ struct Editor {
     inline_text_inlays: Vec<Vec<(usize, String)>>,
     inline_widget_inlays: Vec<Vec<((usize, Bias), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,
-    document_block_widget_inlays: Vec<((usize, Bias), view::Widget)>,
+    block_widget_inlays: Vec<((usize, Bias), view::Widget)>,
 }
