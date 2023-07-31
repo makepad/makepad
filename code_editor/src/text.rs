@@ -1,5 +1,5 @@
 use {
-    crate::{Diff, Length, Point, Range},
+    crate::{Diff, Len, Pos, Range},
     std::{borrow::Cow, ops::AddAssign},
 };
 
@@ -14,13 +14,13 @@ impl Text {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.length() == Length::default()
+        self.len() == Len::default()
     }
 
-    pub fn length(&self) -> Length {
-        Length {
-            line_count: self.lines.len() - 1,
-            byte_count: self.lines.last().unwrap().len(),
+    pub fn len(&self) -> Len {
+        Len {
+            lines: self.lines.len() - 1,
+            bytes: self.lines.last().unwrap().len(),
         }
     }
 
@@ -47,73 +47,70 @@ impl Text {
         Text { lines }
     }
 
-    pub fn take(&mut self, len: Length) -> Self {
-        let mut lines = self
-            .lines
-            .drain(..len.line_count as usize)
-            .collect::<Vec<_>>();
-        lines.push(self.lines.first().unwrap()[..len.byte_count].to_string());
+    pub fn take(&mut self, len: Len) -> Self {
+        let mut lines = self.lines.drain(..len.lines as usize).collect::<Vec<_>>();
+        lines.push(self.lines.first().unwrap()[..len.bytes].to_string());
         self.lines
             .first_mut()
             .unwrap()
-            .replace_range(..len.byte_count, "");
+            .replace_range(..len.bytes, "");
         Text { lines }
     }
 
-    pub fn skip(&mut self, len: Length) {
-        self.lines.drain(..len.line_count);
+    pub fn skip(&mut self, len: Len) {
+        self.lines.drain(..len.lines);
         self.lines
             .first_mut()
             .unwrap()
-            .replace_range(..len.byte_count, "");
+            .replace_range(..len.bytes, "");
     }
 
-    pub fn insert(&mut self, position: Point, mut text: Self) {
-        if text.length().line_count == 0 {
-            self.lines[position.line]
-                .replace_range(position.byte..position.byte, text.lines.first().unwrap());
+    pub fn insert(&mut self, pos: Pos, mut text: Self) {
+        if text.len().lines == 0 {
+            self.lines[pos.line]
+                .replace_range(pos.byte..pos.byte, text.lines.first().unwrap());
         } else {
             text.lines
                 .first_mut()
                 .unwrap()
-                .replace_range(..0, &self.lines[position.line][..position.byte]);
+                .replace_range(..0, &self.lines[pos.line][..pos.byte]);
             text.lines
                 .last_mut()
                 .unwrap()
-                .push_str(&self.lines[position.line][position.byte..]);
+                .push_str(&self.lines[pos.line][pos.byte..]);
             self.lines
-                .splice(position.line..position.line + 1, text.lines);
+                .splice(pos.line..pos.line + 1, text.lines);
         }
     }
 
-    pub fn delete(&mut self, position: Point, length: Length) {
+    pub fn delete(&mut self, pos: Pos, len: Len) {
         use std::iter;
 
-        if length.line_count == 0 {
-            self.lines[position.line]
-                .replace_range(position.byte..position.byte + length.byte_count, "");
+        if len.lines == 0 {
+            self.lines[pos.line]
+                .replace_range(pos.byte..pos.byte + len.bytes, "");
         } else {
-            let mut line = self.lines[position.line][..position.byte].to_string();
-            line.push_str(&self.lines[position.line + length.line_count][length.byte_count..]);
+            let mut line = self.lines[pos.line][..pos.byte].to_string();
+            line.push_str(&self.lines[pos.line + len.lines][len.bytes..]);
             self.lines.splice(
-                position.line..position.line + length.line_count + 1,
+                pos.line..pos.line + len.lines + 1,
                 iter::once(line),
             );
         }
     }
 
     pub fn apply_diff(&mut self, diff: Diff) {
-        use super::diff::Operation;
+        use super::diff::Op;
 
-        let mut position = Point::default();
+        let mut pos = Pos::default();
         for operation in diff {
             match operation {
-                Operation::Delete(length) => self.delete(position, length),
-                Operation::Retain(length) => position += length,
-                Operation::Insert(text) => {
-                    let length = text.length();
-                    self.insert(position, text);
-                    position += length;
+                Op::Delete(len) => self.delete(pos, len),
+                Op::Retain(len) => pos += len,
+                Op::Insert(text) => {
+                    let len = text.len();
+                    self.insert(pos, text);
+                    pos += len;
                 }
             }
         }
@@ -153,7 +150,7 @@ impl From<char> for Text {
 
 impl From<&str> for Text {
     fn from(string: &str) -> Self {
-        let mut lines: Vec<_> = string.split('\n').map(|line| line.to_string()).collect();
+        let mut lines: Vec<_> = string.lines().map(|line| line.to_owned()).collect();
         if lines.is_empty() {
             lines.push(String::new());
         }

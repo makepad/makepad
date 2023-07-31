@@ -1,10 +1,10 @@
-use crate::{Diff, Point, Range, Text};
+use crate::{Diff, Pos, Range, Text};
 
 pub fn replace(range: Range, replace_with: Text) -> Diff {
     use crate::diff::Builder;
 
     let mut builder = Builder::new();
-    builder.retain(range.start() - Point::default());
+    builder.retain(range.start() - Pos::default());
     builder.delete(range.length());
     builder.insert(replace_with);
     builder.finish()
@@ -18,7 +18,7 @@ pub fn delete(range: Range) -> Diff {
     use crate::diff::Builder;
 
     let mut builder = Builder::new();
-    builder.retain(range.start() - Point::default());
+    builder.retain(range.start() - Pos::default());
     builder.delete(range.length());
     builder.finish()
 }
@@ -29,7 +29,7 @@ pub fn backspace(text: &mut Text, range: Range) -> Diff {
     if range.is_empty() {
         let position = prev_position(text, range.start());
         let mut builder = Builder::new();
-        builder.retain(position - Point::default());
+        builder.retain(position - Pos::default());
         builder.delete(range.start() - position);
         builder.finish()
     } else {
@@ -37,11 +37,11 @@ pub fn backspace(text: &mut Text, range: Range) -> Diff {
     }
 }
 
-pub fn prev_position(text: &Text, position: Point) -> Point {
+pub fn prev_position(text: &Text, position: Pos) -> Pos {
     use crate::str::StrExt;
 
     if position.byte > 0 {
-        return Point {
+        return Pos {
             line: position.line,
             byte: text.as_lines()[position.line][..position.byte]
                 .grapheme_indices()
@@ -52,7 +52,10 @@ pub fn prev_position(text: &Text, position: Point) -> Point {
     }
     if position.line > 0 {
         let prev_line = position.line - 1;
-        return Point { line: prev_line, byte: text.as_lines()[prev_line].len() };
+        return Pos {
+            line: prev_line,
+            byte: text.as_lines()[prev_line].len(),
+        };
     }
     position
 }
