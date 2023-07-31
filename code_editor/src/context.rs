@@ -1,6 +1,6 @@
 use {
     crate::{
-        line, view, view::LineInlay, Bias, BiasedPos, Diff, Pos, Range, Selection, Settings, Text,
+        line, view, view::LineInlay, Bias, BiasedTextPos, Diff, TextPos, TextRange, Selection, Settings, Text,
         Tokenizer, View,
     },
     std::collections::HashSet,
@@ -119,7 +119,7 @@ impl<'a> Context<'a> {
         self.modify_text(edit_ops::backspace)
     }
 
-    pub fn set_cursor_pos(&mut self, pos: BiasedPos) {
+    pub fn set_cursor_pos(&mut self, pos: BiasedTextPos) {
         use crate::Cursor;
 
         self.selections.clear();
@@ -127,7 +127,7 @@ impl<'a> Context<'a> {
         *self.latest_selection_index = 0;
     }
 
-    pub fn insert_cursor(&mut self, pos: BiasedPos) {
+    pub fn insert_cursor(&mut self, pos: BiasedTextPos) {
         use {crate::Cursor, std::cmp::Ordering};
 
         let selection = Selection::from(Cursor::from(pos));
@@ -151,11 +151,11 @@ impl<'a> Context<'a> {
         };
     }
 
-    pub fn move_cursor_to(&mut self, select: bool, pos: BiasedPos) {
+    pub fn move_cursor_to(&mut self, select: bool, pos: BiasedTextPos) {
         let latest_selection = &mut self.selections[*self.latest_selection_index];
         latest_selection.cursor.pos = pos;
         if !select {
-            latest_selection.anchor_pos = pos;
+            latest_selection.anchor = pos;
         }
         while *self.latest_selection_index > 0 {
             let previous_selection_index = *self.latest_selection_index - 1;
@@ -185,10 +185,10 @@ impl<'a> Context<'a> {
 
         self.modify_selections(select, |view, selection| {
             selection.update_cursor(|cursor| Cursor {
-                pos: BiasedPos::from_pos_and_bias(
-                    move_ops::move_left(view.text().as_lines(), cursor.pos.to_pos()),
-                    Bias::Before,
-                ),
+                pos: BiasedTextPos {
+                    pos: move_ops::move_left(view.text().as_lines(), cursor.pos.pos),
+                    bias: Bias::Before,
+                },
                 col: None,
             })
         });
@@ -199,10 +199,10 @@ impl<'a> Context<'a> {
 
         self.modify_selections(select, |view, selection| {
             selection.update_cursor(|cursor| Cursor {
-                pos: BiasedPos::from_pos_and_bias(
-                    move_ops::move_right(view.text().as_lines(), cursor.pos.to_pos()),
-                    Bias::After,
-                ),
+                pos: BiasedTextPos {
+                    pos: move_ops::move_right(view.text().as_lines(), cursor.pos.pos),
+                    bias: Bias::After,
+                },
                 col: None,
             })
         });
@@ -399,7 +399,7 @@ impl<'a> Context<'a> {
             let end = current_selection.end().max(next_selection.end());
             let anchor_pos;
             let cursor;
-            if current_selection.anchor_pos <= next_selection.cursor.pos {
+            if current_selection.anchor <= next_selection.cursor.pos {
                 anchor_pos = start;
                 cursor = Cursor {
                     pos: end,
@@ -412,7 +412,7 @@ impl<'a> Context<'a> {
                     col: current_selection.cursor.col,
                 };
             }
-            self.selections[current_selection_index] = Selection { anchor_pos, cursor };
+            self.selections[current_selection_index] = Selection { anchor: anchor_pos, cursor };
             self.selections.remove(next_selection_index);
             if next_selection_index < *self.latest_selection_index {
                 *self.latest_selection_index -= 1;
@@ -420,34 +420,46 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
-        use crate::{pos::ApplyDiffMode, Cursor};
+    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, TextRange) -> Diff) {
+        use crate::{text_pos::ApplyDiffMode, Cursor};
 
         let mut composite_diff = Diff::new();
-        let mut prev_end = Pos::default();
-        let mut diffed_prev_end = Pos::default();
+        let mut prev_end = TextPos::default();
+        let mut diffed_prev_end = TextPos::default();
         for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().to_pos() - prev_end;
+            let distance_from_prev_end = selection.start().pos - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
             let diffed_end = diffed_start + selection.length();
-            let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
+            let diff = f(&mut self.text, TextRange::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().to_pos();
+            prev_end = selection.end().pos;
             diffed_prev_end = diffed_end;
             let anchor_pos;
             let cursor_pos;
-            if selection.anchor_pos <= selection.cursor.pos {
-                anchor_pos = BiasedPos::from_pos_and_bias(diffed_start, selection.start().bias);
-                cursor_pos = BiasedPos::from_pos_and_bias(diffed_end, selection.end().bias);
+            if selection.anchor <= selection.cursor.pos {
+                anchor_pos = BiasedTextPos {
+                    pos: diffed_start,
+                    bias: selection.start().bias,
+                };
+                cursor_pos = BiasedTextPos {
+                    pos: diffed_end,
+                    bias: selection.end().bias,
+                };
             } else {
-                anchor_pos = BiasedPos::from_pos_and_bias(diffed_end, selection.end().bias);
-                cursor_pos = BiasedPos::from_pos_and_bias(diffed_start, selection.start().bias);
+                anchor_pos = BiasedTextPos {
+                    pos: diffed_end,
+                    bias: selection.end().bias,
+                };
+                cursor_pos = BiasedTextPos {
+                    pos: diffed_start,
+                    bias: selection.start().bias,
+                };
             }
             *selection = Selection {
-                anchor_pos,
+                anchor: anchor_pos,
                 cursor: Cursor {
                     pos: cursor_pos,
                     col: None,
@@ -458,7 +470,7 @@ impl<'a> Context<'a> {
     }
 
     fn update_after_modify_text(&mut self, diff: Diff) {
-        use crate::diff::OpInfo;
+        use crate::text_diff::OpInfo;
 
         let mut line = 0;
         for operation in &diff {

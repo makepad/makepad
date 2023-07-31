@@ -1,14 +1,14 @@
-use crate::{BiasedPos, Cursor, Len, Pos};
+use crate::{BiasedTextPos, Cursor, TextLen, TextPos};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Selection {
-    pub anchor_pos: BiasedPos,
+    pub anchor: BiasedTextPos,
     pub cursor: Cursor,
 }
 
 impl Selection {
     pub fn is_empty(self) -> bool {
-        self.anchor_pos == self.cursor.pos
+        self.anchor == self.cursor.pos
     }
 
     pub fn should_merge(mut self, mut other: Self) -> bool {
@@ -24,21 +24,21 @@ impl Selection {
         }
     }
 
-    pub fn length(&self) -> Len {
-        self.end().to_pos() - self.start().to_pos()
+    pub fn length(&self) -> TextLen {
+        self.end().pos - self.start().pos
     }
 
-    pub fn start(self) -> BiasedPos {
-        self.anchor_pos.min(self.cursor.pos)
+    pub fn start(self) -> BiasedTextPos {
+        self.anchor.min(self.cursor.pos)
     }
 
-    pub fn end(self) -> BiasedPos {
-        self.anchor_pos.max(self.cursor.pos)
+    pub fn end(self) -> BiasedTextPos {
+        self.anchor.max(self.cursor.pos)
     }
 
     pub fn reset_anchor(self) -> Self {
         Self {
-            anchor_pos: self.cursor.pos,
+            anchor: self.cursor.pos,
             ..self
         }
     }
@@ -51,14 +51,14 @@ impl Selection {
     }
 }
 
-impl From<Pos> for Selection {
-    fn from(pos: Pos) -> Self {
-        Selection::from(BiasedPos::from(pos))
+impl From<TextPos> for Selection {
+    fn from(pos: TextPos) -> Self {
+        Selection::from(BiasedTextPos::from(pos))
     }
 }
 
-impl From<BiasedPos> for Selection {
-    fn from(pos: BiasedPos) -> Self {
+impl From<BiasedTextPos> for Selection {
+    fn from(pos: BiasedTextPos) -> Self {
         Selection::from(Cursor::from(pos))
     }
 }
@@ -66,7 +66,7 @@ impl From<BiasedPos> for Selection {
 impl From<Cursor> for Selection {
     fn from(cursor: Cursor) -> Self {
         Self {
-            anchor_pos: cursor.pos,
+            anchor: cursor.pos,
             cursor,
         }
     }
