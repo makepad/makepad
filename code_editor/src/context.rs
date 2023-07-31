@@ -161,7 +161,7 @@ impl<'a> Context<'a> {
             let previous_selection_index = *self.latest_selection_index - 1;
             let previous_selection = self.selections[previous_selection_index];
             let latest_selection = self.selections[*self.latest_selection_index];
-            if previous_selection.should_merge(latest_selection) {
+            if previous_selection.try_merge(latest_selection).is_some() {
                 self.selections.remove(previous_selection_index);
                 *self.latest_selection_index -= 1;
             } else {
@@ -172,7 +172,7 @@ impl<'a> Context<'a> {
             let next_selection_index = *self.latest_selection_index + 1;
             let latest_selection = self.selections[*self.latest_selection_index];
             let next_selection = self.selections[next_selection_index];
-            if latest_selection.should_merge(next_selection) {
+            if latest_selection.try_merge(next_selection).is_some() {
                 self.selections.remove(next_selection_index);
             } else {
                 break;
@@ -376,7 +376,7 @@ impl<'a> Context<'a> {
         select: bool,
         mut f: impl FnMut(&View<'_>, Selection) -> Selection,
     ) {
-        use {crate::Cursor, std::mem};
+        use std::mem;
 
         let mut selections = mem::take(self.selections);
         let document = self.document();
@@ -393,34 +393,14 @@ impl<'a> Context<'a> {
             let current_selection = self.selections[current_selection_index];
             let next_selection = self.selections[next_selection_index];
             assert!(current_selection.start() <= next_selection.start());
-            if !current_selection.should_merge(next_selection) {
-                current_selection_index += 1;
-                continue;
-            }
-            let start = current_selection.start().min(next_selection.start());
-            let end = current_selection.end().max(next_selection.end());
-            let anchor_pos;
-            let cursor;
-            if current_selection.anchor <= next_selection.cursor.pos {
-                anchor_pos = start;
-                cursor = Cursor {
-                    pos: end,
-                    col: next_selection.cursor.col,
+            if let Some(merged_selection) = current_selection.try_merge(next_selection) {
+                self.selections[current_selection_index] = merged_selection;
+                self.selections.remove(next_selection_index);
+                if next_selection_index < *self.latest_selection_index {
+                    *self.latest_selection_index -= 1;
                 }
             } else {
-                anchor_pos = end;
-                cursor = Cursor {
-                    pos: start,
-                    col: current_selection.cursor.col,
-                };
-            }
-            self.selections[current_selection_index] = Selection {
-                anchor: anchor_pos,
-                cursor,
-            };
-            self.selections.remove(next_selection_index);
-            if next_selection_index < *self.latest_selection_index {
-                *self.latest_selection_index -= 1;
+                current_selection_index += 1;
             }
         }
     }
@@ -434,7 +414,7 @@ impl<'a> Context<'a> {
         for selection in &mut *self.selections {
             let distance_from_prev_end = selection.start().pos - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + selection.length();
+            let diffed_end = diffed_start + selection.len();
             let diff = f(&mut self.text, TextRange::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, ApplyDiffMode::InsertBefore);
