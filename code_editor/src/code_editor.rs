@@ -1,5 +1,5 @@
 use {
-    crate::{state::ViewId, Affinity, Context, Document, Pos, Selection, State},
+    crate::{state::ViewId, Context, Document, BiasedPos, Bias, Pos, Selection, State},
     makepad_widgets::*,
 };
 
@@ -344,12 +344,12 @@ impl CodeEditor {
         let mut selections = document.selections();
         while selections
             .first()
-            .map_or(false, |selection| selection.end().0.line < self.start_line)
+            .map_or(false, |selection| selection.end().line < self.start_line)
         {
             selections = &selections[1..];
         }
         if selections.first().map_or(false, |selection| {
-            selection.start().0.line < self.start_line
+            selection.start().line < self.start_line
         }) {
             let (selection, remaining_selections) = selections.split_first().unwrap();
             selections = remaining_selections;
@@ -363,7 +363,7 @@ impl CodeEditor {
         .draw_selections(cx, document)
     }
 
-    fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Pos, Affinity)> {
+    fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<BiasedPos> {
         use crate::{document, line, str::StrExt};
 
         let pos = (pos + self.viewport_rect.pos) / self.cell_size;
@@ -388,15 +388,15 @@ impl CodeEditor {
                                     let mid_x = (x + next_x) / 2.0;
                                     if (y..=next_y).contains(&pos.y) {
                                         if (x..=mid_x).contains(&pos.x) {
-                                            return Some((Pos { line, byte }, Affinity::After));
+                                            return Some(BiasedPos::from_pos_and_bias(Pos { line, byte }, Bias::After));
                                         }
                                         if (mid_x..=next_x).contains(&pos.x) {
-                                            return Some((
+                                            return Some(BiasedPos::from_pos_and_bias(
                                                 Pos {
                                                     line,
                                                     byte: next_byte,
                                                 },
-                                                Affinity::Before,
+                                                Bias::Before,
                                             ));
                                         }
                                     }
@@ -413,7 +413,7 @@ impl CodeEditor {
                                 let next_x = line_ref.column_to_x(next_column);
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
-                                    return Some((Pos { line, byte }, Affinity::Before));
+                                    return Some(BiasedPos::from_pos_and_bias(Pos { line, byte }, Bias::Before));
                                 }
                                 column = next_column;
                             }
@@ -423,7 +423,7 @@ impl CodeEditor {
                             line::WrappedElement::Wrap => {
                                 let next_y = y + line_ref.scale();
                                 if (y..=next_y).contains(&pos.y) {
-                                    return Some((Pos { line, byte }, Affinity::Before));
+                                    return Some(BiasedPos::from_pos_and_bias(Pos { line, byte }, Bias::Before));
                                 }
                                 y = next_y;
                                 column = line_ref.start_column_after_wrap();
@@ -432,7 +432,7 @@ impl CodeEditor {
                     }
                     let next_y = y + line_ref.scale();
                     if (y..=next_y).contains(&pos.y) {
-                        return Some((Pos { line, byte }, Affinity::After));
+                        return Some(BiasedPos::from_pos_and_bias(Pos { line, byte }, Bias::After));
                     }
                     line += 1;
                     y += next_y;
@@ -440,7 +440,7 @@ impl CodeEditor {
                 document::Element::Line(true, line_ref) => {
                     let next_y = y + line_ref.height();
                     if (y..=next_y).contains(&pos.y) {
-                        return Some((Pos { line, byte: 0 }, Affinity::Before));
+                        return Some(BiasedPos::from_pos_and_bias(Pos { line, byte: 0 }, Bias::Before));
                     }
                     y = next_y;
                 }
@@ -474,7 +474,7 @@ impl<'a> DrawSelectionsContext<'a> {
                         cx,
                         line,
                         byte,
-                        Affinity::Before,
+                        Bias::Before,
                         line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
@@ -487,7 +487,7 @@ impl<'a> DrawSelectionsContext<'a> {
                                         cx,
                                         line,
                                         byte,
-                                        Affinity::After,
+                                        Bias::After,
                                         line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
@@ -499,7 +499,7 @@ impl<'a> DrawSelectionsContext<'a> {
                                         cx,
                                         line,
                                         byte,
-                                        Affinity::Before,
+                                        Bias::Before,
                                         line_ref.column_to_x(column),
                                         y,
                                         line_ref.scale(),
@@ -533,7 +533,7 @@ impl<'a> DrawSelectionsContext<'a> {
                         cx,
                         line,
                         byte,
-                        Affinity::After,
+                        Bias::After,
                         line_ref.column_to_x(column),
                         y,
                         line_ref.scale(),
@@ -563,30 +563,30 @@ impl<'a> DrawSelectionsContext<'a> {
         cx: &mut Cx2d<'_>,
         line: usize,
         byte: usize,
-        affinity: Affinity,
+        affinity: Bias,
         x: f64,
         y: f64,
         height: f64,
     ) {
         let position = Pos { line, byte };
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, affinity)
+            selection.selection.end() == BiasedPos::from_pos_and_bias(position, affinity)
         }) {
             self.draw_selection(cx, x, y, height);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == BiasedPos::from_pos_and_bias(position, affinity) {
                 self.draw_cursor(cx, x, y, height);
             }
         }
         if self
             .selections
             .first()
-            .map_or(false, |selection| selection.start() == (position, affinity))
+            .map_or(false, |selection| selection.start() == BiasedPos::from_pos_and_bias(position, affinity))
         {
             let (selection, selections) = self.selections.split_first().unwrap();
             self.selections = selections;
-            if selection.cursor == (position, affinity) {
+            if selection.cursor == BiasedPos::from_pos_and_bias(position, affinity) {
                 self.draw_cursor(cx, x, y, height);
             }
             if !selection.is_empty() {
