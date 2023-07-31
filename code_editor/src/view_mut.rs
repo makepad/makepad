@@ -1,6 +1,6 @@
 use {
     crate::{
-        line, view, Bias, BiasedPos, Diff, Pos, Range, Sel, Settings, Text,
+        line, view, Bias, BiasedPos, Diff, Pos, Range, Selection, Settings, Text,
         Tokenizer, View,
     },
     std::collections::HashSet,
@@ -20,8 +20,8 @@ pub struct ViewMut<'a> {
     scale: &'a mut Vec<f64>,
     block_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
     summed_heights: &'a mut Vec<f64>,
-    sels: &'a mut Vec<Sel>,
-    latest_sel_index: &'a mut usize,
+    selections: &'a mut Vec<Selection>,
+    latest_selection_index: &'a mut usize,
     folding_lines: &'a mut HashSet<usize>,
     unfolding_lines: &'a mut HashSet<usize>,
 }
@@ -40,8 +40,8 @@ impl<'a> ViewMut<'a> {
         scale: &'a mut Vec<f64>,
         block_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
         summed_heights: &'a mut Vec<f64>,
-        sels: &'a mut Vec<Sel>,
-        latest_sel_index: &'a mut usize,
+        selections: &'a mut Vec<Selection>,
+        latest_selection_index: &'a mut usize,
         folding_lines: &'a mut HashSet<usize>,
         unfolding_lines: &'a mut HashSet<usize>,
     ) -> Self {
@@ -58,8 +58,8 @@ impl<'a> ViewMut<'a> {
             scale,
             block_widget_inlays,
             summed_heights,
-            sels,
-            latest_sel_index,
+            selections,
+            latest_selection_index,
             folding_lines,
             unfolding_lines,
         }
@@ -78,8 +78,8 @@ impl<'a> ViewMut<'a> {
             self.scale,
             self.block_widget_inlays,
             self.summed_heights,
-            self.sels,
-            *self.latest_sel_index,
+            self.selections,
+            *self.latest_selection_index,
         )
     }
 
@@ -118,58 +118,58 @@ impl<'a> ViewMut<'a> {
     pub fn set_cursor_pos(&mut self, pos: BiasedPos) {
         use crate::Cursor;
 
-        self.sels.clear();
-        self.sels.push(Sel::from(Cursor::from(pos)));
-        *self.latest_sel_index = 0;
+        self.selections.clear();
+        self.selections.push(Selection::from(Cursor::from(pos)));
+        *self.latest_selection_index = 0;
     }
 
     pub fn insert_cursor(&mut self, pos: BiasedPos) {
         use {crate::Cursor, std::cmp::Ordering};
 
-        let sel = Sel::from(Cursor::from(pos));
-        *self.latest_sel_index = match self.sels.binary_search_by(|sel| {
-            if sel.end() <= pos {
+        let selection = Selection::from(Cursor::from(pos));
+        *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
+            if selection.end() <= pos {
                 return Ordering::Less;
             }
-            if sel.start() >= pos {
+            if selection.start() >= pos {
                 return Ordering::Greater;
             }
             Ordering::Equal
         }) {
             Ok(index) => {
-                self.sels[index] = sel;
+                self.selections[index] = selection;
                 index
             }
             Err(index) => {
-                self.sels.insert(index, sel);
+                self.selections.insert(index, selection);
                 index
             }
         };
     }
 
     pub fn move_cursor_to(&mut self, select: bool, pos: BiasedPos) {
-        let latest_sel = &mut self.sels[*self.latest_sel_index];
-        latest_sel.cursor.biased_pos = pos;
+        let latest_selection = &mut self.selections[*self.latest_selection_index];
+        latest_selection.cursor.biased_pos = pos;
         if !select {
-            latest_sel.anchor = pos;
+            latest_selection.anchor = pos;
         }
-        while *self.latest_sel_index > 0 {
-            let previous_sel_index = *self.latest_sel_index - 1;
-            let previous_sel = self.sels[previous_sel_index];
-            let latest_sel = self.sels[*self.latest_sel_index];
-            if previous_sel.try_merge(latest_sel).is_some() {
-                self.sels.remove(previous_sel_index);
-                *self.latest_sel_index -= 1;
+        while *self.latest_selection_index > 0 {
+            let previous_selection_index = *self.latest_selection_index - 1;
+            let previous_selection = self.selections[previous_selection_index];
+            let latest_selection = self.selections[*self.latest_selection_index];
+            if previous_selection.try_merge(latest_selection).is_some() {
+                self.selections.remove(previous_selection_index);
+                *self.latest_selection_index -= 1;
             } else {
                 break;
             }
         }
-        while *self.latest_sel_index + 1 < self.sels.len() {
-            let next_sel_index = *self.latest_sel_index + 1;
-            let latest_sel = self.sels[*self.latest_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            if latest_sel.try_merge(next_sel).is_some() {
-                self.sels.remove(next_sel_index);
+        while *self.latest_selection_index + 1 < self.selections.len() {
+            let next_selection_index = *self.latest_selection_index + 1;
+            let latest_selection = self.selections[*self.latest_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            if latest_selection.try_merge(next_selection).is_some() {
+                self.selections.remove(next_selection_index);
             } else {
                 break;
             }
@@ -179,8 +179,8 @@ impl<'a> ViewMut<'a> {
     pub fn move_cursors_left(&mut self, select: bool) {
         use crate::{move_ops, Cursor};
 
-        self.modify_sels(select, |view, sel| {
-            sel.update_cursor(|cursor| Cursor {
+        self.modify_selections(select, |view, selection| {
+            selection.update_cursor(|cursor| Cursor {
                 biased_pos: BiasedPos {
                     pos: move_ops::move_left(view.text().as_lines(), cursor.biased_pos.pos),
                     bias: Bias::Before,
@@ -193,8 +193,8 @@ impl<'a> ViewMut<'a> {
     pub fn move_cursors_right(&mut self, select: bool) {
         use crate::{move_ops, Cursor};
 
-        self.modify_sels(select, |view, sel| {
-            sel.update_cursor(|cursor| Cursor {
+        self.modify_selections(select, |view, selection| {
+            selection.update_cursor(|cursor| Cursor {
                 biased_pos: BiasedPos {
                     pos: move_ops::move_right(view.text().as_lines(), cursor.biased_pos.pos),
                     bias: Bias::After,
@@ -207,17 +207,16 @@ impl<'a> ViewMut<'a> {
     pub fn move_cursors_up(&mut self, select: bool) {
         use crate::move_ops;
 
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor| move_ops::move_up(document, cursor))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor| move_ops::move_up(document, cursor))
         });
     }
 
     pub fn move_cursors_down(&mut self, select: bool) {
         use crate::move_ops;
 
-        let tab_width = self.settings.tab_width;
-        self.modify_sels(select, |document, sel| {
-            sel.update_cursor(|cursor| move_ops::move_down(document, cursor))
+        self.modify_selections(select, |document, selection| {
+            selection.update_cursor(|cursor| move_ops::move_down(document, cursor))
         });
     }
 
@@ -363,32 +362,32 @@ impl<'a> ViewMut<'a> {
         self.update_summed_heights();
     }
 
-    fn modify_sels(&mut self, select: bool, mut f: impl FnMut(&View<'_>, Sel) -> Sel) {
+    fn modify_selections(&mut self, select: bool, mut f: impl FnMut(&View<'_>, Selection) -> Selection) {
         use std::mem;
 
-        let mut sels = mem::take(self.sels);
+        let mut selections = mem::take(self.selections);
         let document = self.as_view();
-        for sel in &mut sels {
-            *sel = f(&document, *sel);
+        for selection in &mut selections {
+            *selection = f(&document, *selection);
             if !select {
-                *sel = sel.reset_anchor();
+                *selection = selection.reset_anchor();
             }
         }
-        *self.sels = sels;
-        let mut current_sel_index = 0;
-        while current_sel_index + 1 < self.sels.len() {
-            let next_sel_index = current_sel_index + 1;
-            let current_sel = self.sels[current_sel_index];
-            let next_sel = self.sels[next_sel_index];
-            assert!(current_sel.start() <= next_sel.start());
-            if let Some(merged_sel) = current_sel.try_merge(next_sel) {
-                self.sels[current_sel_index] = merged_sel;
-                self.sels.remove(next_sel_index);
-                if next_sel_index < *self.latest_sel_index {
-                    *self.latest_sel_index -= 1;
+        *self.selections = selections;
+        let mut current_selection_index = 0;
+        while current_selection_index + 1 < self.selections.len() {
+            let next_selection_index = current_selection_index + 1;
+            let current_selection = self.selections[current_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if let Some(merged_selection) = current_selection.try_merge(next_selection) {
+                self.selections[current_selection_index] = merged_selection;
+                self.selections.remove(next_selection_index);
+                if next_selection_index < *self.latest_selection_index {
+                    *self.latest_selection_index -= 1;
                 }
             } else {
-                current_sel_index += 1;
+                current_selection_index += 1;
             }
         }
     }
@@ -399,39 +398,39 @@ impl<'a> ViewMut<'a> {
         let mut composite_diff = Diff::new();
         let mut prev_end = Pos::default();
         let mut diffed_prev_end = Pos::default();
-        for sel in &mut *self.sels {
-            let distance_from_prev_end = sel.start().pos - prev_end;
+        for selection in &mut *self.selections {
+            let distance_from_prev_end = selection.start().pos - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
-            let diffed_end = diffed_start + sel.len();
+            let diffed_end = diffed_start + selection.len();
             let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
             let diffed_start = diffed_start.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             let diffed_end = diffed_end.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = sel.end().pos;
+            prev_end = selection.end().pos;
             diffed_prev_end = diffed_end;
             let anchor_pos;
             let cursor_pos;
-            if sel.anchor <= sel.cursor.biased_pos {
+            if selection.anchor <= selection.cursor.biased_pos {
                 anchor_pos = BiasedPos {
                     pos: diffed_start,
-                    bias: sel.start().bias,
+                    bias: selection.start().bias,
                 };
                 cursor_pos = BiasedPos {
                     pos: diffed_end,
-                    bias: sel.end().bias,
+                    bias: selection.end().bias,
                 };
             } else {
                 anchor_pos = BiasedPos {
                     pos: diffed_end,
-                    bias: sel.end().bias,
+                    bias: selection.end().bias,
                 };
                 cursor_pos = BiasedPos {
                     pos: diffed_start,
-                    bias: sel.start().bias,
+                    bias: selection.start().bias,
                 };
             }
-            *sel = Sel {
+            *selection = Selection {
                 anchor: anchor_pos,
                 cursor: Cursor {
                     biased_pos: cursor_pos,

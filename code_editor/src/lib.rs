@@ -12,7 +12,7 @@ pub mod move_ops;
 pub mod point;
 pub mod pos;
 pub mod range;
-pub mod sel;
+pub mod selection;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -25,6 +25,6 @@ pub mod view_mut;
 pub use crate::{
     bias::Bias, biased_pos::BiasedPos, biased_usize::BiasedUsize, code_editor::CodeEditor,
     cursor::Cursor, diff::Diff, len::Len, line::Line, point::Point, pos::Pos, range::Range,
-    sel::Sel, settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
+    selection::Selection, settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer,
     view::View, view_mut::ViewMut,
 };
