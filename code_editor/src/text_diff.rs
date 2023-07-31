@@ -1,14 +1,14 @@
 use {
-    crate::{TextLen, Text},
+    crate::{Text, TextLen},
     std::{slice, vec},
 };
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Diff {
+pub struct TextDiff {
     ops: Vec<Op>,
 }
 
-impl Diff {
+impl TextDiff {
     pub fn new() -> Self {
         Self::default()
     }
@@ -141,7 +141,7 @@ impl Diff {
     }
 }
 
-impl<'a> IntoIterator for &'a Diff {
+impl<'a> IntoIterator for &'a TextDiff {
     type Item = &'a Op;
     type IntoIter = Iter<'a>;
 
@@ -150,7 +150,7 @@ impl<'a> IntoIterator for &'a Diff {
     }
 }
 
-impl IntoIterator for Diff {
+impl IntoIterator for TextDiff {
     type Item = Op;
     type IntoIter = IntoIter;
 
@@ -216,11 +216,11 @@ impl Builder {
         }
     }
 
-    pub fn finish(mut self) -> Diff {
+    pub fn finish(mut self) -> TextDiff {
         if let Some(Op::Retain(_)) = self.ops.last() {
             self.ops.pop();
         }
-        Diff { ops: self.ops }
+        TextDiff { ops: self.ops }
     }
 }
 
