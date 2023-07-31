@@ -1,35 +1,14 @@
-use crate::{BiasedPos, Len};
+use crate::{Cursor, BiasedPos, Pos, Len};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Selection {
-    pub anchor: BiasedPos,
-    pub cursor: BiasedPos,
-    pub preferred_column: Option<usize>,
+    pub anchor_pos: BiasedPos,
+    pub cursor: Cursor,
 }
 
 impl Selection {
-    pub fn new(
-        anchor: BiasedPos,
-        cursor: BiasedPos,
-        preferred_column: Option<usize>,
-    ) -> Self {
-        Self {
-            anchor,
-            cursor,
-            preferred_column,
-        }
-    }
-
-    pub fn from_cursor(cursor: BiasedPos) -> Self {
-        Self {
-            anchor: cursor,
-            cursor,
-            preferred_column: None,
-        }
-    }
-
     pub fn is_empty(self) -> bool {
-        self.anchor == self.cursor
+        self.anchor_pos == self.cursor.pos
     }
 
     pub fn should_merge(mut self, mut other: Self) -> bool {
@@ -50,29 +29,48 @@ impl Selection {
     }
 
     pub fn start(self) -> BiasedPos {
-        self.anchor.min(self.cursor)
+        self.anchor_pos.min(self.cursor.pos)
     }
 
     pub fn end(self) -> BiasedPos {
-        self.anchor.max(self.cursor)
+        self.anchor_pos.max(self.cursor.pos)
     }
 
     pub fn reset_anchor(self) -> Self {
         Self {
-            anchor: self.cursor,
+            anchor_pos: self.cursor.pos,
             ..self
         }
     }
 
     pub fn update_cursor(
         self,
-        f: impl FnOnce(BiasedPos, Option<usize>) -> (BiasedPos, Option<usize>),
+        f: impl FnOnce(Cursor) -> Cursor,
     ) -> Self {
-        let (cursor, column) = f(self.cursor, self.preferred_column);
         Self {
-            cursor,
-            preferred_column: column,
+            cursor: f(self.cursor),
             ..self
+        }
+    }
+}
+
+impl From<Pos> for Selection {
+    fn from(pos: Pos) -> Self {
+        Selection::from(BiasedPos::from(pos))
+    }
+}
+
+impl From<BiasedPos> for Selection {
+    fn from(pos: BiasedPos) -> Self {
+        Selection::from(Cursor::from(pos))
+    }
+}
+
+impl From<Cursor> for Selection {
+    fn from(cursor: Cursor) -> Self {
+        Self {
+            anchor_pos: cursor.pos,
+            cursor,
         }
     }
 }

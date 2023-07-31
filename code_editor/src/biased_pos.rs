@@ -27,3 +27,13 @@ impl BiasedPos {
         Self::from_pos_and_bias(f(self.to_pos()), self.bias)
     }
 }
+
+impl From<Pos> for BiasedPos {
+    fn from(pos: Pos) -> Self {
+        Self {
+            line: pos.line,
+            byte: pos.byte,
+            bias: Bias::default(),
+        }
+    }
+}
