@@ -1,13 +1,13 @@
-use crate::{TextLen, TextPos};
+use crate::{Len, Pos};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct TextRange {
-    start: TextPos,
-    end: TextPos,
+pub struct Range {
+    start: Pos,
+    end: Pos,
 }
 
-impl TextRange {
-    pub fn new(start: TextPos, end: TextPos) -> Self {
+impl Range {
+    pub fn new(start: Pos, end: Pos) -> Self {
         assert!(start <= end);
         Self { start, end }
     }
@@ -16,19 +16,19 @@ impl TextRange {
         self.start == self.end
     }
 
-    pub fn contains(&self, position: TextPos) -> bool {
+    pub fn contains(&self, position: Pos) -> bool {
         self.start <= position && position <= self.end
     }
 
-    pub fn length(self) -> TextLen {
+    pub fn length(self) -> Len {
         self.end - self.start
     }
 
-    pub fn start(self) -> TextPos {
+    pub fn start(self) -> Pos {
         self.start
     }
 
-    pub fn end(self) -> TextPos {
+    pub fn end(self) -> Pos {
         self.end
     }
 }

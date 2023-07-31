@@ -1,14 +1,14 @@
 use {
-    crate::{Text, TextLen},
+    crate::{Text, Len},
     std::{slice, vec},
 };
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct TextDiff {
+pub struct Diff {
     ops: Vec<Op>,
 }
 
-impl TextDiff {
+impl Diff {
     pub fn new() -> Self {
         Self::default()
     }
@@ -141,7 +141,7 @@ impl TextDiff {
     }
 }
 
-impl<'a> IntoIterator for &'a TextDiff {
+impl<'a> IntoIterator for &'a Diff {
     type Item = &'a Op;
     type IntoIter = Iter<'a>;
 
@@ -150,7 +150,7 @@ impl<'a> IntoIterator for &'a TextDiff {
     }
 }
 
-impl IntoIterator for TextDiff {
+impl IntoIterator for Diff {
     type Item = Op;
     type IntoIter = IntoIter;
 
@@ -171,10 +171,10 @@ impl Builder {
         Self::default()
     }
 
-    pub fn delete(&mut self, len: TextLen) {
+    pub fn delete(&mut self, len: Len) {
         use std::mem;
 
-        if len == TextLen::default() {
+        if len == Len::default() {
             return;
         }
         match self.ops.as_mut_slice() {
@@ -192,8 +192,8 @@ impl Builder {
         }
     }
 
-    pub fn retain(&mut self, len: TextLen) {
-        if len == TextLen::default() {
+    pub fn retain(&mut self, len: Len) {
+        if len == Len::default() {
             return;
         }
         match self.ops.last_mut() {
@@ -216,11 +216,11 @@ impl Builder {
         }
     }
 
-    pub fn finish(mut self) -> TextDiff {
+    pub fn finish(mut self) -> Diff {
         if let Some(Op::Retain(_)) = self.ops.last() {
             self.ops.pop();
         }
-        TextDiff { ops: self.ops }
+        Diff { ops: self.ops }
     }
 }
 
@@ -252,8 +252,8 @@ impl Iterator for IntoIter {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Op {
-    Delete(TextLen),
-    Retain(TextLen),
+    Delete(Len),
+    Retain(Len),
     Insert(Text),
 }
 
@@ -269,7 +269,7 @@ impl Op {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OpInfo {
-    Delete(TextLen),
-    Retain(TextLen),
-    Insert(TextLen),
+    Delete(Len),
+    Retain(Len),
+    Insert(Len),
 }
