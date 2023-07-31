@@ -1,4 +1,4 @@
-use crate::{Pos, BiasedPos};
+use crate::{BiasedPos, Pos};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Cursor {
@@ -14,9 +14,6 @@ impl From<Pos> for Cursor {
 
 impl From<BiasedPos> for Cursor {
     fn from(pos: BiasedPos) -> Self {
-        Self {
-            pos,
-            col: None,
-        }
+        Self { pos, col: None }
     }
 }

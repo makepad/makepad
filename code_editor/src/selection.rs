@@ -1,4 +1,4 @@
-use crate::{Cursor, BiasedPos, Pos, Len};
+use crate::{BiasedPos, Cursor, Len, Pos};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Selection {
@@ -43,10 +43,7 @@ impl Selection {
         }
     }
 
-    pub fn update_cursor(
-        self,
-        f: impl FnOnce(Cursor) -> Cursor,
-    ) -> Self {
+    pub fn update_cursor(self, f: impl FnOnce(Cursor) -> Cursor) -> Self {
         Self {
             cursor: f(self.cursor),
             ..self
