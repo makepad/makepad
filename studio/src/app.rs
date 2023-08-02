@@ -18,7 +18,7 @@ use {
         build::{
             build_manager::{
                 BuildManager,
-                BuildManagerAction
+                //BuildManagerAction
             },
         },
         //app_inner::AppInner,
@@ -61,29 +61,29 @@ live_design!{
                     selected: 0
                 }
                 
-                file1 = Tab{
-                    name:"File1"
-                    kind:Empty1
+                file1 = Tab {
+                    name: "File1"
+                    kind: Empty1
                 }
                 
-                file2 = Tab{
-                    name:"File2"
-                    kind:Empty2
+                file2 = Tab {
+                    name: "File2"
+                    kind: Empty2
                 }
-
+                
                 file_tree = Tab {
                     name: "FileTree",
                     kind: FileTree
                 }
                 
-                log_list = Tab{
+                log_list = Tab {
                     name: "LogList",
                     kind: Empty3
                 }
                 
-                Empty1 = <Rect>{draw_bg:{color:#f00}}
-                Empty2 = <Rect>{draw_bg:{color:#0f0}}
-                Empty3 = <Rect>{draw_bg:{color:#00f}}
+                Empty1 = <Rect> {draw_bg: {color: #533}}
+                Empty2 = <Rect> {draw_bg: {color: #353}}
+                Empty3 = <Rect> {draw_bg: {color: #335}}
                 FileTree = <FileTree> {}
                 //LogList = <LogList>{}
             }
@@ -108,7 +108,7 @@ impl LiveHook for App {
         crate::run_view::live_design(cx);
     }
     
-    fn after_new_from_doc(&mut self, _cx:&mut Cx){
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
         self.collab_client.send_request(CollabRequest::LoadFileTree {with_data: false});
     }
 }
@@ -139,23 +139,35 @@ impl AppMain for App {
                     CollabResponse::LoadFileTree(response) => {
                         self.file_system.load_file_tree(response.unwrap());
                         self.ui.get_file_tree(id!(file_tree)).redraw(cx);
-                       // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
+                        // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
-                    response=>{
-                       // self.build_manager.handle_collab_response(cx, state, &response);
-                       // self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
+                    _response => {
+                        // self.build_manager.handle_collab_response(cx, state, &response);
+                        // self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
                     }
                 },
-                CollabClientAction::Notification(notification) => {
+                CollabClientAction::Notification(_notification) => {
                     //self.editors.handle_collab_notification(cx, &mut state.editor_state, notification)
                 }
             }
         }
         let actions = self.ui.handle_widget_event(cx, event);
-
-        if let Some(tab_id) = dock.clicked_tab_close(&actions){
+        
+        if let Some(tab_id) = dock.clicked_tab_close(&actions) {
             dock.close_tab(cx, tab_id);
         }
+        if let Some(tab_id) = dock.should_tab_start_drag(&actions) {
+            dock.tab_start_drag(cx, tab_id, DraggedItem::File {
+                url: "file://something.jpg".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
+                id: tab_id
+            });
+        }
+        // alright so drop validation
+        if let Some(drop) = dock.should_allow_drop(&actions){
+            // here we check if this item is a valid droptarget
+            dock.allow_drop(cx, drop);
+        }
+        
         //self.inner.handle_event(cx, event, &mut *dock.borrow_mut().unwrap(), &mut self.app_state);
     }
 }
@@ -187,7 +199,7 @@ pub struct FileEdge {
 
 impl FileSystem {
     fn draw_file_node(&self, cx: &mut Cx2d, file_node_id: FileNodeId, file_tree: &mut FileTree) {
-        if let Some(file_node) = self.file_nodes.get(&file_node_id){
+        if let Some(file_node) = self.file_nodes.get(&file_node_id) {
             match &file_node.child_edges {
                 Some(child_edges) => {
                     if file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok() {
@@ -204,7 +216,7 @@ impl FileSystem {
         }
     }
     
-    pub fn file_node_path(&self, file_node_id: FileNodeId) -> UnixPathBuf {
+    pub fn _file_node_path(&self, file_node_id: FileNodeId) -> UnixPathBuf {
         let mut components = Vec::new();
         let mut file_node = &self.file_nodes[file_node_id];
         while let Some(edge) = &file_node.parent_edge {
@@ -214,7 +226,7 @@ impl FileSystem {
         self.path.join(components.into_iter().rev().collect::<UnixPathBuf>())
     }
     
-    pub fn file_path_join(&self, components: &[&str]) -> UnixPathBuf {
+    pub fn _file_path_join(&self, components: &[&str]) -> UnixPathBuf {
         self.path.join(components.into_iter().rev().collect::<UnixPathBuf>())
     }
     

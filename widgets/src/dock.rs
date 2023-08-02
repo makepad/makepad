@@ -52,7 +52,7 @@ live_design!{
             draw_depth: 10.0
             color: (COLOR_DRAG_QUAD)
         }
-        overlay_view: {
+        drop_target_view: {
             //walk: {abs_pos: vec2(0.0, 0.0)}
             //is_overlay: true
         }
@@ -87,10 +87,10 @@ impl DrawRoundCorner {
 
 #[derive(Live)]
 pub struct Dock {
-    #[rust] draw_state: DrawStateWrap<DockDrawState>,
+    #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
     #[live] walk: Walk,
     #[live] layout: Layout,
-    #[live] drag_view: View,
+    #[live] drop_target_view: View,
     #[live] round_corner: DrawRoundCorner,
     #[live] padding_fill: DrawColor,
     #[live] border_size: f64,
@@ -107,8 +107,7 @@ pub struct Dock {
     #[rust] dock_items: ComponentMap<LiveId, DockItem>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(LiveId, LiveId), WidgetRef>,
-    
-    #[rust] drag: Option<Drag>,
+    #[rust] drop_state: Option<DropPosition>,
 }
 
 struct TabBarWrap {
@@ -146,11 +145,38 @@ impl DrawStackItem {
     }
 }
 
-#[derive(Clone)]
-enum DockDrawState {
-    Panels {
-        stack: Vec<DrawStackItem>
-    },
+#[derive(Clone, WidgetAction)]
+pub enum DockAction {
+    SplitPanelChanged {panel_id: LiveId, axis: Axis, align: SplitterAlign},
+    TabWasPressed(LiveId),
+    TabCloseWasPressed(LiveId),
+    TabShouldStartDragging(LiveId),
+    DragHit(DockDragHit),
+    None
+}
+
+#[derive(Clone, Debug)]
+pub enum DockDragHit {
+    Drag(DragHitEvent),
+    Drop(DropHitEvent)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DropPosition {
+    part: DropPart,
+    rect: Rect,
+    id: LiveId
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DropPart {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
+    TabBar,
+    Tab
 }
 
 #[derive(Clone, Debug, Live, LiveHook)]
@@ -216,18 +242,19 @@ impl Dock {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
+        //self.drop_zones.clear();
     }
     
     fn end(&mut self, cx: &mut Cx2d) {
-        /*
-        if self.drag_view.begin(cx, Walk::default()).is_redrawing() {
-            if let Some(drag) = self.drag.as_ref() {
-                let tab_bar = &self.tab_bars[drag.panel_id];
-                let rect = compute_drag_rect(tab_bar.contents_rect, drag.position);
-                self.drag_quad.draw_abs(cx, rect);
+        
+        if self.drop_target_view.begin(cx, Walk::default()).is_redrawing() {
+            if let Some(pos) = &self.drop_state {
+                //let tab_bar = &self.tab_bars[drag.panel_id];
+                //let rect = compute_drag_rect(tab_bar.contents_rect, drag.position);
+                self.drag_quad.draw_abs(cx, pos.rect);
             }
-            self.overlay_view.end(cx);
-        }*/
+            self.drop_target_view.end(cx);
+        }
         
         self.tab_bars.retain_visible();
         self.splitters.retain_visible();
@@ -242,6 +269,91 @@ impl Dock {
         cx.end_turtle_with_area(&mut self.area);
     }
     
+    fn find_drop_position(&self, cx: &Cx, abs: DVec2) -> Option<DropPosition> {
+        for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
+            let rect = tab_bar.contents_rect;
+            if let Some((tab_id, rect)) = tab_bar.tab_bar.is_over_tab(cx, abs) {
+                return Some(DropPosition {
+                    part: DropPart::Tab,
+                    id: tab_id,
+                    rect
+                })
+            }
+            else if let Some(rect) = tab_bar.tab_bar.is_over_tab_bar(cx, abs) {
+                return Some(DropPosition {
+                    part: DropPart::TabBar,
+                    id: *tab_bar_id,
+                    rect
+                })
+            }
+            else if rect.contains(abs) {
+                let top_left = rect.pos;
+                let bottom_right = rect.pos + rect.size;
+                if (abs.x - top_left.x) / rect.size.x < 0.1 {
+                    return Some(DropPosition {
+                        part: DropPart::Left,
+                        id: *tab_bar_id,
+                        rect: Rect {
+                            pos: rect.pos,
+                            size: DVec2 {
+                                x: rect.size.x / 2.0,
+                                y: rect.size.y,
+                            },
+                        }
+                    })
+                } else if (bottom_right.x - abs.x) / rect.size.x < 0.1 {
+                    return Some(DropPosition {
+                        part: DropPart::Right,
+                        id: *tab_bar_id,
+                        rect: Rect {
+                            pos: DVec2 {
+                                x: rect.pos.x + rect.size.x / 2.0,
+                                y: rect.pos.y,
+                            },
+                            size: DVec2 {
+                                x: rect.size.x / 2.0,
+                                y: rect.size.y,
+                            },
+                        }
+                    })
+                } else if (abs.y - top_left.y) / rect.size.y < 0.1 {
+                    return Some(DropPosition {
+                        part: DropPart::Top,
+                        id: *tab_bar_id,
+                        rect: Rect {
+                            pos: rect.pos,
+                            size: DVec2 {
+                                x: rect.size.x,
+                                y: rect.size.y / 2.0,
+                            },
+                        }
+                    })
+                } else if (bottom_right.y - abs.y) / rect.size.y < 0.1 {
+                    return Some(DropPosition {
+                        part: DropPart::Bottom,
+                        id: *tab_bar_id,
+                        rect: Rect {
+                            pos: DVec2 {
+                                x: rect.pos.x,
+                                y: rect.pos.y + rect.size.y / 2.0,
+                            },
+                            size: DVec2 {
+                                x: rect.size.x,
+                                y: rect.size.y / 2.0,
+                            },
+                        }
+                    })
+                } else {
+                    return Some(DropPosition {
+                        part: DropPart::Center,
+                        id: *tab_bar_id,
+                        rect
+                    })
+                }
+            }
+        }
+        None
+    }
     
     pub fn get_item(&mut self, cx: &mut Cx2d, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
@@ -271,18 +383,18 @@ impl Dock {
         }
     }
     
-    fn redraw_item(&mut self, cx:&mut Cx, item_id: LiveId) {
-        if let Some(tab_bar) = self.tab_bars.get_mut(&item_id){
+    fn redraw_item(&mut self, cx: &mut Cx, item_id: LiveId) {
+        if let Some(tab_bar) = self.tab_bars.get_mut(&item_id) {
             tab_bar.contents_view.redraw(cx);
         }
-        for ((id, kind), item) in self.items.iter_mut(){
-            if *id == item_id{
+        for ((id, _kind), item) in self.items.iter_mut() {
+            if *id == item_id {
                 item.redraw(cx);
             }
         }
     }
     
-    fn unsplit_tabs(&mut self,cx: &mut Cx,  tabs_id: LiveId) {
+    fn unsplit_tabs(&mut self, cx: &mut Cx, tabs_id: LiveId) {
         for (splitter_id, item) in self.dock_items.iter_mut() {
             match *item {
                 DockItem::Splitter {a, b, ..} => {
@@ -332,8 +444,8 @@ impl Dock {
                     if tabs.len() == 0 { // unsplit
                         self.unsplit_tabs(cx, tabs_id);
                     }
-                    else{
-                        let next_tab = if *selected >= tabs.len(){tabs[*selected - 1]} else {tabs[*selected]};
+                    else {
+                        let next_tab = if *selected >= tabs.len() {tabs[*selected - 1]} else {tabs[*selected]};
                         self.select_tab(cx, next_tab);
                         self.dock_items.remove(&tab_id);
                         self.area.redraw(cx);
@@ -375,9 +487,9 @@ impl Widget for Dock {
             let contents_view = &mut tab_bar.contents_view;
             for action in tab_bar.tab_bar.handle_event(cx, event) {
                 match action {
-                    TabBarAction::ReceivedDraggedItem(item) => dispatch_action(
+                    TabBarAction::TabShouldStartDragging(item) => dispatch_action(
                         cx,
-                        DockAction::TabBarReceivedDraggedItem(*panel_id, item).into_action(uid),
+                        DockAction::TabShouldStartDragging(item).into_action(uid),
                     ),
                     TabBarAction::TabWasPressed(tab_id) => {
                         if let Some(DockItem::Tabs {tabs, selected, ..}) = dock_items.get_mut(&panel_id) {
@@ -392,15 +504,7 @@ impl Widget for Dock {
                         }
                     }
                     TabBarAction::TabCloseWasPressed(tab_id) => {
-                        // alright.. we wanna remove the tab
-                        
                         dispatch_action(cx, DockAction::TabCloseWasPressed(tab_id).into_action(uid))
-                    }
-                    TabBarAction::TabReceivedDraggedItem(tab_id, item) => {
-                        dispatch_action(
-                            cx,
-                            DockAction::TabReceivedDraggedItem(tab_id, item).into_action(uid),
-                        )
                     }
                 }
             };
@@ -408,37 +512,29 @@ impl Widget for Dock {
         for item in self.items.values_mut() {
             item.handle_widget_event_with(cx, event, dispatch_action);
         }
-        match event {
-            Event::Drag(event) => {
-                /*
-                self.drag = None;
-                for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
-                    if tab_bar.contents_rect.contains(event.abs) {
-                        self.drag = Some(Drag {
-                            panel_id: *panel_id,
-                            position: compute_drag_position(tab_bar.contents_rect, event.abs),
-                        });
-                        event.action.set(DragAction::Copy);
+        
+        if let Event::DragEnd = event {
+            // end our possible dragstate
+            self.drop_state = None;
+            self.drop_target_view.redraw(cx);
+        }
+        
+        // alright lets manage the drag areas
+        match event.drag_hits(cx, self.area) {
+            DragHit::Drag(f) => {
+                self.drop_state = None;
+                self.drop_target_view.redraw(cx);
+                match f.state {
+                    DragState::In | DragState::Over => {
+                        dispatch_action(cx, DockAction::DragHit(DockDragHit::Drag(f.clone())).into_action(uid))
                     }
+                    DragState::Out => {}
                 }
-                self.overlay_view.redraw(cx);*/
             }
-            Event::Drop(event) => {
-                /*
-                self.drag = None;
-                for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
-                    if tab_bar.contents_rect.contains(event.abs) {
-                        dispatch_action(
-                            cx,
-                            DockAction::ContentsReceivedDraggedItem(
-                                *panel_id,
-                                compute_drag_position(tab_bar.contents_rect, event.abs),
-                                event.dragged_item.clone(),
-                            ).into_action(uid),
-                        );
-                    }
-                }
-                self.overlay_view.redraw(cx);*/
+            DragHit::Drop(f) => {
+                self.drop_state = None;
+                self.drop_target_view.redraw(cx);
+                dispatch_action(cx, DockAction::DragHit(DockDragHit::Drop(f.clone())).into_action(uid))
             }
             _ => {}
         }
@@ -465,17 +561,17 @@ impl Widget for Dock {
     
     fn get_walk(&self) -> Walk {self.walk}
     
+    
+    
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
             let id = live_id!(root);
-            DockDrawState::Panels {
-                stack: vec![DrawStackItem::from_dock_item(id, dock_items.get(&id))]
-            }
+            vec![DrawStackItem::from_dock_item(id, dock_items.get(&id))]
         }) {
             self.begin(cx, walk);
         }
         
-        while let Some(DockDrawState::Panels {stack}) = self.draw_state.as_mut() {
+        while let Some(stack) = self.draw_state.as_mut() {
             match stack.pop() {
                 Some(DrawStackItem::SplitLeft {id}) => {
                     stack.push(DrawStackItem::SplitRight {id});
@@ -494,6 +590,7 @@ impl Widget for Dock {
                     else {panic!()}
                 }
                 Some(DrawStackItem::SplitRight {id}) => {
+                    // lets create the 4 split dropzones of this splitter
                     stack.push(DrawStackItem::SplitEnd {id});
                     let splitter = self.splitters.get_mut(&id).unwrap();
                     splitter.middle(cx);
@@ -504,6 +601,7 @@ impl Widget for Dock {
                     else {panic!()}
                 }
                 Some(DrawStackItem::SplitEnd {id}) => {
+                    // 4 more dropzones
                     let splitter = self.splitters.get_mut(&id).unwrap();
                     splitter.end(cx);
                 }
@@ -559,6 +657,8 @@ impl Widget for Dock {
                 Some(DrawStackItem::TabContent {id}) => {
                     if let Some(DockItem::Tabs {..}) = self.dock_items.get(&id) {
                         let tab_bar = self.tab_bars.get_mut(&id).unwrap();
+                        // lets create the full dropzone for this contentview
+                        
                         tab_bar.contents_view.end(cx);
                     }
                     else {panic!()}
@@ -581,49 +681,29 @@ impl Widget for Dock {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PanelId(pub LiveId);
 */
-struct Drag {
-    panel_id: LiveId,
-    position: DragPosition,
-}
 
-#[derive(Clone, WidgetAction)]
-pub enum DockAction {
-    SplitPanelChanged {panel_id: LiveId, axis: Axis, align: SplitterAlign},
-    TabBarReceivedDraggedItem(LiveId, DraggedItem),
-    TabWasPressed(LiveId),
-    TabCloseWasPressed(LiveId),
-    TabReceivedDraggedItem(LiveId, DraggedItem),
-    ContentsReceivedDraggedItem(LiveId, DragPosition, DraggedItem),
-    None
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DragPosition {
-    Left,
-    Right,
-    Top,
-    Bottom,
-    Center,
-}
-
+/*
 impl DragPosition {
-    fn compute_drag_position(rect: Rect, position: DVec2) -> DragPosition {
+    pub fn compute_split_pos(id:LiveId, rect: Rect, position: DVec2) -> Option<DragPosition> {
         let top_left = rect.pos;
         let bottom_right = rect.pos + rect.size;
         if (position.x - top_left.x) / rect.size.x < 0.1 {
-            DragPosition::Left
+            Some(DragPosition::Left(id))
         } else if (bottom_right.x - position.x) / rect.size.x < 0.1 {
-            DragPosition::Right
+            Some(DragPosition::Right(id))
         } else if (position.y - top_left.y) / rect.size.y < 0.1 {
-            DragPosition::Top
+            Some(DragPosition::Top(id))
         } else if (bottom_right.y - position.y) / rect.size.y < 0.1 {
-            DragPosition::Bottom
-        } else {
-            DragPosition::Center
+            Some(DragPosition::Bottom(id))
+        } else if rect.contains(position){
+            Some(DragPosition::Center(id))
+        }
+        else{
+            None
         }
     }
     
-    fn compute_drag_rect(&self, rect: Rect) -> Rect {
+    pub fn compute_drag_rect(&self, rect: Rect) -> Rect {
         match self {
             DragPosition::Left => Rect {
                 pos: rect.pos,
@@ -663,7 +743,7 @@ impl DragPosition {
         }
     }
 }
-
+*/
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct DockRef(WidgetRef);
@@ -675,7 +755,6 @@ impl DockRef {
         }
     }
     
-    
     pub fn clicked_tab_close(&self, actions: &WidgetActions) -> Option<LiveId> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
             if let DockAction::TabCloseWasPressed(tab_id) = item.action() {
@@ -684,6 +763,56 @@ impl DockRef {
         }
         None
     }
+    
+    pub fn should_tab_start_drag(&self, actions: &WidgetActions) -> Option<LiveId> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let DockAction::TabShouldStartDragging(tab_id) = item.action() {
+                return Some(tab_id)
+            }
+        }
+        None
+    }
+    
+    pub fn should_allow_drop(&self, actions: &WidgetActions) -> Option<DockDragHit> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let DockAction::DragHit(drag_hit) = item.action() {
+                return Some(drag_hit.clone())
+            }
+        }
+        None
+    }
+    
+    pub fn allow_drop(&self, cx: &mut Cx, dh: DockDragHit) {
+        // ok this handles allow drop / drop of an item
+        if let Some(mut dock) = self.borrow_mut() {
+            match dh {
+                DockDragHit::Drag(dh) => {
+                    dh.response.set(DragResponse::Move);
+                    // find hitzone
+                    // lets first scan all our tab bars and tabs
+                    if let Some(pos) = dock.find_drop_position(cx, dh.abs) {
+                        dock.drop_state = Some(pos);
+                    }
+                    else {
+                        dock.drop_state = None;
+                    }
+                }
+                DockDragHit::Drop(_dh) => {
+                    // split things
+                    dock.drop_state = None;
+                }
+            }
+        }
+    }
+    
+    pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DraggedItem) {
+        cx.start_dragging(vec![item]);
+    }
+    
+}
+
+pub struct DockDrop {
+    
 }
 
 #[derive(Clone, WidgetSet)]
