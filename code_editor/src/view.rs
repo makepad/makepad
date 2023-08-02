@@ -1,39 +1,39 @@
 use {
-    crate::{line, token::TokenInfo, Affinity, Line, Selection, Settings, Text, Tokenizer},
+    crate::{line, token::TokenInfo, Bias, Line, Selection, Settings, Text, Tokenizer},
     std::slice,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Document<'a> {
+pub struct View<'a> {
     settings: &'a Settings,
     text: &'a Text,
     tokenizer: &'a Tokenizer,
     text_inlays: &'a [Vec<(usize, String)>],
-    line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+    line_widget_inlays: &'a [Vec<((usize, Bias), line::Widget)>],
     wrap_bytes: &'a [Vec<usize>],
     start_column_after_wrap: &'a [usize],
     fold_column: &'a [usize],
     scale: &'a [f64],
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    widget_inlays: &'a [((usize, Bias), Widget)],
     summed_heights: &'a [f64],
     selections: &'a [Selection],
     latest_selection_index: usize,
 }
 
-impl<'a> Document<'a> {
+impl<'a> View<'a> {
     pub fn new(
         settings: &'a Settings,
         text: &'a Text,
         tokenizer: &'a Tokenizer,
         text_inlays: &'a [Vec<(usize, String)>],
-        line_widget_inlays: &'a [Vec<((usize, Affinity), line::Widget)>],
+        line_widget_inlays: &'a [Vec<((usize, Bias), line::Widget)>],
         wrap_bytes: &'a [Vec<usize>],
         start_column_after_wrap: &'a [usize],
         fold_column: &'a [usize],
         scale: &'a [f64],
         line_inlays: &'a [(usize, LineInlay)],
-        widget_inlays: &'a [((usize, Affinity), Widget)],
+        widget_inlays: &'a [((usize, Bias), Widget)],
         summed_heights: &'a [f64],
         selections: &'a [Selection],
         latest_selection_index: usize,
@@ -99,6 +99,10 @@ impl<'a> Document<'a> {
                 }
             }
         }
+    }
+
+    pub fn text(self) -> &'a Text {
+        &self.text
     }
 
     pub fn line_count(&self) -> usize {
@@ -170,7 +174,7 @@ pub struct Lines<'a> {
     text: slice::Iter<'a, String>,
     token_infos: slice::Iter<'a, Vec<TokenInfo>>,
     text_inlays: slice::Iter<'a, Vec<(usize, String)>>,
-    line_widget_inlays: slice::Iter<'a, Vec<((usize, Affinity), line::Widget)>>,
+    line_widget_inlays: slice::Iter<'a, Vec<((usize, Bias), line::Widget)>>,
     wrap_bytes: slice::Iter<'a, Vec<usize>>,
     start_column_after_wrap: slice::Iter<'a, usize>,
     fold_column: slice::Iter<'a, usize>,
@@ -198,7 +202,7 @@ impl<'a> Iterator for Lines<'a> {
 pub struct Elements<'a> {
     lines: Lines<'a>,
     line_inlays: &'a [(usize, LineInlay)],
-    widget_inlays: &'a [((usize, Affinity), Widget)],
+    widget_inlays: &'a [((usize, Bias), Widget)],
     line: usize,
 }
 
@@ -209,13 +213,13 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::Before
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Bias::Before
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
             self.widget_inlays = widget_inlays;
-            return Some(Element::Widget(Affinity::Before, *widget));
+            return Some(Element::Widget(Bias::Before, *widget));
         }
         if self
             .line_inlays
@@ -229,13 +233,13 @@ impl<'a> Iterator for Elements<'a> {
         if self
             .widget_inlays
             .first()
-            .map_or(false, |((line, affinity), _)| {
-                *line == self.line && *affinity == Affinity::After
+            .map_or(false, |((line, bias), _)| {
+                *line == self.line && *bias == Bias::After
             })
         {
             let ((_, widget), widget_inlays) = self.widget_inlays.split_first().unwrap();
             self.widget_inlays = widget_inlays;
-            return Some(Element::Widget(Affinity::After, *widget));
+            return Some(Element::Widget(Bias::After, *widget));
         }
         let line = self.lines.next()?;
         self.line += 1;
@@ -246,7 +250,7 @@ impl<'a> Iterator for Elements<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Element<'a> {
     Line(bool, Line<'a>),
-    Widget(Affinity, Widget),
+    Widget(Bias, Widget),
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
