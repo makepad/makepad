@@ -172,6 +172,24 @@ impl TabBar {
         self.view_area.redraw(cx)
     }
     
+    pub fn is_over_tab(&self, cx:&Cx, abs:DVec2)->Option<(LiveId,Rect)>{
+        for (tab_id, tab) in self.tabs.iter() {
+            let rect = tab.area().get_rect(cx);
+            if rect.contains(abs){
+                return Some((*tab_id, rect))
+            }
+        }
+        None
+    }
+    
+    pub fn is_over_tab_bar(&self, cx:&Cx, abs:DVec2)->Option<Rect>{
+        let rect = self.scroll_bars.area().get_rect(cx);
+        if rect.contains(abs){
+            return Some(rect)
+        }
+        None
+    }
+    
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<TabBarAction> {
         let mut actions = Vec::new();
@@ -201,11 +219,21 @@ impl TabBar {
                 TabAction::CloseWasPressed => {
                     dispatch_action(cx, TabBarAction::TabCloseWasPressed(*tab_id));
                 }
-                TabAction::ReceivedDraggedItem(item) => {
-                    dispatch_action(cx, TabBarAction::TabReceivedDraggedItem(*tab_id, item));
+                TabAction::ShouldStartDragging=>{
+                    dispatch_action(cx, TabBarAction::TabShouldStartDragging(*tab_id));
                 }
+                TabAction::ShouldStopDragging=>{
+                }/*
+                TabAction::DragHit(hit)=>{
+                    dispatch_action(cx, TabBarAction::DragHitTab(hit, *tab_id));
+                }*/
             });
         }
+        /*
+        match event.drag_hits(cx, self.scroll_bars.area()) {
+            DragHit::NoHit=>(),
+            hit=>dispatch_action(cx, TabBarAction::DragHitTabBar(hit))
+        }*/
         /*
         match event.drag_hits(cx, self.scroll_view.area()) {
             DragHit::Drag(f) => match f.state {
@@ -237,8 +265,9 @@ impl TabBar {
 
 
 pub enum TabBarAction {
-    ReceivedDraggedItem(DraggedItem),
     TabWasPressed(LiveId),
+    TabShouldStartDragging(LiveId),
     TabCloseWasPressed(LiveId),
-    TabReceivedDraggedItem(LiveId, DraggedItem),
+    //DragHitTab(DragHit, LiveId),
+    //DragHitTabBar(DragHit)
 }
