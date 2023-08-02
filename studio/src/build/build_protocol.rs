@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_code_editor::range::{Range},
+        makepad_code_editor::TextRange,
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
     }
 };
@@ -49,7 +49,7 @@ pub enum BuildMsgLevel{
 pub struct BuildMsgLocation{
     pub level: BuildMsgLevel,
     pub file_name: String,
-    pub range: Range,
+    pub range: TextRange,
     pub msg: String
 }
 

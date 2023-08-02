@@ -25,28 +25,28 @@ impl Tokenizer {
     }
 
     pub fn retokenize(&mut self, diff: &Diff, text: &Text) {
-        use crate::diff::OperationInfo;
+        use crate::text_diff::OpInfo;
 
         let mut line = 0;
         for operation in diff {
             match operation.info() {
-                OperationInfo::Delete(length) => {
-                    self.state.drain(line..line + length.line_count);
-                    self.token_infos.drain(line..line + length.line_count);
+                OpInfo::Delete(length) => {
+                    self.state.drain(line..line + length.lines);
+                    self.token_infos.drain(line..line + length.lines);
                     self.state[line] = None;
                     self.token_infos[line] = Vec::new();
                 }
-                OperationInfo::Retain(length) => {
-                    line += length.line_count;
+                OpInfo::Retain(length) => {
+                    line += length.lines;
                 }
-                OperationInfo::Insert(length) => {
+                OpInfo::Insert(length) => {
                     self.state[line] = None;
                     self.token_infos[line] = Vec::new();
                     self.state
-                        .splice(line..line, (0..length.line_count).map(|_| None));
+                        .splice(line..line, (0..length.lines).map(|_| None));
                     self.token_infos
-                        .splice(line..line, (0..length.line_count).map(|_| Vec::new()));
-                    line += length.line_count;
+                        .splice(line..line, (0..length.lines).map(|_| Vec::new()));
+                    line += length.lines;
                 }
             }
         }
