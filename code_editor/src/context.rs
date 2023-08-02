@@ -1,7 +1,7 @@
 use {
     crate::{
-        document, document::LineInlay, line, Affinity, Diff, Document, Position, Range, Selection,
-        Settings, Text, Tokenizer,
+        line, view, view::LineInlay, Bias, BiasedTextPos, Diff, TextPos, TextRange, Selection, Settings, Text,
+        Tokenizer, View,
     },
     std::collections::HashSet,
 };
@@ -13,13 +13,13 @@ pub struct Context<'a> {
     text: &'a mut Text,
     tokenizer: &'a mut Tokenizer,
     text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-    line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+    line_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
     wrap_bytes: &'a mut Vec<Vec<usize>>,
     start_column_after_wrap: &'a mut Vec<usize>,
     fold_column: &'a mut Vec<usize>,
     scale: &'a mut Vec<f64>,
     line_inlays: &'a mut Vec<(usize, LineInlay)>,
-    document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+    document_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
     summed_heights: &'a mut Vec<f64>,
     selections: &'a mut Vec<Selection>,
     latest_selection_index: &'a mut usize,
@@ -34,13 +34,13 @@ impl<'a> Context<'a> {
         text: &'a mut Text,
         tokenizer: &'a mut Tokenizer,
         text_inlays: &'a mut Vec<Vec<(usize, String)>>,
-        line_widget_inlays: &'a mut Vec<Vec<((usize, Affinity), line::Widget)>>,
+        line_widget_inlays: &'a mut Vec<Vec<((usize, Bias), line::Widget)>>,
         wrap_bytes: &'a mut Vec<Vec<usize>>,
         start_column_after_wrap: &'a mut Vec<usize>,
         fold_column: &'a mut Vec<usize>,
         scale: &'a mut Vec<f64>,
         line_inlays: &'a mut Vec<(usize, LineInlay)>,
-        document_widget_inlays: &'a mut Vec<((usize, Affinity), document::Widget)>,
+        document_widget_inlays: &'a mut Vec<((usize, Bias), view::Widget)>,
         summed_heights: &'a mut Vec<f64>,
         selections: &'a mut Vec<Selection>,
         latest_selection_index: &'a mut usize,
@@ -68,8 +68,8 @@ impl<'a> Context<'a> {
         }
     }
 
-    pub fn document(&self) -> Document<'_> {
-        Document::new(
+    pub fn document(&self) -> View<'_> {
+        View::new(
             self.settings,
             self.text,
             self.tokenizer,
@@ -119,21 +119,23 @@ impl<'a> Context<'a> {
         self.modify_text(edit_ops::backspace)
     }
 
-    pub fn set_cursor(&mut self, cursor: (Position, Affinity)) {
+    pub fn set_cursor_pos(&mut self, pos: BiasedTextPos) {
+        use crate::Cursor;
+
         self.selections.clear();
-        self.selections.push(Selection::from_cursor(cursor));
+        self.selections.push(Selection::from(Cursor::from(pos)));
         *self.latest_selection_index = 0;
     }
 
-    pub fn insert_cursor(&mut self, cursor: (Position, Affinity)) {
-        use std::cmp::Ordering;
+    pub fn insert_cursor(&mut self, pos: BiasedTextPos) {
+        use {crate::Cursor, std::cmp::Ordering};
 
-        let selection = Selection::from_cursor(cursor);
+        let selection = Selection::from(Cursor::from(pos));
         *self.latest_selection_index = match self.selections.binary_search_by(|selection| {
-            if selection.end() <= cursor {
+            if selection.end() <= pos {
                 return Ordering::Less;
             }
-            if selection.start() >= cursor {
+            if selection.start() >= pos {
                 return Ordering::Greater;
             }
             Ordering::Equal
@@ -149,11 +151,11 @@ impl<'a> Context<'a> {
         };
     }
 
-    pub fn move_cursor_to(&mut self, select: bool, cursor: (Position, Affinity)) {
+    pub fn move_cursor_to(&mut self, select: bool, pos: BiasedTextPos) {
         let latest_selection = &mut self.selections[*self.latest_selection_index];
-        latest_selection.cursor = cursor;
+        latest_selection.cursor.pos = pos;
         if !select {
-            latest_selection.anchor = cursor;
+            latest_selection.anchor = pos;
         }
         while *self.latest_selection_index > 0 {
             let previous_selection_index = *self.latest_selection_index - 1;
@@ -179,18 +181,30 @@ impl<'a> Context<'a> {
     }
 
     pub fn move_cursors_left(&mut self, select: bool) {
-        use crate::move_ops;
+        use crate::{move_ops, Cursor};
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_left(document, position))
+        self.modify_selections(select, |view, selection| {
+            selection.update_cursor(|cursor| Cursor {
+                pos: BiasedTextPos {
+                    pos: move_ops::move_left(view.text().as_lines(), cursor.pos.pos),
+                    bias: Bias::Before,
+                },
+                col: None,
+            })
         });
     }
 
     pub fn move_cursors_right(&mut self, select: bool) {
-        use crate::move_ops;
+        use crate::{move_ops, Cursor};
 
-        self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|(position, _), _| move_ops::move_right(document, position))
+        self.modify_selections(select, |view, selection| {
+            selection.update_cursor(|cursor| Cursor {
+                pos: BiasedTextPos {
+                    pos: move_ops::move_right(view.text().as_lines(), cursor.pos.pos),
+                    bias: Bias::After,
+                },
+                col: None,
+            })
         });
     }
 
@@ -198,7 +212,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_up(document, cursor, column))
+            selection.update_cursor(|cursor| move_ops::move_up(document, cursor))
         });
     }
 
@@ -206,7 +220,7 @@ impl<'a> Context<'a> {
         use crate::move_ops;
 
         self.modify_selections(select, |document, selection| {
-            selection.update_cursor(|cursor, column| move_ops::move_down(document, cursor, column))
+            selection.update_cursor(|cursor| move_ops::move_down(document, cursor))
         });
     }
 
@@ -225,14 +239,14 @@ impl<'a> Context<'a> {
             .elements(start, self.document().line_count())
         {
             match element {
-                document::Element::Line(false, line) => {
+                view::Element::Line(false, line) => {
                     summed_height += line.height();
                     summed_heights.push(summed_height);
                 }
-                document::Element::Line(true, line) => {
+                view::Element::Line(true, line) => {
                     summed_height += line.height();
                 }
-                document::Element::Widget(_, widget) => {
+                view::Element::Widget(_, widget) => {
                     summed_height += widget.height;
                 }
             }
@@ -325,8 +339,8 @@ impl<'a> Context<'a> {
                     match element {
                         line::Element::Token(_, token) => {
                             for string in token.text.split_whitespace_boundaries() {
-                                let mut next_column =
-                                    column + string.column_count(document.settings().tab_column_count);
+                                let mut next_column = column
+                                    + string.column_count(document.settings().tab_column_count);
                                 if next_column > max_column {
                                     next_column = start_column_after_wrap;
                                     wrap_bytes.push(byte);
@@ -358,9 +372,9 @@ impl<'a> Context<'a> {
     fn modify_selections(
         &mut self,
         select: bool,
-        mut f: impl FnMut(&Document<'_>, Selection) -> Selection,
+        mut f: impl FnMut(&View<'_>, Selection) -> Selection,
     ) {
-        use std::mem;
+        use {crate::Cursor, std::mem};
 
         let mut selections = mem::take(self.selections);
         let document = self.document();
@@ -383,17 +397,22 @@ impl<'a> Context<'a> {
             }
             let start = current_selection.start().min(next_selection.start());
             let end = current_selection.end().max(next_selection.end());
-            let anchor;
+            let anchor_pos;
             let cursor;
-            if current_selection.anchor <= next_selection.cursor {
-                anchor = start;
-                cursor = end;
+            if current_selection.anchor <= next_selection.cursor.pos {
+                anchor_pos = start;
+                cursor = Cursor {
+                    pos: end,
+                    col: next_selection.cursor.col,
+                }
             } else {
-                anchor = end;
-                cursor = start;
+                anchor_pos = end;
+                cursor = Cursor {
+                    pos: start,
+                    col: current_selection.cursor.col,
+                };
             }
-            self.selections[current_selection_index] =
-                Selection::new(anchor, cursor, current_selection.preferred_column);
+            self.selections[current_selection_index] = Selection { anchor: anchor_pos, cursor };
             self.selections.remove(next_selection_index);
             if next_selection_index < *self.latest_selection_index {
                 *self.latest_selection_index -= 1;
@@ -401,46 +420,64 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, Range) -> Diff) {
-        use crate::diff::Strategy;
+    fn modify_text(&mut self, mut f: impl FnMut(&mut Text, TextRange) -> Diff) {
+        use crate::{text_pos::ApplyDiffMode, Cursor};
 
         let mut composite_diff = Diff::new();
-        let mut prev_end = Position::default();
-        let mut diffed_prev_end = Position::default();
+        let mut prev_end = TextPos::default();
+        let mut diffed_prev_end = TextPos::default();
         for selection in &mut *self.selections {
-            let distance_from_prev_end = selection.start().0 - prev_end;
+            let distance_from_prev_end = selection.start().pos - prev_end;
             let diffed_start = diffed_prev_end + distance_from_prev_end;
             let diffed_end = diffed_start + selection.length();
-            let diff = f(&mut self.text, Range::new(diffed_start, diffed_end));
-            let diffed_start = diffed_start.apply_diff(&diff, Strategy::InsertBefore);
-            let diffed_end = diffed_end.apply_diff(&diff, Strategy::InsertBefore);
+            let diff = f(&mut self.text, TextRange::new(diffed_start, diffed_end));
+            let diffed_start = diffed_start.apply_diff(&diff, ApplyDiffMode::InsertBefore);
+            let diffed_end = diffed_end.apply_diff(&diff, ApplyDiffMode::InsertBefore);
             self.text.apply_diff(diff.clone());
             composite_diff = composite_diff.compose(diff);
-            prev_end = selection.end().0;
+            prev_end = selection.end().pos;
             diffed_prev_end = diffed_end;
-            let anchor;
-            let cursor;
-            if selection.anchor <= selection.cursor {
-                anchor = (diffed_start, selection.start().1);
-                cursor = (diffed_end, selection.end().1);
+            let anchor_pos;
+            let cursor_pos;
+            if selection.anchor <= selection.cursor.pos {
+                anchor_pos = BiasedTextPos {
+                    pos: diffed_start,
+                    bias: selection.start().bias,
+                };
+                cursor_pos = BiasedTextPos {
+                    pos: diffed_end,
+                    bias: selection.end().bias,
+                };
             } else {
-                anchor = (diffed_end, selection.end().1);
-                cursor = (diffed_start, selection.start().1);
+                anchor_pos = BiasedTextPos {
+                    pos: diffed_end,
+                    bias: selection.end().bias,
+                };
+                cursor_pos = BiasedTextPos {
+                    pos: diffed_start,
+                    bias: selection.start().bias,
+                };
             }
-            *selection = Selection::new(anchor, cursor, selection.preferred_column);
+            *selection = Selection {
+                anchor: anchor_pos,
+                cursor: Cursor {
+                    pos: cursor_pos,
+                    col: None,
+                },
+            };
         }
         self.update_after_modify_text(composite_diff);
     }
 
     fn update_after_modify_text(&mut self, diff: Diff) {
-        use crate::diff::OperationInfo;
+        use crate::text_diff::OpInfo;
 
         let mut line = 0;
         for operation in &diff {
             match operation.info() {
-                OperationInfo::Delete(length) => {
+                OpInfo::Delete(length) => {
                     let start_line = line;
-                    let end_line = start_line + length.line_count;
+                    let end_line = start_line + length.lines;
                     self.text_inlays.drain(start_line..end_line);
                     self.line_widget_inlays.drain(start_line..end_line);
                     self.wrap_bytes.drain(start_line..end_line);
@@ -449,12 +486,12 @@ impl<'a> Context<'a> {
                     self.scale.drain(start_line..end_line);
                     self.summed_heights.truncate(line);
                 }
-                OperationInfo::Retain(length) => {
-                    line += length.line_count;
+                OpInfo::Retain(length) => {
+                    line += length.lines;
                 }
-                OperationInfo::Insert(length) => {
+                OpInfo::Insert(length) => {
                     let next_line = line + 1;
-                    let line_count = length.line_count;
+                    let line_count = length.lines;
                     self.text_inlays
                         .splice(next_line..next_line, (0..line_count).map(|_| Vec::new()));
                     self.line_widget_inlays

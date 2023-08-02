@@ -1,11 +1,11 @@
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Affinity {
+pub enum Bias {
     Before,
     After,
 }
 
-impl Default for Affinity {
+impl Default for Bias {
     fn default() -> Self {
-        Affinity::Before
+        Bias::Before
     }
 }
