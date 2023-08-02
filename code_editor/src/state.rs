@@ -1,7 +1,6 @@
 use {
     crate::{
-        document, document::LineInlay, line, Affinity, Context, Document, Selection, Settings,
-        Text, Tokenizer,
+        line, view, view::LineInlay, Bias, Context, Selection, Settings, Text, Tokenizer, View,
     },
     std::{
         collections::{HashMap, HashSet},
@@ -14,7 +13,7 @@ use {
 pub struct State {
     settings: Settings,
     view_id: usize,
-    views: HashMap<ViewId, View>,
+    views: HashMap<ViewId, Session>,
     editor_id: usize,
     editors: HashMap<EditorId, Editor>,
 }
@@ -35,10 +34,10 @@ impl State {
         &self.settings
     }
 
-    pub fn document(&self, view_id: ViewId) -> Document<'_> {
+    pub fn document(&self, view_id: ViewId) -> View<'_> {
         let view = &self.views[&view_id];
         let editor = &self.editors[&view.editor_id];
-        Document::new(
+        View::new(
             &self.settings,
             &editor.text,
             &editor.tokenizer,
@@ -87,7 +86,7 @@ impl State {
         let line_count = self.editors[&editor_id].text.as_lines().len();
         self.views.insert(
             view_id,
-            View {
+            Session {
                 editor_id,
                 max_column: None,
                 wrap_bytes: (0..line_count).map(|_| [].into()).collect(),
@@ -165,7 +164,7 @@ impl State {
 pub struct ViewId(usize);
 
 #[derive(Clone, Debug, PartialEq)]
-struct View {
+struct Session {
     max_column: Option<usize>,
     editor_id: EditorId,
     fold_column: Vec<usize>,
@@ -187,7 +186,7 @@ struct Editor {
     text: Text,
     tokenizer: Tokenizer,
     text_inlays: Vec<Vec<(usize, String)>>,
-    line_widget_inlays: Vec<Vec<((usize, Affinity), line::Widget)>>,
+    line_widget_inlays: Vec<Vec<((usize, Bias), line::Widget)>>,
     line_inlays: Vec<(usize, LineInlay)>,
-    document_widget_inlays: Vec<((usize, Affinity), document::Widget)>,
+    document_widget_inlays: Vec<((usize, Bias), view::Widget)>,
 }

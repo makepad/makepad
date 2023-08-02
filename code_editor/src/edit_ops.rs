@@ -1,35 +1,35 @@
-use crate::{Diff, Position, Range, Text};
+use crate::{Diff, TextPos, TextRange, Text};
 
-pub fn replace(range: Range, replace_with: Text) -> Diff {
-    use crate::diff::Builder;
+pub fn replace(range: TextRange, replace_with: Text) -> Diff {
+    use crate::text_diff::Builder;
 
     let mut builder = Builder::new();
-    builder.retain(range.start() - Position::default());
+    builder.retain(range.start() - TextPos::default());
     builder.delete(range.length());
     builder.insert(replace_with);
     builder.finish()
 }
 
-pub fn enter(range: Range) -> Diff {
+pub fn enter(range: TextRange) -> Diff {
     replace(range, "\n".into())
 }
 
-pub fn delete(range: Range) -> Diff {
-    use crate::diff::Builder;
+pub fn delete(range: TextRange) -> Diff {
+    use crate::text_diff::Builder;
 
     let mut builder = Builder::new();
-    builder.retain(range.start() - Position::default());
+    builder.retain(range.start() - TextPos::default());
     builder.delete(range.length());
     builder.finish()
 }
 
-pub fn backspace(text: &mut Text, range: Range) -> Diff {
-    use crate::diff::Builder;
+pub fn backspace(text: &mut Text, range: TextRange) -> Diff {
+    use crate::text_diff::Builder;
 
     if range.is_empty() {
         let position = prev_position(text, range.start());
         let mut builder = Builder::new();
-        builder.retain(position - Position::default());
+        builder.retain(position - TextPos::default());
         builder.delete(range.start() - position);
         builder.finish()
     } else {
@@ -37,22 +37,25 @@ pub fn backspace(text: &mut Text, range: Range) -> Diff {
     }
 }
 
-pub fn prev_position(text: &Text, position: Position) -> Position {
+pub fn prev_position(text: &Text, position: TextPos) -> TextPos {
     use crate::str::StrExt;
 
     if position.byte > 0 {
-        return Position::new(
-            position.line,
-            text.as_lines()[position.line][..position.byte]
+        return TextPos {
+            line: position.line,
+            byte: text.as_lines()[position.line][..position.byte]
                 .grapheme_indices()
                 .next_back()
                 .map(|(byte, _)| byte)
                 .unwrap(),
-        );
+        };
     }
     if position.line > 0 {
         let prev_line = position.line - 1;
-        return Position::new(prev_line, text.as_lines()[prev_line].len());
+        return TextPos {
+            line: prev_line,
+            byte: text.as_lines()[prev_line].len(),
+        };
     }
     position
 }
