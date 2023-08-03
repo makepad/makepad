@@ -558,7 +558,7 @@ impl FileTree {
         &mut self,
         cx: &mut Cx,
         node_id: FileNodeId,
-        items: Vec<DraggedItem>,
+        items: Vec<DragItem>,
     ) {
         self.dragging_node_id = Some(node_id);
         cx.start_dragging(items);
