@@ -36,7 +36,7 @@ use {
         event::{
             DragEvent,
             DropEvent,
-            DraggedItem,
+            DragItem,
             DragResponse
         },
     }
@@ -814,12 +814,12 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
     
-    extern fn dragging_ended(_this: &Object, _: Sel, _sender: ObjcId) {
-        //let window = get_cocoa_window(this);
-        //window.end_live_resize();
+    extern fn dragging_ended(this: &Object, _: Sel, _sender: ObjcId) {
+       let window = get_cocoa_window(this);
+       window.end_live_resize();
     }
     
-    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DraggedItem >>, DVec2) {
+    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DragItem >>, DVec2) {
         //let window = get_cocoa_window(this);
         let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
@@ -848,19 +848,44 @@ pub fn define_cocoa_view_class() -> *const Class {
         for index in 0..count {
             let url: ObjcId = unsafe {msg_send![urls, objectAtIndex: index]};
             let url: ObjcId = unsafe {msg_send![url, filePathURL]};
+            if url == nil{
+                continue;
+            }
             let string: ObjcId = unsafe {msg_send![url, absoluteString]};
+            if string == nil{
+                continue;
+            }
             let string = unsafe {CStr::from_ptr(msg_send![string, UTF8String])};
-            items.push(DraggedItem::File {
-                id: LiveId::unique(),
-                url: string.to_str().unwrap().to_string()
-            });
+            if let Ok(string) = string.to_str(){
+                // lets rip off file:// and #id
+                if let Some(string) = string.strip_prefix("file://"){
+                    let mut bits = string.split("#makepad_internal_id=");
+                    let path = bits.next().unwrap().to_string();
+                    let internal_id = if let Some(next) = bits.next(){
+                        if let Ok(id) = next.parse::<u64>(){
+                            Some(LiveId(id))
+                        }
+                        else{
+                            None
+                        }
+                    }
+                    else{
+                        None
+                    };
+                    items.push(DragItem::FilePath {
+                        internal_id,
+                        path
+                    });
+                }
+            }
+            
         }
         (Rc::new(items), pos)
     }
     
     extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
-        let window = get_cocoa_window(this);
-        window.end_live_resize();
+        //let window = get_cocoa_window(this);
+        //window.end_live_resize();
         
         let window = get_cocoa_window(this);
         let (items, pos) = get_drag_items_from_pasteboard(this, sender);
