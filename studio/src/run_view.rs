@@ -1,6 +1,6 @@
 use crate::{
     makepad_draw::*,
-    build::build_manager::BuildState,
+    build::build_manager::BuildManager,
     makepad_platform::os::cx_stdin::*,
     build::{
         build_protocol::*,
@@ -52,17 +52,17 @@ impl LiveHook for RunView {
 
 impl RunView {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut BuildState) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _manager: &mut BuildManager) {
         self.state_handle_event(cx, event);
         if self.tick.is_event(event) {
             self.time += self.frame_delta;
             self.frame += 1;
             
             // what shall we do, a timer? or do we do a next-frame
-            state.send_host_to_stdin(None, HostToStdin::Tick {
+            /*state.send_host_to_stdin(None, HostToStdin::Tick {
                 frame: self.frame,
                 time: self.time
-            })
+            })*/
         }
         // ok what do we want. lets do fingerdown, finger 
         match event.hits(cx, self.draw_bg.area()) {
@@ -108,7 +108,7 @@ impl RunView {
         }
     }
     
-    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: StdinToHost, _state: &mut BuildState) {
+    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: StdinToHost, _manager: &mut BuildManager) {
         match msg {
             StdinToHost::ReadyToStart => {
                 // cause a resize event to fire
@@ -125,7 +125,7 @@ impl RunView {
         self.draw_bg.area().redraw(cx);
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, state: &BuildState) {
+    pub fn draw(&mut self, cx: &mut Cx2d, manager: &BuildManager) {
         
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
@@ -133,7 +133,7 @@ impl RunView {
         let rect = cx.walk_turtle(Walk::fill()).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
         self.draw_bg.draw_abs(cx, rect);
-        for client in &state.clients {
+        for client in &manager.clients {
             for process in client.processes.values() {
                 
                 let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
@@ -145,12 +145,12 @@ impl RunView {
                         width: Some(new_size.0),
                         height: Some(new_size.1),
                     });
-                    
+                    /*
                     state.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
                         width: rect.size.x,
                         height: rect.size.y,
                         dpi_factor: dpi_factor,
-                    }));
+                    }));*/
                 }
                 self.draw_bg.set_texture(0, &process.texture);
                 

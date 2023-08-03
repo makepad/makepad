@@ -1,9 +1,5 @@
 use {
     crate::{
-        makepad_editor_core::{
-            delta::Delta,
-            text::Text
-        },
         makepad_live_id::*,
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
         unix_path::UnixPathBuf,
@@ -44,7 +40,7 @@ pub enum CollabRequest {
     OpenFile(UnixPathBuf),
     /// Requests the collab server to apply the given delta to the given revision of the file with
     /// the given id.
-    ApplyDelta(TextFileId, u32, Delta),
+    ApplyDelta(TextFileId, String),
     /// Requests the collab server to remove the client as a participant from the file with the
     /// given id. If the client was the last participant for the file, this also closes the file on
     /// the collab server.
@@ -67,7 +63,7 @@ pub enum CollabResponse {
     LoadFileTree(Result<FileTreeData, CollabError>),
     /// The result of requesting the collab server to add the client as a participant to the file
     /// with the given id.
-    OpenFile(Result<(TextFileId, u32, Text), CollabError>),
+    OpenFile(Result<(TextFileId, String), CollabError>),
     /// The result of requesting the collab server to apply a delta to a revision of the file with
     /// the given id.
     ApplyDelta(Result<TextFileId, CollabError>),
@@ -110,7 +106,7 @@ pub struct DirectoryEntry {
 pub enum CollabNotification {
     /// Notifies the client that another client applied the given delta to the file with the given
     /// id. This is only sent for files for which the client is a participant.
-    DeltaWasApplied(TextFileId, Delta),
+    DeltaWasApplied(TextFileId),
 }
 
 /// A type for representing errors from the collab server.

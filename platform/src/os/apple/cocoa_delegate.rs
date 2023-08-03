@@ -6,7 +6,7 @@ use {
         os::raw::{c_void}
     },
     crate::{
-        makepad_objc_sys::runtime::{ObjcId,nil},
+        makepad_objc_sys::runtime::{ObjcId, nil},
         makepad_live_id::LiveId,
         makepad_math::{
             DVec2,
@@ -34,18 +34,17 @@ use {
             MenuCommand
         },
         event::{
-            DragState,
             DragEvent,
             DropEvent,
             DraggedItem,
-            DragAction
+            DragResponse
         },
     }
 };
 
 
 pub struct AvVideoCaptureCallback {
-    _callback: Box<Box<dyn Fn(CMSampleBufferRef) + Send + 'static>>,
+    _callback: Box<Box<dyn Fn(CMSampleBufferRef) + Send + 'static >>,
     pub delegate: RcObjcId,
 }
 
@@ -98,11 +97,11 @@ pub fn define_av_video_callback_delegate() -> *const Class {
     // Add callback methods
     unsafe {
         decl.add_method(
-            sel!(captureOutput:didOutputSampleBuffer:fromConnection:),
+            sel!(captureOutput: didOutputSampleBuffer: fromConnection:),
             capture_output_did_output_sample_buffer as extern fn(&Object, Sel, ObjcId, CMSampleBufferRef, ObjcId)
         );
         decl.add_method(
-            sel!(captureOutput:didDropSampleBuffer:fromConnection:),
+            sel!(captureOutput: didDropSampleBuffer: fromConnection:),
             capture_output_did_drop_sample_buffer as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId)
         );
         decl.add_protocol(
@@ -790,37 +789,42 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
     
     fn dragging(this: &Object, sender: ObjcId) -> NSDragOperation {
+        
         let window = get_cocoa_window(this);
-        let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
+        let (items, pos) = get_drag_items_from_pasteboard(this, sender);
+        
+        /*let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
-        }));
-        let action = Rc::new(Cell::new(DragAction::None));
+        }));*/
+        
+        let response = Rc::new(Cell::new(DragResponse::None));
         
         window.do_callback(CocoaEvent::Drag(DragEvent {
             handled: Cell::new(false),
             abs: pos,
-            state: DragState::Over,
-            action: action.clone()
+            items,
+            response: response.clone()
         }));
         
-        match action.get(){
-            DragAction::None => NSDragOperation::None,
-            DragAction::Copy => NSDragOperation::Copy,
-            DragAction::Link => NSDragOperation::Link,
-            DragAction::Move => NSDragOperation::Move,
+        match response.get() {
+            DragResponse::None => NSDragOperation::None,
+            DragResponse::Copy => NSDragOperation::Copy,
+            DragResponse::Link => NSDragOperation::Link,
+            DragResponse::Move => NSDragOperation::Move,
         }
     }
     
-    extern fn dragging_ended(this: &Object, _: Sel, _sender: ObjcId) {
-        let window = get_cocoa_window(this);
-        window.end_live_resize();
+    extern fn dragging_ended(_this: &Object, _: Sel, _sender: ObjcId) {
+        //let window = get_cocoa_window(this);
+        //window.end_live_resize();
     }
     
-    extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
-        let window = get_cocoa_window(this);
+    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DraggedItem >>, DVec2) {
+        //let window = get_cocoa_window(this);
         let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
+        
         let pasteboard: ObjcId = unsafe {msg_send![sender, draggingPasteboard]};
         let class: ObjcId = unsafe {msg_send![class!(NSURL), class]};
         let classes: ObjcId = unsafe {
@@ -840,21 +844,30 @@ pub fn define_cocoa_view_class() -> *const Class {
             msg_send![pasteboard, readObjectsForClasses: classes options: options]
         };
         let count: usize = unsafe {msg_send![urls, count]};
-        let mut file_urls = Vec::with_capacity(count);
+        let mut items = Vec::with_capacity(count);
         for index in 0..count {
             let url: ObjcId = unsafe {msg_send![urls, objectAtIndex: index]};
             let url: ObjcId = unsafe {msg_send![url, filePathURL]};
             let string: ObjcId = unsafe {msg_send![url, absoluteString]};
             let string = unsafe {CStr::from_ptr(msg_send![string, UTF8String])};
-            file_urls.push(string.to_str().unwrap().to_string());
+            items.push(DraggedItem::File {
+                id: LiveId::unique(),
+                url: string.to_str().unwrap().to_string()
+            });
         }
-
+        (Rc::new(items), pos)
+    }
+    
+    extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
+        let window = get_cocoa_window(this);
+        window.end_live_resize();
+        
+        let window = get_cocoa_window(this);
+        let (items, pos) = get_drag_items_from_pasteboard(this, sender);
         window.do_callback(CocoaEvent::Drop(DropEvent {
             handled: Cell::new(false),
             abs: pos,
-            dragged_item: DraggedItem {
-                file_urls,
-            }
+            items
         }));
     }
     
