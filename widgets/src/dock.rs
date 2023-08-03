@@ -151,15 +151,11 @@ pub enum DockAction {
     TabWasPressed(LiveId),
     TabCloseWasPressed(LiveId),
     TabShouldStartDragging(LiveId),
-    DragHit(DockDragHit),
+    Drag(DragHitEvent),
+    Drop(DropHitEvent),
     None
 }
 
-#[derive(Clone, Debug)]
-pub enum DockDragHit {
-    Drag(DragHitEvent),
-    Drop(DropHitEvent)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DropPosition {
@@ -524,7 +520,7 @@ impl Widget for Dock {
                 self.drop_target_view.redraw(cx);
                 match f.state {
                     DragState::In | DragState::Over => {
-                        dispatch_action(cx, DockAction::DragHit(DockDragHit::Drag(f.clone())).into_action(uid))
+                        dispatch_action(cx, DockAction::Drag(f.clone()).into_action(uid))
                     }
                     DragState::Out => {}
                 }
@@ -532,7 +528,7 @@ impl Widget for Dock {
             DragHit::Drop(f) => {
                 self.drop_state = None;
                 self.drop_target_view.redraw(cx);
-                dispatch_action(cx, DockAction::DragHit(DockDragHit::Drop(f.clone())).into_action(uid))
+                dispatch_action(cx, DockAction::Drop(f.clone()).into_action(uid))
             }
             _ => {}
         }
@@ -703,39 +699,56 @@ impl DockRef {
         None
     }
     
-    pub fn should_allow_drop(&self, actions: &WidgetActions) -> Option<DockDragHit> {
+    pub fn should_accept_drag(&self, actions: &WidgetActions) -> Option<DragHitEvent> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::DragHit(drag_hit) = item.action() {
-                return Some(drag_hit.clone())
+            if let DockAction::Drag(drag_event) = item.action() {
+                return Some(drag_event.clone())
+            }
+        }
+        None
+    }
+
+    pub fn has_drop(&self, actions: &WidgetActions) -> Option<DropHitEvent> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let DockAction::Drop(drag_event) = item.action() {
+                return Some(drag_event.clone())
             }
         }
         None
     }
     
-    pub fn allow_drop(&self, cx: &mut Cx, dh: DockDragHit) {
-        // ok this handles allow drop / drop of an item
+    
+    pub fn accept_drag(&self, cx: &mut Cx, dh: DragHitEvent) {
         if let Some(mut dock) = self.borrow_mut() {
-            match dh {
-                DockDragHit::Drag(dh) => {
-                    dh.response.set(DragResponse::Move);
-                    // find hitzone
-                    // lets first scan all our tab bars and tabs
-                    if let Some(pos) = dock.find_drop_position(cx, dh.abs) {
-                        dock.drop_state = Some(pos);
-                    }
-                    else {
-                        dock.drop_state = None;
-                    }
-                }
-                DockDragHit::Drop(_dh) => {
-                    // split things
-                    dock.drop_state = None;
-                }
+            if let Some(pos) = dock.find_drop_position(cx, dh.abs) {
+                dh.response.set(DragResponse::Move);
+                dock.drop_state = Some(pos);
+            }
+            else {
+                dock.drop_state = None;
             }
         }
     }
     
-    pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DraggedItem) {
+    pub fn drop_clone(&self, _cx:&mut Cx, _pos:DVec2, _old_item:LiveId, _new_item:LiveId){
+        if let Some(mut _dock) = self.borrow_mut() {
+            
+        }
+    }
+    
+    pub fn drop_move(&self, _cx:&mut Cx, _pos:DVec2, _item:LiveId){
+        if let Some(mut _dock) = self.borrow_mut() {
+            
+        }
+    }
+    
+    pub fn drop_create(&self, _cx:&mut Cx, _pos:DVec2, _item:LiveId, _kind:LiveId){
+        if let Some(mut _dock) = self.borrow_mut() {
+            
+        }
+    }
+    
+    pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
     }
     

@@ -18,7 +18,7 @@ use {
 pub struct DragEvent {
     pub handled: Cell<bool>,
     pub abs: DVec2,
-    pub items: Rc<Vec<DraggedItem>>,
+    pub items: Rc<Vec<DragItem>>,
     pub response: Rc<Cell<DragResponse >>,
 }
 
@@ -26,7 +26,7 @@ pub struct DragEvent {
 pub struct DropEvent {
     pub handled: Cell<bool>,
     pub abs: DVec2,
-    pub items: Rc<Vec<DraggedItem>>,
+    pub items: Rc<Vec<DragItem>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,7 +34,7 @@ pub struct DragHitEvent{
     pub abs: DVec2,
     pub rect: Rect,
     pub state: DragState,
-    pub items: Rc<Vec<DraggedItem>>,
+    pub items: Rc<Vec<DragItem>>,
     pub response: Rc<Cell<DragResponse>>,
 }
 
@@ -42,7 +42,7 @@ pub struct DragHitEvent{
 pub struct DropHitEvent {
     pub abs: DVec2,
     pub rect: Rect,
-    pub items: Rc<Vec<DraggedItem>>,
+    pub items: Rc<Vec<DragItem>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,8 +61,9 @@ pub enum DragResponse {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum DraggedItem {
-    FilePath{path: String, id:Option<LiveId>},
+pub enum DragItem {
+    FilePath{path: String, internal_id:Option<LiveId>},
+    String{value:String, internal_id:Option<LiveId>}
 }
 
 /*
