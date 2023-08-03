@@ -8,7 +8,7 @@ use {
         gpu_info::GpuInfo,
         cx::{Cx, CxRef, OsType, XrCapabilities},
         event::{
-            DraggedItem, 
+            DragItem, 
             Timer,
             Trigger,
             WebSocketAutoReconnect,
@@ -69,7 +69,7 @@ pub enum CxOsOp {
     SetCursor(MouseCursor),
     StartTimer {timer_id: u64, interval: f64, repeats: bool},
     StopTimer(u64),
-    StartDragging(Vec<DraggedItem>),
+    StartDragging(Vec<DragItem>),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
     HttpRequest(HttpRequest),
@@ -133,7 +133,7 @@ impl Cx {
         self.platform_ops.push(CxOsOp::ShowClipboardActions(selected));
     }
 
-    pub fn start_dragging(&mut self, items: Vec<DraggedItem>) {
+    pub fn start_dragging(&mut self, items: Vec<DragItem>) {
         self.platform_ops.iter().for_each( | p | {
             if let CxOsOp::StartDragging{..} = p {
                 panic!("start drag twice");

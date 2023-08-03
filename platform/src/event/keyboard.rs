@@ -21,6 +21,14 @@ pub struct CxKeyboard {
 }
 
 impl CxKeyboard {
+    pub fn modifiers(&self)->KeyModifiers{
+        if let Some(key) = self.keys_down.first(){
+            key.modifiers
+        }
+        else{
+            Default::default()
+        }
+    }
     
     pub fn set_key_focus(&mut self, focus_area: Area) {
         self.text_ime_dismissed = false;
