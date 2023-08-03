@@ -157,9 +157,9 @@ impl AppMain for App {
             dock.close_tab(cx, tab_id);
         }
         if let Some(tab_id) = dock.should_tab_start_drag(&actions) {
-            dock.tab_start_drag(cx, tab_id, DraggedItem::File {
-                url: "file://something.jpg".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
-                id: tab_id
+            dock.tab_start_drag(cx, tab_id, DraggedItem::FilePath {
+                path: "".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
+                id: Some(tab_id)
             });
         }
         // alright so drop validation
