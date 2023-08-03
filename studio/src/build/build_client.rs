@@ -109,7 +109,7 @@ impl BuildClient {
                 }
             })),
         );
-        spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);
+        /*spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);*/
         
         Self {
             cmd_sender,
@@ -119,7 +119,7 @@ impl BuildClient {
     }
     
 }
-
+/*
 fn spawn_connection_listener(listener: TcpListener, mut server: BuildServer) {
     thread::spawn(move || {
         log!("Builder Server listening on {}", listener.local_addr().unwrap());
@@ -140,8 +140,8 @@ fn spawn_connection_listener(listener: TcpListener, mut server: BuildServer) {
             spawn_msg_sender(msg_receiver, stream);
         }
     });
-}
-
+}*/
+/*
 fn spawn_remote_cmd_handler(
     connection: BuildConnection,
     mut stream: TcpStream,
@@ -157,8 +157,8 @@ fn spawn_remote_cmd_handler(
         
         connection.handle_cmd(cmd);
     });
-}
-
+}*/
+/*
 fn spawn_msg_sender(
     msg_receiver: Receiver<BuildMsgWrap>,
     mut stream: TcpStream,
@@ -205,7 +205,7 @@ fn _spawn_msg_receiver(
         msg_signal.set()
     });
 }
-
+*/
 fn spawn_local_cmd_handler(
     cmd_receiver: Receiver<BuildCmdWrap>,
     connection: BuildConnection,

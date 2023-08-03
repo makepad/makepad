@@ -69,7 +69,7 @@ pub enum CxOsOp {
     SetCursor(MouseCursor),
     StartTimer {timer_id: u64, interval: f64, repeats: bool},
     StopTimer(u64),
-    StartDragging(DraggedItem),
+    StartDragging(Vec<DraggedItem>),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
     HttpRequest(HttpRequest),
@@ -133,13 +133,13 @@ impl Cx {
         self.platform_ops.push(CxOsOp::ShowClipboardActions(selected));
     }
 
-    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
+    pub fn start_dragging(&mut self, items: Vec<DraggedItem>) {
         self.platform_ops.iter().for_each( | p | {
             if let CxOsOp::StartDragging(_) = p {
                 panic!("start drag twice");
             }
         });
-        self.platform_ops.push(CxOsOp::StartDragging(dragged_item));
+        self.platform_ops.push(CxOsOp::StartDragging(items));
     }
     
     pub fn set_cursor(&mut self, cursor: MouseCursor) {
@@ -323,7 +323,7 @@ impl Cx {
         }
         
         self.fingers.update_area(old_area, new_area);
-        self.finger_drag.update_area(old_area, new_area);
+        self.drag_drop.update_area(old_area, new_area);
         self.keyboard.update_area(old_area, new_area);
         
         new_area

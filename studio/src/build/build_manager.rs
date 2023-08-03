@@ -9,10 +9,6 @@ use {
             StdinToHost,
             StdinWindowSize            
         },
-        app_state::AppState,
-        editor_state::{
-            DocumentId,
-        },
         build::{
             build_protocol::*,
             build_server::{BuildConnection, BuildServer},
@@ -45,10 +41,41 @@ live_design!{
 
 #[derive(Default)]
 pub struct BuildState {
-    pub clients: Vec<BuildClientWrap>,
 }
 
 impl BuildState {
+
+}
+
+pub struct BuildClientProcess {
+    pub cmd_id: BuildCmdId,
+    pub texture: Texture
+}
+
+pub struct BuildClientWrap {
+    client: BuildClient,
+    pub processes: HashMap<String, BuildClientProcess>,
+}
+
+#[derive(Live, LiveHook)]
+pub struct BuildManager {
+    #[live] path: String,
+    #[live] recompile_timeout: f64,
+    #[rust] pub clients: Vec<BuildClientWrap>,
+    #[rust] recompile_timer: Timer,
+}
+
+pub enum BuildManagerAction {
+    RedrawDoc,// {doc_id: DocumentId},
+    StdinToHost {cmd_id: BuildCmdId, msg: StdinToHost},
+    RedrawLog,
+    ClearLog,
+    None
+}
+
+const WHAT_TO_BUILD:&'static str = "fractal_zoom";
+
+impl BuildManager {
     pub fn get_process(&mut self, cmd_id: BuildCmdId) -> Option<&mut BuildClientProcess> {
         for wrap in &mut self.clients {
             for process in wrap.processes.values_mut() {
@@ -71,37 +98,8 @@ impl BuildState {
         }
         log!("Send host to stdin process not found");
     }
-}
-
-pub struct BuildClientProcess {
-    pub cmd_id: BuildCmdId,
-    pub texture: Texture
-}
-
-pub struct BuildClientWrap {
-    client: BuildClient,
-    pub processes: HashMap<String, BuildClientProcess>,
-}
-
-#[derive(Live, LiveHook)]
-pub struct BuildManager {
-    #[live] path: String,
-    #[live] recompile_timeout: f64,
-    #[rust] recompile_timer: Timer,
-}
-
-pub enum BuildManagerAction {
-    RedrawDoc {doc_id: DocumentId},
-    StdinToHost {cmd_id: BuildCmdId, msg: StdinToHost},
-    RedrawLog,
-    ClearLog,
-    None
-}
-
-const WHAT_TO_BUILD:&'static str = "fractal_zoom";
-
-impl BuildManager {
-    pub fn init(&mut self, cx: &mut Cx, state: &mut AppState) {
+    
+    pub fn init(&mut self, cx: &mut Cx) {
         let mut client = BuildClientWrap {
             client: BuildClient::new_with_local_server(&self.path),
             processes: HashMap::new()
@@ -114,12 +112,12 @@ impl BuildManager {
             cmd_id: BuildCmdId(0)
         });
         
-        state.build_state.clients.push(client);
+        self.clients.push(client);
         self.recompile_timer = cx.start_timeout(self.recompile_timeout);
     }
     
-    pub fn file_change(&mut self, _cx: &mut Cx, state: &mut AppState) {
-        for wrap in &mut state.build_state.clients {
+    pub fn file_change(&mut self, _cx: &mut Cx) {
+        for wrap in &mut self.clients {
             if let Some(process) = wrap.processes.get_mut(WHAT_TO_BUILD) {
                 
                 process.cmd_id = wrap.client.send_cmd(BuildCmd::CargoRun {
@@ -129,16 +127,15 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) -> Vec<BuildManagerAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<BuildManagerAction> {
         let mut actions = Vec::new();
-        self.handle_event_with(cx, event, state, &mut | _, action | actions.push(action));
+        self.handle_event_with(cx, event, &mut | _, action | actions.push(action));
         actions
     }
     
     pub fn handle_collab_response(
         &mut self,
         cx: &mut Cx,
-        _state: &mut AppState,
         response: &CollabResponse,
     ) {
         match response {
@@ -152,26 +149,26 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
+    pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if self.recompile_timer.is_event(event) {
-            self.file_change(cx, state);
-            state.editor_state.messages.clear();
+            self.file_change(cx);
+            /*state.editor_state.messages.clear();
             for doc in &mut state.editor_state.documents.values_mut() {
                 if let Some(inner) = &mut doc.inner {
                     inner.msg_cache.clear();
                 }
-            }
+            }*/
             dispatch_event(cx, BuildManagerAction::RedrawLog)
         }
         let mut any_msg = false;
-        for wrap in &mut state.build_state.clients {
-            let editor_state = &mut state.editor_state;
+        for wrap in &mut self.clients {
+            //let editor_state = &mut state.editor_state;
             wrap.client.handle_event_with(cx, event, &mut | cx, wrap | {
-                let msg_id = editor_state.messages.len();
+                //let msg_id = editor_state.messages.len();
                 // ok we have a cmd_id in wrap.msg
                 match wrap.msg {
-                    BuildMsg::Location(loc) => {
-                        if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
+                    BuildMsg::Location(_loc) => {
+                        /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
                             let doc = &mut editor_state.documents[*doc_id];
                             if let Some(inner) = &mut doc.inner {
                                 inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
@@ -179,11 +176,11 @@ impl BuildManager {
                             dispatch_event(cx, BuildManagerAction::RedrawDoc {
                                 doc_id: *doc_id
                             })
-                        }
-                        editor_state.messages.push(BuildMsg::Location(loc));
+                        }*/
+                        //editor_state.messages.push(BuildMsg::Location(loc));
                     }
                     BuildMsg::Bare(_) => {
-                        editor_state.messages.push(wrap.msg);
+                        //editor_state.messages.push(wrap.msg);
                     }
                     BuildMsg::StdinToHost(line) => {
                         let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
@@ -195,10 +192,10 @@ impl BuildManager {
                                 });
                             }
                             Err(_) => { // we should output a log string
-                                editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
+                                /*editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
                                     level: BuildMsgLevel::Log,
                                     line
-                                }));
+                                }));*/
                             }
                         }
                     }
