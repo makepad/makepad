@@ -284,13 +284,16 @@ impl Cx {
                 self.call_event_handler(&Event::TextInput(e))
             }
             CocoaEvent::Drag(e) => {
-                self.call_event_handler(&Event::Drag(e))
+                self.call_event_handler(&Event::Drag(e));
+                self.drag_drop.cycle_drag();
             }
             CocoaEvent::Drop(e) => {
-                self.call_event_handler(&Event::Drop(e))
+                self.call_event_handler(&Event::Drop(e));
+                self.drag_drop.cycle_drag();
             }
             CocoaEvent::DragEnd => {
-                self.call_event_handler(&Event::DragEnd)
+                self.call_event_handler(&Event::DragEnd);
+                self.drag_drop.cycle_drag();
             }
             CocoaEvent::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());

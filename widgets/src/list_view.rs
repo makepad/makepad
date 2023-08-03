@@ -22,12 +22,6 @@ live_design!{
     }
 }
 
-enum DrawPhase {
-    Begin,
-    Down {index: u64, scroll: f64, viewport: Rect},
-    Up {index: u64, scroll: f64, viewport: Rect},
-}
-
 enum ScrollState {
     Stopped,
     Drag {last_abs: f64, delta:f64},
@@ -47,7 +41,6 @@ pub struct ListView {
     #[live(0.98)] flick_scroll_decay: f64,
     #[rust] top_id: u64,
     #[rust] top_scroll: f64,
-    #[rust] draw_phase: Option<DrawPhase>,
     #[live] scroll_bar: ScrollBar,
     //    #[live] scroll_bars: ScrollBars,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
@@ -89,7 +82,7 @@ impl ListView {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
-        self.draw_phase = Some(DrawPhase::Begin)
+       // self.draw_phase = Some(DrawPhase::Begin)
     }
     
     fn end(&mut self, cx: &mut Cx2d) {
@@ -98,16 +91,13 @@ impl ListView {
         self.scroll_bar.draw_scroll_bar(cx, Axis::Vertical, rect, dvec2(100.0, rect.size.y * total_views));
         
         cx.end_turtle_with_area(&mut self.area);
-        if self.draw_phase.is_some() {
-            panic!("please call next_visible in a loop untill it returns None");
-        }
     }
     
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<u64> {
-        match self.draw_phase {
-            Some(DrawPhase::Begin) => {
+        match self.draw_state.get() {
+            Some(ListDrawState::Begin) => {
                 let viewport = cx.turtle().rect();
-                self.draw_phase = Some(DrawPhase::Down {
+                self.draw_state.set(ListDrawState::Down {
                     index: self.top_id,
                     scroll: self.top_scroll,
                     viewport,
@@ -121,7 +111,7 @@ impl ListView {
                 }, Layout::flow_down());
                 return Some(self.top_id)
             }
-            Some(DrawPhase::Down {index, scroll, viewport}) => {
+            Some(ListDrawState::Down {index, scroll, viewport}) => {
                 let did_draw = cx.turtle_has_align_items();
                 let rect = cx.end_turtle();
                 
@@ -135,7 +125,7 @@ impl ListView {
                 
                 if !did_draw || rect.pos.y + rect.size.y > viewport.pos.y + viewport.size.y || index + 1 == self.range_end {
                     if self.top_id > self.range_start && self.top_scroll > 0.0 {
-                        self.draw_phase = Some(DrawPhase::Up {
+                        self.draw_state.set(ListDrawState::Up {
                             index: self.top_id - 1,
                             scroll: self.top_scroll,
                             viewport
@@ -149,13 +139,13 @@ impl ListView {
                         return Some(self.top_id - 1);
                     }
                     else {
-                        self.draw_phase = None;
+                        self.draw_state.set(ListDrawState::End);
                         return None
                     }
                 }
                 
                 if index + 1 == self.range_end {
-                    self.draw_phase = None;
+                    self.draw_state.set(ListDrawState::End);
                     return None
                 }
                 
@@ -163,7 +153,7 @@ impl ListView {
                 if self.top_id + 1 == self.range_end {
                     scroll = 0.0;
                 }
-                self.draw_phase = Some(DrawPhase::Down {
+                self.draw_state.set(ListDrawState::Down {
                     index: index + 1,
                     scroll,
                     viewport
@@ -176,14 +166,14 @@ impl ListView {
                 }, Layout::flow_down());
                 return Some(index + 1)
             }
-            Some(DrawPhase::Up {index, scroll, viewport}) => {
+            Some(ListDrawState::Up {index, scroll, viewport}) => {
                 let did_draw = cx.turtle_has_align_items();
                 let used = cx.turtle().used();
                 let shift = dvec2(0.0, scroll - used.y);
                 cx.turtle_mut().set_shift(shift);
                 let rect = cx.end_turtle();
                 if !did_draw || rect.pos.y + rect.size.y + shift.y < viewport.pos.y {
-                    self.draw_phase = None;
+                    self.draw_state.set(ListDrawState::End);
                     return None
                 }
                 self.top_id = index;
@@ -192,10 +182,10 @@ impl ListView {
                     self.top_scroll = 0.0;
                 }
                 if index == self.range_start {
-                    self.draw_phase = None;
+                    self.draw_state.set(ListDrawState::End);
                     return None
                 }
-                self.draw_phase = Some(DrawPhase::Up {
+                self.draw_state.set(ListDrawState::Up {
                     index: self.top_id - 1,
                     scroll: self.top_scroll,
                     viewport
@@ -209,7 +199,7 @@ impl ListView {
                 
                 return Some(self.top_id - 1);
             }
-            None => {
+            _ => {
                 return None
             }
         }
@@ -247,7 +237,10 @@ impl ListView {
 
 #[derive(Clone)]
 enum ListDrawState {
-    Hook,
+    Begin,
+    Down {index: u64, scroll: f64, viewport: Rect},
+    Up {index: u64, scroll: f64, viewport: Rect},
+    End
 }
 
 #[derive(Clone, WidgetAction)]
@@ -287,7 +280,6 @@ impl Widget for ListView {
             });
         }
         
-        
         if let ScrollState::Flick {delta, next_frame} = &mut self.scroll_state{
             if let Some(_) =  next_frame.is_event(event){
                 *delta = *delta * self.flick_scroll_decay;
@@ -295,7 +287,7 @@ impl Widget for ListView {
                     *next_frame = cx.new_next_frame();
                     let delta = *delta;
                     self.delta_top_scroll(cx, delta);
-                    dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
+                    dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
                 }
             }
@@ -304,7 +296,7 @@ impl Widget for ListView {
         match event.hits(cx, self.area) {
             Hit::FingerScroll(e) => {
                 self.delta_top_scroll(cx, -e.scroll.y);
-                dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
+                dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                 self.area.redraw(cx);
             },
             Hit::FingerDown(e) => {
@@ -321,7 +313,7 @@ impl Widget for ListView {
                     *delta = new_delta;
                     *last_abs = e.abs.y;
                     self.delta_top_scroll(cx, new_delta);
-                    dispatch_action(cx, WidgetActionItem::new(InfiniteListAction::Scroll.into(), uid));
+                    dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
                 }
             }
@@ -348,11 +340,12 @@ impl Widget for ListView {
     fn get_walk(&self) -> Walk {self.walk}
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        if self.draw_state.begin(cx, ListDrawState::Hook) {
+        if self.draw_state.begin(cx, ListDrawState::Begin) {
             self.begin(cx, walk);
             return WidgetDraw::hook_above()
         }
-        if let Some(ListDrawState::Hook) = self.draw_state.get() {
+        // ok so if we are 
+        if let Some(_) = self.draw_state.get() {
             self.end(cx);
             self.draw_state.end();
         }

@@ -152,7 +152,7 @@ pub struct CocoaApp {
     event_flow: EventFlow,
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
-    ns_event: ObjcId,
+    current_ns_event: Option<ObjcId>,
 }
 
 impl CocoaApp {
@@ -180,7 +180,7 @@ impl CocoaApp {
                 event_callback: Some(event_callback),
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
-                ns_event: ptr::null_mut(),
+                current_ns_event: None,
             }
         }
     }
@@ -616,7 +616,7 @@ impl CocoaApp {
                             inMode: NSDefaultRunLoopMode
                             dequeue: YES
                         ];
-                        
+                        self.current_ns_event = Some(ns_event);
                         if ns_event != nil {
                             self.process_ns_event(ns_event);
                         }
@@ -624,6 +624,7 @@ impl CocoaApp {
                         if ns_event == nil || event_wait {
                             self.do_callback(CocoaEvent::Paint);
                         }
+                        self.current_ns_event = None;
                         
                         let () = msg_send![pool, release];
                     }
@@ -778,7 +779,7 @@ impl CocoaApp {
         ]);
         self.do_callback(vec![CocoaEvent::Paint]);
     }*/
-    
+     
     pub fn send_command_event(&mut self, command: MenuCommand) {
         self.do_callback(
             CocoaEvent::MenuCommand(command)
@@ -790,14 +791,17 @@ impl CocoaApp {
         self.do_callback(CocoaEvent::Paint);
     }
     
-    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
+    pub fn start_dragging(&mut self, items: Vec<DraggedItem>) {
         let cocoa_window = unsafe {
-            let window: ObjcId = msg_send![self.ns_event, window];
+            let window: ObjcId = msg_send![self.current_ns_event.unwrap(), window];
             let window_delegate: ObjcId = msg_send![window, delegate];
+            if window == nil{
+                crate::error!("start_dragging: Cocoa window nil on event");
+                return
+            }
             let cocoa_window: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
             &mut *(cocoa_window as *mut CocoaWindow)
         };
-        
-        cocoa_window.start_dragging(self.ns_event, dragged_item);
+        cocoa_window.start_dragging(self.current_ns_event.unwrap(), items);
     }
 }

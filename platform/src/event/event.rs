@@ -107,9 +107,10 @@ pub enum Hit{
     Nothing
 }
 
-pub enum DragHit<'a>{
-    Drag(DragHitEvent<'a>),
-    Drop(DropHitEvent<'a>),
+#[derive(Clone)]
+pub enum DragHit{
+    Drag(DragHitEvent),
+    Drop(DropHitEvent),
     DragEnd,
     NoHit
 }
