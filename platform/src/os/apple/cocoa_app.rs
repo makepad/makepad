@@ -46,7 +46,7 @@ use {
             TimerEvent,
             //Signal,
             //SignalEvent,
-            DraggedItem,
+            DragItem,
             KeyModifiers,
             HttpResponseEvent,
             HttpRequestErrorEvent,
@@ -791,7 +791,7 @@ impl CocoaApp {
         self.do_callback(CocoaEvent::Paint);
     }
     
-    pub fn start_dragging(&mut self, items: Vec<DraggedItem>) {
+    pub fn start_dragging(&mut self, items: Vec<DragItem>) {
         let cocoa_window = unsafe {
             let window: ObjcId = msg_send![self.current_ns_event.unwrap(), window];
             let window_delegate: ObjcId = msg_send![window, delegate];

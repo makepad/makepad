@@ -34,7 +34,7 @@ use {
             WindowCloseRequestedEvent,
             WindowClosedEvent,
             TextInputEvent,
-            DraggedItem,
+            DragItem,
         },
     }
 };
@@ -419,17 +419,18 @@ impl CocoaWindow {
         }))
     }
     
-    pub fn start_dragging(&mut self, ns_event: ObjcId, items: Vec<DraggedItem>) {
-        let dragged_files = items.iter().map( | item | {
+    pub fn start_dragging(&mut self, ns_event: ObjcId, items: Vec<DragItem>) {
+        let mut dragged_files = Vec::new();
+        for item in items{
             match item{
-                DraggedItem::FilePath{path, id}=>{
+                DragItem::FilePath{path, internal_id}=>{
                     let pasteboard_item: ObjcId = unsafe {msg_send![class!(NSPasteboardItem), new]};
                     let _: () = unsafe {
                         msg_send![
                             pasteboard_item,
                             setString: str_to_nsstring(
-                                &if let Some(id) = id{
-                                    format!("file://{}#makepad_file_path_id={}",path, id.0)
+                                &if let Some(id) = internal_id{
+                                    format!("file://{}internal_id={}",path, id.0)
                                 }
                                 else{
                                     format!("file://{}",path)
@@ -444,10 +445,14 @@ impl CocoaWindow {
                     let _: () = unsafe {
                         msg_send![dragging_item, setDraggingFrame: bounds contents: self.view]
                     };
-                    dragging_item
+                    dragged_files.push(dragging_item)
+                }
+                _=>{
+                    crate::error!("Dragging string not implemented on macos yet");
                 }
             }
-        }).collect::<Vec<_ >> ();
+        }
+        
         let dragging_items: ObjcId = unsafe {
             msg_send![
                 class!(NSArray),

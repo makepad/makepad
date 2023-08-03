@@ -36,7 +36,7 @@ use {
         event::{
             DragEvent,
             DropEvent,
-            DraggedItem,
+            DragItem,
             DragResponse
         },
     }
@@ -819,7 +819,7 @@ pub fn define_cocoa_view_class() -> *const Class {
        window.end_live_resize();
     }
     
-    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DraggedItem >>, DVec2) {
+    fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DragItem >>, DVec2) {
         //let window = get_cocoa_window(this);
         let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
@@ -859,9 +859,9 @@ pub fn define_cocoa_view_class() -> *const Class {
             if let Ok(string) = string.to_str(){
                 // lets rip off file:// and #id
                 if let Some(string) = string.strip_prefix("file://"){
-                    let mut bits = string.split("#makepad_file_path_id=");
+                    let mut bits = string.split("#makepad_internal_id=");
                     let path = bits.next().unwrap().to_string();
-                    let id = if let Some(next) = bits.next(){
+                    let internal_id = if let Some(next) = bits.next(){
                         if let Ok(id) = next.parse::<u64>(){
                             Some(LiveId(id))
                         }
@@ -872,8 +872,8 @@ pub fn define_cocoa_view_class() -> *const Class {
                     else{
                         None
                     };
-                    items.push(DraggedItem::FilePath {
-                        id,
+                    items.push(DragItem::FilePath {
+                        internal_id,
                         path
                     });
                 }
