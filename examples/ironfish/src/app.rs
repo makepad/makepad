@@ -323,8 +323,8 @@ impl App {
         db.bind(id!(osc1.harmoniclfo), ids!(osc1.harmoniclfo.slider));
         
         // Osc2 panel
-        db.bind(id!(supersaw1.spread), ids!(osc2.supersaw.spread.slider));
-        db.bind(id!(supersaw1.diffuse), ids!(osc2.supersaw.diffuse.slider));
+        db.bind(id!(supersaw2.spread), ids!(osc2.supersaw.spread.slider));
+        db.bind(id!(supersaw2.diffuse), ids!(osc2.supersaw.diffuse.slider));
         db.bind(id!(supersaw2.spread), ids!(osc2.supersaw.spread.slider));
         db.bind(id!(supersaw2.diffuse), ids!(osc2.supersaw.diffuse.slider));
         db.bind(id!(supersaw2.spread), ids!(osc2.hypersaw.spread.slider));
