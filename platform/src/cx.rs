@@ -95,8 +95,8 @@ pub struct Cx {
     #[allow(dead_code)]
     pub (crate) web_socket_id: u64,
     
-    pub (crate) keyboard: CxKeyboard,
-    pub (crate) fingers: CxFingers,
+    pub keyboard: CxKeyboard,
+    pub fingers: CxFingers,
     pub (crate) drag_drop: CxDragDrop,
     
     pub (crate) platform_ops: Vec<CxOsOp>,
