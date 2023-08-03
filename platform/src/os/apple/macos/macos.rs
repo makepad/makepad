@@ -30,12 +30,14 @@ use {
         pass::{CxPassParent},
         thread::Signal,
         event::{
+            MouseUpEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Event,
             HttpResponseEvent,
             HttpRequestErrorEvent,
         },
+        window::CxWindowPool,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx, OsType},
     }
@@ -150,6 +152,8 @@ impl Cx {
     ) -> EventFlow {
         
         self.handle_platform_ops(metal_windows, metal_cx, cocoa_app);
+         
+        // send a mouse up when dragging starts
         
         let mut paint_dirty = false;
         match &event {
@@ -292,6 +296,18 @@ impl Cx {
                 self.drag_drop.cycle_drag();
             }
             CocoaEvent::DragEnd => {
+                // lets send mousebutton ups to fix missing it.
+                // TODO! make this more resilient
+                self.call_event_handler(&Event::MouseUp(MouseUpEvent{
+                    abs: dvec2(0.0,0.0),
+                    button: 0,
+                    window_id: CxWindowPool::id_zero(),
+                    modifiers: Default::default(),
+                    time: 0.0
+                }));
+                self.fingers.mouse_up(0);
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                
                 self.call_event_handler(&Event::DragEnd);
                 self.drag_drop.cycle_drag();
             }
@@ -324,7 +340,7 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp) {
+    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp){
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -396,8 +412,8 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     cocoa_app.stop_timer(timer_id);
                 },
-                CxOsOp::StartDragging(dragged_item) => {
-                    cocoa_app.start_dragging(dragged_item);
+                CxOsOp::StartDragging(items) => {
+                    cocoa_app.start_dragging(items);
                 }
                 CxOsOp::UpdateMenu(menu) => {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)

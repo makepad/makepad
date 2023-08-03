@@ -249,8 +249,6 @@ impl Dock {
         
         if self.drop_target_view.begin(cx, Walk::default()).is_redrawing() {
             if let Some(pos) = &self.drop_state {
-                //let tab_bar = &self.tab_bars[drag.panel_id];
-                //let rect = compute_drag_rect(tab_bar.contents_rect, drag.position);
                 self.drag_quad.draw_abs(cx, pos.rect);
             }
             self.drop_target_view.end(cx);
@@ -676,74 +674,6 @@ impl Widget for Dock {
         WidgetDraw::done()
     }
 }
-
-/*
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct PanelId(pub LiveId);
-*/
-
-/*
-impl DragPosition {
-    pub fn compute_split_pos(id:LiveId, rect: Rect, position: DVec2) -> Option<DragPosition> {
-        let top_left = rect.pos;
-        let bottom_right = rect.pos + rect.size;
-        if (position.x - top_left.x) / rect.size.x < 0.1 {
-            Some(DragPosition::Left(id))
-        } else if (bottom_right.x - position.x) / rect.size.x < 0.1 {
-            Some(DragPosition::Right(id))
-        } else if (position.y - top_left.y) / rect.size.y < 0.1 {
-            Some(DragPosition::Top(id))
-        } else if (bottom_right.y - position.y) / rect.size.y < 0.1 {
-            Some(DragPosition::Bottom(id))
-        } else if rect.contains(position){
-            Some(DragPosition::Center(id))
-        }
-        else{
-            None
-        }
-    }
-    
-    pub fn compute_drag_rect(&self, rect: Rect) -> Rect {
-        match self {
-            DragPosition::Left => Rect {
-                pos: rect.pos,
-                size: DVec2 {
-                    x: rect.size.x / 2.0,
-                    y: rect.size.y,
-                },
-            },
-            DragPosition::Right => Rect {
-                pos: DVec2 {
-                    x: rect.pos.x + rect.size.x / 2.0,
-                    y: rect.pos.y,
-                },
-                size: DVec2 {
-                    x: rect.size.x / 2.0,
-                    y: rect.size.y,
-                },
-            },
-            DragPosition::Top => Rect {
-                pos: rect.pos,
-                size: DVec2 {
-                    x: rect.size.x,
-                    y: rect.size.y / 2.0,
-                },
-            },
-            DragPosition::Bottom => Rect {
-                pos: DVec2 {
-                    x: rect.pos.x,
-                    y: rect.pos.y + rect.size.y / 2.0,
-                },
-                size: DVec2 {
-                    x: rect.size.x,
-                    y: rect.size.y / 2.0,
-                },
-            },
-            DragPosition::Center => rect,
-        }
-    }
-}
-*/
 
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct DockRef(WidgetRef);
