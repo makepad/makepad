@@ -135,7 +135,7 @@ impl Cx {
 
     pub fn start_dragging(&mut self, items: Vec<DraggedItem>) {
         self.platform_ops.iter().for_each( | p | {
-            if let CxOsOp::StartDragging(_) = p {
+            if let CxOsOp::StartDragging{..} = p {
                 panic!("start drag twice");
             }
         });

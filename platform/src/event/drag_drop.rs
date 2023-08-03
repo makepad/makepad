@@ -62,7 +62,7 @@ pub enum DragResponse {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DraggedItem {
-    File{id: LiveId, url: String},
+    FilePath{path: String, id:Option<LiveId>},
 }
 
 /*

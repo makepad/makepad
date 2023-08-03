@@ -161,6 +161,9 @@ impl CocoaWindow {
     }
     
     pub fn start_live_resize(&mut self) {
+        if self.live_resize_timer != nil{
+            return;
+        }
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             let cocoa_app = get_cocoa_app_global();
@@ -185,8 +188,10 @@ impl CocoaWindow {
     
     pub fn end_live_resize(&mut self) {
         unsafe {
-            let () = msg_send![self.live_resize_timer, invalidate];
-            self.live_resize_timer = nil;
+            if self.live_resize_timer != nil{
+                let () = msg_send![self.live_resize_timer, invalidate];
+                self.live_resize_timer = nil;
+            }
         }
         self.do_callback(
             CocoaEvent::WindowResizeLoopStop(self.window_id)
@@ -417,12 +422,19 @@ impl CocoaWindow {
     pub fn start_dragging(&mut self, ns_event: ObjcId, items: Vec<DraggedItem>) {
         let dragged_files = items.iter().map( | item | {
             match item{
-                DraggedItem::File{url, ..}=>{
+                DraggedItem::FilePath{path, id}=>{
                     let pasteboard_item: ObjcId = unsafe {msg_send![class!(NSPasteboardItem), new]};
                     let _: () = unsafe {
                         msg_send![
                             pasteboard_item,
-                            setString: str_to_nsstring(&url)
+                            setString: str_to_nsstring(
+                                &if let Some(id) = id{
+                                    format!("file://{}#makepad_file_path_id={}",path, id.0)
+                                }
+                                else{
+                                    format!("file://{}",path)
+                                }
+                            )
                             forType: NSPasteboardTypeFileURL
                         ]
                     };
