@@ -558,10 +558,10 @@ impl FileTree {
         &mut self,
         cx: &mut Cx,
         node_id: FileNodeId,
-        dragged_item: DraggedItem,
+        items: Vec<DraggedItem>,
     ) {
         self.dragging_node_id = Some(node_id);
-        cx.start_dragging(dragged_item);
+        cx.start_dragging(items);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {

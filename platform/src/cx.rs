@@ -28,7 +28,7 @@ use {
         event::{
             DrawEvent,
             CxFingers,
-            CxFingerDrag,
+            CxDragDrop,
             Event,
             Trigger,
             CxKeyboard,
@@ -97,7 +97,7 @@ pub struct Cx {
     
     pub (crate) keyboard: CxKeyboard,
     pub (crate) fingers: CxFingers,
-    pub (crate) finger_drag: CxFingerDrag,
+    pub (crate) drag_drop: CxDragDrop,
     
     pub (crate) platform_ops: Vec<CxOsOp>,
     
@@ -250,7 +250,7 @@ impl Cx {
             
             keyboard: Default::default(),
             fingers: Default::default(),
-            finger_drag: Default::default(),
+            drag_drop: Default::default(),
             
             platform_ops: Default::default(),
             

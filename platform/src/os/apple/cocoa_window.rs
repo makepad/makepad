@@ -414,29 +414,33 @@ impl CocoaWindow {
         }))
     }
     
-    pub fn start_dragging(&mut self, ns_event: ObjcId, dragged_item: DraggedItem) {
-        let dragging_items = dragged_item.file_urls.iter().map( | file_url | {
-            let pasteboard_item: ObjcId = unsafe {msg_send![class!(NSPasteboardItem), new]};
-            let _: () = unsafe {
-                msg_send![
-                    pasteboard_item,
-                    setString: str_to_nsstring(file_url)
-                    forType: NSPasteboardTypeFileURL
-                ]
-            };
-            let dragging_item: ObjcId = unsafe {msg_send![class!(NSDraggingItem), alloc]};
-            let _: () = unsafe {msg_send![dragging_item, initWithPasteboardWriter: pasteboard_item]};
-            let bounds: NSRect = unsafe {msg_send![self.view, bounds]};
-            let _: () = unsafe {
-                msg_send![dragging_item, setDraggingFrame: bounds contents: self.view]
-            };
-            dragging_item
+    pub fn start_dragging(&mut self, ns_event: ObjcId, items: Vec<DraggedItem>) {
+        let dragged_files = items.iter().map( | item | {
+            match item{
+                DraggedItem::File{url, ..}=>{
+                    let pasteboard_item: ObjcId = unsafe {msg_send![class!(NSPasteboardItem), new]};
+                    let _: () = unsafe {
+                        msg_send![
+                            pasteboard_item,
+                            setString: str_to_nsstring(&url)
+                            forType: NSPasteboardTypeFileURL
+                        ]
+                    };
+                    let dragging_item: ObjcId = unsafe {msg_send![class!(NSDraggingItem), alloc]};
+                    let _: () = unsafe {msg_send![dragging_item, initWithPasteboardWriter: pasteboard_item]};
+                    let bounds: NSRect = unsafe {msg_send![self.view, bounds]};
+                    let _: () = unsafe {
+                        msg_send![dragging_item, setDraggingFrame: bounds contents: self.view]
+                    };
+                    dragging_item
+                }
+            }
         }).collect::<Vec<_ >> ();
         let dragging_items: ObjcId = unsafe {
             msg_send![
                 class!(NSArray),
-                arrayWithObjects: dragging_items.as_ptr()
-                count: dragging_items.len()
+                arrayWithObjects: dragged_files.as_ptr()
+                count: dragged_files.len()
             ]
         };
         
