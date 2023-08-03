@@ -84,6 +84,7 @@ live_design!{
                 Empty1 = <Rect> {draw_bg: {color: #533}}
                 Empty2 = <Rect> {draw_bg: {color: #353}}
                 Empty3 = <Rect> {draw_bg: {color: #335}}
+                Empty4 = <Rect> {draw_bg: {color: #535}}
                 FileTree = <FileTree> {}
                 //LogList = <LogList>{}
             }
@@ -157,15 +158,31 @@ impl AppMain for App {
             dock.close_tab(cx, tab_id);
         }
         if let Some(tab_id) = dock.should_tab_start_drag(&actions) {
-            dock.tab_start_drag(cx, tab_id, DraggedItem::File {
-                url: "file://something.jpg".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
-                id: tab_id
+            dock.tab_start_drag(cx, tab_id, DragItem::FilePath {
+                path: "".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
+                internal_id: Some(tab_id)
             });
         }
         // alright so drop validation
-        if let Some(drop) = dock.should_allow_drop(&actions){
-            // here we check if this item is a valid droptarget
-            dock.allow_drop(cx, drop);
+        if let Some(drag) = dock.should_accept_drag(&actions){
+            if drag.items.len() == 1{
+                dock.accept_drag(cx, drag);
+            }
+        }
+        if let Some(drop) = dock.has_drop(&actions){
+            if let DragItem::FilePath{path:_, internal_id} = &drop.items[0]{
+                if let Some(internal_id) = internal_id{ // from inside the app
+                    if cx.keyboard.modifiers().logo{
+                        dock.drop_clone(cx, drop.abs, *internal_id, live_id!(drop));
+                    }
+                    else{
+                        dock.drop_move(cx, drop.abs, *internal_id);
+                    }
+                }
+                else{ // external file, we have to create a new tab
+                    dock.drop_create(cx, drop.abs, live_id!(newitem), live_id!(Empty4))
+                }
+            }
         }
         
         //self.inner.handle_event(cx, event, &mut *dock.borrow_mut().unwrap(), &mut self.app_state);
