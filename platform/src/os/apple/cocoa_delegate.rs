@@ -874,7 +874,7 @@ pub fn define_cocoa_view_class() -> *const Class {
                     };
                     items.push(DragItem::FilePath {
                         internal_id,
-                        path
+                        path: if path=="makepad_internal_empty"{"".to_string()}else{path}
                     });
                 }
             }

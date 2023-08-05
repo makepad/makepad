@@ -430,10 +430,10 @@ impl CocoaWindow {
                             pasteboard_item,
                             setString: str_to_nsstring(
                                 &if let Some(id) = internal_id{
-                                    format!("file://{}internal_id={}",path, id.0)
+                                    format!("file://{}#makepad_internal_id={}", if path.len()==0{"makepad_internal_empty"}else {&path}, id.0)
                                 }
                                 else{
-                                    format!("file://{}",path)
+                                    format!("file://{}",if path.len()==0{"makepad_internal_empty"}else {&path})
                                 }
                             )
                             forType: NSPasteboardTypeFileURL
