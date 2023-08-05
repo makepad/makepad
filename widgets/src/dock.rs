@@ -426,7 +426,19 @@ impl Dock {
         }
     }
     
-    fn close_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
+    fn find_tab_bar_from_tab(&mut self,tab_id: LiveId)->Option<LiveId> {
+        for (tabs_id, item) in self.dock_items.iter_mut() {
+            match item {
+                DockItem::Tabs {tabs, ..} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
+                    return Some(*tabs_id)
+                }
+                _ => ()
+            }
+        }
+        None
+    }
+    
+    fn close_tab(&mut self, cx: &mut Cx, tab_id: LiveId, keep_item: bool)->Option<LiveId> {
         // ok so we have to find the tab id in our tab bars / tabs and remove it
         // if we are the last tab we need to remove a splitter
         for (tabs_id, item) in self.dock_items.iter_mut() {
@@ -437,18 +449,38 @@ impl Dock {
                     tabs.remove(pos);
                     if tabs.len() == 0 { // unsplit
                         self.unsplit_tabs(cx, tabs_id);
+                        return None
                     }
                     else {
                         let next_tab = if *selected >= tabs.len() {tabs[*selected - 1]} else {tabs[*selected]};
                         self.select_tab(cx, next_tab);
-                        self.dock_items.remove(&tab_id);
+                        if !keep_item{
+                            self.dock_items.remove(&tab_id);
+                        }
                         self.area.redraw(cx);
+                        return Some(tabs_id)
                     }
-                    return
                 }
                 _ => ()
             }
         }
+        None
+    }
+    
+    fn check_drop_is_noop(&mut self, tab_id: LiveId, item_id:LiveId)->bool {
+        // ok so we have to find the tab id in our tab bars / tabs and remove it
+        // if we are the last tab we need to remove a splitter
+        for (tabs_id, item) in self.dock_items.iter_mut() {
+            match item {
+                DockItem::Tabs {tabs, ..} => if let Some(_) = tabs.iter().position( | v | *v == tab_id) {
+                    if *tabs_id == item_id && tabs.len() == 1{
+                        return true
+                    }
+                }
+                _ => ()
+            }
+        }
+        false
     }
     
 }
@@ -677,7 +709,7 @@ pub struct DockRef(WidgetRef);
 impl DockRef {
     pub fn close_tab(&self, cx: &mut Cx, tab_id: LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
-            dock.close_tab(cx, tab_id);
+            dock.close_tab(cx, tab_id, false);
         }
     }
     
@@ -736,9 +768,91 @@ impl DockRef {
         }
     }
     
-    pub fn drop_move(&self, _cx:&mut Cx, _pos:DVec2, _item:LiveId){
-        if let Some(mut _dock) = self.borrow_mut() {
-            
+    pub fn drop_move(&self, cx:&mut Cx, abs:DVec2, item:LiveId){
+        if let Some(mut dock) = self.borrow_mut() {
+            if let Some(pos) = dock.find_drop_position(cx, abs) {
+                
+                // ok now what
+                // we have a pos
+                match pos.part{
+                    DropPart::Left | DropPart::Right | DropPart::Top | DropPart::Bottom =>{
+                        if dock.check_drop_is_noop(item, pos.id){
+                            return
+                        }
+                        dock.close_tab(cx, item, true);
+                        let new_split = LiveId::unique();
+                        let new_tabs = LiveId::unique();
+                        dock.set_parent_split(pos.id, new_split);
+                        dock.dock_items.insert(new_split, match pos.part{
+                            DropPart::Left=>DockItem::Splitter{
+                                axis: Axis::Horizontal,
+                                align: SplitterAlign::Weighted(0.5),
+                                a: new_tabs,
+                                b: pos.id,
+                            },
+                            DropPart::Right=>DockItem::Splitter{
+                                axis: Axis::Horizontal,
+                                align: SplitterAlign::Weighted(0.5),
+                                a: pos.id,
+                                b: new_tabs
+                            },
+                            DropPart::Top=>DockItem::Splitter{
+                                axis: Axis::Vertical,
+                                align: SplitterAlign::Weighted(0.5),
+                                a: new_tabs,
+                                b: pos.id,
+                            },
+                            DropPart::Bottom=>DockItem::Splitter{
+                                axis: Axis::Vertical,
+                                align: SplitterAlign::Weighted(0.5),
+                                a: pos.id,
+                                b: new_tabs,
+                            },
+                            _=>panic!()
+                        });
+                        dock.dock_items.insert(new_tabs, DockItem::Tabs{
+                            tabs: vec![item],
+                            selected: 0,
+                        });
+                    }
+                    DropPart::Center=>{
+                        if dock.check_drop_is_noop(item, pos.id){
+                            return
+                        }
+                        dock.close_tab(cx, item, true);
+                        if let Some(DockItem::Tabs{tabs, selected}) = dock.dock_items.get_mut(&pos.id){
+                            tabs.push(item);
+                            *selected = tabs.len() - 1;
+                        }
+                    }
+                    DropPart::TabBar=>{
+                        if dock.check_drop_is_noop(item, pos.id){
+                            return
+                        }
+                        dock.close_tab(cx, item, true);
+                        if let Some(DockItem::Tabs{tabs, selected}) = dock.dock_items.get_mut(&pos.id){
+                            tabs.push(item);
+                            *selected = tabs.len() - 1;
+                        }
+                    }
+                    // insert the ta
+                    DropPart::Tab=>{
+                        if pos.id == item{
+                            return
+                        }
+                        let tab_bar_id = dock.find_tab_bar_from_tab(pos.id).unwrap();
+                        dock.close_tab(cx, item, true);
+                        if let Some(DockItem::Tabs{tabs, selected}) = dock.dock_items.get_mut(&tab_bar_id){
+                            if let Some(pos) = tabs.iter().position( | v | *v == pos.id){
+                                let old = tabs[pos];
+                                tabs[pos] = item;
+                                tabs.push(old);
+                                *selected = pos;
+                            } 
+                        }
+                    }
+                }
+            }
         }
     }
     
