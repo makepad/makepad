@@ -57,7 +57,7 @@ live_design!{
                 }
                 
                 content2 = Tabs {
-                    tabs: [file1, file2],
+                    tabs: [file1, file2, file3],
                     selected: 0
                 }
                 
@@ -69,6 +69,11 @@ live_design!{
                 file2 = Tab {
                     name: "File2"
                     kind: Empty2
+                }
+
+                file3 = Tab {
+                    name: "File3"
+                    kind: Empty3
                 }
                 
                 file_tree = Tab {
