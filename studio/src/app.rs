@@ -70,7 +70,7 @@ live_design!{
                     name: "File2"
                     kind: Empty2
                 }
-
+                
                 file3 = Tab {
                     name: "File3"
                     kind: Empty3
@@ -132,7 +132,12 @@ impl AppMain for App {
                 let cx = &mut Cx2d::new(cx, event);
                 while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                     if let Some(mut file_tree) = next.into_file_tree().borrow_mut() {
-                        self.file_system.draw_file_node(cx, live_id!(root).into(), &mut *file_tree);
+                        file_tree.set_folder_is_open(cx, live_id!(root).into(),true, Animate::No);
+                        self.file_system.draw_file_node(
+                            cx,
+                            live_id!(root).into(),
+                            &mut *file_tree
+                        );
                     }
                 }
                 return
@@ -169,22 +174,22 @@ impl AppMain for App {
             });
         }
         // alright so drop validation
-        if let Some(drag) = dock.should_accept_drag(&actions){
-            if drag.items.len() == 1{
+        if let Some(drag) = dock.should_accept_drag(&actions) {
+            if drag.items.len() == 1 {
                 dock.accept_drag(cx, drag);
             }
         }
-        if let Some(drop) = dock.has_drop(&actions){
-            if let DragItem::FilePath{path:_, internal_id} = &drop.items[0]{
-                if let Some(internal_id) = internal_id{ // from inside the app
-                    if cx.keyboard.modifiers().logo{
+        if let Some(drop) = dock.has_drop(&actions) {
+            if let DragItem::FilePath {path: _, internal_id} = &drop.items[0] {
+                if let Some(internal_id) = internal_id { // from inside the app
+                    if cx.keyboard.modifiers().logo {
                         dock.drop_clone(cx, drop.abs, *internal_id, live_id!(drop));
                     }
-                    else{
+                    else {
                         dock.drop_move(cx, drop.abs, *internal_id);
                     }
                 }
-                else{ // external file, we have to create a new tab
+                else { // external file, we have to create a new tab
                     dock.drop_create(cx, drop.abs, live_id!(newitem), live_id!(Empty4))
                 }
             }
