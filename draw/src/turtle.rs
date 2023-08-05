@@ -721,7 +721,7 @@ impl Turtle {
     }
     
     pub fn rect_is_visible(&self, geom: Rect) -> bool {
-        let view = Rect {pos: self.origin, size: dvec2(self.width, self.height)};
+        let view = Rect {pos: self.origin + self.layout.scroll, size: dvec2(self.width, self.height)};
         return view.intersects(geom)
     }
     
