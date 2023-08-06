@@ -5,26 +5,20 @@ use {
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
         makepad_widgets::dock::*,
-        makepad_collab_protocol::{
-            CollabRequest,
-            CollabResponse,
-            CollabClientAction,
-            FileNodeData,
-            FileTreeData,
-            unix_str::UnixString,
-            unix_path::UnixPathBuf,
+        makepad_file_protocol::{
+            FileRequest,
+            FileResponse,
+            FileClientAction,
         },
-        collab_client::CollabClient,
+        file_client::FileClient,
+        file_system::*,
+        run_view::*,
         build::{
             build_manager::{
                 BuildManager,
-                //BuildManagerAction
             },
         },
-        //app_inner::AppInner,
-        //app_state::AppState,
     },
-    //makepad_regex::regex::Regex
 };
 
 live_design!{
@@ -34,29 +28,38 @@ live_design!{
     import makepad_widgets::log_list::LogList;
     import makepad_widgets::dock::*;
     import makepad_widgets::desktop_window::DesktopWindow;
+
+    import makepad_studio::run_view::RunView;
+
     const FS_ROOT = ""
     App = {{App}} {
         ui: <DesktopWindow> {
             caption_bar = {visible: true, caption_label = {label = {label: "Makepad Studio"}}},
             dock = <Dock> {
                 walk: {height: Fill, width: Fill}
-                // alright so how would we do this thing
-                // a dock has a serialised data rep
+
                 root = Splitter {
                     axis: Horizontal,
                     align: FromA(200.0),
                     a: file_tree,
-                    b: content1
+                    b: split1
                 }
                 
-                content1 = Splitter {
+                split1 = Splitter {
                     axis: Vertical,
                     align: FromB(200.0),
-                    a: content2,
+                    a: split2,
                     b: log_list
                 }
                 
-                content2 = Tabs {
+                split2 = Splitter {
+                    axis: Horizontal,
+                    align: FromB(100.0),
+                    a: open_files,
+                    b: run_view
+                }
+                
+                open_files = Tabs {
                     tabs: [file1, file2, file3],
                     selected: 0
                 }
@@ -86,10 +89,16 @@ live_design!{
                     kind: Empty3
                 }
                 
+                run_view = Tab {
+                    name: "Run",
+                    kind: RunView
+                }
+                
                 Empty1 = <Rect> {draw_bg: {color: #533}}
                 Empty2 = <Rect> {draw_bg: {color: #353}}
                 Empty3 = <Rect> {draw_bg: {color: #335}}
                 Empty4 = <Rect> {draw_bg: {color: #535}}
+                RunView = <RunView>{}
                 FileTree = <FileTree> {}
                 //LogList = <LogList>{}
             }
@@ -100,7 +109,7 @@ live_design!{
 #[derive(Live)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[live] collab_client: CollabClient,
+    #[live] file_client: FileClient,
     #[live] build_manager: BuildManager,
     #[rust] file_system: FileSystem
 }
@@ -109,13 +118,14 @@ impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
         crate::build::build_manager::live_design(cx);
-        crate::collab_client::live_design(cx);
+        crate::file_client::live_design(cx);
         crate::shader_view::live_design(cx);
         crate::run_view::live_design(cx);
     }
     
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
-        self.collab_client.send_request(CollabRequest::LoadFileTree {with_data: false});
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
+        self.build_manager.init(cx);
     }
 }
 
@@ -128,37 +138,47 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let dock = self.ui.get_dock(id!(dock));
         let file_tree = self.ui.get_file_tree(id!(file_tree));
-        match event {
-            Event::Draw(event) => {
-                let cx = &mut Cx2d::new(cx, event);
-                while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                    if let Some(mut file_tree) = file_tree.has_widget(&next).borrow_mut() {
-                        file_tree.set_folder_is_open(cx, live_id!(root).into(),true, Animate::No);
-                        self.file_system.draw_file_node(
-                            cx,
-                            live_id!(root).into(),
-                            &mut *file_tree
-                        );
-                    }
+        let run_view = self.ui.get_run_view(id!(run_view));
+        
+        if let Event::Draw(event) = event{
+            let cx = &mut Cx2d::new(cx, event);
+            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+                
+                if let Some(mut file_tree) = file_tree.has_widget(&next).borrow_mut() {
+                    file_tree.set_folder_is_open(cx, live_id!(root).into(), true, Animate::No);
+                    self.file_system.draw_file_node(
+                        cx,
+                        live_id!(root).into(),
+                        &mut *file_tree
+                    );
                 }
-                return
+                
+                if let Some(mut run_view) = next.into_run_view().borrow_mut(){
+                    log!("HERE!");
+                    run_view.draw(cx, &self.build_manager);
+                }
             }
-            _ => ()
+            return
         }
-        for action in self.collab_client.handle_event(cx, event) {
+
+        run_view.handle_event(cx, event, &mut self.build_manager);
+        for _action in self.build_manager.handle_event(cx, event){
+        }
+        
+        for action in self.file_client.handle_event(cx, event) {
             match action {
-                CollabClientAction::Response(response) => match response {
-                    CollabResponse::LoadFileTree(response) => {
+                FileClientAction::Response(response) => match response {
+                    FileResponse::LoadFileTree(response) => {
                         self.file_system.load_file_tree(response.unwrap());
                         self.ui.get_file_tree(id!(file_tree)).redraw(cx);
                         // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
-                    _response => {
-                        // self.build_manager.handle_collab_response(cx, state, &response);
+                    response => {
+                        self.build_manager.handle_file_response(cx, &response);
                         // self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
                     }
                 },
-                CollabClientAction::Notification(_notification) => {
+                FileClientAction::Notification(_notification) => {
                     //self.editors.handle_collab_notification(cx, &mut state.editor_state, notification)
                 }
             }
@@ -183,7 +203,7 @@ impl AppMain for App {
                 if drag.modifiers.logo {
                     dock.accept_drag(cx, drag, DragResponse::Copy);
                 }
-                else{
+                else {
                     dock.accept_drag(cx, drag, DragResponse::Move);
                 }
             }
@@ -205,131 +225,18 @@ impl AppMain for App {
             }
         }
         
-        if let Some(file_id) = file_tree.should_file_start_drag(&actions){
+        if let Some(file_id) = file_tree.should_file_start_drag(&actions) {
             let path = self.file_system.file_nodes.get(&file_id).unwrap().name.clone();
             file_tree.file_start_drag(cx, file_id, DragItem::FilePath {
-                path, //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
+                path,
                 internal_id: None
             });
         }
         
-        if let Some(file_id) = file_tree.file_clicked(&actions){
+        if let Some(file_id) = file_tree.file_clicked(&actions) {
             let path = self.file_system.file_nodes.get(&file_id).unwrap().name.clone();
             // lets add a file tab 'somewhere'
             dock.create_tab(cx, live_id!(content2), LiveId::unique(), live_id!(Empty4), path);
         }
-        
-        //self.inner.handle_event(cx, event, &mut *dock.borrow_mut().unwrap(), &mut self.app_state);
-    }
-}
-
-#[derive(Default)]
-struct FileSystem {
-    pub path: UnixPathBuf,
-    pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
-}
-
-#[derive(Debug)]
-pub struct FileNode {
-    pub parent_edge: Option<FileEdge>,
-    pub name: String,
-    pub child_edges: Option<Vec<FileEdge >>,
-}
-
-impl FileNode {
-    pub fn is_file(&self) -> bool {
-        self.child_edges.is_none()
-    }
-}
-
-#[derive(Debug)]
-pub struct FileEdge {
-    pub name: UnixString,
-    pub file_node_id: FileNodeId,
-}
-
-impl FileSystem {
-    fn draw_file_node(&self, cx: &mut Cx2d, file_node_id: FileNodeId, file_tree: &mut FileTree) {
-        if let Some(file_node) = self.file_nodes.get(&file_node_id) {
-            match &file_node.child_edges {
-                Some(child_edges) => {
-                    if file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok() {
-                        for child_edge in child_edges {
-                            self.draw_file_node(cx, child_edge.file_node_id, file_tree);
-                        }
-                        file_tree.end_folder();
-                    }
-                }
-                None => {
-                    file_tree.file(cx, file_node_id, &file_node.name);
-                }
-            }
-        }
-    }
-    
-    pub fn _file_node_path(&self, file_node_id: FileNodeId) -> UnixPathBuf {
-        let mut components = Vec::new();
-        let mut file_node = &self.file_nodes[file_node_id];
-        while let Some(edge) = &file_node.parent_edge {
-            components.push(&edge.name);
-            file_node = &self.file_nodes[edge.file_node_id];
-        }
-        self.path.join(components.into_iter().rev().collect::<UnixPathBuf>())
-    }
-    
-    pub fn _file_path_join(&self, components: &[&str]) -> UnixPathBuf {
-        self.path.join(components.into_iter().rev().collect::<UnixPathBuf>())
-    }
-    
-    pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
-        fn create_file_node(
-            file_node_id: Option<FileNodeId>,
-            file_nodes: &mut LiveIdMap<FileNodeId, FileNode>,
-            parent_edge: Option<FileEdge>,
-            node: FileNodeData,
-        ) -> FileNodeId {
-            let file_node_id = file_node_id.unwrap_or(file_nodes.alloc_key());
-            let name = parent_edge.as_ref().map_or_else(
-                || String::from("root"),
-                | edge | edge.name.to_string_lossy().to_string(),
-            );
-            let node = FileNode {
-                parent_edge,
-                name,
-                child_edges: match node {
-                    FileNodeData::Directory {entries} => Some(
-                        entries
-                            .into_iter()
-                            .map( | entry | FileEdge {
-                            name: entry.name.clone(),
-                            file_node_id: create_file_node(
-                                None,
-                                file_nodes,
-                                Some(FileEdge {
-                                    name: entry.name,
-                                    file_node_id,
-                                }),
-                                entry.node,
-                            ),
-                        })
-                            .collect::<Vec<_ >> (),
-                    ),
-                    FileNodeData::File {..} => None,
-                },
-            };
-            file_nodes.insert(file_node_id, node);
-            file_node_id
-        }
-        
-        self.path = tree_data.path;
-        
-        self.file_nodes.clear();
-        
-        create_file_node(
-            Some(live_id!(root).into()),
-            &mut self.file_nodes,
-            None,
-            tree_data.root,
-        );
     }
 }

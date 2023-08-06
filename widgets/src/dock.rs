@@ -434,7 +434,9 @@ impl Dock {
                 DockItem::Tabs {tabs, selected} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
                     *selected = pos;
                     // ok now lets redraw the area of the tab
-                    self.tab_bars.get_mut(&tabs_id).unwrap().contents_view.redraw(cx);
+                    if let Some(tab_bar) = self.tab_bars.get(&tabs_id){
+                        tab_bar.contents_view.redraw(cx);
+                    }
                 }
                 _ => ()
             }
@@ -444,7 +446,7 @@ impl Dock {
     fn find_tab_bar_from_tab(&mut self,tab_id: LiveId)->Option<LiveId> {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
-                DockItem::Tabs {tabs, ..} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
+                DockItem::Tabs {tabs, ..} => if let Some(_) = tabs.iter().position( | v | *v == tab_id) {
                     return Some(*tabs_id)
                 }
                 _ => ()
@@ -945,10 +947,6 @@ impl DockRef {
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
     }
-}
-
-pub struct DockDrop {
-    
 }
 
 #[derive(Clone, WidgetSet)]
