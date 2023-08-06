@@ -12,5 +12,4 @@ metadata.makepad-auto-version = "q4_pXhgQnFdWlB8fyhealPjFGgs="
 [dependencies]
 makepad-live-id = { path = "../../libs/live_id", version = "0.3.0"}
 makepad-micro-serde = {path = "../../libs/micro_serde", version = "0.3.0"}
-makepad-editor-core = {path="../editor_core", version="0.3.0"}
 
