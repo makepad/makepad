@@ -144,9 +144,9 @@ live_design!{
 #[derive(Clone, WidgetAction)]
 pub enum ButtonAction {
     None,
-    Click,
-    Press,
-    Release
+    Clicked,
+    Pressed,
+    Released
 }
 
 #[derive(Live)]
@@ -202,7 +202,7 @@ impl Button {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(_fe) => {
-                dispatch_action(cx, ButtonAction::Press);
+                dispatch_action(cx, ButtonAction::Pressed);
                 self.animate_state(cx, id!(hover.pressed));
             },
             Hit::FingerHoverIn(_) => {
@@ -213,7 +213,7 @@ impl Button {
                 self.animate_state(cx, id!(hover.off));
             }
             Hit::FingerUp(fe) => if fe.is_over {
-                dispatch_action(cx, ButtonAction::Click);
+                dispatch_action(cx, ButtonAction::Clicked);
                 if fe.device.has_hovers() {
                     self.animate_state(cx, id!(hover.on));
                 }
@@ -222,7 +222,7 @@ impl Button {
                 }
             }
             else {
-                dispatch_action(cx, ButtonAction::Release);
+                dispatch_action(cx, ButtonAction::Released);
                 self.animate_state(cx, id!(hover.off));
             }
             _ => ()
@@ -256,7 +256,7 @@ impl ButtonRef {
     
     pub fn clicked(&self, actions:&WidgetActions) -> bool {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let ButtonAction::Click = item.action() {
+            if let ButtonAction::Clicked = item.action() {
                 return true
             }
         }

@@ -462,12 +462,12 @@ impl CocoaWindow {
         };
         
         unsafe {
-            msg_send![
+            let _: ObjcId  = msg_send![
                 self.view,
                 beginDraggingSessionWithItems: dragging_items
                 event: ns_event
                 source: self.view
-            ]
+            ];
         }
         
         /*
