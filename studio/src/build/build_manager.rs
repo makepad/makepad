@@ -63,6 +63,7 @@ pub struct BuildManager {
     #[live] recompile_timeout: f64,
     #[rust] pub clients: Vec<BuildClientWrap>,
     #[rust] recompile_timer: Timer,
+    #[rust] pub messages: Vec<BuildMsg>,
 }
 
 pub enum BuildManagerAction {
@@ -76,6 +77,10 @@ pub enum BuildManagerAction {
 const WHAT_TO_BUILD:&'static str = "makepad-example-news-feed";
 
 impl BuildManager {
+    
+    pub fn draw_log(){
+    }
+    
     pub fn get_process(&mut self, cmd_id: BuildCmdId) -> Option<&mut BuildClientProcess> {
         for wrap in &mut self.clients {
             for process in wrap.processes.values_mut() {
@@ -152,6 +157,7 @@ impl BuildManager {
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if self.recompile_timer.is_event(event) {
             self.file_change(cx);
+            self.messages.clear();
             /*state.editor_state.messages.clear();
             for doc in &mut state.editor_state.documents.values_mut() {
                 if let Some(inner) = &mut doc.inner {
@@ -162,13 +168,15 @@ impl BuildManager {
         }
         let mut any_msg = false;
         for wrap in &mut self.clients {
+            let messages = &mut self.messages;
             //let editor_state = &mut state.editor_state;
             wrap.client.handle_event_with(cx, event, &mut | cx, wrap | {
                 log!("HANDLIN {:?}", wrap);
                 //let msg_id = editor_state.messages.len();
                 // ok we have a cmd_id in wrap.msg
-                match wrap.msg {
+                match &wrap.msg {
                     BuildMsg::Location(_loc) => {
+                        messages.push(wrap.msg);
                         /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
                             let doc = &mut editor_state.documents[*doc_id];
                             if let Some(inner) = &mut doc.inner {
@@ -181,6 +189,7 @@ impl BuildManager {
                         //editor_state.messages.push(BuildMsg::Location(loc));
                     }
                     BuildMsg::Bare(_) => {
+                        messages.push(wrap.msg);
                         //editor_state.messages.push(wrap.msg);
                     }
                     BuildMsg::StdinToHost(line) => {

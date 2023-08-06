@@ -15,23 +15,11 @@ use {
     },
 };
 
-live_design!{
-    FileClient= {{FileClient}} {}
-}
-
-#[derive(Live)]
+#[derive(Default)]
 pub struct FileClient {
-    #[live] bind: Option<String>,
-    #[live] path: String,
-    #[rust] inner: Option<FileClientInner>
-}
-
-impl LiveHook for FileClient {
-    fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if self.inner.is_none() {
-            self.inner = Some(FileClientInner::new_with_local_server(&self.path))
-        }
-    }
+//    bind: Option<String>,
+    path: String,
+    inner: Option<FileClientInner>
 }
 
 pub struct FileClientInner {
@@ -41,6 +29,12 @@ pub struct FileClientInner {
 }
 
 impl FileClient {
+    pub fn init(&mut self, _cx:&mut Cx){
+        if self.inner.is_none() {
+            self.inner = Some(FileClientInner::new_with_local_server(&self.path))
+        }
+    }
+    
     pub fn send_request(&mut self, request: FileRequest) {
         self.inner.as_ref().unwrap().request_sender.send(request).unwrap();
     }

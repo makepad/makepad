@@ -3,7 +3,11 @@ use {
         makepad_platform::*,
         makepad_draw::*,
         makepad_widgets::file_tree::*,
+        file_client::FileClient,
         makepad_file_protocol::{
+            FileRequest,
+            FileResponse,
+            FileClientAction,
             FileNodeData,
             FileTreeData,
             unix_str::UnixString,
@@ -14,6 +18,7 @@ use {
 
 #[derive(Default)]
 pub struct FileSystem {
+    pub file_client: FileClient,
     pub path: UnixPathBuf,
     pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
 }
@@ -38,6 +43,32 @@ pub struct FileEdge {
 }
 
 impl FileSystem {
+    pub fn init(&mut self, cx:&mut Cx){
+        self.file_client.init(cx);
+        self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
+    }
+    
+    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event){
+        for action in self.file_client.handle_event(cx, event) {
+            match action {
+                FileClientAction::Response(response) => match response {
+                    FileResponse::LoadFileTree(response) => {
+                        self.load_file_tree(response.unwrap());
+                        //self.ui.get_file_tree(id!(file_tree)).redraw(cx);
+                        // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
+                    }
+                    _response => {
+                        //self.build_manager.handle_file_response(cx, &response);
+                        // self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
+                    }
+                },
+                FileClientAction::Notification(_notification) => {
+                    //self.editors.handle_collab_notification(cx, &mut state.editor_state, notification)
+                }
+            }
+        }
+    }
+    
     pub fn draw_file_node(&self, cx: &mut Cx2d, file_node_id: FileNodeId, file_tree: &mut FileTree) {
         if let Some(file_node) = self.file_nodes.get(&file_node_id) {
             match &file_node.child_edges {
