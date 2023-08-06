@@ -5,13 +5,7 @@ use {
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
         makepad_widgets::dock::*,
-        makepad_file_protocol::{
-            FileRequest,
-            FileResponse,
-            FileClientAction,
-        },
-        file_client::FileClient,
-        file_system::*,
+        file_client::file_system::*,
         run_view::*,
         build::{
             build_manager::{
@@ -109,7 +103,6 @@ live_design!{
 #[derive(Live)]
 pub struct App {
     #[live] ui: WidgetRef,
-    #[live] file_client: FileClient,
     #[live] build_manager: BuildManager,
     #[rust] file_system: FileSystem
 }
@@ -118,13 +111,11 @@ impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
         crate::build::build_manager::live_design(cx);
-        crate::file_client::live_design(cx);
-        crate::shader_view::live_design(cx);
         crate::run_view::live_design(cx);
     }
     
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
+        self.file_system.init(cx);
         self.build_manager.init(cx);
     }
 }
@@ -165,24 +156,6 @@ impl AppMain for App {
         for _action in self.build_manager.handle_event(cx, event){
         }
         
-        for action in self.file_client.handle_event(cx, event) {
-            match action {
-                FileClientAction::Response(response) => match response {
-                    FileResponse::LoadFileTree(response) => {
-                        self.file_system.load_file_tree(response.unwrap());
-                        self.ui.get_file_tree(id!(file_tree)).redraw(cx);
-                        // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
-                    }
-                    response => {
-                        self.build_manager.handle_file_response(cx, &response);
-                        // self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
-                    }
-                },
-                FileClientAction::Notification(_notification) => {
-                    //self.editors.handle_collab_notification(cx, &mut state.editor_state, notification)
-                }
-            }
-        }
         let actions = self.ui.handle_widget_event(cx, event);
         
         // dock drag drop and tabs
