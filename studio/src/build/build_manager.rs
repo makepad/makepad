@@ -14,10 +14,10 @@ use {
             build_server::{BuildConnection, BuildServer},
             build_client::BuildClient
         },
-        makepad_collab_protocol::{
-            CollabNotification,
-            CollabRequest,
-            CollabResponse,
+        makepad_file_protocol::{
+            FileNotification,
+            FileRequest,
+            FileResponse,
             unix_path::{UnixPath},
         },
     },
@@ -73,7 +73,7 @@ pub enum BuildManagerAction {
     None
 }
 
-const WHAT_TO_BUILD:&'static str = "fractal_zoom";
+const WHAT_TO_BUILD:&'static str = "makepad-example-news-feed";
 
 impl BuildManager {
     pub fn get_process(&mut self, cmd_id: BuildCmdId) -> Option<&mut BuildClientProcess> {
@@ -133,13 +133,13 @@ impl BuildManager {
         actions
     }
     
-    pub fn handle_collab_response(
+    pub fn handle_file_response(
         &mut self,
         cx: &mut Cx,
-        response: &CollabResponse,
+        response: &FileResponse,
     ) {
         match response {
-            CollabResponse::ApplyDelta(response) => {
+            FileResponse::ApplyDelta(response) => {
                 // something changed for file_id
                 let _file_id = response.clone().unwrap();
                 cx.stop_timer(self.recompile_timer);
@@ -164,6 +164,7 @@ impl BuildManager {
         for wrap in &mut self.clients {
             //let editor_state = &mut state.editor_state;
             wrap.client.handle_event_with(cx, event, &mut | cx, wrap | {
+                log!("HANDLIN {:?}", wrap);
                 //let msg_id = editor_state.messages.len();
                 // ok we have a cmd_id in wrap.msg
                 match wrap.msg {

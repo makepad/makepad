@@ -19,7 +19,6 @@ pub enum WidgetCache {
 pub struct WidgetUid(pub u64);
 
 pub trait WidgetDesign{
-    
 }
 
 pub trait Widget: LiveApply {

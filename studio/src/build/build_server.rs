@@ -90,7 +90,6 @@ impl BuildConnection {
             what,
             "--message-format=json",
             "--release",
-            "--features=nightly",
             "--",
             "--message-format=json",
             &format!("--stdin-loop"),
