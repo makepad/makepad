@@ -127,11 +127,12 @@ impl App {
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         let dock = self.ui.get_dock(id!(dock));
+        let file_tree = self.ui.get_file_tree(id!(file_tree));
         match event {
             Event::Draw(event) => {
                 let cx = &mut Cx2d::new(cx, event);
                 while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
-                    if let Some(mut file_tree) = next.into_file_tree().borrow_mut() {
+                    if let Some(mut file_tree) = file_tree.has_widget(&next).borrow_mut() {
                         file_tree.set_folder_is_open(cx, live_id!(root).into(),true, Animate::No);
                         self.file_system.draw_file_node(
                             cx,
@@ -164,35 +165,58 @@ impl AppMain for App {
         }
         let actions = self.ui.handle_widget_event(cx, event);
         
+        // dock drag drop and tabs
+        
         if let Some(tab_id) = dock.clicked_tab_close(&actions) {
             dock.close_tab(cx, tab_id);
         }
+        
         if let Some(tab_id) = dock.should_tab_start_drag(&actions) {
             dock.tab_start_drag(cx, tab_id, DragItem::FilePath {
                 path: "".to_string(), //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
                 internal_id: Some(tab_id)
             });
         }
-        // alright so drop validation
+        
         if let Some(drag) = dock.should_accept_drag(&actions) {
             if drag.items.len() == 1 {
-                dock.accept_drag(cx, drag);
+                if drag.modifiers.logo {
+                    dock.accept_drag(cx, drag, DragResponse::Copy);
+                }
+                else{
+                    dock.accept_drag(cx, drag, DragResponse::Move);
+                }
             }
         }
+        
         if let Some(drop) = dock.has_drop(&actions) {
-            if let DragItem::FilePath {path: _, internal_id} = &drop.items[0] {
-                if let Some(internal_id) = internal_id { // from inside the app
-                    if cx.keyboard.modifiers().logo {
-                        dock.drop_clone(cx, drop.abs, *internal_id, live_id!(drop));
+            if let DragItem::FilePath {path, internal_id} = &drop.items[0] {
+                if let Some(internal_id) = internal_id { // from inside the dock
+                    if drop.modifiers.logo {
+                        dock.drop_clone(cx, drop.abs, *internal_id, LiveId::unique());
                     }
                     else {
                         dock.drop_move(cx, drop.abs, *internal_id);
                     }
                 }
                 else { // external file, we have to create a new tab
-                    dock.drop_create(cx, drop.abs, live_id!(newitem), live_id!(Empty4))
+                    dock.drop_create(cx, drop.abs, LiveId::unique(), live_id!(Empty4), path.clone())
                 }
             }
+        }
+        
+        if let Some(file_id) = file_tree.should_file_start_drag(&actions){
+            let path = self.file_system.file_nodes.get(&file_id).unwrap().name.clone();
+            file_tree.file_start_drag(cx, file_id, DragItem::FilePath {
+                path, //String::from("file://") + &*path.into_unix_string().to_string_lossy(),
+                internal_id: None
+            });
+        }
+        
+        if let Some(file_id) = file_tree.file_clicked(&actions){
+            let path = self.file_system.file_nodes.get(&file_id).unwrap().name.clone();
+            // lets add a file tab 'somewhere'
+            dock.create_tab(cx, live_id!(content2), LiveId::unique(), live_id!(Empty4), path);
         }
         
         //self.inner.handle_event(cx, event, &mut *dock.borrow_mut().unwrap(), &mut self.app_state);

@@ -5,7 +5,8 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         event::{
-            finger::{HitOptions,Margin},
+            KeyModifiers,
+            finger::{HitOptions, Margin},
             event::{Event, DragHit}
         },
         cx::Cx,
@@ -16,33 +17,37 @@ use {
 
 #[derive(Clone, Debug)]
 pub struct DragEvent {
+    pub modifiers: KeyModifiers,
     pub handled: Cell<bool>,
     pub abs: DVec2,
-    pub items: Rc<Vec<DragItem>>,
+    pub items: Rc<Vec<DragItem >>,
     pub response: Rc<Cell<DragResponse >>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DropEvent {
+    pub modifiers: KeyModifiers,
     pub handled: Cell<bool>,
     pub abs: DVec2,
-    pub items: Rc<Vec<DragItem>>,
+    pub items: Rc<Vec<DragItem >>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DragHitEvent{
+pub struct DragHitEvent {
+    pub modifiers: KeyModifiers,
     pub abs: DVec2,
     pub rect: Rect,
     pub state: DragState,
-    pub items: Rc<Vec<DragItem>>,
-    pub response: Rc<Cell<DragResponse>>,
+    pub items: Rc<Vec<DragItem >>,
+    pub response: Rc<Cell<DragResponse >>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DropHitEvent {
+    pub modifiers: KeyModifiers,
     pub abs: DVec2,
     pub rect: Rect,
-    pub items: Rc<Vec<DragItem>>,
+    pub items: Rc<Vec<DragItem >>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,8 +67,8 @@ pub enum DragResponse {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DragItem {
-    FilePath{path: String, internal_id:Option<LiveId>},
-    String{value:String, internal_id:Option<LiveId>}
+    FilePath {path: String, internal_id: Option<LiveId>},
+    String {value: String, internal_id: Option<LiveId>}
 }
 
 /*
@@ -112,14 +117,16 @@ impl Event {
                         event.handled.set(true);
                         DragHit::Drag(DragHitEvent {
                             rect,
+                            modifiers: event.modifiers,
                             abs: event.abs,
                             items: event.items.clone(),
-                            state:  DragState::Over,
+                            state: DragState::Over,
                             response: event.response.clone()
                         })
                     } else {
                         DragHit::Drag(DragHitEvent {
                             rect,
+                            modifiers: event.modifiers,
                             state: DragState::Out,
                             items: event.items.clone(),
                             abs: event.abs,
@@ -131,6 +138,7 @@ impl Event {
                         cx.drag_drop.next_drag_area = area;
                         event.handled.set(true);
                         DragHit::Drag(DragHitEvent {
+                            modifiers: event.modifiers,
                             rect,
                             state: DragState::In,
                             items: event.items.clone(),
@@ -148,6 +156,7 @@ impl Event {
                     cx.drag_drop.next_drag_area = Area::default();
                     event.handled.set(true);
                     DragHit::Drop(DropHitEvent {
+                        modifiers: event.modifiers,
                         rect,
                         abs: event.abs,
                         items: event.items.clone()

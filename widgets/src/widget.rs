@@ -192,7 +192,7 @@ pub struct WidgetRef(Rc<RefCell<Option<Box<dyn Widget >> >>);
 
 impl Debug for WidgetRef{
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
-        write!(f,"Unwrap error on draw_widget means you need to implement widget hooks")
+        write!(f, "WidgetRef {}", self.widget_uid().0)
     }
 }
 

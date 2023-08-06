@@ -150,7 +150,7 @@ pub enum DockAction {
     SplitPanelChanged {panel_id: LiveId, axis: Axis, align: SplitterAlign},
     TabWasPressed(LiveId),
     TabCloseWasPressed(LiveId),
-    TabShouldStartDragging(LiveId),
+    ShouldTabStartDrag(LiveId),
     Drag(DragHitEvent),
     Drop(DropHitEvent),
     None
@@ -208,6 +208,7 @@ impl LiveHook for Dock {
                         let mut dock_item = DockItem::new(cx);
                         let index = dock_item.apply(cx, from, index, nodes);
                         self.dock_items.insert(id, dock_item);
+                        
                         return index;
                     }
                     else {
@@ -229,6 +230,20 @@ impl LiveHook for Dock {
         }
         nodes.skip_node(index)
     }
+    
+    fn after_new_from_doc(&mut self, cx:&mut Cx){
+        // make sure our items exist
+        let mut items = Vec::new();
+        for (item_id, item) in self.dock_items.iter(){
+            if let DockItem::Tab{kind,..} = item{
+                items.push((*item_id, *kind));
+            }
+        }
+        for (item_id, kind) in items{
+            self.get_item(cx, item_id, kind);
+        }
+    }
+    
     fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, Dock)
     }
@@ -349,7 +364,7 @@ impl Dock {
         None
     }
     
-    pub fn get_item(&mut self, cx: &mut Cx2d, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
+    pub fn get_item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
@@ -483,6 +498,149 @@ impl Dock {
         false
     }
     
+    fn handle_drop(&mut self, cx:&mut Cx, abs:DVec2, item:LiveId, is_move: bool)->bool{
+        if let Some(pos) = self.find_drop_position(cx, abs) {
+            // ok now what
+            // we have a pos
+            match pos.part{
+                DropPart::Left | DropPart::Right | DropPart::Top | DropPart::Bottom =>{
+                    if is_move{
+                        if self.check_drop_is_noop(item, pos.id){
+                            return false
+                        }
+                        self.close_tab(cx, item, true);
+                    }
+                    let new_split = LiveId::unique();
+                    let new_tabs = LiveId::unique();
+                    self.set_parent_split(pos.id, new_split);
+                    self.dock_items.insert(new_split, match pos.part{
+                        DropPart::Left=>DockItem::Splitter{
+                            axis: Axis::Horizontal,
+                            align: SplitterAlign::Weighted(0.5),
+                            a: new_tabs,
+                            b: pos.id,
+                        },
+                        DropPart::Right=>DockItem::Splitter{
+                            axis: Axis::Horizontal,
+                            align: SplitterAlign::Weighted(0.5),
+                            a: pos.id,
+                            b: new_tabs
+                        },
+                        DropPart::Top=>DockItem::Splitter{
+                            axis: Axis::Vertical,
+                            align: SplitterAlign::Weighted(0.5),
+                            a: new_tabs,
+                            b: pos.id,
+                        },
+                        DropPart::Bottom=>DockItem::Splitter{
+                            axis: Axis::Vertical,
+                            align: SplitterAlign::Weighted(0.5),
+                            a: pos.id,
+                            b: new_tabs,
+                        },
+                        _=>panic!()
+                    });
+                    self.dock_items.insert(new_tabs, DockItem::Tabs{
+                        tabs: vec![item],
+                        selected: 0,
+                    });
+                    return true
+                }
+                DropPart::Center=>{
+                    if is_move{
+                        if self.check_drop_is_noop(item, pos.id){
+                            return false
+                        }
+                        self.close_tab(cx, item, true);
+                    }
+                    if let Some(DockItem::Tabs{tabs, selected}) = self.dock_items.get_mut(&pos.id){
+                        tabs.push(item);
+                        *selected = tabs.len() - 1;
+                    }
+                    return true
+                }
+                DropPart::TabBar=>{
+                    if is_move{
+                        if self.check_drop_is_noop(item, pos.id){
+                            return false
+                        }
+                        self.close_tab(cx, item, true);
+                    }
+                    if let Some(DockItem::Tabs{tabs, selected}) = self.dock_items.get_mut(&pos.id){
+                        tabs.push(item);
+                        *selected = tabs.len() - 1;
+                    }
+                    return true
+                }
+                // insert the ta
+                DropPart::Tab=>{
+                    if is_move{
+                        if pos.id == item{
+                            return false
+                        }
+                        self.close_tab(cx, item, true);
+                    }
+                    let tab_bar_id = self.find_tab_bar_from_tab(pos.id).unwrap();
+                    if let Some(DockItem::Tabs{tabs, selected}) = self.dock_items.get_mut(&tab_bar_id){
+                        if let Some(pos) = tabs.iter().position( | v | *v == pos.id){
+                            let old = tabs[pos];
+                            tabs[pos] = item;
+                            tabs.push(old);
+                            *selected = pos;
+                        } 
+                    }
+                    return true
+                }
+            }
+        }        
+        false
+    }
+
+    fn drop_create(&mut self, cx:&mut Cx, abs:DVec2, item:LiveId, kind:LiveId, name:String){
+        // lets add a tab
+        if self.handle_drop(cx, abs, item, false){
+            self.dock_items.insert(item, DockItem::Tab{
+                name,
+                no_close: false,
+                kind
+            });
+            self.get_item(cx, item, kind);
+            self.select_tab(cx, item);
+            self.area.redraw(cx);
+        }        
+    }
+
+    fn drop_clone(&mut self, cx:&mut Cx, abs:DVec2, item:LiveId, new_item:LiveId){
+        // lets add a tab
+        if let Some(DockItem::Tab{name, kind, ..}) = self.dock_items.get(&item){
+            let name = name.clone();
+            let kind = kind.clone();
+            if self.handle_drop(cx, abs, new_item, false){
+                self.dock_items.insert(new_item, DockItem::Tab{
+                    name,
+                    no_close: false,
+                    kind
+                });
+                self.get_item(cx, new_item, kind);
+                self.select_tab(cx, new_item);
+            }        
+        }
+    }
+
+
+    fn create_tab(&mut self, cx:&mut Cx, parent:LiveId, item: LiveId, kind: LiveId, name:String){
+        if let Some(DockItem::Tabs{tabs,..}) = self.dock_items.get_mut(&parent){
+            tabs.push(item);
+            self.dock_items.insert(item, DockItem::Tab{
+                name,
+                no_close: false,
+                kind
+            });
+            self.select_tab(cx, item);
+            self.get_item(cx, item, kind);
+        }
+    }
+    
 }
 
 
@@ -513,9 +671,9 @@ impl Widget for Dock {
             let contents_view = &mut tab_bar.contents_view;
             for action in tab_bar.tab_bar.handle_event(cx, event) {
                 match action {
-                    TabBarAction::TabShouldStartDragging(item) => dispatch_action(
+                    TabBarAction::ShouldTabStartDrag(item) => dispatch_action(
                         cx,
-                        DockAction::TabShouldStartDragging(item).into_action(uid),
+                        DockAction::ShouldTabStartDrag(item).into_action(uid),
                     ),
                     TabBarAction::TabWasPressed(tab_id) => {
                         if let Some(DockItem::Tabs {tabs, selected, ..}) = dock_items.get_mut(&panel_id) {
@@ -586,8 +744,6 @@ impl Widget for Dock {
     }
     
     fn get_walk(&self) -> Walk {self.walk}
-    
-    
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin_with(cx, &self.dock_items, | _, dock_items | {
@@ -703,7 +859,7 @@ impl Widget for Dock {
     }
 }
 
-#[derive(Clone, PartialEq, WidgetRef)]
+#[derive(Clone, Debug, PartialEq, WidgetRef)]
 pub struct DockRef(WidgetRef);
 
 impl DockRef {
@@ -724,7 +880,7 @@ impl DockRef {
     
     pub fn should_tab_start_drag(&self, actions: &WidgetActions) -> Option<LiveId> {
         if let Some(item) = actions.find_single_action(self.widget_uid()) {
-            if let DockAction::TabShouldStartDragging(tab_id) = item.action() {
+            if let DockAction::ShouldTabStartDrag(tab_id) = item.action() {
                 return Some(tab_id)
             }
         }
@@ -750,10 +906,10 @@ impl DockRef {
     }
     
     
-    pub fn accept_drag(&self, cx: &mut Cx, dh: DragHitEvent) {
+    pub fn accept_drag(&self, cx: &mut Cx, dh: DragHitEvent, dr:DragResponse) {
         if let Some(mut dock) = self.borrow_mut() {
             if let Some(pos) = dock.find_drop_position(cx, dh.abs) {
-                dh.response.set(DragResponse::Move);
+                dh.response.set(dr);
                 dock.drop_state = Some(pos);
             }
             else {
@@ -762,110 +918,33 @@ impl DockRef {
         }
     }
     
-    pub fn drop_clone(&self, _cx:&mut Cx, _pos:DVec2, _old_item:LiveId, _new_item:LiveId){
-        if let Some(mut _dock) = self.borrow_mut() {
-            
+    pub fn drop_clone(&self, cx:&mut Cx, abs:DVec2, old_item:LiveId, new_item:LiveId){
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.drop_clone(cx, abs, old_item, new_item);
         }
     }
     
     pub fn drop_move(&self, cx:&mut Cx, abs:DVec2, item:LiveId){
         if let Some(mut dock) = self.borrow_mut() {
-            if let Some(pos) = dock.find_drop_position(cx, abs) {
-                
-                // ok now what
-                // we have a pos
-                match pos.part{
-                    DropPart::Left | DropPart::Right | DropPart::Top | DropPart::Bottom =>{
-                        if dock.check_drop_is_noop(item, pos.id){
-                            return
-                        }
-                        dock.close_tab(cx, item, true);
-                        let new_split = LiveId::unique();
-                        let new_tabs = LiveId::unique();
-                        dock.set_parent_split(pos.id, new_split);
-                        dock.dock_items.insert(new_split, match pos.part{
-                            DropPart::Left=>DockItem::Splitter{
-                                axis: Axis::Horizontal,
-                                align: SplitterAlign::Weighted(0.5),
-                                a: new_tabs,
-                                b: pos.id,
-                            },
-                            DropPart::Right=>DockItem::Splitter{
-                                axis: Axis::Horizontal,
-                                align: SplitterAlign::Weighted(0.5),
-                                a: pos.id,
-                                b: new_tabs
-                            },
-                            DropPart::Top=>DockItem::Splitter{
-                                axis: Axis::Vertical,
-                                align: SplitterAlign::Weighted(0.5),
-                                a: new_tabs,
-                                b: pos.id,
-                            },
-                            DropPart::Bottom=>DockItem::Splitter{
-                                axis: Axis::Vertical,
-                                align: SplitterAlign::Weighted(0.5),
-                                a: pos.id,
-                                b: new_tabs,
-                            },
-                            _=>panic!()
-                        });
-                        dock.dock_items.insert(new_tabs, DockItem::Tabs{
-                            tabs: vec![item],
-                            selected: 0,
-                        });
-                    }
-                    DropPart::Center=>{
-                        if dock.check_drop_is_noop(item, pos.id){
-                            return
-                        }
-                        dock.close_tab(cx, item, true);
-                        if let Some(DockItem::Tabs{tabs, selected}) = dock.dock_items.get_mut(&pos.id){
-                            tabs.push(item);
-                            *selected = tabs.len() - 1;
-                        }
-                    }
-                    DropPart::TabBar=>{
-                        if dock.check_drop_is_noop(item, pos.id){
-                            return
-                        }
-                        dock.close_tab(cx, item, true);
-                        if let Some(DockItem::Tabs{tabs, selected}) = dock.dock_items.get_mut(&pos.id){
-                            tabs.push(item);
-                            *selected = tabs.len() - 1;
-                        }
-                    }
-                    // insert the ta
-                    DropPart::Tab=>{
-                        if pos.id == item{
-                            return
-                        }
-                        let tab_bar_id = dock.find_tab_bar_from_tab(pos.id).unwrap();
-                        dock.close_tab(cx, item, true);
-                        if let Some(DockItem::Tabs{tabs, selected}) = dock.dock_items.get_mut(&tab_bar_id){
-                            if let Some(pos) = tabs.iter().position( | v | *v == pos.id){
-                                let old = tabs[pos];
-                                tabs[pos] = item;
-                                tabs.push(old);
-                                *selected = pos;
-                            } 
-                        }
-                    }
-                }
-            }
+            dock.handle_drop(cx, abs, item, true);
         }
     }
     
-    pub fn drop_create(&self, _cx:&mut Cx, _pos:DVec2, _item:LiveId, _kind:LiveId){
-        if let Some(mut _dock) = self.borrow_mut() {
-            
+    pub fn drop_create(&self, cx:&mut Cx, abs:DVec2, item:LiveId, kind:LiveId, name:String){
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.drop_create(cx, abs, item, kind, name);
+        }
+    }
+    
+    pub fn create_tab(&self, cx:&mut Cx, parent:LiveId, item: LiveId, kind: LiveId, name:String){
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.create_tab(cx, parent, item, kind, name);
         }
     }
     
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
     }
-    
 }
 
 pub struct DockDrop {
