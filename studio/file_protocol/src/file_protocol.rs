@@ -31,7 +31,7 @@ use {
  
 /// A type for representing a request to the collab server.
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum CollabRequest {
+pub enum FileRequest {
     /// Requests the collab server to return its file tree. 
     LoadFileTree{ with_data: bool },
     /// Requests the collab server to add the client as a participant to the file with the given id.
@@ -49,27 +49,27 @@ pub enum CollabRequest {
 
 /// A type for representing either a response or a notification from the collab server.
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum CollabClientAction {
-    Response(CollabResponse),
-    Notification(CollabNotification),
+pub enum FileClientAction {
+    Response(FileResponse),
+    Notification(FileNotification),
 }
 
 /// A type for representing a response from the collab server.
 /// 
 /// Each `Response` corresponds to the `Request` with the same name.
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum CollabResponse {
+pub enum FileResponse {
     /// The result of requesting the collab server to return its file tree.
-    LoadFileTree(Result<FileTreeData, CollabError>),
+    LoadFileTree(Result<FileTreeData, FileError>),
     /// The result of requesting the collab server to add the client as a participant to the file
     /// with the given id.
-    OpenFile(Result<(TextFileId, String), CollabError>),
+    OpenFile(Result<(TextFileId, String), FileError>),
     /// The result of requesting the collab server to apply a delta to a revision of the file with
     /// the given id.
-    ApplyDelta(Result<TextFileId, CollabError>),
+    ApplyDelta(Result<TextFileId, FileError>),
     /// The result of requesting the collab server to remove the client as a participant from the
     /// file with the given id.
-    CloseFile(Result<TextFileId, CollabError>),
+    CloseFile(Result<TextFileId, FileError>),
 }
 
 /// A type for representing data about a file tree.
@@ -103,7 +103,7 @@ pub struct DirectoryEntry {
 
 /// A type for representing a notification from the collab server.
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum CollabNotification {
+pub enum FileNotification {
     /// Notifies the client that another client applied the given delta to the file with the given
     /// id. This is only sent for files for which the client is a participant.
     DeltaWasApplied(TextFileId),
@@ -111,7 +111,7 @@ pub enum CollabNotification {
 
 /// A type for representing errors from the collab server.
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum CollabError {
+pub enum FileError {
     /// Attempted to add the client as a participant to a file for which it was already a
     /// participant.
     AlreadyAParticipant,

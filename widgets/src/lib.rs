@@ -87,6 +87,7 @@ pub use crate::{
         WidgetRegistry,
         WidgetFactory,
         WidgetAction,
+        DrawStateWrap,
     }
 };
 

@@ -1,7 +1,7 @@
 //pub mod app_inner;
 //pub mod app_state;
 pub mod app;
-pub mod collab_client;
+pub mod file_client;
 pub mod build;
 
 //pub mod code_editor;
@@ -11,10 +11,11 @@ pub mod build;
 //pub mod rust_editor;
 pub mod shader_view;
 pub mod run_view;
+pub mod file_system;
 
 //pub use makepad_code_editor;
-pub use makepad_collab_protocol;
-pub use makepad_collab_server;
+pub use makepad_file_protocol;
+pub use makepad_file_server;
 pub use makepad_widgets;
 pub use makepad_widgets::makepad_draw;
 pub use makepad_draw::makepad_platform;
