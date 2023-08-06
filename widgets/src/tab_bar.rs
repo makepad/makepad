@@ -219,10 +219,10 @@ impl TabBar {
                 TabAction::CloseWasPressed => {
                     dispatch_action(cx, TabBarAction::TabCloseWasPressed(*tab_id));
                 }
-                TabAction::ShouldStartDragging=>{
-                    dispatch_action(cx, TabBarAction::TabShouldStartDragging(*tab_id));
+                TabAction::ShouldTabStartDrag=>{
+                    dispatch_action(cx, TabBarAction::ShouldTabStartDrag(*tab_id));
                 }
-                TabAction::ShouldStopDragging=>{
+                TabAction::ShouldTabStopDrag=>{
                 }/*
                 TabAction::DragHit(hit)=>{
                     dispatch_action(cx, TabBarAction::DragHitTab(hit, *tab_id));
@@ -266,7 +266,7 @@ impl TabBar {
 
 pub enum TabBarAction {
     TabWasPressed(LiveId),
-    TabShouldStartDragging(LiveId),
+    ShouldTabStartDrag(LiveId),
     TabCloseWasPressed(LiveId),
     //DragHitTab(DragHit, LiveId),
     //DragHitTabBar(DragHit)

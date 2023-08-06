@@ -138,8 +138,8 @@ pub struct Tab {
 pub enum TabAction {
     WasPressed,
     CloseWasPressed,
-    ShouldStartDragging,
-    ShouldStopDragging,
+    ShouldTabStartDrag,
+    ShouldTabStopDrag
     //DragHit(DragHit)
 }
 
@@ -199,12 +199,12 @@ impl Tab {
             Hit::FingerMove(e) => {
                 if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist {
                     self.is_dragging = true;
-                    dispatch_action(cx, TabAction::ShouldStartDragging);
+                    dispatch_action(cx, TabAction::ShouldTabStartDrag);
                 }
             }
             Hit::FingerUp(_) => {
                 if self.is_dragging {
-                    dispatch_action(cx, TabAction::ShouldStopDragging);
+                    dispatch_action(cx, TabAction::ShouldTabStopDrag);
                     self.is_dragging = false;
                 }
             }

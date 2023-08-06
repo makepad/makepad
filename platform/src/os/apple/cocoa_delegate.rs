@@ -512,6 +512,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_mouse_down(0, modifiers);
     }
     
+    
     extern fn mouse_up(this: &Object, _sel: Sel, event: ObjcId) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
@@ -799,7 +800,14 @@ pub fn define_cocoa_view_class() -> *const Class {
         
         let response = Rc::new(Cell::new(DragResponse::None));
         
+        let modifiers = unsafe {
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let ns_event: ObjcId = msg_send![ns_app, currentEvent];
+            get_event_key_modifier(ns_event)
+        };
+        
         window.do_callback(CocoaEvent::Drag(DragEvent {
+            modifiers,
             handled: Cell::new(false),
             abs: pos,
             items,
@@ -815,8 +823,8 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
     
     extern fn dragging_ended(this: &Object, _: Sel, _sender: ObjcId) {
-       let window = get_cocoa_window(this);
-       window.end_live_resize();
+        let window = get_cocoa_window(this);
+        window.end_live_resize();
     }
     
     fn get_drag_items_from_pasteboard(this: &Object, sender: ObjcId) -> (Rc<Vec<DragItem >>, DVec2) {
@@ -848,33 +856,33 @@ pub fn define_cocoa_view_class() -> *const Class {
         for index in 0..count {
             let url: ObjcId = unsafe {msg_send![urls, objectAtIndex: index]};
             let url: ObjcId = unsafe {msg_send![url, filePathURL]};
-            if url == nil{
+            if url == nil {
                 continue;
             }
             let string: ObjcId = unsafe {msg_send![url, absoluteString]};
-            if string == nil{
+            if string == nil {
                 continue;
             }
             let string = unsafe {CStr::from_ptr(msg_send![string, UTF8String])};
-            if let Ok(string) = string.to_str(){
+            if let Ok(string) = string.to_str() {
                 // lets rip off file:// and #id
-                if let Some(string) = string.strip_prefix("file://"){
+                if let Some(string) = string.strip_prefix("file://") {
                     let mut bits = string.split("#makepad_internal_id=");
                     let path = bits.next().unwrap().to_string();
-                    let internal_id = if let Some(next) = bits.next(){
-                        if let Ok(id) = next.parse::<u64>(){
+                    let internal_id = if let Some(next) = bits.next() {
+                        if let Ok(id) = next.parse::<u64>() {
                             Some(LiveId(id))
                         }
-                        else{
+                        else {
                             None
                         }
                     }
-                    else{
+                    else {
                         None
                     };
                     items.push(DragItem::FilePath {
                         internal_id,
-                        path: if path=="makepad_internal_empty"{"".to_string()}else{path}
+                        path: if path == "makepad_internal_empty" {"".to_string()}else {path}
                     });
                 }
             }
@@ -886,10 +894,15 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
         //let window = get_cocoa_window(this);
         //window.end_live_resize();
-        
+        let modifiers = unsafe {
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let ns_event: ObjcId = msg_send![ns_app, currentEvent];
+            get_event_key_modifier(ns_event)
+        };    
         let window = get_cocoa_window(this);
         let (items, pos) = get_drag_items_from_pasteboard(this, sender);
         window.do_callback(CocoaEvent::Drop(DropEvent {
+            modifiers,
             handled: Cell::new(false),
             abs: pos,
             items
