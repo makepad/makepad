@@ -24,7 +24,7 @@ live_design!{
 
 enum ScrollState {
     Stopped,
-    Drag {last_abs: f64, delta:f64},
+    Drag {last_abs: f64, delta: f64},
     Flick {delta: f64, next_frame: NextFrame}
 }
 
@@ -82,7 +82,7 @@ impl ListView {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
-       // self.draw_phase = Some(DrawPhase::Begin)
+        // self.draw_phase = Some(DrawPhase::Begin)
     }
     
     fn end(&mut self, cx: &mut Cx2d) {
@@ -115,7 +115,7 @@ impl ListView {
                 let did_draw = cx.turtle_has_align_items();
                 let rect = cx.end_turtle();
                 
-                if did_draw && rect.pos.y + rect.size.y < viewport.pos.y && index + 1 < self.range_end {
+                if did_draw && rect.pos.y + rect.size.y < viewport.pos.y && index + 1 < self.range_end{
                     self.top_id = index + 1;
                     self.top_scroll = (rect.pos.y + rect.size.y) - viewport.pos.y;
                     if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
@@ -123,7 +123,9 @@ impl ListView {
                     }
                 }
                 
-                if !did_draw || rect.pos.y + rect.size.y > viewport.pos.y + viewport.size.y || index + 1 == self.range_end {
+                if !did_draw
+                    || rect.pos.y + rect.size.y > viewport.pos.y + viewport.size.y
+                   /* || index + 1 == self.range_end*/ {
                     if self.top_id > self.range_start && self.top_scroll > 0.0 {
                         self.draw_state.set(ListDrawState::Up {
                             index: self.top_id - 1,
@@ -143,16 +145,16 @@ impl ListView {
                         return None
                     }
                 }
-                
-                if index + 1 == self.range_end {
+                /*
+                if index + 1 == self.range_end { 
                     self.draw_state.set(ListDrawState::End);
                     return None
-                }
+                }*/
                 
-                let mut scroll = scroll + rect.size.y;
-                if self.top_id + 1 == self.range_end {
+                let scroll = scroll + rect.size.y;
+                /*if self.top_id + 1 == self.range_end {
                     scroll = 0.0;
-                }
+                }*/
                 self.draw_state.set(ListDrawState::Down {
                     index: index + 1,
                     scroll,
@@ -171,6 +173,7 @@ impl ListView {
                 let used = cx.turtle().used();
                 let shift = dvec2(0.0, scroll - used.y);
                 cx.turtle_mut().set_shift(shift);
+                
                 let rect = cx.end_turtle();
                 if !did_draw || rect.pos.y + rect.size.y + shift.y < viewport.pos.y {
                     self.draw_state.set(ListDrawState::End);
@@ -178,18 +181,22 @@ impl ListView {
                 }
                 self.top_id = index;
                 self.top_scroll = scroll - used.y;
-                if self.top_id + 1 == self.range_end && self.top_scroll < 0.0 {
+                
+                if self.top_id == self.range_start && self.top_scroll < 0.0 {
                     self.top_scroll = 0.0;
                 }
+                
                 if index == self.range_start {
                     self.draw_state.set(ListDrawState::End);
                     return None
                 }
+                
                 self.draw_state.set(ListDrawState::Up {
                     index: self.top_id - 1,
                     scroll: self.top_scroll,
                     viewport
                 });
+                
                 cx.begin_turtle(Walk {
                     abs_pos: Some(dvec2(viewport.pos.x, viewport.pos.y)),
                     margin: Default::default(),
@@ -205,9 +212,9 @@ impl ListView {
         }
     }
     
-    pub fn get_item(&mut self, cx: &mut Cx2d, entry_id: u64, template: &[LiveId; 1]) -> Option<WidgetRef> {
-        if let Some(ptr) = self.templates.get(&template[0]) {
-            let entry = self.items.get_or_insert(cx, (entry_id, template[0]), | cx | {
+    pub fn get_item(&mut self, cx: &mut Cx2d, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+        if let Some(ptr) = self.templates.get(&template) {
+            let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
             });
             return Some(entry.clone())
@@ -280,8 +287,8 @@ impl Widget for ListView {
             });
         }
         
-        if let ScrollState::Flick {delta, next_frame} = &mut self.scroll_state{
-            if let Some(_) =  next_frame.is_event(event){
+        if let ScrollState::Flick {delta, next_frame} = &mut self.scroll_state {
+            if let Some(_) = next_frame.is_event(event) {
                 *delta = *delta * self.flick_scroll_decay;
                 if delta.abs()>self.flick_scroll_minimum {
                     *next_frame = cx.new_next_frame();
@@ -292,7 +299,7 @@ impl Widget for ListView {
                 }
             }
         }
-
+        
         match event.hits(cx, self.area) {
             Hit::FingerScroll(e) => {
                 self.delta_top_scroll(cx, -e.scroll.y);
@@ -318,7 +325,7 @@ impl Widget for ListView {
                 }
             }
             Hit::FingerUp(_) => {
-                if let ScrollState::Drag {delta,..} = &mut self.scroll_state {
+                if let ScrollState::Drag {delta, ..} = &mut self.scroll_state {
                     if delta.abs()>self.flick_scroll_minimum {
                         self.scroll_state = ScrollState::Flick {
                             delta: *delta,
@@ -344,7 +351,7 @@ impl Widget for ListView {
             self.begin(cx, walk);
             return WidgetDraw::hook_above()
         }
-        // ok so if we are 
+        // ok so if we are
         if let Some(_) = self.draw_state.get() {
             self.end(cx);
             self.draw_state.end();

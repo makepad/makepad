@@ -71,6 +71,7 @@ enum StdErrState{
 impl BuildConnection {
     
     pub fn cargo_run(&self, what: &str, cmd_id: BuildCmdId) {
+
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
@@ -94,8 +95,8 @@ impl BuildConnection {
             "--message-format=json",
             &format!("--stdin-loop"),
         ];
-        
-        let process = ChildProcess::start("cargo", &args, path, &[]).expect("Cannot start process");
+        let env = [("MAKEPAD", "lines")];
+        let process = ChildProcess::start("cargo", &args, path, &env).expect("Cannot start process");
 
         shared.write().unwrap().processes.insert(
             what.to_string(),

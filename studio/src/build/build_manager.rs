@@ -7,7 +7,7 @@ use {
         makepad_platform::os::cx_stdin::{
             HostToStdin,
             StdinToHost,
-            StdinWindowSize            
+            StdinWindowSize
         },
         build::{
             build_protocol::*,
@@ -20,6 +20,8 @@ use {
             FileResponse,
             unix_path::{UnixPath},
         },
+        makepad_widgets::*,
+        makepad_widgets::list_view::ListView,
     },
     std::{
         collections::HashMap,
@@ -34,7 +36,7 @@ use {
 };
 
 live_design!{
-    BuildManager= {{BuildManager}} {
+    BuildManager = {{BuildManager}} {
         recompile_timeout: 0.2
     }
 }
@@ -44,7 +46,7 @@ pub struct BuildState {
 }
 
 impl BuildState {
-
+    
 }
 
 pub struct BuildClientProcess {
@@ -67,18 +69,58 @@ pub struct BuildManager {
 }
 
 pub enum BuildManagerAction {
-    RedrawDoc,// {doc_id: DocumentId},
+    RedrawDoc, // {doc_id: DocumentId},
     StdinToHost {cmd_id: BuildCmdId, msg: StdinToHost},
     RedrawLog,
     ClearLog,
     None
 }
 
-const WHAT_TO_BUILD:&'static str = "makepad-example-news-feed";
+const WHAT_TO_BUILD: &'static str = "makepad-example-news-feed";
 
 impl BuildManager {
     
-    pub fn draw_log(){
+    pub fn draw_log_list(&self, cx: &mut Cx2d, list: &mut ListView) {
+        // lets draw it
+        //list.set_item_range(0, 10, 1);
+        list.set_item_range(0, self.messages.len() as u64, 1);
+        while let Some(item_id) = list.next_visible_item(cx) {
+
+            if let Some(msg) = self.messages.get(item_id as usize){
+                match msg {
+                    BuildMsg::Bare(msg) => {
+                        let item = list.get_item(cx, item_id, live_id!(Wait)).unwrap().into_frame();
+                        item.cut_state(cx, if item_id&1 == 0{id!(even.on)} else {id!(even.off)});
+                        item.get_label(id!(label)).set_label(&msg.line);
+                        item.draw_widget_all(cx);
+                    }
+                    BuildMsg::Location(msg) => {
+                        let item = list.get_item(cx, item_id, live_id!(Wait)).unwrap().into_frame();
+                        item.cut_state(cx, if item_id&1 == 0{id!(even.on)} else {id!(even.off)});
+                        item.get_label(id!(link_label)).set_label(&msg.file_name);
+                        item.get_label(id!(label)).set_label(&msg.msg);
+                        let item = list.get_item(cx, item_id, live_id!(Wait)).unwrap();
+                        item.draw_widget_all(cx);
+                    }
+                    _=>()
+                }
+            }
+            else{ // draw empty items
+                let item = list.get_item(cx, item_id, live_id!(Empty)).unwrap().into_frame();
+                item.cut_state(cx, if item_id&1 == 0{id!(even.on)} else {id!(even.off)});
+                item.draw_widget_all(cx);
+            }
+            /*match message {
+                BuildMsg::Bare(msg) => {
+                    item.get_label(id!(label)).set_label(&msg.line);
+                }
+                BuildMsg::Location(msg) => {
+                    item.get_label(id!(link_label)).set_label(&msg.file_name);
+                    item.get_label(id!(label)).set_label(&msg.msg);
+                }
+                _=>()
+            }*/
+        }
     }
     
     pub fn get_process(&mut self, cmd_id: BuildCmdId) -> Option<&mut BuildClientProcess> {
@@ -171,12 +213,13 @@ impl BuildManager {
             let messages = &mut self.messages;
             //let editor_state = &mut state.editor_state;
             wrap.client.handle_event_with(cx, event, &mut | cx, wrap | {
-                log!("HANDLIN {:?}", wrap);
+                
                 //let msg_id = editor_state.messages.len();
                 // ok we have a cmd_id in wrap.msg
                 match &wrap.msg {
                     BuildMsg::Location(_loc) => {
                         messages.push(wrap.msg);
+                        dispatch_event(cx, BuildManagerAction::RedrawLog)
                         /*if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
                             let doc = &mut editor_state.documents[*doc_id];
                             if let Some(inner) = &mut doc.inner {
@@ -190,6 +233,7 @@ impl BuildManager {
                     }
                     BuildMsg::Bare(_) => {
                         messages.push(wrap.msg);
+                        dispatch_event(cx, BuildManagerAction::RedrawLog)
                         //editor_state.messages.push(wrap.msg);
                     }
                     BuildMsg::StdinToHost(line) => {

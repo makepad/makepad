@@ -327,14 +327,14 @@ impl AppMain for App {
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                 if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
                     // lets set our scroll range so the scrollbar has something
-                    list.set_item_range(0, 3000, 1);
+                    list.set_item_range(0, 2, 1);
                     // next visible item only returns items that are visible
                     // this means the performance here is O(visible)
                     while let Some(item_id) = list.next_visible_item(cx){
                         let template = match item_id{
-                            0=>id!(TopSpace),
-                            x if x%5 == 0=>id!(PostImage),
-                            _=>id!(Post)
+                            0=>live_id!(TopSpace),
+                            x if x%5 == 0=>live_id!(PostImage),
+                            _=>live_id!(Post)
                         };
                         let item = list.get_item(cx, item_id, template).unwrap();
                         let text = match item_id%4{

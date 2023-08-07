@@ -183,7 +183,7 @@ pub struct PopupMenuItem {
 
 #[derive(Live)]
 pub struct PopupMenu {
-    #[live] view: View,
+    #[live] draw_list: DrawList2d,
     #[live] menu_item: Option<LivePtr>,
     
     #[live] draw_bg: DrawQuad,
@@ -204,7 +204,7 @@ impl LiveHook for PopupMenu {
                 node.apply(cx, from, index, nodes);
             }
         }
-        self.view.redraw(cx);
+        self.draw_list.redraw(cx);
     }
 }
 
@@ -291,7 +291,7 @@ impl PopupMenu {
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d) {
-        self.view.begin_overlay_reuse(cx);
+        self.draw_list.begin_overlay_reuse(cx);
         
         cx.begin_pass_sized_turtle(Layout::flow_down());
         
@@ -313,7 +313,7 @@ impl PopupMenu {
 
         cx.end_pass_sized_turtle_with_shift(shift_area,shift);
         //cx.debug.rect_r(self.draw_bg.area().get_rect(cx));
-        self.view.end(cx);
+        self.draw_list.end(cx);
         self.menu_items.retain_visible();
         if let Some(init_select_item) = self.init_select_item.take() {
             self.select_item_state(cx, init_select_item);
@@ -321,7 +321,7 @@ impl PopupMenu {
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
+        self.draw_list.redraw(cx);
     }
     
     pub fn draw_item(
