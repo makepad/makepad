@@ -73,21 +73,22 @@ const WHAT_TO_BUILD: &'static str = "makepad-example-news-feed";
 impl BuildManager {
     
     pub fn draw_log_list(&self, cx: &mut Cx2d, list: &mut ListView) {
-        // lets draw it
-        //list.set_item_range(0, 10, 1);
+
         list.set_item_range(0, self.messages.len() as u64, 1);
         while let Some(item_id) = list.next_visible_item(cx) {
+            let is_even = item_id&1 == 0;
+            
             if let Some(msg) = self.messages.get(item_id as usize){
                 match msg {
                     BuildMsg::Bare(msg) => {
-                        let item = list.get_item(cx, item_id, live_id!(Wait)).unwrap().into_frame();
-                        item.cut_state(cx, if item_id&1 == 0{id!(even.on)} else {id!(even.off)});
+                        let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
+                        let item = list.get_item(cx, item_id, template).unwrap().into_frame();
                         item.get_label(id!(label)).set_label(&msg.line);
                         item.draw_widget_all(cx);
                     }
                     BuildMsg::Location(msg) => {
-                        let item = list.get_item(cx, item_id, live_id!(Wait)).unwrap().into_frame();
-                        item.cut_state(cx, if item_id&1 == 0{id!(even.on)} else {id!(even.off)});
+                        let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
+                        let item = list.get_item(cx, item_id, template).unwrap().into_frame();
                         item.get_label(id!(link_label)).set_label(&msg.file_name);
                         item.get_label(id!(label)).set_label(&msg.msg);
                         item.draw_widget_all(cx);
@@ -96,8 +97,8 @@ impl BuildManager {
                 }
             }
             else{ // draw empty items
-                let item = list.get_item(cx, item_id, live_id!(Empty)).unwrap().into_frame();
-                item.cut_state(cx, if item_id&1 == 0{id!(even.on)} else {id!(even.off)});
+                let template = if is_even{live_id!(EmptyEven)}else{live_id!(EmptyOdd)};
+                let item = list.get_item(cx, item_id, template).unwrap().into_frame();
                 item.draw_widget_all(cx);
             }
         }

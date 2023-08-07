@@ -29,8 +29,8 @@ live_design!{
     
     import makepad_studio::run_view::RunView;
     
-    WaitIcon = <Frame>{
-        walk:{width:10, height:10}
+    WaitIcon = <Frame> {
+        walk: {width: 10, height: 10}
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -47,11 +47,11 @@ live_design!{
             }
         }
     }
-
-    LogListItem = <Rect>{
-        walk:{height:Fit, width:Fill}
-        layout:{padding:{top:5,bottom:5}}
-        draw_bg:{
+    
+    LogItem = <Rect> {
+        walk: {height: Fit, width: Fill}
+        layout: {padding: {top: 5, bottom: 5}}
+        draw_bg: {
             instance is_even: 0.0
             instance selected: 0.0
             fn pixel(self) -> vec4 {
@@ -67,22 +67,6 @@ live_design!{
             }
         }
         state: {
-            even = {
-                default: off
-                off = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_bg: {is_even: 0.0}
-                    }
-                }
-                on = {
-                    from: {all: Snap}
-                    apply: {
-                        draw_bg: {is_even: 1.0}
-                    },
-                }
-            }
-            
             hover = {
                 default: off
                 off = {
@@ -125,18 +109,34 @@ live_design!{
             }
         }
     }
-
-    LogListWait = <LogListItem> {
-        icon = <WaitIcon>{},
-        label = <Label>{walk:{width:Fill}, draw_label:{wrap:Word}}
-        link_label = <LinkLabel>{}
+    
+    LogItemWait = <LogItem> {
+        icon = <WaitIcon> {},
+        label = <Label> {walk: {width: Fill}, draw_label: {wrap: Word}}
+        link_label = <LinkLabel> {}
+    }
+    
+    LogItemEmpty = <Rect> {
+        walk: {height: 20, width: Fill}
+        draw_bg: {
+            instance is_even: 0.0
+            fn pixel(self) -> vec4 {
+                return mix(
+                    COLOR_BG_EDITOR,
+                    COLOR_BG_ODD,
+                    self.is_even
+                )
+            }
+        }
     }
     
     LogList = <ListView> {
         walk: {height: Fill, width: Fill}
         layout: {flow: Down}
-        Wait = <LogListWait>{}
-        Empty = <LogListItem>{walk:{height:20,width:Fill}}
+        WaitEven = <LogItemWait> {draw_bg: {is_even: 1.0}}
+        EmptyEven = <LogItemEmpty> {draw_bg: {is_even: 1.0}}
+        WaitOdd = <LogItemWait> {draw_bg: {is_even: 0.0}}
+        EmptyOdd = <LogItemEmpty> {draw_bg: {is_even: 0.0}}
     }
     
     App = {{App}} {
@@ -275,11 +275,11 @@ impl AppMain for App {
         run_view.handle_event(cx, event, &mut self.build_manager);
         
         for action in self.build_manager.handle_event(cx, event) {
-            match action{
-                BuildManagerAction::RedrawLog=>{
+            match action {
+                BuildManagerAction::RedrawLog => {
                     log_list.redraw(cx);
                 }
-                _=>()
+                _ => ()
             }
         }
         
