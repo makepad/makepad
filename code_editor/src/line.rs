@@ -1,19 +1,25 @@
 use crate::{char::CharExt, inlays::InlineInlay, str::StrExt, Settings, Token};
 
-pub use super::{Inline, Inlines, Wrapped, Wrappeds};
+mod inlines;
+mod wrappeds;
+
+pub use self::{
+    inlines::{Inline, Inlines},
+    wrappeds::{Wrapped, Wrappeds},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Line<'a> {
-    pub(crate) settings: &'a Settings,
-    pub(crate) y: Option<f64>,
-    pub(crate) column_count: Option<usize>,
-    pub(crate) fold: usize,
-    pub(crate) scale: f64,
-    pub(crate) indent: usize,
-    pub(crate) text: &'a str,
-    pub(crate) tokens: &'a [Token],
-    pub(crate) inline_inlays: &'a [(usize, InlineInlay)],
-    pub(crate) wraps: &'a [usize],
+    pub settings: &'a Settings,
+    pub y: Option<f64>,
+    pub column_count: Option<usize>,
+    pub fold: usize,
+    pub scale: f64,
+    pub indent: usize,
+    pub text: &'a str,
+    pub tokens: &'a [Token],
+    pub inline_inlays: &'a [(usize, InlineInlay)],
+    pub wraps: &'a [usize],
 }
 
 impl<'a> Line<'a> {

@@ -1,6 +1,7 @@
 use {
     crate::{
-        state::{Block, SessionId, Wrapped},
+        line::Wrapped,
+        state::{Block, SessionId},
         token, State, Token,
     },
     makepad_widgets::*,
