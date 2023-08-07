@@ -1,5 +1,6 @@
 pub trait StrExt {
     fn indent(&self) -> Option<&str>;
+    fn graphemes(&self) -> Graphemes<'_>;
     fn split_whitespace_boundaries(&self) -> SplitWhitespaceBoundaries<'_>;
 }
 
@@ -10,8 +11,49 @@ impl StrExt for str {
             .map(|(index, _)| &self[..index])
     }
 
+    fn graphemes(&self) -> Graphemes<'_> {
+        Graphemes { string: self }
+    }
+
     fn split_whitespace_boundaries(&self) -> SplitWhitespaceBoundaries<'_> {
         SplitWhitespaceBoundaries { string: self }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Graphemes<'a> {
+    string: &'a str,
+}
+
+impl<'a> Iterator for Graphemes<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.string.is_empty() {
+            return None;
+        }
+        let mut end = 1;
+        while !self.string.is_char_boundary(end) {
+            end += 1;
+        }
+        let (grapheme, string) = self.string.split_at(end);
+        self.string = string;
+        Some(grapheme)
+    }
+}
+
+impl<'a> DoubleEndedIterator for Graphemes<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.string.is_empty() {
+            return None;
+        }
+        let mut start = self.string.len() - 1;
+        while !self.string.is_char_boundary(start) {
+            start -= 1;
+        }
+        let (string, grapheme) = self.string.split_at(start);
+        self.string = string;
+        Some(grapheme)
     }
 }
 
