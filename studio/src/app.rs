@@ -29,8 +29,6 @@ live_design!{
     
     import makepad_studio::run_view::RunView;
     
-    const FS_ROOT = ""
-    
     WaitIcon = <Frame>{
         walk:{width:10, height:10}
         draw_bg: {
@@ -137,7 +135,6 @@ live_design!{
     LogList = <ListView> {
         walk: {height: Fill, width: Fill}
         layout: {flow: Down}
-        fill_empty: true,
         Wait = <LogListWait>{}
         Empty = <LogListItem>{walk:{height:20,width:Fill}}
     }
