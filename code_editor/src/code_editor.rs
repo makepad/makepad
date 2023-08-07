@@ -139,13 +139,21 @@ impl CodeEditor {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        _state: &mut State,
-        _session_id: SessionId,
+        state: &mut State,
+        session_id: SessionId,
         event: &Event,
     ) {
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
         });
+        match event.hits(cx, self.scroll_bars.area()) {
+            Hit::FingerDown(FingerDownEvent { abs, rect, .. }) => {
+                if let Some((point, affinity)) = self.pick(state, session_id, abs - rect.pos) {
+                    println!("{:?} {:?}", point, affinity);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d<'_>, state: &State, session_id: SessionId) {
@@ -247,7 +255,10 @@ impl CodeEditor {
             .first()
             .map_or(false, |selection| selection.start().line < self.start_line)
         {
-            active_selection = Some(ActiveSelection { selection: *selections.next().unwrap(), start_x: 0.0 });
+            active_selection = Some(ActiveSelection {
+                selection: *selections.next().unwrap(),
+                start_x: 0.0,
+            });
         }
         DrawSelections {
             code_editor: self,
@@ -255,6 +266,119 @@ impl CodeEditor {
             selections,
         }
         .draw_selections(cx, state, session_id)
+    }
+
+    fn pick(
+        &self,
+        state: &State,
+        session_id: SessionId,
+        point: DVec2,
+    ) -> Option<(Point, Affinity)> {
+        let point = (point + self.viewport_rect.pos) / self.cell_size;
+        let mut line = state.find_first_line_ending_after_y(session_id, point.y);
+        let mut y = state.line(session_id, line).y();
+        for block in state.blocks(session_id, line..line + 1) {
+            match block {
+                Block::Line {
+                    is_inlay: false,
+                    line: line_ref,
+                } => {
+                    let mut byte = 0;
+                    let mut column = 0;
+                    for wrapped in line_ref.wrappeds() {
+                        match wrapped {
+                            Wrapped::Text {
+                                is_inlay: false,
+                                text,
+                            } => {
+                                for grapheme in text.graphemes() {
+                                    let next_byte = byte + grapheme.len();
+                                    let next_column = column
+                                        + grapheme
+                                            .chars()
+                                            .map(|char| {
+                                                char.column_count(state.settings().tab_column_count)
+                                            })
+                                            .sum::<usize>();
+                                    let next_y = y + line_ref.scale();
+                                    let x = line_ref.column_to_x(column);
+                                    let next_x = line_ref.column_to_x(next_column);
+                                    let mid_x = (x + next_x) / 2.0;
+                                    if (y..=next_y).contains(&point.y) {
+                                        if (x..=mid_x).contains(&point.x) {
+                                            return Some((Point { line, byte }, Affinity::After));
+                                        }
+                                        if (mid_x..=next_x).contains(&point.x) {
+                                            return Some((
+                                                Point {
+                                                    line,
+                                                    byte: next_byte,
+                                                },
+                                                Affinity::Before,
+                                            ));
+                                        }
+                                    }
+                                    byte = next_byte;
+                                    column = next_column;
+                                }
+                            }
+                            Wrapped::Text {
+                                is_inlay: true,
+                                text,
+                            } => {
+                                let next_column = column
+                                    + text
+                                        .chars()
+                                        .map(|char| {
+                                            char.column_count(state.settings().tab_column_count)
+                                        })
+                                        .sum::<usize>();
+                                let next_y = y + line_ref.scale();
+                                let x = line_ref.column_to_x(column);
+                                let next_x = line_ref.column_to_x(next_column);
+                                if (y..=next_y).contains(&point.y)
+                                    && (x..=next_x).contains(&point.x)
+                                {
+                                    return Some((Point { line, byte }, Affinity::Before));
+                                }
+                                column = next_column;
+                            }
+                            Wrapped::Widget(widget) => {
+                                column += widget.column_count;
+                            }
+                            Wrapped::Wrap => {
+                                let next_y = y + line_ref.scale();
+                                if (y..=next_y).contains(&point.y) {
+                                    return Some((Point { line, byte }, Affinity::Before));
+                                }
+                                column = line_ref.indent();
+                                y = next_y;
+                            }
+                        }
+                    }
+                    let next_y = y + line_ref.scale();
+                    if (y..=y + next_y).contains(&point.y) {
+                        return Some((Point { line, byte }, Affinity::After));
+                    }
+                    line += 1;
+                    y = next_y;
+                }
+                Block::Line {
+                    is_inlay: true,
+                    line: line_ref,
+                } => {
+                    let next_y = y + line_ref.height();
+                    if (y..=next_y).contains(&point.y) {
+                        return Some((Point { line, byte: 0 }, Affinity::Before));
+                    }
+                    y = next_y;
+                }
+                Block::Widget(widget) => {
+                    y += widget.height;
+                }
+            }
+        }
+        None
     }
 }
 
