@@ -227,7 +227,6 @@ pub use {
             LiveState,
             LiveStateImpl,
             StateAction,
-            StatePair
         },
         draw_vars::{
             shader_enum,

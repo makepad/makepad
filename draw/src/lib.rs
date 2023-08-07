@@ -5,7 +5,7 @@ pub use makepad_vector;
 
 pub mod overlay;
 pub mod cx_2d;
-pub mod view;
+pub mod draw_list_2d;
 pub mod shader;
 pub mod turtle;
 pub mod font_atlas;
@@ -35,11 +35,11 @@ pub use crate::{
         NavItem,
         NavScrollIndex
     },
-    view::{
-        View,
+    draw_list_2d::{
+        DrawList2d,
         ManyInstances,
-        ViewRedrawing,
-        ViewRedrawingApi,
+        Redrawing,
+        RedrawingApi,
     },
     cx_2d::{
         Cx2d

@@ -310,7 +310,7 @@ live_design!{
         
         fn pixel(self) -> vec4 {
             let color = self.get_color();
-            return Pal::premul(vec4(color.xyz, color.w*self.image_alpha))
+            return Pal::premul(vec4(color.xyz, color.w * self.image_alpha))
         }
         
         shape: Solid,
@@ -341,13 +341,13 @@ live_design!{
             fill: Image
         }
     }
-    CachedScrollXY = <CachedFrame>{
+    CachedScrollXY = <CachedFrame> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}
     }
-    CachedScrollX = <CachedFrame>{
+    CachedScrollX = <CachedFrame> {
         scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: false}
     }
-    CachedScrollY = <CachedFrame>{
+    CachedScrollY = <CachedFrame> {
         scroll_bars: <ScrollBars> {show_scroll_x: false, show_scroll_y: true}
     }
     ScrollXY = <Frame> {scroll_bars: <ScrollBars> {show_scroll_x: true, show_scroll_y: true}}
@@ -356,6 +356,26 @@ live_design!{
 }
 
 // maybe we should put an enum on the bools like
+
+#[derive(Live, LiveHook)]
+#[live_ignore]
+pub enum FrameOptimize{
+    #[pick] None,
+    DrawList,
+    Texture    
+}
+
+impl FrameOptimize{
+    fn is_texture(&self)->bool{
+        if let Self::Texture = self{true} else{false}
+    }
+    fn is_draw_list(&self)->bool{
+        if let Self::DrawList = self{true} else{false}
+    }
+    fn needs_draw_list(&self)->bool{
+        return self.is_texture() ||self.is_draw_list()
+    }
+}
 
 #[derive(Live)]
 pub struct Frame { // draw info per UI element
@@ -371,10 +391,10 @@ pub struct Frame { // draw info per UI element
     #[live] image_texture: Option<Texture>,
     #[live] image_scale: f64,
     
-    #[live] use_cache: bool,
+    //#[live] use_cache: bool,
     #[live] dpi_factor: Option<f64>,
     
-    #[live] has_view: bool,
+    #[live] optimize: FrameOptimize,
     
     #[live(true)] visible: bool,
     
@@ -385,18 +405,19 @@ pub struct Frame { // draw info per UI element
     
     #[rust] find_cache: HashMap<u64, WidgetSet>,
     
-    #[rust] scroll_bars_obj: Option<Box<ScrollBars>>,
-    
+    #[rust] scroll_bars_obj: Option<Box<ScrollBars >>,
     #[rust] view_size: Option<DVec2>,
     
     #[rust] area: Area,
-    #[rust] view: Option<View>,
+    #[rust] draw_list: Option<DrawList2d>,
     
     #[rust] texture_cache: Option<FrameTextureCache>,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] children: ComponentMap<LiveId, WidgetRef>,
-    #[rust] draw_order: Vec<LiveId>
+    #[rust] draw_order: Vec<LiveId>,
+    
+    #[state] state: LiveState,
 }
 
 struct FrameTextureCache {
@@ -411,8 +432,8 @@ impl LiveHook for Frame {
     }
     
     fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if self.has_view && self.view.is_none() {
-            self.view = Some(View::new(cx));
+        if self.optimize.needs_draw_list() && self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::new(cx));
         }
         if self.scroll_bars.is_some() {
             if self.scroll_bars_obj.is_none() {
@@ -523,6 +544,14 @@ pub struct FrameRef(WidgetRef);
 #[derive(Clone, WidgetSet)]
 pub struct FrameSet(WidgetSet);
 
+#[derive(Clone, WidgetAction)]
+pub enum FrameAction {
+    None,
+    FingerDown(FingerDownEvent),
+    FingerUp(FingerUpEvent),
+    FingerMove(FingerMoveEvent)
+}
+
 impl FrameRef {
     /*
     pub fn handle_event(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
@@ -535,6 +564,24 @@ impl FrameRef {
         }
         WidgetDraw::done()
     }*/
+    
+    pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.cut_state(cx, state);
+        }
+    }
+    
+    pub fn animate_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.animate_state(cx, state);
+        }
+    }
+    
+    pub fn toggle_state(&self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.toggle_state(cx, is_state_1, animate, state1, state2);
+        }
+    }
     
     pub fn set_visible(&self, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -580,6 +627,25 @@ impl FrameRef {
 }
 
 impl FrameSet {
+    
+    pub fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+        for item in self.iter() {
+            item.cut_state(cx, state)
+        }
+    }
+    
+    pub fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+        for item in self.iter() {
+            item.animate_state(cx, state);
+        }
+    }
+    
+    pub fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
+        for item in self.iter() {
+            item.toggle_state(cx, is_state_1, animate, state1, state2);
+        }
+    }
+
     pub fn set_visible(&self, visible: bool) {
         for item in self.iter() {
             item.set_visible(visible)
@@ -612,6 +678,8 @@ impl Widget for Frame {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
+        self.state_handle_event(cx, event);
+        
         if self.block_signal_event {
             if let Event::Signal = event {
                 return
@@ -628,23 +696,31 @@ impl Widget for Frame {
             }
         }
         
-        // ok so if a child is not visible
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
-                // if a child is not visible, we should
                 if child.is_visible() || !event.requires_visibility() {
                     child.handle_widget_event_with(cx, event, dispatch_action);
                 }
             }
         }
-        
-        if let Some(cursor) = &self.cursor {
+        if self.cursor.is_some() || self.state.live_ptr.is_some(){
             match event.hits(cx, self.area()) {
                 Hit::FingerDown(_) => {
                     cx.set_key_focus(Area::Empty);
+                    
                 }
                 Hit::FingerHoverIn(_) => {
-                    cx.set_cursor(*cursor);
+                    if let Some(cursor) = &self.cursor{
+                        cx.set_cursor(*cursor);
+                    }
+                    if self.state.live_ptr.is_some(){
+                        self.animate_state(cx, id!(hover.on));
+                    }
+                }
+                Hit::FingerHoverOut(_)=>{
+                    if self.state.live_ptr.is_some(){
+                        self.animate_state(cx, id!(hover.off));
+                    }
                 }
                 _ => ()
             }
@@ -767,18 +843,17 @@ impl Frame {
             
             self.defer_walks.clear();
             
-            if self.has_view {
-                // ok so.. how do we render this to texture
-                if self.use_cache {
+            match self.optimize{
+                FrameOptimize::Texture=>{
                     let walk = self.walk_from_previous_size(walk);
-                    if !cx.view_will_redraw(self.view.as_mut().unwrap(), walk) {
+                    if !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
                         if let Some(texture_cache) = &self.texture_cache {
                             self.draw_bg.draw_vars.set_texture(0, &texture_cache.color_texture);
                             let mut rect = cx.walk_turtle_with_area(&mut self.area, walk);
                             rect.size *= 2.0 / self.dpi_factor.unwrap_or(1.0);
                             self.draw_bg.draw_abs(cx, rect);
                             self.area = self.draw_bg.area();
-                            cx.set_pass_scaled_area(&texture_cache.pass, self.area, 2.0/self.dpi_factor.unwrap_or(1.0));
+                            cx.set_pass_scaled_area(&texture_cache.pass, self.area, 2.0 / self.dpi_factor.unwrap_or(1.0));
                         }
                         return WidgetDraw::done()
                     }
@@ -796,15 +871,16 @@ impl Frame {
                     let texture_cache = self.texture_cache.as_mut().unwrap();
                     cx.make_child_pass(&texture_cache.pass);
                     cx.begin_pass(&texture_cache.pass, self.dpi_factor);
-                    self.view.as_mut().unwrap().begin_always(cx)
+                    self.draw_list.as_mut().unwrap().begin_always(cx)
                 }
-                else {
+                FrameOptimize::DrawList=>{
                     let walk = self.walk_from_previous_size(walk);
-                    if self.view.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
+                    if self.draw_list.as_mut().unwrap().begin(cx, walk).is_not_redrawing() {
                         cx.walk_turtle_with_area(&mut self.area, walk);
                         return WidgetDraw::done()
-                    };
+                    }
                 }
+                _=>()
             }
             
             
@@ -821,10 +897,10 @@ impl Frame {
                 if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
                 }
-                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0/self.dpi_factor.unwrap_or(2.0)));
+                self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
             else {
-                cx.begin_turtle(walk, self.layout.with_scroll(scroll).with_scale(2.0/self.dpi_factor.unwrap_or(2.0)));
+                cx.begin_turtle(walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
         }
         
@@ -868,8 +944,8 @@ impl Frame {
                 };
                 
                 if self.show_bg {
-                    if self.use_cache {
-                        panic!("dont use show_bg and use_cache at the same time");
+                    if self.optimize.is_texture() {
+                        panic!("dont use show_bg and texture cazching at the same time");
                     }
                     self.draw_bg.end(cx);
                     self.area = self.draw_bg.area();
@@ -883,12 +959,12 @@ impl Frame {
                     scroll_bars.end_nav_area(cx);
                 };
                 
-                if self.has_view {
+                if self.optimize.needs_draw_list() {
                     let rect = self.area.get_rect(cx);
                     self.view_size = Some(rect.size);
-                    self.view.as_mut().unwrap().end(cx);
+                    self.draw_list.as_mut().unwrap().end(cx);
                     
-                    if self.use_cache {
+                    if self.optimize.is_texture() {
                         let texture_cache = self.texture_cache.as_mut().unwrap();
                         cx.end_pass(&texture_cache.pass);
                         /*if cache.pass.id_equals(4){
@@ -901,7 +977,7 @@ impl Frame {
                         self.draw_bg.draw_abs(cx, rect);
                         let area = self.draw_bg.area();
                         let texture_cache = self.texture_cache.as_mut().unwrap();
-                        cx.set_pass_scaled_area(&texture_cache.pass, area, 2.0/self.dpi_factor.unwrap_or(1.0));
+                        cx.set_pass_scaled_area(&texture_cache.pass, area, 2.0 / self.dpi_factor.unwrap_or(1.0));
                     }
                 }
                 self.draw_state.end();
@@ -910,7 +986,7 @@ impl Frame {
         WidgetDraw::done()
     }
     
-     pub fn child_count(&self) -> usize {
+    pub fn child_count(&self) -> usize {
         self.draw_order.len()
     }
 }

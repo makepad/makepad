@@ -160,7 +160,7 @@ pub struct Button {
     #[live] walk: Walk,
     
     #[live] layout: Layout,
-    #[live] label: String
+    #[live] pub label: String
 }
 
 impl LiveHook for Button{

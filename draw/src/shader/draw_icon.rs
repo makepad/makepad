@@ -2,7 +2,7 @@ use {
     std::rc::Rc,
     crate::{
         makepad_platform::*,
-        view::ManyInstances,
+        draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         icon_atlas::{CxIconAtlas, CxIconArgs},
         cx_2d::Cx2d,
