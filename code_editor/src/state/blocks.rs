@@ -1,6 +1,6 @@
 use {
-    super::{Line, Lines},
-    crate::{inlays::BlockInlay, widgets::BlockWidget},
+    super::Lines,
+    crate::{inlays::BlockInlay, widgets::BlockWidget, Line},
     std::slice::Iter,
 };
 
