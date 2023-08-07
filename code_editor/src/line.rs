@@ -1,8 +1,10 @@
-use {crate::{widgets::InlineWidget, char::CharExt, inlays::InlineInlay, str::StrExt, Settings, Token}, std::slice::Iter};
+use {
+    crate::{char::CharExt, inlays::InlineInlay, str::StrExt, widgets::InlineWidget, Token},
+    std::slice::Iter,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Line<'a> {
-    pub settings: &'a Settings,
     pub y: Option<f64>,
     pub column_count: Option<usize>,
     pub fold: usize,
@@ -79,13 +81,17 @@ impl<'a> Line<'a> {
         }
     }
 
-    pub(super) fn compute_indent_and_wraps(&self, max_column: usize) -> (usize, Vec<usize>) {
+    pub(super) fn compute_indent_and_wraps(
+        &self,
+        max_column: usize,
+        tab_column_count: usize,
+    ) -> (usize, Vec<usize>) {
         let mut indent: usize = self
             .text
             .indent()
             .unwrap_or("")
             .chars()
-            .map(|char| char.column_count(self.settings.tab_column_count))
+            .map(|char| char.column_count(tab_column_count))
             .sum();
         for inline in self.inlines() {
             match inline {
@@ -93,7 +99,7 @@ impl<'a> Line<'a> {
                     for string in text.split_whitespace_boundaries() {
                         let column_count: usize = string
                             .chars()
-                            .map(|char| char.column_count(self.settings.tab_column_count))
+                            .map(|char| char.column_count(tab_column_count))
                             .sum();
                         if indent + column_count > max_column {
                             indent = 0;
@@ -118,7 +124,7 @@ impl<'a> Line<'a> {
                     for string in text.split_whitespace_boundaries() {
                         let column_count: usize = string
                             .chars()
-                            .map(|char| char.column_count(self.settings.tab_column_count))
+                            .map(|char| char.column_count(tab_column_count))
                             .sum();
                         if column + column_count > max_column {
                             column = indent;
@@ -142,7 +148,6 @@ impl<'a> Line<'a> {
         (indent, wraps)
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct Inlines<'a> {

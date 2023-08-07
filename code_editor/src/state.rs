@@ -5,7 +5,8 @@ use {
         inlays::{BlockInlay, InlineInlay},
         line::Wrapped,
         widgets::BlockWidget,
-        Arena, Line, Settings, Token,
+        selection::Affinity,
+        Arena, Line, Point, Selection, Settings, Token,
     },
     std::{
         collections::{HashMap, HashSet},
@@ -39,6 +40,10 @@ impl State {
         }
     }
 
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
     pub fn width(&self, session_id: SessionId) -> f64 {
         let mut width: f64 = 0.0;
         for line in self.lines(session_id, 0..self.line_count(self.document_id(session_id))) {
@@ -62,10 +67,6 @@ impl State {
             }
         }
         y
-    }
-
-    pub fn settings(&self) -> &Settings {
-        &self.settings
     }
 
     pub fn document_id(&self, session_id: SessionId) -> DocumentId {
@@ -99,7 +100,6 @@ impl State {
     pub fn line(&self, session_id: SessionId, index: usize) -> Line<'_> {
         let document_id = self.document_id(session_id);
         Line {
-            settings: &self.settings,
             y: self.sessions[session_id.0].y.get(index).copied(),
             column_count: self.sessions[session_id.0].column_count[index],
             fold: self.sessions[session_id.0].fold[index],
@@ -116,7 +116,6 @@ impl State {
         let document_id = self.document_id(session_id);
         let y_count = self.sessions[session_id.0].y.len();
         Lines {
-            settings: &self.settings,
             y: self.sessions[session_id.0].y[range.start.min(y_count)..range.end.min(y_count)]
                 .iter(),
             column_count: self.sessions[session_id.0].column_count[range.start..range.end].iter(),
@@ -146,6 +145,10 @@ impl State {
             block_inlays,
             index: range.start,
         }
+    }
+
+    pub fn selections(&self, session_id: SessionId) -> &[Selection] {
+        &self.sessions[session_id.0].selections
     }
 
     pub fn line_count(&self, document_id: DocumentId) -> usize {
@@ -186,6 +189,11 @@ impl State {
             scale: (0..line_count).map(|_| 1.0).collect(),
             wraps: (0..line_count).map(|_| Vec::new()).collect(),
             indent: (0..line_count).map(|_| 0).collect(),
+            selections: vec![Selection {
+                cursor: Point { line: 0, byte: 0},
+                anchor: Point { line: 7, byte: 28 },
+                affinity: Affinity::Before,
+            }],
         }));
         self.documents[document_id.0].session_ids.insert(session_id);
         self.update_y(session_id);
@@ -261,9 +269,10 @@ impl State {
     }
 
     fn update_indent_and_wraps(&mut self, session_id: SessionId, index: usize) {
-        let (indent, wraps) = self
-            .line(session_id, index)
-            .compute_indent_and_wraps(self.sessions[session_id.0].max_column);
+        let (indent, wraps) = self.line(session_id, index).compute_indent_and_wraps(
+            self.sessions[session_id.0].max_column,
+            self.settings.tab_column_count,
+        );
         self.sessions[session_id.0].wraps[index] = wraps;
         self.sessions[session_id.0].indent[index] = indent;
         self.update_column_count(session_id, index);
@@ -344,7 +353,6 @@ pub enum Block<'a> {
 
 #[derive(Clone, Debug)]
 pub struct Lines<'a> {
-    pub settings: &'a Settings,
     pub y: Iter<'a, f64>,
     pub column_count: Iter<'a, Option<usize>>,
     pub fold: Iter<'a, usize>,
@@ -362,7 +370,6 @@ impl<'a> Iterator for Lines<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let text = self.text.next()?;
         Some(Line {
-            settings: self.settings,
             y: self.y.next().copied(),
             column_count: *self.column_count.next().unwrap(),
             fold: *self.fold.next().unwrap(),
@@ -375,7 +382,6 @@ impl<'a> Iterator for Lines<'a> {
         })
     }
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionId(Id<Session>);
@@ -393,6 +399,7 @@ struct Session {
     scale: Vec<f64>,
     wraps: Vec<Vec<usize>>,
     indent: Vec<usize>,
+    selections: Vec<Selection>,
 }
 
 #[derive(Clone, Debug)]
