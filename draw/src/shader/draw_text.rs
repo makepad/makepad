@@ -3,7 +3,7 @@ use {
         makepad_platform::*,
         turtle::{Walk, Size, Align},
         font_atlas::{CxFontsAtlasTodo, CxFont, CxFontsAtlas, Font},
-        view::ManyInstances,
+        draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         cx_2d::Cx2d
     },
@@ -239,7 +239,6 @@ pub struct DrawText {
     #[live] pub geometry: GeometryQuad2D,
     #[live] pub text_style: TextStyle,
     #[live] pub wrap: TextWrap,
-    
     #[live(1.0)] pub font_scale: f64,
     #[live(1.0)] pub draw_depth: f32,
     
@@ -499,7 +498,7 @@ impl DrawText {
                 let mut iter = WordIterator::new(text.char_indices(), eval_width, font_size_logical * self.font_scale);
                 while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_ref().unwrap()) {
                     if measured_width + word.width >= eval_width {
-                        measured_height += line_height;
+                        measured_height += line_height* self.text_style.line_spacing;
                         measured_width = word.width;
                     }
                     else {
@@ -507,7 +506,7 @@ impl DrawText {
                     }
                     if measured_width > max_width {max_width = measured_width}
                     if word.with_newline {
-                        measured_height += line_height;
+                        measured_height += line_height * self.text_style.line_spacing;
                         measured_width = 0.0;
                     }
                 }
@@ -527,7 +526,7 @@ impl DrawText {
                 
                 for c in text.chars() {
                     if c == '\n'{
-                        measured_height += line_height;
+                        measured_height += line_height * self.text_style.line_spacing;
                     }
                     if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -613,14 +612,14 @@ impl DrawText {
                     let mut iter = WordIterator::new(text.char_indices(), geom.eval_width, font_size_logical * self.font_scale);
                     while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_ref().unwrap()) {
                         if pos.x + word.width >= geom.eval_width {
-                            pos.y += line_height;
+                            pos.y += line_height * self.text_style.line_spacing;
                             pos.x = 0.0;
                         }
                         self.draw_inner(cx, rect.pos + pos, &text[word.start..word.end], fonts_atlas);
                         pos.x += word.width;
                         
                         if word.with_newline {
-                            pos.y += line_height;
+                            pos.y += line_height * self.text_style.line_spacing;
                             pos.x = 0.0;
                         }
                     }
@@ -638,7 +637,7 @@ impl DrawText {
                     let mut ypos = 0.0;
                     for line in text.split('\n'){
                         self.draw_inner(cx, rect.pos + dvec2(0.0, y_align + ypos), line, fonts_atlas);
-                        ypos += line_height;
+                        ypos += line_height * self.text_style.line_spacing;
                     }
                     
                 }

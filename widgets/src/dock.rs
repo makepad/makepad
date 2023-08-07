@@ -90,7 +90,7 @@ pub struct Dock {
     #[rust] draw_state: DrawStateWrap<Vec<DrawStackItem >>,
     #[live] walk: Walk,
     #[live] layout: Layout,
-    #[live] drop_target_view: View,
+    #[live] drop_target_draw_list: DrawList2d,
     #[live] round_corner: DrawRoundCorner,
     #[live] padding_fill: DrawColor,
     #[live] border_size: f64,
@@ -112,7 +112,7 @@ pub struct Dock {
 
 struct TabBarWrap {
     tab_bar: TabBar,
-    contents_view: View,
+    contents_draw_list: DrawList2d,
     contents_rect: Rect
 }
 
@@ -258,11 +258,11 @@ impl Dock {
     
     fn end(&mut self, cx: &mut Cx2d) {
         
-        if self.drop_target_view.begin(cx, Walk::default()).is_redrawing() {
+        if self.drop_target_draw_list.begin(cx, Walk::default()).is_redrawing() {
             if let Some(pos) = &self.drop_state {
                 self.drag_quad.draw_abs(cx, pos.rect);
             }
-            self.drop_target_view.end(cx);
+            self.drop_target_draw_list.end(cx);
         }
         
         self.tab_bars.retain_visible();
@@ -394,7 +394,7 @@ impl Dock {
     
     fn redraw_item(&mut self, cx: &mut Cx, item_id: LiveId) {
         if let Some(tab_bar) = self.tab_bars.get_mut(&item_id) {
-            tab_bar.contents_view.redraw(cx);
+            tab_bar.contents_draw_list.redraw(cx);
         }
         for ((id, _kind), item) in self.items.iter_mut() {
             if *id == item_id {
@@ -435,7 +435,7 @@ impl Dock {
                     *selected = pos;
                     // ok now lets redraw the area of the tab
                     if let Some(tab_bar) = self.tab_bars.get(&tabs_id){
-                        tab_bar.contents_view.redraw(cx);
+                        tab_bar.contents_draw_list.redraw(cx);
                     }
                 }
                 _ => ()
@@ -670,7 +670,7 @@ impl Widget for Dock {
             });
         }
         for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
-            let contents_view = &mut tab_bar.contents_view;
+            let contents_view = &mut tab_bar.contents_draw_list;
             for action in tab_bar.tab_bar.handle_event(cx, event) {
                 match action {
                     TabBarAction::ShouldTabStartDrag(item) => dispatch_action(
@@ -702,14 +702,14 @@ impl Widget for Dock {
         if let Event::DragEnd = event {
             // end our possible dragstate
             self.drop_state = None;
-            self.drop_target_view.redraw(cx);
+            self.drop_target_draw_list.redraw(cx);
         }
         
         // alright lets manage the drag areas
         match event.drag_hits(cx, self.area) {
             DragHit::Drag(f) => {
                 self.drop_state = None;
-                self.drop_target_view.redraw(cx);
+                self.drop_target_draw_list.redraw(cx);
                 match f.state {
                     DragState::In | DragState::Over => {
                         dispatch_action(cx, DockAction::Drag(f.clone()).into_action(uid))
@@ -719,7 +719,7 @@ impl Widget for Dock {
             }
             DragHit::Drop(f) => {
                 self.drop_state = None;
-                self.drop_target_view.redraw(cx);
+                self.drop_target_draw_list.redraw(cx);
                 dispatch_action(cx, DockAction::Drop(f.clone()).into_action(uid))
             }
             _ => {}
@@ -796,7 +796,7 @@ impl Widget for Dock {
                         let tab_bar = self.tab_bars.get_or_insert(cx, id, | cx | {
                             TabBarWrap {
                                 tab_bar: TabBar::new_from_ptr(cx, tab_bar),
-                                contents_view: View::new(cx),
+                                contents_draw_list: DrawList2d::new(cx),
                                 contents_rect: Rect::default(),
                                 //full_rect: Rect::default(),
                             }
@@ -818,7 +818,7 @@ impl Widget for Dock {
                         else {
                             tab_bar.tab_bar.end(cx);
                             tab_bar.contents_rect = cx.turtle().rect();
-                            if tab_bar.contents_view.begin(cx, Walk::default()).is_redrawing() {
+                            if tab_bar.contents_draw_list.begin(cx, Walk::default()).is_redrawing() {
                                 stack.push(DrawStackItem::TabContent {id});
                                 stack.push(DrawStackItem::Tab {id: tabs[*selected]});
                             }
@@ -843,7 +843,7 @@ impl Widget for Dock {
                         let tab_bar = self.tab_bars.get_mut(&id).unwrap();
                         // lets create the full dropzone for this contentview
                         
-                        tab_bar.contents_view.end(cx);
+                        tab_bar.contents_draw_list.end(cx);
                     }
                     else {panic!()}
                 }
