@@ -25,7 +25,7 @@ pub struct State {
     settings: Settings,
     sessions: Arena<Session>,
     documents: Arena<Document>,
-    document_ids: HashMap<PathBuf, DocumentId>,
+    documents_by_path: HashMap<PathBuf, DocumentId>,
 }
 
 impl State {
@@ -44,19 +44,19 @@ impl State {
         &self.settings
     }
 
-    pub fn width(&self, session_id: SessionId) -> f64 {
+    pub fn width(&self, session: SessionId) -> f64 {
         let mut width: f64 = 0.0;
-        for line in self.lines(session_id, 0..self.line_count(self.document_id(session_id))) {
+        for line in self.lines(session, 0..self.line_count(self.document(session))) {
             width = width.max(line.width());
         }
         width
     }
 
-    pub fn height(&self, session_id: SessionId) -> f64 {
-        let line_count = self.line_count(self.document_id(session_id));
-        let line = self.line(session_id, line_count - 1);
+    pub fn height(&self, session: SessionId) -> f64 {
+        let line_count = self.line_count(self.document(session));
+        let line = self.line(session, line_count - 1);
         let mut y = line.y() + line.height();
-        for block in self.blocks(session_id, line_count..line_count) {
+        for block in self.blocks(session, line_count..line_count) {
             match block {
                 Block::Line {
                     is_inlay: true,
@@ -69,100 +69,98 @@ impl State {
         y
     }
 
-    pub fn document_id(&self, session_id: SessionId) -> DocumentId {
-        self.sessions[session_id.0].document_id
+    pub fn document(&self, session: SessionId) -> DocumentId {
+        self.sessions[session.0].document
     }
 
-    pub fn max_column(&self, session_id: SessionId) -> usize {
-        self.sessions[session_id.0].max_column
+    pub fn max_column(&self, session: SessionId) -> usize {
+        self.sessions[session.0].max_column
     }
 
-    pub fn find_first_line_ending_after_y(&self, session_id: SessionId, y: f64) -> usize {
-        match self.sessions[session_id.0]
+    pub fn find_first_line_ending_after_y(&self, session: SessionId, y: f64) -> usize {
+        match self.sessions[session.0]
             .y
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
-            Ok(index) => index,
-            Err(index) => index.saturating_sub(1),
+            Ok(line) => line,
+            Err(line) => line.saturating_sub(1),
         }
     }
 
-    pub fn find_first_line_starting_after_y(&self, session_id: SessionId, y: f64) -> usize {
-        match self.sessions[session_id.0]
+    pub fn find_first_line_starting_after_y(&self, session: SessionId, y: f64) -> usize {
+        match self.sessions[session.0]
             .y
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
-            Ok(index) => index + 1,
-            Err(index) => index,
+            Ok(line) => line + 1,
+            Err(line) => line,
         }
     }
 
-    pub fn line(&self, session_id: SessionId, index: usize) -> Line<'_> {
-        let document_id = self.document_id(session_id);
+    pub fn line(&self, session: SessionId, line: usize) -> Line<'_> {
+        let document = self.document(session);
         Line {
-            y: self.sessions[session_id.0].y.get(index).copied(),
-            column_count: self.sessions[session_id.0].column_count[index],
-            fold: self.sessions[session_id.0].fold[index],
-            scale: self.sessions[session_id.0].scale[index],
-            text: &self.documents[document_id.0].text[index],
-            tokens: &self.documents[document_id.0].tokens[index],
-            inline_inlays: &self.documents[document_id.0].inline_inlays[index],
-            wraps: &self.sessions[session_id.0].wraps[index],
-            indent: self.sessions[session_id.0].indent[index],
+            y: self.sessions[session.0].y.get(line).copied(),
+            column_count: self.sessions[session.0].column_count[line],
+            fold: self.sessions[session.0].fold[line],
+            scale: self.sessions[session.0].scale[line],
+            text: &self.documents[document.0].text[line],
+            tokens: &self.documents[document.0].tokens[line],
+            inline_inlays: &self.documents[document.0].inline_inlays[line],
+            wraps: &self.sessions[session.0].wraps[line],
+            indent: self.sessions[session.0].indent[line],
         }
     }
 
-    pub fn lines(&self, session_id: SessionId, range: Range<usize>) -> Lines<'_> {
-        let document_id = self.document_id(session_id);
-        let y_count = self.sessions[session_id.0].y.len();
+    pub fn lines(&self, session: SessionId, line_range: Range<usize>) -> Lines<'_> {
+        let document = self.document(session);
+        let y_count = self.sessions[session.0].y.len();
         Lines {
-            y: self.sessions[session_id.0].y[range.start.min(y_count)..range.end.min(y_count)]
-                .iter(),
-            column_count: self.sessions[session_id.0].column_count[range.start..range.end].iter(),
-            fold: self.sessions[session_id.0].fold[range.start..range.end].iter(),
-            scale: self.sessions[session_id.0].scale[range.start..range.end].iter(),
-            indent: self.sessions[session_id.0].indent[range.start..range.end].iter(),
-            text: self.documents[document_id.0].text[range.start..range.end].iter(),
-            tokens: self.documents[document_id.0].tokens[range.start..range.end].iter(),
-            inline_inlays: self.documents[document_id.0].inline_inlays[range.start..range.end]
-                .iter(),
-            wraps: self.sessions[session_id.0].wraps[range.start..range.end].iter(),
+            y: self.sessions[session.0].y[line_range.start.min(y_count)..line_range.end.min(y_count)].iter(),
+            column_count: self.sessions[session.0].column_count[line_range.start..line_range.end].iter(),
+            fold: self.sessions[session.0].fold[line_range.start..line_range.end].iter(),
+            scale: self.sessions[session.0].scale[line_range.start..line_range.end].iter(),
+            indent: self.sessions[session.0].indent[line_range.start..line_range.end].iter(),
+            text: self.documents[document.0].text[line_range.start..line_range.end].iter(),
+            tokens: self.documents[document.0].tokens[line_range.start..line_range.end].iter(),
+            inline_inlays: self.documents[document.0].inline_inlays[line_range.start..line_range.end].iter(),
+            wraps: self.sessions[session.0].wraps[line_range.start..line_range.end].iter(),
         }
     }
 
-    pub fn blocks(&self, session_id: SessionId, range: Range<usize>) -> Blocks<'_> {
-        let document_id = self.document_id(session_id);
-        let mut block_inlays = self.documents[document_id.0].block_inlays.iter();
+    pub fn blocks(&self, session: SessionId, line_range: Range<usize>) -> Blocks<'_> {
+        let document = self.document(session);
+        let mut block_inlays = self.documents[document.0].block_inlays.iter();
         while block_inlays
             .as_slice()
             .first()
-            .map_or(false, |&(index, _)| index < range.start)
+            .map_or(false, |&(line, _)| line < line_range.start)
         {
             block_inlays.next();
         }
         Blocks {
-            lines: self.lines(session_id, range.start..range.end),
+            lines: self.lines(session, line_range.start..line_range.end),
             block_inlays,
-            index: range.start,
+            line: line_range.start,
         }
     }
 
-    pub fn selections(&self, session_id: SessionId) -> &[Selection] {
-        &self.sessions[session_id.0].selections
+    pub fn selections(&self, session: SessionId) -> &[Selection] {
+        &self.sessions[session.0].selections
     }
 
-    pub fn line_count(&self, document_id: DocumentId) -> usize {
-        self.documents[document_id.0].text.len()
+    pub fn line_count(&self, document: DocumentId) -> usize {
+        self.documents[document.0].text.len()
     }
 
     pub fn new_file(&mut self, text: Vec<String>) -> SessionId {
-        let document_id = self.create_document(None, text);
-        self.create_session(document_id)
+        let document = self.create_document(None, text);
+        self.create_session(document)
     }
 
     pub fn open_file(&mut self, path: impl AsRef<Path> + Into<PathBuf>) -> io::Result<SessionId> {
-        let document_id = match self.document_ids.get(path.as_ref()) {
-            Some(&document_id) => document_id,
+        let document = match self.documents_by_path.get(path.as_ref()) {
+            Some(&document) => document,
             None => {
                 let file = File::open(path.as_ref())?;
                 self.create_document(
@@ -171,17 +169,73 @@ impl State {
                 )
             }
         };
-        Ok(self.create_session(document_id))
+        Ok(self.create_session(document))
     }
 
-    pub fn close_file(&mut self, session_id: SessionId) {
-        self.destroy_session(session_id);
+    pub fn close_file(&mut self, session: SessionId) {
+        self.destroy_session(session);
     }
 
-    fn create_session(&mut self, document_id: DocumentId) -> SessionId {
-        let line_count = self.documents[document_id.0].text.len();
-        let session_id = SessionId(self.sessions.insert(Session {
-            document_id,
+    pub fn set_max_column(&mut self, session: SessionId, max_column: usize) {
+        if self.sessions[session.0].max_column == max_column {
+            return;
+        }
+        self.sessions[session.0].max_column = max_column;
+        for line in 0..self.line_count(self.document(session)) {
+            self.update_indent_and_wraps(session, line);
+        }
+        self.update_y(session);
+    }
+
+    pub fn set_cursor(&mut self, session: SessionId, cursor: Point, affinity: Affinity) {
+        self.sessions[session.0].selections.clear();
+        self.sessions[session.0].selections.push(Selection {
+            anchor: cursor,
+            cursor,
+            affinity,
+        });
+        self.sessions[session.0].pending_selection = Some(0);
+    }
+
+    pub fn move_to(
+        &mut self,
+        session: SessionId,
+        cursor: Point,
+        affinity: Affinity,
+    ) {
+        let mut pending_selection = self.sessions[session.0].pending_selection.unwrap();
+        self.sessions[session.0].selections[pending_selection].cursor = cursor;
+        self.sessions[session.0].selections[pending_selection].affinity = affinity;
+        while pending_selection > 0 {
+            let prev_selection_index = pending_selection - 1;
+            if self.sessions[session.0].selections[prev_selection_index]
+                .should_merge(self.sessions[session.0].selections[pending_selection])
+            {
+                break;
+            }
+            self.sessions[session.0]
+                .selections
+                .remove(prev_selection_index);
+            pending_selection -= 1;
+        }
+        while pending_selection + 1 < self.sessions[session.0].selections.len() {
+            let next_selection_index = pending_selection + 1;
+            if self.sessions[session.0].selections[pending_selection]
+                .should_merge(self.sessions[session.0].selections[next_selection_index])
+            {
+                break;
+            }
+            self.sessions[session.0]
+                .selections
+                .remove(next_selection_index);
+        }
+        self.sessions[session.0].pending_selection = Some(pending_selection);
+    }
+
+    fn create_session(&mut self, document: DocumentId) -> SessionId {
+        let line_count = self.documents[document.0].text.len();
+        let session = SessionId(self.sessions.insert(Session {
+            document,
             max_column: usize::MAX,
             y: Vec::new(),
             column_count: (0..line_count).map(|_| None).collect(),
@@ -194,40 +248,30 @@ impl State {
                 anchor: Point { line: 7, byte: 28 },
                 affinity: Affinity::Before,
             }],
+            pending_selection: None,
         }));
-        self.documents[document_id.0].session_ids.insert(session_id);
-        self.update_y(session_id);
-        for index in 0..self.line_count(document_id) {
-            self.update_column_count(session_id, index);
+        self.documents[document.0].sessions.insert(session);
+        self.update_y(session);
+        for line in 0..self.line_count(document) {
+            self.update_column_count(session, line);
         }
-        session_id
+        session
     }
 
-    pub fn set_max_column(&mut self, session_id: SessionId, max_column: usize) {
-        if self.sessions[session_id.0].max_column == max_column {
-            return;
-        }
-        self.sessions[session_id.0].max_column = max_column;
-        for index in 0..self.line_count(self.document_id(session_id)) {
-            self.update_indent_and_wraps(session_id, index);
-        }
-        self.update_y(session_id);
-    }
-
-    fn update_y(&mut self, session_id: SessionId) {
-        let start = self.sessions[session_id.0].y.len();
-        let line_count = self.line_count(self.document_id(session_id));
+    fn update_y(&mut self, session: SessionId) {
+        let start = self.sessions[session.0].y.len();
+        let line_count = self.line_count(self.document(session));
         if start == line_count + 1 {
             return;
         }
         let mut y = if start == 0 {
             0.0
         } else {
-            let line = self.line(session_id, start - 1);
+            let line = self.line(session, start - 1);
             line.y() + line.height()
         };
-        let mut ys = mem::take(&mut self.sessions[session_id.0].y);
-        for block in self.blocks(session_id, start..line_count) {
+        let mut ys = mem::take(&mut self.sessions[session.0].y);
+        for block in self.blocks(session, start..line_count) {
             match block {
                 Block::Line { is_inlay, line } => {
                     if !is_inlay {
@@ -241,14 +285,14 @@ impl State {
             }
         }
         ys.push(y);
-        self.sessions[session_id.0].y = ys;
+        self.sessions[session.0].y = ys;
     }
 
-    fn update_column_count(&mut self, session_id: SessionId, index: usize) {
+    fn update_column_count(&mut self, session: SessionId, line: usize) {
         let mut column_count = 0;
         let mut column = 0;
-        let line = self.line(session_id, index);
-        for wrapped in line.wrappeds() {
+        let line_ref = self.line(session, line);
+        for wrapped in line_ref.wrappeds() {
             match wrapped {
                 Wrapped::Text { text, .. } => {
                     column += text
@@ -261,56 +305,54 @@ impl State {
                 }
                 Wrapped::Wrap => {
                     column_count = column_count.max(column);
-                    column = line.indent();
+                    column = line_ref.indent();
                 }
             }
         }
-        self.sessions[session_id.0].column_count[index] = Some(column_count.max(column));
+        self.sessions[session.0].column_count[line] = Some(column_count.max(column));
     }
 
-    fn update_indent_and_wraps(&mut self, session_id: SessionId, index: usize) {
-        let (indent, wraps) = self.line(session_id, index).compute_indent_and_wraps(
-            self.sessions[session_id.0].max_column,
+    fn update_indent_and_wraps(&mut self, session: SessionId, line: usize) {
+        let (indent, wraps) = self.line(session, line).compute_indent_and_wraps(
+            self.sessions[session.0].max_column,
             self.settings.tab_column_count,
         );
-        self.sessions[session_id.0].wraps[index] = wraps;
-        self.sessions[session_id.0].indent[index] = indent;
-        self.update_column_count(session_id, index);
-        self.sessions[session_id.0].y.truncate(index + 1);
+        self.sessions[session.0].wraps[line] = wraps;
+        self.sessions[session.0].indent[line] = indent;
+        self.update_column_count(session, line);
+        self.sessions[session.0].y.truncate(line + 1);
     }
 
-    fn destroy_session(&mut self, session_id: SessionId) {
-        let document_id = self.document_id(session_id);
-        self.documents[document_id.0]
-            .session_ids
-            .remove(&session_id);
-        if self.documents[document_id.0].session_ids.is_empty() {
-            self.destroy_document(document_id);
+    fn destroy_session(&mut self, session: SessionId) {
+        let document = self.document(session);
+        self.documents[document.0].sessions.remove(&session);
+        if self.documents[document.0].sessions.is_empty() {
+            self.destroy_document(document);
         }
-        self.sessions.remove(session_id.0);
+        self.sessions.remove(session.0);
     }
 
     fn create_document(&mut self, path: Option<PathBuf>, text: Vec<String>) -> DocumentId {
         let line_count = text.len();
-        let document_id = DocumentId(self.documents.insert(Document {
+        let document = DocumentId(self.documents.insert(Document {
             path,
             text,
             tokens: (0..line_count).map(|_| Vec::new()).collect(),
             inline_inlays: (0..line_count).map(|_| Vec::new()).collect(),
             block_inlays: Vec::new(),
-            session_ids: HashSet::new(),
+            sessions: HashSet::new(),
         }));
-        if let Some(path) = &self.documents[document_id.0].path {
-            self.document_ids.insert(path.clone(), document_id);
+        if let Some(path) = &self.documents[document.0].path {
+            self.documents_by_path.insert(path.clone(), document);
         }
-        document_id
+        document
     }
 
-    fn destroy_document(&mut self, document_id: DocumentId) {
-        if let Some(path) = &self.documents[document_id.0].path {
-            self.document_ids.remove(path);
+    fn destroy_document(&mut self, document: DocumentId) {
+        if let Some(path) = &self.documents[document.0].path {
+            self.documents_by_path.remove(path);
         }
-        self.documents.remove(document_id.0);
+        self.documents.remove(document.0);
     }
 }
 
@@ -318,7 +360,7 @@ impl State {
 pub struct Blocks<'a> {
     pub(super) lines: Lines<'a>,
     pub(super) block_inlays: Iter<'a, (usize, BlockInlay)>,
-    pub(super) index: usize,
+    pub(super) line: usize,
 }
 
 impl<'a> Iterator for Blocks<'a> {
@@ -329,7 +371,7 @@ impl<'a> Iterator for Blocks<'a> {
             .block_inlays
             .as_slice()
             .first()
-            .map_or(false, |&(index, _)| index == self.index)
+            .map_or(false, |&(line, _)| line == self.line)
         {
             let (_, block_inlay) = self.block_inlays.next().unwrap();
             return Some(match *block_inlay {
@@ -337,7 +379,7 @@ impl<'a> Iterator for Blocks<'a> {
             });
         }
         let line = self.lines.next()?;
-        self.index += 1;
+        self.line += 1;
         Some(Block::Line {
             is_inlay: false,
             line,
@@ -391,7 +433,7 @@ pub struct DocumentId(Id<Document>);
 
 #[derive(Clone, Debug)]
 struct Session {
-    document_id: DocumentId,
+    document: DocumentId,
     max_column: usize,
     y: Vec<f64>,
     column_count: Vec<Option<usize>>,
@@ -400,6 +442,7 @@ struct Session {
     wraps: Vec<Vec<usize>>,
     indent: Vec<usize>,
     selections: Vec<Selection>,
+    pending_selection: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -409,5 +452,5 @@ struct Document {
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
     block_inlays: Vec<(usize, BlockInlay)>,
-    session_ids: HashSet<SessionId>,
+    sessions: HashSet<SessionId>,
 }

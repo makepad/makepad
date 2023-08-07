@@ -12,6 +12,14 @@ impl Selection {
         self.anchor == self.cursor
     }
 
+    pub fn should_merge(self, other: Self) -> bool {
+        if self.is_empty() || other.is_empty() {
+            self.end() >= other.start()
+        } else {
+            self.end() > other.start()
+        }
+    }
+
     pub fn start(self) -> Point {
         self.anchor.min(self.cursor)
     }
@@ -33,6 +41,26 @@ impl Selection {
             Affinity::Before
         } else {
             self.affinity
+        }
+    }
+
+    pub fn merge(self, other: Self) -> Option<Self> {
+        if self.should_merge(other) {
+            Some(if self.anchor <= self.cursor {
+                Selection {
+                    anchor: self.anchor,
+                    cursor: other.cursor,
+                    affinity: other.affinity,
+                }
+            } else {
+                Selection {
+                    anchor: other.anchor,
+                    cursor: self.cursor,
+                    affinity: self.affinity,
+                }
+            })
+        } else {
+            None
         }
     }
 }

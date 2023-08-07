@@ -67,7 +67,7 @@ impl<'a> Line<'a> {
         Inlines {
             text: self.text,
             inline_inlays: self.inline_inlays.iter(),
-            index: 0,
+            byte: 0,
         }
     }
 
@@ -77,7 +77,7 @@ impl<'a> Line<'a> {
             inline: inlines.next(),
             inlines,
             wraps: self.wraps.iter(),
-            index: 0,
+            byte: 0,
         }
     }
 
@@ -115,7 +115,7 @@ impl<'a> Line<'a> {
                 }
             }
         }
-        let mut index = 0;
+        let mut byte = 0;
         let mut column = 0;
         let mut wraps = Vec::new();
         for inline in self.inlines() {
@@ -128,11 +128,11 @@ impl<'a> Line<'a> {
                             .sum();
                         if column + column_count > max_column {
                             column = indent;
-                            wraps.push(index);
+                            wraps.push(byte);
                         } else {
                             column += column_count;
                         }
-                        index += string.len();
+                        byte += string.len();
                     }
                 }
                 Inline::Widget(widget) => {
@@ -153,7 +153,7 @@ impl<'a> Line<'a> {
 pub struct Inlines<'a> {
     pub(super) text: &'a str,
     pub(super) inline_inlays: Iter<'a, (usize, InlineInlay)>,
-    pub(super) index: usize,
+    pub(super) byte: usize,
 }
 
 impl<'a> Iterator for Inlines<'a> {
@@ -164,7 +164,7 @@ impl<'a> Iterator for Inlines<'a> {
             .inline_inlays
             .as_slice()
             .first()
-            .map_or(false, |&(index, _)| index == self.index)
+            .map_or(false, |&(byte, _)| byte == self.byte)
         {
             let (_, inline_inlay) = self.inline_inlays.next().unwrap();
             return Some(match *inline_inlay {
@@ -179,12 +179,12 @@ impl<'a> Iterator for Inlines<'a> {
             return None;
         }
         let mut mid = self.text.len();
-        if let Some(&(index, _)) = self.inline_inlays.as_slice().first() {
-            mid = mid.min(index - self.index);
+        if let Some(&(byte, _)) = self.inline_inlays.as_slice().first() {
+            mid = mid.min(byte - self.byte);
         }
         let (text_0, text_1) = self.text.split_at(mid);
         self.text = text_1;
-        self.index += text_0.len();
+        self.byte += text_0.len();
         Some(Inline::Text {
             is_inlay: false,
             text: text_0,
@@ -203,7 +203,7 @@ pub struct Wrappeds<'a> {
     pub(super) inline: Option<Inline<'a>>,
     pub(super) inlines: Inlines<'a>,
     pub(super) wraps: Iter<'a, usize>,
-    pub(super) index: usize,
+    pub(super) byte: usize,
 }
 
 impl<'a> Iterator for Wrappeds<'a> {
@@ -214,7 +214,7 @@ impl<'a> Iterator for Wrappeds<'a> {
             .wraps
             .as_slice()
             .first()
-            .map_or(false, |&index| index == self.index)
+            .map_or(false, |&byte| byte == self.byte)
         {
             self.wraps.next();
             return Some(Wrapped::Wrap);
@@ -222,8 +222,8 @@ impl<'a> Iterator for Wrappeds<'a> {
         Some(match self.inline.take()? {
             Inline::Text { is_inlay, text } => {
                 let mut mid = text.len();
-                if let Some(&index) = self.wraps.as_slice().first() {
-                    mid = mid.min(index - self.index);
+                if let Some(&byte) = self.wraps.as_slice().first() {
+                    mid = mid.min(byte - self.byte);
                 }
                 let text = if mid < text.len() {
                     let (text_0, text_1) = text.split_at(mid);
@@ -236,11 +236,11 @@ impl<'a> Iterator for Wrappeds<'a> {
                     self.inline = self.inlines.next();
                     text
                 };
-                self.index += text.len();
+                self.byte += text.len();
                 Wrapped::Text { is_inlay, text }
             }
             Inline::Widget(widget) => {
-                self.index += 1;
+                self.byte += 1;
                 Wrapped::Widget(widget)
             }
         })
