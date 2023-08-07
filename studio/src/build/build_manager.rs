@@ -41,14 +41,6 @@ live_design!{
     }
 }
 
-#[derive(Default)]
-pub struct BuildState {
-}
-
-impl BuildState {
-    
-}
-
 pub struct BuildClientProcess {
     pub cmd_id: BuildCmdId,
     pub texture: Texture
@@ -85,7 +77,6 @@ impl BuildManager {
         //list.set_item_range(0, 10, 1);
         list.set_item_range(0, self.messages.len() as u64, 1);
         while let Some(item_id) = list.next_visible_item(cx) {
-
             if let Some(msg) = self.messages.get(item_id as usize){
                 match msg {
                     BuildMsg::Bare(msg) => {
@@ -99,7 +90,6 @@ impl BuildManager {
                         item.cut_state(cx, if item_id&1 == 0{id!(even.on)} else {id!(even.off)});
                         item.get_label(id!(link_label)).set_label(&msg.file_name);
                         item.get_label(id!(label)).set_label(&msg.msg);
-                        let item = list.get_item(cx, item_id, live_id!(Wait)).unwrap();
                         item.draw_widget_all(cx);
                     }
                     _=>()
@@ -110,16 +100,6 @@ impl BuildManager {
                 item.cut_state(cx, if item_id&1 == 0{id!(even.on)} else {id!(even.off)});
                 item.draw_widget_all(cx);
             }
-            /*match message {
-                BuildMsg::Bare(msg) => {
-                    item.get_label(id!(label)).set_label(&msg.line);
-                }
-                BuildMsg::Location(msg) => {
-                    item.get_label(id!(link_label)).set_label(&msg.file_name);
-                    item.get_label(id!(label)).set_label(&msg.msg);
-                }
-                _=>()
-            }*/
         }
     }
     
