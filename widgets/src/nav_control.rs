@@ -17,7 +17,6 @@ live_design!{
             },
             color: #a
         }
-        view: {}
     }
 }
 

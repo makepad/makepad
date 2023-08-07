@@ -318,8 +318,7 @@ live_design!{
     }}
     
     CachedFrame = <Frame> {
-        has_view: true,
-        use_cache: true,
+        optimize: Texture,
         draw_bg: {
             texture image: texture2d
             uniform marked: float,
@@ -678,6 +677,7 @@ impl Widget for Frame {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
     ) {
+        let uid = self.widget_uid();
         self.state_handle_event(cx, event);
         
         if self.block_signal_event {
@@ -705,9 +705,15 @@ impl Widget for Frame {
         }
         if self.cursor.is_some() || self.state.live_ptr.is_some(){
             match event.hits(cx, self.area()) {
-                Hit::FingerDown(_) => {
+                Hit::FingerDown(d) => {
                     cx.set_key_focus(Area::Empty);
-                    
+                    dispatch_action(cx, FrameAction::FingerDown(d).into_action(uid))
+                }
+                Hit::FingerMove(d) => {
+                    dispatch_action(cx, FrameAction::FingerMove(d).into_action(uid))
+                }
+                Hit::FingerUp(d) => {
+                    dispatch_action(cx, FrameAction::FingerUp(d).into_action(uid))
                 }
                 Hit::FingerHoverIn(_) => {
                     if let Some(cursor) = &self.cursor{
