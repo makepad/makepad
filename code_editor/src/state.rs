@@ -1,17 +1,9 @@
 mod blocks;
-mod inlines;
-mod line;
 mod lines;
-mod view;
-mod wrappeds;
 
 pub use self::{
     blocks::{Block, Blocks},
-    inlines::{Inline, Inlines},
-    line::Line,
     lines::Lines,
-    view::{View, ViewMut},
-    wrappeds::{Wrapped, Wrappeds},
 };
 
 use {
@@ -19,7 +11,8 @@ use {
         arena::Id,
         char::CharExt,
         inlays::{BlockInlay, InlineInlay},
-        Arena, Settings, Token,
+        line::Wrapped,
+        Arena, Line, Settings, Token,
     },
     std::{
         collections::{HashMap, HashSet},

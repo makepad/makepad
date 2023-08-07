@@ -1,6 +1,5 @@
 use {
-    super::Line,
-    crate::{inlays::InlineInlay, Settings, Token},
+    crate::{inlays::InlineInlay, Line, Settings, Token},
     std::slice::Iter,
 };
 
