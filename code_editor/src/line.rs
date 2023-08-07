@@ -1,12 +1,4 @@
-use crate::{char::CharExt, inlays::InlineInlay, str::StrExt, Settings, Token};
-
-mod inlines;
-mod wrappeds;
-
-pub use self::{
-    inlines::{Inline, Inlines},
-    wrappeds::{Wrapped, Wrappeds},
-};
+use {crate::{widgets::InlineWidget, char::CharExt, inlays::InlineInlay, str::StrExt, Settings, Token}, std::slice::Iter};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Line<'a> {
@@ -149,4 +141,110 @@ impl<'a> Line<'a> {
         }
         (indent, wraps)
     }
+}
+
+
+#[derive(Clone, Debug)]
+pub struct Inlines<'a> {
+    pub(super) text: &'a str,
+    pub(super) inline_inlays: Iter<'a, (usize, InlineInlay)>,
+    pub(super) index: usize,
+}
+
+impl<'a> Iterator for Inlines<'a> {
+    type Item = Inline<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self
+            .inline_inlays
+            .as_slice()
+            .first()
+            .map_or(false, |&(index, _)| index == self.index)
+        {
+            let (_, inline_inlay) = self.inline_inlays.next().unwrap();
+            return Some(match *inline_inlay {
+                InlineInlay::Text(ref text) => Inline::Text {
+                    is_inlay: true,
+                    text,
+                },
+                InlineInlay::Widget(widget) => Inline::Widget(widget),
+            });
+        }
+        if self.text.is_empty() {
+            return None;
+        }
+        let mut mid = self.text.len();
+        if let Some(&(index, _)) = self.inline_inlays.as_slice().first() {
+            mid = mid.min(index - self.index);
+        }
+        let (text_0, text_1) = self.text.split_at(mid);
+        self.text = text_1;
+        self.index += text_0.len();
+        Some(Inline::Text {
+            is_inlay: false,
+            text: text_0,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Inline<'a> {
+    Text { is_inlay: bool, text: &'a str },
+    Widget(InlineWidget),
+}
+
+#[derive(Clone, Debug)]
+pub struct Wrappeds<'a> {
+    pub(super) inline: Option<Inline<'a>>,
+    pub(super) inlines: Inlines<'a>,
+    pub(super) wraps: Iter<'a, usize>,
+    pub(super) index: usize,
+}
+
+impl<'a> Iterator for Wrappeds<'a> {
+    type Item = Wrapped<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self
+            .wraps
+            .as_slice()
+            .first()
+            .map_or(false, |&index| index == self.index)
+        {
+            self.wraps.next();
+            return Some(Wrapped::Wrap);
+        }
+        Some(match self.inline.take()? {
+            Inline::Text { is_inlay, text } => {
+                let mut mid = text.len();
+                if let Some(&index) = self.wraps.as_slice().first() {
+                    mid = mid.min(index - self.index);
+                }
+                let text = if mid < text.len() {
+                    let (text_0, text_1) = text.split_at(mid);
+                    self.inline = Some(Inline::Text {
+                        is_inlay,
+                        text: text_1,
+                    });
+                    text_0
+                } else {
+                    self.inline = self.inlines.next();
+                    text
+                };
+                self.index += text.len();
+                Wrapped::Text { is_inlay, text }
+            }
+            Inline::Widget(widget) => {
+                self.index += 1;
+                Wrapped::Widget(widget)
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Wrapped<'a> {
+    Text { is_inlay: bool, text: &'a str },
+    Widget(InlineWidget),
+    Wrap,
 }
