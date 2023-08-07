@@ -37,8 +37,6 @@ pub mod swipe_list;
 pub mod list_box;
 pub mod file_tree;
 pub mod slides_view;
-pub mod log_list;
-pub mod log_icon;
 pub mod color_picker;
 
 #[macro_use]
@@ -122,8 +120,6 @@ pub fn live_design(cx: &mut Cx) {
     crate::hook_widget::live_design(cx);
     crate::list_view::live_design(cx);
     //#[cfg(ide_widgets)]{
-        crate::log_list::live_design(cx);
-        crate::log_icon::live_design(cx);
         crate::tab::live_design(cx);
         crate::tab_bar::live_design(cx);
         crate::dock::live_design(cx);

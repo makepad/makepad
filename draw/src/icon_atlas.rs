@@ -11,7 +11,7 @@ pub use {
         makepad_platform::*,
         cx_2d::Cx2d,
         turtle::{Walk, Layout},
-        view::{ManyInstances, View, ViewRedrawingApi},
+        draw_list_2d::{ManyInstances, DrawList2d, RedrawingApi},
         geometry::GeometryQuad2D,
         makepad_vector::trapezoidator::Trapezoidator,
         makepad_vector::geometry::{AffineTransformation, Transform, Vector, Point},
@@ -327,7 +327,7 @@ pub struct CxDrawIconAtlasRc(pub Rc<RefCell<CxDrawIconAtlas >>);
 pub struct CxDrawIconAtlas {
     pub draw_trapezoid: DrawTrapezoidVector,
     pub atlas_pass: Pass,
-    pub atlas_view: View,
+    pub atlas_draw_list: DrawList2d,
     pub atlas_texture: Texture,
 }
 
@@ -343,7 +343,7 @@ impl CxDrawIconAtlas {
         Self {
             draw_trapezoid,
             atlas_pass: Pass::new(cx),
-            atlas_view: View::new(cx),
+            atlas_draw_list: DrawList2d::new(cx),
             atlas_texture: atlas_texture
         }
     }
@@ -394,7 +394,7 @@ impl<'a> Cx2d<'a> {
             
             draw_atlas.atlas_pass.clear_color_textures(self.cx);
             draw_atlas.atlas_pass.add_color_texture(self.cx, &draw_atlas.atlas_texture, clear);
-            draw_atlas.atlas_view.begin_always(self);
+            draw_atlas.atlas_draw_list.begin_always(self);
             
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut atlas.alloc.todo, &mut atlas_todo);
@@ -408,7 +408,7 @@ impl<'a> Cx2d<'a> {
                 
                 self.end_many_instances(many);
             }
-            draw_atlas.atlas_view.end(self);
+            draw_atlas.atlas_draw_list.end(self);
             self.end_pass(&draw_atlas.atlas_pass);
         }
     }

@@ -2,6 +2,7 @@ use {
     crate::{
         makepad_platform::*,
         makepad_draw::*,
+        makepad_widgets::*,
         makepad_widgets::file_tree::*,
         file_client::FileClient,
         makepad_file_protocol::{
@@ -48,13 +49,13 @@ impl FileSystem {
         self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
     }
     
-    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event){
+    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef){
         for action in self.file_client.handle_event(cx, event) {
             match action {
                 FileClientAction::Response(response) => match response {
                     FileResponse::LoadFileTree(response) => {
                         self.load_file_tree(response.unwrap());
-                        //self.ui.get_file_tree(id!(file_tree)).redraw(cx);
+                        ui.get_file_tree(id!(file_tree)).redraw(cx);
                         // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
                     }
                     _response => {

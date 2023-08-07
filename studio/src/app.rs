@@ -10,28 +10,144 @@ use {
         build::{
             build_manager::{
                 BuildManager,
+                BuildManagerAction
             },
         },
     },
 };
 
 live_design!{
+    import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     import makepad_widgets::frame::*;
+    import makepad_widgets::label::Label;
+    import makepad_widgets::link_label::LinkLabel;
     import makepad_widgets::file_tree::FileTree;
-    import makepad_widgets::log_list::LogList;
+    import makepad_widgets::list_view::ListView;
     import makepad_widgets::dock::*;
     import makepad_widgets::desktop_window::DesktopWindow;
-
+    
     import makepad_studio::run_view::RunView;
-
+    
     const FS_ROOT = ""
+    
+    WaitIcon = <Frame>{
+        walk:{width:10, height:10}
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.circle(5., 5., 4.)
+                sdf.fill(COLOR_TEXT_META)
+                sdf.move_to(3., 5.)
+                sdf.line_to(3., 5.)
+                sdf.move_to(5., 5.)
+                sdf.line_to(5., 5.)
+                sdf.move_to(7., 5.)
+                sdf.line_to(7., 5.)
+                sdf.stroke(#0, 0.8)
+                return sdf.result
+            }
+        }
+    }
+
+    LogListItem = <Rect>{
+        walk:{height:Fit, width:Fill}
+        layout:{padding:{top:5,bottom:5}}
+        draw_bg:{
+            instance is_even: 0.0
+            instance selected: 0.0
+            fn pixel(self) -> vec4 {
+                return mix(
+                    mix(
+                        COLOR_BG_EDITOR,
+                        COLOR_BG_ODD,
+                        self.is_even
+                    ),
+                    COLOR_BG_SELECTED,
+                    self.selected
+                );
+            }
+        }
+        state: {
+            even = {
+                default: off
+                off = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {is_even: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {is_even: 1.0}
+                    },
+                }
+            }
+            
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {hover: 0.0}
+                        /*draw_name: {hover: 0.0}
+                        draw_icon: {hover: 0.0}*/
+                    }
+                }
+                on = {
+                    cursor: Hand
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {hover: 1.0}
+                        /*draw_name: {hover: 1.0}
+                        draw_icon: {hover: 1.0}*/
+                    },
+                }
+            }
+            
+            select = {
+                default: off
+                off = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {selected: 0.0}
+                        /*draw_name: {selected: 0.0}
+                        draw_icon: {selected: 0.0}*/
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {selected: 1.0}
+                        /*draw_name: {selected: 1.0}
+                        draw_icon: {selected: 1.0}*/
+                    }
+                }
+            }
+        }
+    }
+
+    LogListWait = <LogListItem> {
+        icon = <WaitIcon>{},
+        label = <Label>{walk:{width:Fill}, draw_label:{wrap:Word}}
+        link_label = <LinkLabel>{}
+    }
+    
+    LogList = <ListView> {
+        walk: {height: Fill, width: Fill}
+        layout: {flow: Down}
+        fill_empty: true,
+        Wait = <LogListWait>{}
+        Empty = <LogListItem>{walk:{height:20,width:Fill}}
+    }
+    
     App = {{App}} {
         ui: <DesktopWindow> {
             caption_bar = {visible: true, caption_label = {label = {label: "Makepad Studio"}}},
             dock = <Dock> {
                 walk: {height: Fill, width: Fill}
-
+                
                 root = Splitter {
                     axis: Horizontal,
                     align: FromA(200.0),
@@ -80,7 +196,7 @@ live_design!{
                 
                 log_list = Tab {
                     name: "LogList",
-                    kind: Empty3
+                    kind: LogList
                 }
                 
                 run_view = Tab {
@@ -92,8 +208,9 @@ live_design!{
                 Empty2 = <Rect> {draw_bg: {color: #353}}
                 Empty3 = <Rect> {draw_bg: {color: #335}}
                 Empty4 = <Rect> {draw_bg: {color: #535}}
-                RunView = <RunView>{}
+                RunView = <RunView> {}
                 FileTree = <FileTree> {}
+                LogList = <LogList> {}
                 //LogList = <LogList>{}
             }
         }
@@ -130,8 +247,9 @@ impl AppMain for App {
         let dock = self.ui.get_dock(id!(dock));
         let file_tree = self.ui.get_file_tree(id!(file_tree));
         let run_view = self.ui.get_run_view(id!(run_view));
+        let log_list = self.ui.get_list_view(id!(log_list));
         
-        if let Event::Draw(event) = event{
+        if let Event::Draw(event) = event {
             let cx = &mut Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
                 
@@ -144,16 +262,28 @@ impl AppMain for App {
                     );
                 }
                 
-                if let Some(mut run_view) = next.into_run_view().borrow_mut(){
-                    log!("HERE!");
+                if let Some(mut run_view) = run_view.has_widget(&next).borrow_mut() {
                     run_view.draw(cx, &self.build_manager);
+                }
+                
+                if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
+                    self.build_manager.draw_log_list(cx, &mut *list_view);
                 }
             }
             return
         }
-
+        
+        self.file_system.handle_event(cx, event, &self.ui);
+        
         run_view.handle_event(cx, event, &mut self.build_manager);
-        for _action in self.build_manager.handle_event(cx, event){
+        
+        for action in self.build_manager.handle_event(cx, event) {
+            match action{
+                BuildManagerAction::RedrawLog=>{
+                    log_list.redraw(cx);
+                }
+                _=>()
+            }
         }
         
         let actions = self.ui.handle_widget_event(cx, event);
