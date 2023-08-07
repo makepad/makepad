@@ -4,8 +4,8 @@ use {
         char::CharExt,
         inlays::{BlockInlay, InlineInlay},
         line::Wrapped,
-        widgets::BlockWidget,
         selection::Affinity,
+        widgets::BlockWidget,
         Arena, Line, Point, Selection, Settings, Token,
     },
     std::{
@@ -83,7 +83,7 @@ impl State {
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
             Ok(index) => index,
-            Err(index) => (index + 1).min(self.line_count(self.document_id(session_id))),
+            Err(index) => index.saturating_sub(1),
         }
     }
 
@@ -190,7 +190,7 @@ impl State {
             wraps: (0..line_count).map(|_| Vec::new()).collect(),
             indent: (0..line_count).map(|_| 0).collect(),
             selections: vec![Selection {
-                cursor: Point { line: 0, byte: 0},
+                cursor: Point { line: 0, byte: 0 },
                 anchor: Point { line: 7, byte: 28 },
                 affinity: Affinity::Before,
             }],
