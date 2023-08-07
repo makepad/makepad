@@ -1,4 +1,12 @@
-use std::{fmt, iter::Enumerate, hash::{Hash, Hasher}, marker::PhantomData, mem, ops::{Index, IndexMut}, slice, vec};
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    iter::Enumerate,
+    marker::PhantomData,
+    mem,
+    ops::{Index, IndexMut},
+    slice, vec,
+};
 
 #[derive(Clone, Debug)]
 pub struct Arena<T> {
@@ -53,7 +61,7 @@ impl<T> Arena<T> {
 
     pub fn iter_mut(&mut self) -> IterMut<'_, T> {
         IterMut {
-            iter: self.entries.iter_mut().enumerate()
+            iter: self.entries.iter_mut().enumerate(),
         }
     }
 
@@ -62,24 +70,24 @@ impl<T> Arena<T> {
             generation: self.generation,
             value,
         };
-        Id::new(match self.first_vacant_index {
-            Some(index) => {
-                match self.entries[index] {
+        Id::new(
+            match self.first_vacant_index {
+                Some(index) => match self.entries[index] {
                     Entry::Vacant { next_vacant_index } => {
                         self.entries[index] = entry;
                         self.first_vacant_index = next_vacant_index;
                         index
                     }
                     _ => unreachable!(),
+                },
+                None => {
+                    let index = self.entries.len();
+                    self.len += 1;
+                    self.entries.push(entry);
+                    index
                 }
-            }
-            None => {
-                let index = self.entries.len();
-                self.len += 1;
-                self.entries.push(entry);
-                index
-            }
-        }, self.generation
+            },
+            self.generation,
         )
     }
 
@@ -163,7 +171,7 @@ impl<T> IntoIterator for Arena<T> {
 
     fn into_iter(self) -> Self::IntoIter {
         IntoIter {
-            iter: self.entries.into_iter().enumerate()
+            iter: self.entries.into_iter().enumerate(),
         }
     }
 }
@@ -180,7 +188,10 @@ impl<'a, T> Iterator for Iter<'a, T> {
         loop {
             let (index, entry) = self.iter.next()?;
             match *entry {
-                Entry::Occupied { generation, ref value } => {
+                Entry::Occupied {
+                    generation,
+                    ref value,
+                } => {
                     break Some((Id::new(index, generation), value));
                 }
                 Entry::Vacant { .. } => continue,
@@ -201,7 +212,10 @@ impl<'a, T> Iterator for IterMut<'a, T> {
         loop {
             let (index, entry) = self.iter.next()?;
             match *entry {
-                Entry::Occupied { generation, ref mut value } => {
+                Entry::Occupied {
+                    generation,
+                    ref mut value,
+                } => {
                     break Some((Id::new(index, generation), value));
                 }
                 Entry::Vacant { .. } => continue,
@@ -273,7 +287,7 @@ impl<T> Eq for Id<T> {}
 impl<T> Hash for Id<T> {
     fn hash<H>(&self, hasher: &mut H)
     where
-        H: Hasher
+        H: Hasher,
     {
         self.index.hash(hasher);
         self.generation.hash(hasher);

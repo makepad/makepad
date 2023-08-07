@@ -8,4 +8,6 @@ pub mod str;
 pub mod token;
 pub mod widgets;
 
-pub use self::{code_editor::CodeEditor, settings::Settings, state::State, token::Token};
+pub use self::{
+    arena::Arena, code_editor::CodeEditor, settings::Settings, state::State, token::Token,
+};
