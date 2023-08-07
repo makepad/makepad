@@ -30,24 +30,42 @@ pub struct CodeEditor {
     walk: Walk,
     #[live]
     draw_text: DrawText,
+    #[rust]
+    viewport_rect: Rect,
+    #[rust]
+    cell_size: DVec2,
+    #[rust]
+    start: usize,
+    #[rust]
+    end: usize,
 }
 
 impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d<'_>, state: &mut State, session_id: SessionId) {
-        let mut view = state.view_mut(session_id);
-        let viewport_rect = Rect {
+        self.viewport_rect = Rect {
             pos: self.scroll_bars.get_scroll_pos(),
             size: cx.turtle().rect().size,
         };
-        let cell_size = self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-        view.set_max_column((viewport_rect.size.x / cell_size.x) as usize);
-        let start = view.find_first_line_ending_after_y(viewport_rect.pos.y / cell_size.y);
-        let end = view.find_first_line_starting_after_y(
-            (viewport_rect.pos.y + viewport_rect.size.y) / cell_size.y,
+        self.cell_size =
+            self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+        state.set_max_column(
+            session_id,
+            (self.viewport_rect.size.x / self.cell_size.x) as usize,
+        );
+        self.start = state.find_first_line_ending_after_y(
+            session_id,
+            self.viewport_rect.pos.y / self.cell_size.y,
+        );
+        self.end = state.find_first_line_starting_after_y(
+            session_id,
+            (self.viewport_rect.pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
         self.scroll_bars.begin(cx, self.walk, Layout::default());
         let mut y = 0.0;
-        for block in view.blocks(0..view.line_count()) {
+        for block in state.blocks(
+            session_id,
+            0..state.line_count(state.document_id(session_id)),
+        ) {
             match block {
                 Block::Line { line, .. } => {
                     let mut token_iter = line.tokens().iter().copied();
@@ -88,8 +106,8 @@ impl CodeEditor {
                                         DVec2 {
                                             x: line.column_to_x(column),
                                             y,
-                                        } * cell_size
-                                            - viewport_rect.pos,
+                                        } * self.cell_size
+                                            - self.viewport_rect.pos,
                                         text_0,
                                     );
                                 }
@@ -103,8 +121,8 @@ impl CodeEditor {
                                     DVec2 {
                                         x: line.column_to_x(column),
                                         y,
-                                    } * cell_size
-                                        - viewport_rect.pos,
+                                    } * self.cell_size
+                                        - self.viewport_rect.pos,
                                     text,
                                 );
                             }
@@ -124,8 +142,10 @@ impl CodeEditor {
                 }
             }
         }
-        cx.turtle_mut()
-            .set_used(view.width() * cell_size.x, view.height() * cell_size.y);
+        cx.turtle_mut().set_used(
+            state.width(session_id) * self.cell_size.x,
+            state.height(session_id) * self.cell_size.y,
+        );
         self.scroll_bars.end(cx);
     }
 
