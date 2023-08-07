@@ -107,7 +107,7 @@ pub struct CodeEditor {
 }
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d<'_>, state: &mut State, session_id: SessionId) {
+    pub fn draw(&mut self, cx: &mut Cx2d<'_>, state: &mut State, session: SessionId) {
         self.viewport_rect = Rect {
             pos: self.scroll_bars.get_scroll_pos(),
             size: cx.turtle().rect().size,
@@ -115,23 +115,21 @@ impl CodeEditor {
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         state.set_max_column(
-            session_id,
+            session,
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         );
-        self.start_line = state.find_first_line_ending_after_y(
-            session_id,
-            self.viewport_rect.pos.y / self.cell_size.y,
-        );
+        self.start_line = state
+            .find_first_line_ending_after_y(session, self.viewport_rect.pos.y / self.cell_size.y);
         self.end_line = state.find_first_line_starting_after_y(
-            session_id,
+            session,
             (self.viewport_rect.pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
         self.scroll_bars.begin(cx, self.walk, Layout::default());
-        self.draw_text(cx, state, session_id);
-        self.draw_selections(cx, state, session_id);
+        self.draw_text(cx, state, session);
+        self.draw_selections(cx, state, session);
         cx.turtle_mut().set_used(
-            state.width(session_id) * self.cell_size.x,
-            state.height(session_id) * self.cell_size.y,
+            state.width(session) * self.cell_size.x,
+            state.height(session) * self.cell_size.y,
         );
         self.scroll_bars.end(cx);
     }
@@ -140,7 +138,7 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         state: &mut State,
-        session_id: SessionId,
+        session: SessionId,
         event: &Event,
     ) {
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
@@ -148,20 +146,24 @@ impl CodeEditor {
         });
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::FingerDown(FingerDownEvent { abs, rect, .. }) => {
-                if let Some((point, affinity)) = self.pick(state, session_id, abs - rect.pos) {
-                    println!("{:?} {:?}", point, affinity);
+                if let Some((cursor, affinity)) = self.pick(state, session, abs - rect.pos) {
+                    state.set_cursor(session, cursor, affinity);
+                    cx.redraw_all();
+                }
+            }
+            Hit::FingerMove(FingerMoveEvent { abs, rect, .. }) => {
+                if let Some((cursor, affinity)) = self.pick(state, session, abs - rect.pos) {
+                    state.move_to(session, cursor, affinity);
+                    cx.redraw_all();
                 }
             }
             _ => {}
         }
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d<'_>, state: &State, session_id: SessionId) {
+    fn draw_text(&mut self, cx: &mut Cx2d<'_>, state: &State, session: SessionId) {
         let mut y = 0.0;
-        for block in state.blocks(
-            session_id,
-            0..state.line_count(state.document_id(session_id)),
-        ) {
+        for block in state.blocks(session, 0..state.line_count(state.document(session))) {
             match block {
                 Block::Line { line, .. } => {
                     let mut token_iter = line.tokens().iter().copied();
@@ -240,9 +242,9 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, state: &State, session_id: SessionId) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, state: &State, session: SessionId) {
         let mut active_selection = None;
-        let mut selections = state.selections(session_id).iter();
+        let mut selections = state.selections(session).iter();
         while selections
             .as_slice()
             .first()
@@ -265,19 +267,14 @@ impl CodeEditor {
             active_selection,
             selections,
         }
-        .draw_selections(cx, state, session_id)
+        .draw_selections(cx, state, session)
     }
 
-    fn pick(
-        &self,
-        state: &State,
-        session_id: SessionId,
-        point: DVec2,
-    ) -> Option<(Point, Affinity)> {
+    fn pick(&self, state: &State, session: SessionId, point: DVec2) -> Option<(Point, Affinity)> {
         let point = (point + self.viewport_rect.pos) / self.cell_size;
-        let mut line = state.find_first_line_ending_after_y(session_id, point.y);
-        let mut y = state.line(session_id, line).y();
-        for block in state.blocks(session_id, line..line + 1) {
+        let mut line = state.find_first_line_ending_after_y(session, point.y);
+        let mut y = state.line(session, line).y();
+        for block in state.blocks(session, line..line + 1) {
             match block {
                 Block::Line {
                     is_inlay: false,
@@ -389,11 +386,11 @@ struct DrawSelections<'a> {
 }
 
 impl<'a> DrawSelections<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, state: &State, session_id: SessionId) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, state: &State, session: SessionId) {
         let mut line = self.code_editor.start_line;
-        let mut y = state.line(session_id, line).y();
+        let mut y = state.line(session, line).y();
         for element in state.blocks(
-            session_id,
+            session,
             self.code_editor.start_line..self.code_editor.end_line,
         ) {
             match element {
