@@ -52,10 +52,6 @@ live_design!{
             draw_depth: 10.0
             color: (COLOR_DRAG_QUAD)
         }
-        drop_target_view: {
-            //walk: {abs_pos: vec2(0.0, 0.0)}
-            //is_overlay: true
-        }
         tab_bar: <TabBar> {}
         splitter: <Splitter> {}
     }
