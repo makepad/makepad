@@ -1,17 +1,10 @@
-mod blocks;
-mod lines;
-
-pub use self::{
-    blocks::{Block, Blocks},
-    lines::Lines,
-};
-
 use {
     crate::{
         arena::Id,
         char::CharExt,
         inlays::{BlockInlay, InlineInlay},
         line::Wrapped,
+        widgets::BlockWidget,
         Arena, Line, Settings, Token,
     },
     std::{
@@ -22,6 +15,7 @@ use {
         mem,
         ops::Range,
         path::{Path, PathBuf},
+        slice::Iter,
     },
 };
 
@@ -310,6 +304,78 @@ impl State {
         self.documents.remove(document_id.0);
     }
 }
+
+#[derive(Clone, Debug)]
+pub struct Blocks<'a> {
+    pub(super) lines: Lines<'a>,
+    pub(super) block_inlays: Iter<'a, (usize, BlockInlay)>,
+    pub(super) index: usize,
+}
+
+impl<'a> Iterator for Blocks<'a> {
+    type Item = Block<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self
+            .block_inlays
+            .as_slice()
+            .first()
+            .map_or(false, |&(index, _)| index == self.index)
+        {
+            let (_, block_inlay) = self.block_inlays.next().unwrap();
+            return Some(match *block_inlay {
+                BlockInlay::Widget(widget) => Block::Widget(widget),
+            });
+        }
+        let line = self.lines.next()?;
+        self.index += 1;
+        Some(Block::Line {
+            is_inlay: false,
+            line,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Block<'a> {
+    Line { is_inlay: bool, line: Line<'a> },
+    Widget(BlockWidget),
+}
+
+#[derive(Clone, Debug)]
+pub struct Lines<'a> {
+    pub settings: &'a Settings,
+    pub y: Iter<'a, f64>,
+    pub column_count: Iter<'a, Option<usize>>,
+    pub fold: Iter<'a, usize>,
+    pub scale: Iter<'a, f64>,
+    pub indent: Iter<'a, usize>,
+    pub text: Iter<'a, String>,
+    pub tokens: Iter<'a, Vec<Token>>,
+    pub inline_inlays: Iter<'a, Vec<(usize, InlineInlay)>>,
+    pub wraps: Iter<'a, Vec<usize>>,
+}
+
+impl<'a> Iterator for Lines<'a> {
+    type Item = Line<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let text = self.text.next()?;
+        Some(Line {
+            settings: self.settings,
+            y: self.y.next().copied(),
+            column_count: *self.column_count.next().unwrap(),
+            fold: *self.fold.next().unwrap(),
+            scale: *self.scale.next().unwrap(),
+            indent: *self.indent.next().unwrap(),
+            text,
+            tokens: self.tokens.next().unwrap(),
+            inline_inlays: self.inline_inlays.next().unwrap(),
+            wraps: self.wraps.next().unwrap(),
+        })
+    }
+}
+
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionId(Id<Session>);
