@@ -7,6 +7,8 @@ use {
         inlays::{BlockInlay, InlineInlay},
         line_ref::Wrapped,
         selection::Affinity,
+        str::StrExt,
+        token::TokenKind,
         widgets::BlockWidget,
         Arena, Change, LineRef, Point, Selection, Settings, Text, Token,
     },
@@ -277,8 +279,102 @@ impl State {
         }
     }
 
+    pub fn delete(&mut self, session: SessionId) {
+        let mut changes = Vec::new();
+        let document = self.document(session);
+        edit_ops::delete(
+            &mut self.documents[document.0].text,
+            &self.sessions[session.0].selections,
+            &mut changes,
+        );
+        for change in &changes {
+            self.apply_change_to_document(document, change);
+        }
+    }
+
     fn apply_change_to_document(&mut self, document: DocumentId, change: &Change) {
+        self.apply_change_to_tokens(document, change);
         self.apply_change_to_inline_inlays(document, change);
+    }
+
+    fn apply_change_to_tokens(&mut self, document: DocumentId, change: &Change) {
+        let document_ref = &mut self.documents[document.0];
+        match change.kind {
+            ChangeKind::Insert(point, ref text) => {
+                if text.extent().line_count == 0 {
+                    // TODO
+                } else {
+
+                }
+            }
+            ChangeKind::Delete(range) => {
+                let mut byte = 0;
+                let mut start = document_ref.tokens[range.start().line]
+                    .iter()
+                    .position(|token| {
+                        if byte + token.byte_count > range.start().byte {
+                            return true;
+                        }
+                        byte += token.byte_count;
+                        false
+                    })
+                    .unwrap_or(document_ref.tokens[range.start().line].len());
+                if byte != range.start().byte {
+                    let token = document_ref.tokens[range.start().line][start];
+                    let byte_count = range.start().byte - byte;
+                    document_ref.tokens[range.start().line][start] = Token {
+                        byte_count,
+                        kind: token.kind,
+                    };
+                    start += 1;
+                    document_ref.tokens[range.start().line].insert(
+                        start,
+                        Token {
+                            byte_count: token.byte_count - byte_count,
+                            kind: token.kind,
+                        },
+                    );
+                }
+                let mut byte = 0;
+                let mut end = document_ref.tokens[range.end().line]
+                    .iter()
+                    .position(|token| {
+                        if byte + token.byte_count > range.end().byte {
+                            return true;
+                        }
+                        byte += token.byte_count;
+                        false
+                    })
+                    .unwrap_or(document_ref.tokens[range.end().line].len());
+                if byte != range.end().byte {
+                    let token = document_ref.tokens[range.end().line][end];
+                    let byte_count = range.end().byte - byte;
+                    document_ref.tokens[range.end().line][end] = Token {
+                        byte_count,
+                        kind: token.kind,
+                    };
+                    end += 1;
+                    document_ref.tokens[range.end().line].insert(
+                        end,
+                        Token {
+                            byte_count: token.byte_count - byte_count,
+                            kind: token.kind,
+                        },
+                    );
+                }
+                if range.start().line == range.end().line {
+                    document_ref.tokens[range.start().line].drain(start..end);
+                } else {
+                    let mut tokens = document_ref.tokens[range.start().line]
+                        .drain(..start)
+                        .collect::<Vec<_>>();
+                    tokens.extend(document_ref.tokens[range.end().line].drain(end..));
+                    document_ref
+                        .tokens
+                        .splice(range.start().line..range.end().line + 1, iter::once(tokens));
+                }
+            }
+        }
     }
 
     fn apply_change_to_inline_inlays(&mut self, document: DocumentId, change: &Change) {
@@ -329,19 +425,22 @@ impl State {
                     .position(|&(byte, _)| byte >= range.end().byte)
                     .unwrap_or(document_ref.inline_inlays[range.end().line].len());
                 if range.start().line == range.end().line {
-                    document_ref.inline_inlays.drain(start..end);
+                    document_ref.inline_inlays[range.start().line].drain(start..end);
                     for (byte, _) in &mut document_ref.inline_inlays[range.start().line][start..] {
                         *byte = range.start().byte + (*byte - range.end().byte.min(*byte));
                     }
                 } else {
                     let mut inline_inlays = document_ref.inline_inlays[range.start().line]
-                        .drain(start..)
+                        .drain(..start)
                         .collect::<Vec<_>>();
                     inline_inlays.extend(
                         document_ref.inline_inlays[range.end().line]
-                            .drain(..end)
+                            .drain(end..)
                             .map(|(byte, inline_inlay)| {
-                                (byte - range.end().byte.min(byte), inline_inlay)
+                                (
+                                    range.start().byte + byte - range.end().byte.min(byte),
+                                    inline_inlay,
+                                )
                             }),
                     );
                     document_ref.inline_inlays.splice(
@@ -388,11 +487,14 @@ impl State {
 
     fn create_document(&mut self, path: Option<PathBuf>, text: Text) -> DocumentId {
         let line_count = text.as_lines().len();
+        let tokens: Vec<_> = (0..line_count)
+            .map(|line| tokenize(&text.as_lines()[line]))
+            .collect();
         let document = DocumentId(
             self.documents.insert(Document {
                 path,
                 text,
-                tokens: (0..line_count).map(|_| Vec::new()).collect(),
+                tokens,
                 inline_inlays: (0..line_count)
                     .map(|line| {
                         if line == 2 {
@@ -585,4 +687,17 @@ struct Document {
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
     block_inlays: Vec<(usize, BlockInlay)>,
     sessions: HashSet<SessionId>,
+}
+
+fn tokenize(text: &str) -> Vec<Token> {
+    text.split_whitespace_boundaries()
+        .map(|string| Token {
+            byte_count: string.len(),
+            kind: if string.chars().next().unwrap().is_whitespace() {
+                TokenKind::Whitespace
+            } else {
+                TokenKind::Unknown
+            },
+        })
+        .collect()
 }
