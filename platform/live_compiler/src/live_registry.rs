@@ -4,13 +4,13 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_error_log::*,
-        makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
+        makepad_live_tokenizer::{/*Delim, TokenPos, TokenRange, TokenWithLen,*/ FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
         live_error::{LiveError, LiveErrorSpan, LiveFileError},
         live_parser::LiveParser,
         live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveIdAsProp},
-        live_node_reader::{LiveNodeMutReader},
-        live_node_vec::{LiveNodeSliceApi, LiveNodeVecApi},
+        /*live_node_reader::{LiveNodeMutReader},*/
+        live_node_vec::{LiveNodeSliceApi, /*LiveNodeVecApi*/},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId, LiveFileGeneration},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
         span::{TextSpan, TextPos},
@@ -428,7 +428,7 @@ impl LiveRegistry {
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok(tokens)
     }
-    
+    /*
     // called by the live editor to update a live file
     pub fn live_edit_file<'a, CB>(
         &mut self,
@@ -571,7 +571,7 @@ impl LiveRegistry {
         }
         
         Ok(None)
-    }
+    }*/
     
     pub fn process_next_originals_and_expand(&mut self) -> Result<(), Vec<LiveError >> {
         for live_file in &mut self.live_files {
@@ -591,7 +591,7 @@ impl LiveRegistry {
             Ok(())
         }
     }
-    
+    /*
     fn update_documents_from_mutated_tokens(
         &mut self,
         mutated_tokens: &[LiveTokenId]
@@ -665,7 +665,7 @@ impl LiveRegistry {
         }
         diff.close();
         (diff, live_ptrs)
-    }
+    }*/
     
     pub fn register_live_file(
         &mut self,

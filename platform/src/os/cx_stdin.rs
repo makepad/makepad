@@ -121,6 +121,10 @@ pub enum HostToStdin{
     MouseUp(StdinMouseUp),
     MouseMove(StdinMouseMove),
     Scroll(StdinScroll),
+    ReloadFile{
+        file:String,
+        contents:String
+    }
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
