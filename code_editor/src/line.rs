@@ -7,13 +7,13 @@ use {
 pub struct Line<'a> {
     pub y: Option<f64>,
     pub column_count: Option<usize>,
-    pub fold: usize,
+    pub fold_column: usize,
     pub scale: f64,
-    pub indent: usize,
+    pub indent_column_count_after_wrap: usize,
     pub text: &'a str,
     pub tokens: &'a [Token],
-    pub inline_inlays: &'a [(usize, InlineInlay)],
-    pub wraps: &'a [usize],
+    pub inline_inlays_by_byte: &'a [(usize, InlineInlay)],
+    pub wraps_by_byte: &'a [usize],
 }
 
 impl<'a> Line<'a> {
@@ -22,7 +22,7 @@ impl<'a> Line<'a> {
     }
 
     pub fn row_count(&self) -> usize {
-        self.wraps.len() + 1
+        self.wraps_by_byte.len() + 1
     }
 
     pub fn column_count(&self) -> usize {
@@ -38,21 +38,21 @@ impl<'a> Line<'a> {
     }
 
     pub fn column_to_x(&self, column: usize) -> f64 {
-        let before_fold = column.min(self.fold);
-        let after_fold = column - before_fold;
-        before_fold as f64 + after_fold as f64 * self.scale
+        let column_count_before_fold_column = column.min(self.fold_column);
+        let column_count_after_fold_column = column - column_count_before_fold_column;
+        column_count_before_fold_column as f64 + column_count_after_fold_column as f64 * self.scale
     }
 
-    pub fn fold(&self) -> usize {
-        self.fold
+    pub fn fold_column(&self) -> usize {
+        self.fold_column
     }
 
     pub fn scale(&self) -> f64 {
         self.scale
     }
 
-    pub fn indent(self) -> usize {
-        self.indent
+    pub fn indent_column_count_after_wrap(self) -> usize {
+        self.indent_column_count_after_wrap
     }
 
     pub fn text(&self) -> &str {
@@ -66,7 +66,7 @@ impl<'a> Line<'a> {
     pub fn inlines(&self) -> Inlines<'a> {
         Inlines {
             text: self.text,
-            inline_inlays: self.inline_inlays.iter(),
+            inline_inlays: self.inline_inlays_by_byte.iter(),
             byte: 0,
         }
     }
@@ -76,17 +76,17 @@ impl<'a> Line<'a> {
         Wrappeds {
             inline: inlines.next(),
             inlines,
-            wraps: self.wraps.iter(),
+            wraps: self.wraps_by_byte.iter(),
             byte: 0,
         }
     }
 
-    pub(super) fn compute_indent_and_wraps(
+    pub(super) fn compute_wraps(
         &self,
         max_column: usize,
         tab_column_count: usize,
-    ) -> (usize, Vec<usize>) {
-        let mut indent: usize = self
+    ) -> (Vec<usize>, usize) {
+        let mut indent_column_count_after_wrap: usize = self
             .text
             .indent()
             .unwrap_or("")
@@ -101,15 +101,15 @@ impl<'a> Line<'a> {
                             .chars()
                             .map(|char| char.column_count(tab_column_count))
                             .sum();
-                        if indent + column_count > max_column {
-                            indent = 0;
+                        if indent_column_count_after_wrap + column_count > max_column {
+                            indent_column_count_after_wrap = 0;
                             break;
                         }
                     }
                 }
                 Inline::Widget(widget) => {
-                    if indent + widget.column_count > max_column {
-                        indent = 0;
+                    if indent_column_count_after_wrap + widget.column_count > max_column {
+                        indent_column_count_after_wrap = 0;
                         break;
                     }
                 }
@@ -127,7 +127,7 @@ impl<'a> Line<'a> {
                             .map(|char| char.column_count(tab_column_count))
                             .sum();
                         if column + column_count > max_column {
-                            column = indent;
+                            column = indent_column_count_after_wrap;
                             wraps.push(byte);
                         } else {
                             column += column_count;
@@ -137,15 +137,15 @@ impl<'a> Line<'a> {
                 }
                 Inline::Widget(widget) => {
                     if column + widget.column_count > max_column {
-                        column = indent;
-                        wraps.push(indent);
+                        column = indent_column_count_after_wrap;
+                        wraps.push(indent_column_count_after_wrap);
                     } else {
                         column += widget.column_count;
                     }
                 }
             }
         }
-        (indent, wraps)
+        (wraps, indent_column_count_after_wrap)
     }
 }
 
