@@ -7,6 +7,7 @@ use {
         io::{BufReader},
     },
     crate::{
+        makepad_live_id::*,
         makepad_math::*,
         makepad_error_log::*,
         makepad_micro_serde::*,
@@ -52,15 +53,6 @@ impl Cx {
             }
         }
     }
-    /*
-    pub fn stdin_post_signal(signal: Signal) {
-        let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-signal\", \"signal\":{}}}\n", signal.0.0).as_bytes());
-    }
-    
-    pub fn stdin_render_done(buffer: u32) {
-        let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-render\", \"buffer\":{}}}\n", buffer).as_bytes());
-    }*/
-    
     
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
@@ -78,45 +70,33 @@ impl Cx {
                 }
                 // alright lets put the line in a json parser
                 let parsed: Result<HostToStdin, DeJsonErr> = DeJson::deserialize_json(&line);
+                
                 match parsed {
                     Ok(msg) => match msg {
                         HostToStdin::MouseDown(e) => {
-                            self.call_event_handler(&Event::MouseDown(e.into()));
-                            /*
-                            let digit_id = LiveId(fe.digit_id).into();
-                            self.fingers.alloc_digit(digit_id);
                             self.fingers.process_tap_count(
-                                digit_id,
-                                DVec2 {x: fe.x, y: fe.y},
-                                fe.time
+                                dvec2(e.x,e.y),
+                                e.time
                             );
-                            self.call_event_handler(&Event::FingerDown(
-                                fe.into_finger_down_event(&self.fingers)
-                            ));
-                            self.fingers.cycle_hover_area(digit_id);*/
+                            self.fingers.mouse_down(e.button);
+
+                            self.call_event_handler(&Event::MouseDown(e.into()));
                         }
                         HostToStdin::MouseMove(e) => {
                             self.call_event_handler(&Event::MouseMove(e.into()));
-                            /*
-                            let digit_id = LiveId(fe.digit_id).into();
-                            // lets grab the captured area
-                            self.call_event_handler(&Event::FingerMove(
-                                fe.into_finger_move_event(&self.fingers)
-                            ));
-                            self.fingers.cycle_hover_area(digit_id);*/
+                            self.fingers.cycle_hover_area(live_id!(mouse).into());
+                            self.fingers.switch_captures();
                         }
                         HostToStdin::MouseUp(e) => {
+                            let button = e.button;
                             self.call_event_handler(&Event::MouseUp(e.into()));
-                            /*
-                            let digit_id = LiveId(fe.digit_id).into();
-                            self.call_event_handler(&Event::FingerUp(
-                                fe.into_finger_up_event(&self.fingers)
-                            ));
-                            self.fingers.free_digit(digit_id);*/
+                            self.fingers.mouse_up(button);
+                            self.fingers.cycle_hover_area(live_id!(mouse).into());
                         }
                         HostToStdin::WindowSize(ws) => {
                             if window_size.is_none() {
                                 // lets allocate our framebuffer textures
+                                
                                 self.call_event_handler(&Event::Construct);
                             }
                             if window_size != Some(ws) {
@@ -129,7 +109,6 @@ impl Cx {
                                     inner_size: dvec2(ws.width, ws.height),
                                     ..Default::default()
                                 };
-                                
                                 self.stdin_handle_platform_ops(metal_cx, &fb_texture);
                             }
                         }
@@ -203,7 +182,8 @@ impl Cx {
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     pass.color_textures = vec![CxPassColorTexture {
-                        clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
+                        //clear_color: PassClearColor::ClearWith(pass.clear_color),
                         texture_id: main_texture.texture_id()
                     }];
                 },
