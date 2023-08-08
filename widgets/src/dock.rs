@@ -554,6 +554,9 @@ impl Dock {
                     if let Some(DockItem::Tabs{tabs, selected}) = self.dock_items.get_mut(&pos.id){
                         tabs.push(item);
                         *selected = tabs.len() - 1;
+                        if let Some(tab_bar) = self.tab_bars.get(&pos.id){
+                            tab_bar.contents_draw_list.redraw(cx);
+                        }
                     }
                     return true
                 }
@@ -567,6 +570,9 @@ impl Dock {
                     if let Some(DockItem::Tabs{tabs, selected}) = self.dock_items.get_mut(&pos.id){
                         tabs.push(item);
                         *selected = tabs.len() - 1;
+                        if let Some(tab_bar) = self.tab_bars.get(&pos.id){
+                            tab_bar.contents_draw_list.redraw(cx);
+                        }
                     }
                     return true
                 }
@@ -585,6 +591,9 @@ impl Dock {
                             tabs[pos] = item;
                             tabs.push(old);
                             *selected = pos;
+                            if let Some(tab_bar) = self.tab_bars.get(&tab_bar_id){
+                                tab_bar.contents_draw_list.redraw(cx);
+                            }
                         } 
                     }
                     return true
