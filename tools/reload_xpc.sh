@@ -20,7 +20,7 @@ echo "    </dict>">>$PLIST
 echo "</dict>">>$PLIST 
 echo "</plist>">>$PLIST
 echo "">>$PLIST
-
+cargo build -p makepad-studio
 launchctl unload $PLIST  
 launchctl load $PLIST
-cargo build -p makepad-studio
+
