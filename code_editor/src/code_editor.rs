@@ -150,6 +150,13 @@ impl CodeEditor {
                 state.insert(session, input.into());
                 cx.redraw_all();
             }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                state.delete(session);
+                cx.redraw_all();
+            }
             _ => {}
         }
         match event.hits(cx, self.scroll_bars.area()) {
@@ -195,13 +202,13 @@ impl CodeEditor {
                                 while !text.is_empty() {
                                     let token = match token_slot {
                                         Some(token) => {
-                                            if text.len() < token.len {
+                                            if text.len() < token.byte_count {
                                                 token_slot = Some(Token {
-                                                    len: token.len - text.len(),
+                                                    byte_count: token.byte_count - text.len(),
                                                     kind: token.kind,
                                                 });
                                                 Token {
-                                                    len: text.len(),
+                                                    byte_count: text.len(),
                                                     kind: token.kind,
                                                 }
                                             } else {
@@ -210,11 +217,11 @@ impl CodeEditor {
                                             }
                                         }
                                         None => Token {
-                                            len: text.len(),
+                                            byte_count: text.len(),
                                             kind: TokenKind::Unknown,
                                         },
                                     };
-                                    let (text_0, text_1) = text.split_at(token.len);
+                                    let (text_0, text_1) = text.split_at(token.byte_count);
                                     text = text_1;
                                     self.draw_text.draw_abs(
                                         cx,
