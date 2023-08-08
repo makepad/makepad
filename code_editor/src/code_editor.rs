@@ -5,7 +5,8 @@ use {
         selection::Affinity,
         state::{Block, SessionId},
         str::StrExt,
-        token, Line, Point, Selection, State, Token,
+        token::TokenKind,
+        Line, Point, Selection, State, Token,
     },
     makepad_widgets::*,
     std::{mem, slice::Iter},
@@ -144,6 +145,13 @@ impl CodeEditor {
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
         });
+        match event {
+            Event::TextInput(TextInputEvent { input, .. }) => {
+                state.insert(session, input.into());
+                cx.redraw_all();
+            }
+            _ => {}
+        }
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::FingerDown(FingerDownEvent { abs, rect, .. }) => {
                 if let Some((cursor, affinity)) = self.pick(state, session, abs - rect.pos) {
@@ -180,12 +188,12 @@ impl CodeEditor {
                                         Some(token) => {
                                             if text.len() < token.len {
                                                 token_slot = Some(Token {
-                                                    kind: token.kind,
                                                     len: token.len - text.len(),
+                                                    kind: token.kind,
                                                 });
                                                 Token {
-                                                    kind: token.kind,
                                                     len: text.len(),
+                                                    kind: token.kind,
                                                 }
                                             } else {
                                                 token_slot = token_iter.next();
@@ -193,7 +201,7 @@ impl CodeEditor {
                                             }
                                         }
                                         None => Token {
-                                            kind: token::Kind::Unknown,
+                                            kind: TokenKind::Unknown,
                                             len: text.len(),
                                         },
                                     };
@@ -228,7 +236,7 @@ impl CodeEditor {
                                 column += widget.column_count;
                             }
                             Wrapped::Wrap => {
-                                column = line.indent();
+                                column = line.indent_column_count_after_wrap();
                                 y += line.scale();
                             }
                         }
@@ -348,7 +356,7 @@ impl CodeEditor {
                                 if (y..=next_y).contains(&point.y) {
                                     return Some((Point { line, byte }, Affinity::Before));
                                 }
-                                column = line_ref.indent();
+                                column = line_ref.indent_column_count_after_wrap();
                                 y = next_y;
                             }
                         }
@@ -453,7 +461,7 @@ impl<'a> DrawSelections<'a> {
                                 if self.active_selection.is_some() {
                                     self.draw_selection(cx, line_ref, y, column);
                                 }
-                                column = line_ref.indent();
+                                column = line_ref.indent_column_count_after_wrap();
                                 y += line_ref.scale();
                             }
                         }
