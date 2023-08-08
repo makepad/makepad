@@ -62,6 +62,9 @@ impl Cx {
         let service_proxy = xpc_service_proxy();
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;
+        
+        self.call_event_handler(&Event::Construct);
+        
         loop {
             let mut line = String::new();
             if let Ok(len) = reader.read_line(&mut line) {
@@ -97,11 +100,6 @@ impl Cx {
                             self.call_event_handler(&Event::Scroll(e.into()))
                         }
                         HostToStdin::WindowSize(ws) => {
-                            if window_size.is_none() {
-                                // lets allocate our framebuffer textures
-                                
-                                self.call_event_handler(&Event::Construct);
-                            }
                             if window_size != Some(ws) {
                                 window_size = Some(ws);
                                 self.redraw_all();
