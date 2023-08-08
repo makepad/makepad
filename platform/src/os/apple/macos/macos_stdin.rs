@@ -93,6 +93,9 @@ impl Cx {
                             self.fingers.mouse_up(button);
                             self.fingers.cycle_hover_area(live_id!(mouse).into());
                         }
+                        HostToStdin::Scroll(e) => {
+                            self.call_event_handler(&Event::Scroll(e.into()))
+                        }
                         HostToStdin::WindowSize(ws) => {
                             if window_size.is_none() {
                                 // lets allocate our framebuffer textures

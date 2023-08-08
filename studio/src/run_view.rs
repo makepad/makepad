@@ -81,32 +81,43 @@ impl RunView {
         // lets send mouse events
         let rect = self.draw_bg.area().get_rect(cx);
         match event{
-            Event::MouseDown(fe)=>{
-                let rel = fe.abs - rect.pos;
+            Event::MouseDown(e)=>{
+                let rel = e.abs - rect.pos;
                 manager.send_host_to_stdin(None, HostToStdin::MouseDown(StdinMouseDown{
-                    time: fe.time,
+                    time: e.time,
                     x: rel.x,
                     y: rel.y,
-                    button: fe.button,
+                    button: e.button,
                 }));
             }
-            Event::MouseMove(fe)=>{
-                let rel = fe.abs - rect.pos;
+            Event::MouseMove(e)=>{
+                let rel = e.abs - rect.pos;
                 manager.send_host_to_stdin(None, HostToStdin::MouseMove(StdinMouseMove{
-                    time: fe.time,
+                    time: e.time,
                     x: rel.x,
                     y: rel.y,
                 }));
             }
-            Event::MouseUp(fe)=>{
-                let rel = fe.abs - rect.pos;
+            Event::MouseUp(e)=>{
+                let rel = e.abs - rect.pos;
                 manager.send_host_to_stdin(None, HostToStdin::MouseUp(StdinMouseUp{
-                    time: fe.time,
-                    button: fe.button,
+                    time: e.time,
+                    button: e.button,
                     x: rel.x,
                     y: rel.y,
                 }));
-            }            
+            }          
+            Event::Scroll(e)=>{
+                let rel = e.abs - rect.pos;
+                manager.send_host_to_stdin(None, HostToStdin::Scroll(StdinScroll{
+                    is_mouse: e.is_mouse,
+                    time: e.time,
+                    x: rel.x,
+                    y: rel.y,
+                    sx: e.scroll.x,
+                    sy: e.scroll.y
+                }));
+            }  
             _=>()
         }
     }
