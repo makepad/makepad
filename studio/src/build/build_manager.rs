@@ -185,7 +185,7 @@ pub enum BuildManagerAction {
     None
 }
 
-const WHAT_TO_BUILD: &'static str = "makepad-example-news-feed";
+const WHAT_TO_BUILD: &'static str = "makepad-example-ironfish";
 
 impl BuildManager {
     
