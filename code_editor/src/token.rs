@@ -1,6 +1,6 @@
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Token {
-    pub len: usize,
+    pub byte_count: usize,
     pub kind: TokenKind,
 }
 

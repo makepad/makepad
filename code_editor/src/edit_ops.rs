@@ -1,12 +1,12 @@
 use crate::{
     change::{ChangeKind, Drift},
     iter::IteratorExt,
-    Change, Point, Range, SelectionSet, Text,
+    Change, Point, Range, Selection, Text,
 };
 
 pub fn insert(
     text: &mut Text,
-    selections: &SelectionSet,
+    selections: &[Selection],
     additional_text: Text,
     changes: &mut Vec<Change>,
 ) {
