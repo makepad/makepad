@@ -24,4 +24,3 @@ echo "">>$PLIST
 launchctl unload $PLIST  
 launchctl load $PLIST
 cargo build -p makepad-studio
-#$PWD/target/debug/makepad_studio --render-to=0
