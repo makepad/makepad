@@ -1,4 +1,4 @@
-use crate::{Extent, Point, Range};
+use crate::{Change, Extent, Point, Range};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Hash, Eq)]
 pub struct Selection {
@@ -69,6 +69,14 @@ impl Selection {
             })
         } else {
             None
+        }
+    }
+
+    pub fn apply_change(self, change: &Change) -> Selection {
+        Self {
+            anchor: self.anchor.apply_change(change),
+            cursor: self.cursor.apply_change(change),
+            ..self
         }
     }
 }

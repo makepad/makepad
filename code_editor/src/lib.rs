@@ -10,7 +10,6 @@ pub mod line;
 pub mod point;
 pub mod range;
 pub mod selection;
-pub mod selection_set;
 pub mod settings;
 pub mod state;
 pub mod str;
@@ -20,6 +19,6 @@ pub mod widgets;
 
 pub use self::{
     arena::Arena, change::Change, code_editor::CodeEditor, extent::Extent, line::Line,
-    point::Point, range::Range, selection::Selection, selection_set::SelectionSet,
-    settings::Settings, state::State, text::Text, token::Token,
+    point::Point, range::Range, selection::Selection, settings::Settings, state::State, text::Text,
+    token::Token,
 };
