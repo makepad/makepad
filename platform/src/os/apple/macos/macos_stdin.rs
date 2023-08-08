@@ -76,6 +76,10 @@ impl Cx {
                 
                 match parsed {
                     Ok(msg) => match msg {
+                        HostToStdin::ReloadFile{file:_, contents:_}=>{
+                            // alright lets reload this file in our DSL system
+                            
+                        }
                         HostToStdin::MouseDown(e) => {
                             self.fingers.process_tap_count(
                                 dvec2(e.x,e.y),

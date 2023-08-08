@@ -10,14 +10,14 @@ use {
             LiveProp,
             LiveError,
             LiveModuleId,
-            LiveToken,
+           /*LiveToken,*/
             LivePtr,
-            LiveTokenId,
+            /*LiveTokenId,*/
             LiveFileId,
         },
         makepad_error_log::*,
         makepad_live_compiler::LiveTypeInfo,
-        makepad_math::*,
+        /*makepad_math::*,*/
         cx::Cx,
         cx::CxDependency,
     }
@@ -161,6 +161,13 @@ impl Cx {
         }
     }
     
+    pub fn start_live_file_watcher(&mut self){
+        let live_registry = self.live_registry.borrow();
+        for file in &live_registry.live_files {
+            //log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
+        }
+    }
+    
     // ok so now what. now we should run the expansion
     pub fn live_expand(&mut self) {
         let mut errs = Vec::new();
@@ -210,7 +217,7 @@ impl Cx {
             error!("Error parsing live file {}", err);
         }
     }
-    
+    /*
     fn update_buffer_from_live_value(slots: usize, output: &mut [f32], offset: usize, v: &LiveValue) {
         match slots {
             1 => {
@@ -256,8 +263,8 @@ impl Cx {
             _ => {
             }
         }
-    }
-    
+    }*/
+    /*
     pub fn update_shader_tables_with_live_edit(&mut self, mutated_tokens: &[LiveTokenId], live_ptrs: &[LivePtr]) -> bool {
         // OK now.. we have to access our token tables
         let mut change = false;
@@ -287,7 +294,7 @@ impl Cx {
         }
         change
     }
-    
+    */
     pub fn get_nodes_from_live_ptr<CB>(&mut self, live_ptr: LivePtr, cb: CB)
     where CB: FnOnce(&mut Cx, LiveFileId, usize, &[LiveNode]) -> usize {
         let live_registry_rc = self.live_registry.clone();

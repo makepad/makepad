@@ -430,6 +430,7 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.live_expand();
+        self.start_live_file_watcher();
         self.live_scan_dependencies();
         self.native_load_dependencies();
     }
