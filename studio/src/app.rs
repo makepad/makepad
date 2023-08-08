@@ -51,11 +51,16 @@ live_design!{
                     axis: Horizontal,
                     align: FromB(400.0),
                     a: open_files,
-                    b: run_view
+                    b: run_views
                 }
                 
                 open_files = Tabs {
                     tabs: [file1, file2, file3],
+                    selected: 0
+                }
+                
+                run_views = Tabs {
+                    tabs: [run_view],
                     selected: 0
                 }
                 
