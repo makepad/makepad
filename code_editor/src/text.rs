@@ -1,6 +1,6 @@
 use {
     crate::{change, Change, Extent, Point, Range},
-    std::{io, io::BufRead},
+    std::{io, io::BufRead, iter},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -37,44 +37,31 @@ impl Text {
         &self.lines
     }
 
-    pub fn insert(&mut self, point: Point, mut additional_text: Self) {
-        if additional_text.extent().line_count == 0 {
-            self.lines[point.line_index].replace_range(
-                point.byte_index..point.byte_index,
-                additional_text.lines.first().unwrap(),
-            );
+    pub fn insert(&mut self, point: Point, mut text: Self) {
+        if text.extent().line_count == 0 {
+            self.lines[point.line]
+                .replace_range(point.byte..point.byte, text.lines.first().unwrap());
         } else {
-            additional_text
-                .lines
+            text.lines
                 .first_mut()
                 .unwrap()
-                .replace_range(..0, &self.lines[point.line_index][..point.byte_index]);
-            additional_text
-                .lines
+                .replace_range(..0, &self.lines[point.line][..point.byte]);
+            text.lines
                 .last_mut()
                 .unwrap()
-                .push_str(&self.lines[point.line_index][point.byte_index..]);
-            self.lines.splice(
-                point.line_index..point.line_index + 1,
-                additional_text.lines,
-            );
+                .push_str(&self.lines[point.line][point.byte..]);
+            self.lines.splice(point.line..point.line + 1, text.lines);
         }
     }
 
     pub fn delete(&mut self, range: Range) {
-        use std::iter;
-
-        if range.start().line_index == range.end().line_index {
-            self.lines[range.start().line_index]
-                .replace_range(range.start().byte_index..range.end().byte_index, "");
+        if range.start().line == range.end().line {
+            self.lines[range.start().line].replace_range(range.start().byte..range.end().byte, "");
         } else {
-            let mut line =
-                self.lines[range.start().line_index][..range.start().byte_index].to_string();
-            line.push_str(&self.lines[range.end().line_index][range.end().byte_index..]);
-            self.lines.splice(
-                range.start().line_index..range.end().line_index + 1,
-                iter::once(line),
-            );
+            let mut line = self.lines[range.start().line][..range.start().byte].to_string();
+            line.push_str(&self.lines[range.end().line][range.end().byte..]);
+            self.lines
+                .splice(range.start().line..range.end().line + 1, iter::once(line));
         }
     }
 

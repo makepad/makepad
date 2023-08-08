@@ -11,8 +11,8 @@ use {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Point {
-    pub line_index: usize,
-    pub byte_index: usize,
+    pub line: usize,
+    pub byte: usize,
 }
 
 impl Point {
@@ -47,13 +47,13 @@ impl Add<Extent> for Point {
     fn add(self, extent: Extent) -> Self::Output {
         if extent.line_count == 0 {
             Self {
-                line_index: self.line_index,
-                byte_index: self.byte_index + extent.byte_count,
+                line: self.line,
+                byte: self.byte + extent.byte_count,
             }
         } else {
             Self {
-                line_index: self.line_index + extent.line_count,
-                byte_index: extent.byte_count,
+                line: self.line + extent.line_count,
+                byte: extent.byte_count,
             }
         }
     }
@@ -69,15 +69,15 @@ impl Sub for Point {
     type Output = Extent;
 
     fn sub(self, other: Self) -> Self::Output {
-        if self.line_index == other.line_index {
+        if self.line == other.line {
             Extent {
                 line_count: 0,
-                byte_count: self.byte_index - other.byte_index,
+                byte_count: self.byte - other.byte,
             }
         } else {
             Extent {
-                line_count: self.line_index - other.line_index,
-                byte_count: self.byte_index,
+                line_count: self.line - other.line,
+                byte_count: self.byte,
             }
         }
     }
