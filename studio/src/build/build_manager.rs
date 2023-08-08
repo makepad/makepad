@@ -36,6 +36,123 @@ use {
 };
 
 live_design!{
+    import makepad_draw::shader::std::*;
+    import makepad_widgets::theme::*;
+    import makepad_widgets::frame::*;
+    import makepad_widgets::label::Label;
+    import makepad_widgets::link_label::LinkLabel;
+    import makepad_widgets::list_view::ListView;
+    
+    WaitIcon = <Frame> {
+        walk: {width: 10, height: 10}
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                sdf.circle(5., 5., 4.)
+                sdf.fill(COLOR_TEXT_META)
+                sdf.move_to(3., 5.)
+                sdf.line_to(3., 5.)
+                sdf.move_to(5., 5.)
+                sdf.line_to(5., 5.)
+                sdf.move_to(7., 5.)
+                sdf.line_to(7., 5.)
+                sdf.stroke(#0, 0.8)
+                return sdf.result
+            }
+        }
+    }
+    
+    LogItem = <Rect> {
+        walk: {height: Fit, width: Fill}
+        layout: {padding: {top: 5, bottom: 5}}
+        draw_bg: {
+            instance is_even: 0.0
+            instance selected: 0.0
+            fn pixel(self) -> vec4 {
+                return mix(
+                    mix(
+                        COLOR_BG_EDITOR,
+                        COLOR_BG_ODD,
+                        self.is_even
+                    ),
+                    COLOR_BG_SELECTED,
+                    self.selected
+                );
+            }
+        }
+        state: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {hover: 0.0}
+                        /*draw_name: {hover: 0.0}
+                        draw_icon: {hover: 0.0}*/
+                    }
+                }
+                on = {
+                    cursor: Hand
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {hover: 1.0}
+                        /*draw_name: {hover: 1.0}
+                        draw_icon: {hover: 1.0}*/
+                    },
+                }
+            }
+            
+            select = {
+                default: off
+                off = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {selected: 0.0}
+                        /*draw_name: {selected: 0.0}
+                        draw_icon: {selected: 0.0}*/
+                    }
+                }
+                on = {
+                    from: {all: Snap}
+                    apply: {
+                        draw_bg: {selected: 1.0}
+                        /*draw_name: {selected: 1.0}
+                        draw_icon: {selected: 1.0}*/
+                    }
+                }
+            }
+        }
+    }
+    
+    LogItemWait = <LogItem> {
+        icon = <WaitIcon> {},
+        label = <Label> {walk: {width: Fill}, draw_label: {wrap: Word}}
+        link_label = <LinkLabel> {}
+    }
+    
+    LogItemEmpty = <Rect> {
+        walk: {height: 20, width: Fill}
+        draw_bg: {
+            instance is_even: 0.0
+            fn pixel(self) -> vec4 {
+                return mix(
+                    COLOR_BG_EDITOR,
+                    COLOR_BG_ODD,
+                    self.is_even
+                )
+            }
+        }
+    }
+    
+    LogList = <ListView> {
+        walk: {height: Fill, width: Fill}
+        layout: {flow: Down}
+        WaitEven = <LogItemWait> {draw_bg: {is_even: 1.0}}
+        WaitOdd = <LogItemWait> {draw_bg: {is_even: 0.0}}
+        EmptyEven = <LogItemEmpty> {draw_bg: {is_even: 1.0}}
+        EmptyOdd = <LogItemEmpty> {draw_bg: {is_even: 0.0}}
+    }
+    
     BuildManager = {{BuildManager}} {
         recompile_timeout: 0.2
     }

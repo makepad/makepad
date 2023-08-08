@@ -17,13 +17,15 @@ live_design!{
             //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
             let fb = sample2d_rt(self.tex, self.pos)
             if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
-                return #1
+                return #4
             }
             return fb;
         }
     }
+    
+    
     RunView = {{RunView}} {
-        frame_delta: 0.016
+        frame_delta: 0.008
     }
 }
 
@@ -64,59 +66,48 @@ impl LiveHook for RunView {
 
 impl RunView {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _manager: &mut BuildManager) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, manager: &mut BuildManager) {
         self.state_handle_event(cx, event);
         if self.tick.is_event(event) {
             self.time += self.frame_delta;
             self.frame += 1;
             
             // what shall we do, a timer? or do we do a next-frame
-            /*state.send_host_to_stdin(None, HostToStdin::Tick {
+            manager.send_host_to_stdin(None, HostToStdin::Tick {
                 frame: self.frame,
                 time: self.time
-            })*/
+            })
         }
-        // ok what do we want. lets do fingerdown, finger 
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
-                /*
-                cx.set_key_focus(self.draw_bg.area());
-                let rel = fe.abs - fe.rect.pos;
-                state.send_host_to_stdin(None, HostToStdin::FingerDown(StdinFingerDown{
+        // lets send mouse events
+        let rect = self.draw_bg.area().get_rect(cx);
+        match event{
+            Event::MouseDown(fe)=>{
+                let rel = fe.abs - rect.pos;
+                manager.send_host_to_stdin(None, HostToStdin::MouseDown(StdinMouseDown{
                     time: fe.time,
                     x: rel.x,
                     y: rel.y,
-                    mouse_button: if let DigitDevice::Mouse(mb) = fe.digit.device{
-                        Some(mb)
-                    }else{None},
-                    digit_id: fe.digit.id.0.0,
-                }));*/
-            },
-            Hit::FingerUp(_fe) => {
-                /*let rel = fe.abs - fe.rect.pos;
-                state.send_host_to_stdin(None, HostToStdin::FingerUp(StdinFingerUp{
-                    time: fe.time,
-                    x: rel.x,
-                    y: rel.y,
-                    mouse_button: if let DigitDevice::Mouse(mb) = fe.digit.device{
-                        Some(mb)
-                    }else{None},
-                    digit_id: fe.digit.id.0.0,
-                }));*/
+                    button: fe.button,
+                }));
             }
-            Hit::FingerMove(_fe) => {
-                /*let rel = fe.abs - fe.rect.pos;
-                state.send_host_to_stdin(None, HostToStdin::FingerMove(StdinFingerMove{
+            Event::MouseMove(fe)=>{
+                let rel = fe.abs - rect.pos;
+                manager.send_host_to_stdin(None, HostToStdin::MouseMove(StdinMouseMove{
                     time: fe.time,
                     x: rel.x,
                     y: rel.y,
-                    mouse_button: if let DigitDevice::Mouse(mb) = fe.digit.device{
-                        Some(mb)
-                    }else{None},
-                    digit_id: fe.digit.id.0.0,
-                }));*/
+                }));
             }
-            _ => ()
+            Event::MouseUp(fe)=>{
+                let rel = fe.abs - rect.pos;
+                manager.send_host_to_stdin(None, HostToStdin::MouseUp(StdinMouseUp{
+                    time: fe.time,
+                    button: fe.button,
+                    x: rel.x,
+                    y: rel.y,
+                }));
+            }            
+            _=>()
         }
     }
     
@@ -145,31 +136,31 @@ impl RunView {
         let walk = if let Some(DrawState::Draw(walk)) = self.draw_state.get(){walk}else{panic!()};
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
-        self.draw_bg.draw_abs(cx, rect);
         for client in &manager.clients {
             for process in client.processes.values() {
                 
                 let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
                 if new_size != self.last_size {
                     self.last_size = new_size;
-
                     process.texture.set_desc(cx, TextureDesc {
                         format: TextureFormat::SharedBGRA(0),
                         width: Some(new_size.0),
                         height: Some(new_size.1),
                     });
-                    /*
-                    state.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
+                    
+                    manager.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {
                         width: rect.size.x,
                         height: rect.size.y,
                         dpi_factor: dpi_factor,
-                    }));*/
+                    }));
                 }
+
                 self.draw_bg.set_texture(0, &process.texture);
                 
                 break
             }
         }
+        self.draw_bg.draw_abs(cx, rect);
     }
 }
 
@@ -205,6 +196,12 @@ impl RunViewRef{
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, manager: &mut BuildManager){
         if let Some(mut inner) = self.borrow_mut(){
             inner.handle_event(cx, event, manager);
+        }
+    }
+
+    pub fn handle_stdin_to_host(&self, cx: &mut Cx, cmd_id: BuildCmdId, msg: StdinToHost, manager: &mut BuildManager) {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.handle_stdin_to_host(cx, cmd_id, msg, manager);
         }
     }
     
