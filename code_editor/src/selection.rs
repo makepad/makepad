@@ -1,6 +1,6 @@
-use crate::Point;
+use crate::{Extent, Point, Range};
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Hash, Eq)]
 pub struct Selection {
     pub anchor: Point,
     pub cursor: Point,
@@ -42,6 +42,14 @@ impl Selection {
         } else {
             self.affinity
         }
+    }
+
+    pub fn extent(self) -> Extent {
+        self.end() - self.start()
+    }
+
+    pub fn range(self) -> Range {
+        Range::new(self.start(), self.end()).unwrap()
     }
 
     pub fn merge(self, other: Self) -> Option<Self> {

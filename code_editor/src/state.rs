@@ -2,17 +2,18 @@ use {
     crate::{
         arena::Id,
         char::CharExt,
+        edit_ops,
         inlays::{BlockInlay, InlineInlay},
         line::Wrapped,
         selection::Affinity,
         widgets::BlockWidget,
-        Arena, Line, Point, Selection, Settings, Token,
+        Arena, Line, Point, Selection, SelectionSet, Settings, Text, Token,
     },
     std::{
         collections::{HashMap, HashSet},
         fs::File,
         io,
-        io::{BufRead, BufReader},
+        io::BufReader,
         mem,
         ops::Range,
         path::{Path, PathBuf},
@@ -102,35 +103,43 @@ impl State {
         Line {
             y: self.sessions[session.0].y.get(line).copied(),
             column_count: self.sessions[session.0].column_count[line],
-            fold: self.sessions[session.0].fold[line],
+            fold_column: self.sessions[session.0].fold_column[line],
             scale: self.sessions[session.0].scale[line],
-            text: &self.documents[document.0].text[line],
+            indent_column_count_after_wrap: self.sessions[session.0].indent_column_count_after_wrap
+                [line],
+            text: &self.documents[document.0].text.as_lines()[line],
             tokens: &self.documents[document.0].tokens[line],
-            inline_inlays: &self.documents[document.0].inline_inlays[line],
-            wraps: &self.sessions[session.0].wraps[line],
-            indent: self.sessions[session.0].indent[line],
+            inline_inlays_by_byte: &self.documents[document.0].inline_inlays_by_byte[line],
+            wraps_by_byte: &self.sessions[session.0].wraps[line],
         }
     }
 
     pub fn lines(&self, session: SessionId, line_range: Range<usize>) -> Lines<'_> {
         let document = self.document(session);
-        let y_count = self.sessions[session.0].y.len();
         Lines {
-            y: self.sessions[session.0].y[line_range.start.min(y_count)..line_range.end.min(y_count)].iter(),
-            column_count: self.sessions[session.0].column_count[line_range.start..line_range.end].iter(),
-            fold: self.sessions[session.0].fold[line_range.start..line_range.end].iter(),
+            y: self.sessions[session.0].y[line_range.start.min(self.sessions[session.0].y.len())
+                ..line_range.end.min(self.sessions[session.0].y.len())]
+                .iter(),
+            column_count: self.sessions[session.0].column_count[line_range.start..line_range.end]
+                .iter(),
+            fold_column: self.sessions[session.0].fold_column[line_range.start..line_range.end]
+                .iter(),
             scale: self.sessions[session.0].scale[line_range.start..line_range.end].iter(),
-            indent: self.sessions[session.0].indent[line_range.start..line_range.end].iter(),
-            text: self.documents[document.0].text[line_range.start..line_range.end].iter(),
+            indent_column_count_after_wrap: self.sessions[session.0].indent_column_count_after_wrap
+                [line_range.start..line_range.end]
+                .iter(),
+            text: self.documents[document.0].text.as_lines()[line_range.start..line_range.end]
+                .iter(),
             tokens: self.documents[document.0].tokens[line_range.start..line_range.end].iter(),
-            inline_inlays: self.documents[document.0].inline_inlays[line_range.start..line_range.end].iter(),
-            wraps: self.sessions[session.0].wraps[line_range.start..line_range.end].iter(),
+            inline_inlays_by_byte: self.documents[document.0].inline_inlays_by_byte
+                [line_range.start..line_range.end]
+                .iter(),
+            wraps_by_byte: self.sessions[session.0].wraps[line_range.start..line_range.end].iter(),
         }
     }
 
     pub fn blocks(&self, session: SessionId, line_range: Range<usize>) -> Blocks<'_> {
-        let document = self.document(session);
-        let mut block_inlays = self.documents[document.0].block_inlays.iter();
+        let mut block_inlays = self.documents[self.document(session).0].block_inlays_by_line.iter();
         while block_inlays
             .as_slice()
             .first()
@@ -140,20 +149,20 @@ impl State {
         }
         Blocks {
             lines: self.lines(session, line_range.start..line_range.end),
-            block_inlays,
+            block_inlays_by_line: block_inlays,
             line: line_range.start,
         }
     }
 
-    pub fn selections(&self, session: SessionId) -> &[Selection] {
+    pub fn selections(&self, session: SessionId) -> &SelectionSet {
         &self.sessions[session.0].selections
     }
 
     pub fn line_count(&self, document: DocumentId) -> usize {
-        self.documents[document.0].text.len()
+        self.documents[document.0].text.as_lines().len()
     }
 
-    pub fn new_file(&mut self, text: Vec<String>) -> SessionId {
+    pub fn new_file(&mut self, text: Text) -> SessionId {
         let document = self.create_document(None, text);
         self.create_session(document)
     }
@@ -165,7 +174,7 @@ impl State {
                 let file = File::open(path.as_ref())?;
                 self.create_document(
                     Some(path.into()),
-                    BufReader::new(file).lines().collect::<Result<_, _>>()?,
+                    Text::from_buf_reader(BufReader::new(file))?,
                 )
             }
         };
@@ -182,45 +191,46 @@ impl State {
         }
         self.sessions[session.0].max_column = max_column;
         for line in 0..self.line_count(self.document(session)) {
-            self.update_indent_and_wraps(session, line);
+            self.update_wraps(session, line);
         }
         self.update_y(session);
     }
 
     pub fn set_cursor(&mut self, session: SessionId, cursor: Point, affinity: Affinity) {
         self.sessions[session.0].selections.clear();
-        self.sessions[session.0].selections.push(Selection {
-            anchor: cursor,
-            cursor,
-            affinity,
-        });
-        self.sessions[session.0].pending_selection = Some(0);
+        self.sessions[session.0].pending_selection_index =
+            Some(self.sessions[session.0].selections.insert(Selection {
+                anchor: cursor,
+                cursor,
+                affinity,
+            }));
     }
 
-    pub fn move_to(
-        &mut self,
-        session: SessionId,
-        cursor: Point,
-        affinity: Affinity,
-    ) {
-        let mut pending_selection = self.sessions[session.0].pending_selection.unwrap();
-        self.sessions[session.0].selections[pending_selection].cursor = cursor;
-        self.sessions[session.0].selections[pending_selection].affinity = affinity;
-        while pending_selection > 0 {
-            let prev_selection_index = pending_selection - 1;
-            if self.sessions[session.0].selections[prev_selection_index]
-                .should_merge(self.sessions[session.0].selections[pending_selection])
+    pub fn move_to(&mut self, session: SessionId, cursor: Point, affinity: Affinity) {
+        let pending_selection_index = self.sessions[session.0].pending_selection_index.unwrap();
+        let mut pending_selection_index =
+            self.sessions[session.0]
+                .selections
+                .replace(pending_selection_index, |selection| Selection {
+                    cursor,
+                    affinity,
+                    ..selection
+                });
+        while pending_selection_index > 0 {
+            let prev_selection_index = pending_selection_index - 1;
+            if !self.sessions[session.0].selections[prev_selection_index]
+                .should_merge(self.sessions[session.0].selections[pending_selection_index])
             {
                 break;
             }
             self.sessions[session.0]
                 .selections
                 .remove(prev_selection_index);
-            pending_selection -= 1;
+            pending_selection_index -= 1;
         }
-        while pending_selection + 1 < self.sessions[session.0].selections.len() {
-            let next_selection_index = pending_selection + 1;
-            if self.sessions[session.0].selections[pending_selection]
+        while pending_selection_index + 1 < self.sessions[session.0].selections.len() {
+            let next_selection_index = pending_selection_index + 1;
+            if !self.sessions[session.0].selections[pending_selection_index]
                 .should_merge(self.sessions[session.0].selections[next_selection_index])
             {
                 break;
@@ -229,26 +239,33 @@ impl State {
                 .selections
                 .remove(next_selection_index);
         }
-        self.sessions[session.0].pending_selection = Some(pending_selection);
+        self.sessions[session.0].pending_selection_index = Some(pending_selection_index);
+    }
+
+    pub fn insert(&mut self, session: SessionId, additional_text: Text) {
+        let document = self.document(session);
+        let mut changes = Vec::new();
+        edit_ops::insert(
+            &mut self.documents[document.0].text,
+            &self.sessions[session.0].selections,
+            additional_text,
+            &mut changes,
+        );
     }
 
     fn create_session(&mut self, document: DocumentId) -> SessionId {
-        let line_count = self.documents[document.0].text.len();
+        let line_count = self.documents[document.0].text.as_lines().len();
         let session = SessionId(self.sessions.insert(Session {
             document,
             max_column: usize::MAX,
             y: Vec::new(),
             column_count: (0..line_count).map(|_| None).collect(),
-            fold: (0..line_count).map(|_| 0).collect(),
+            fold_column: (0..line_count).map(|_| 0).collect(),
             scale: (0..line_count).map(|_| 1.0).collect(),
+            indent_column_count_after_wrap: (0..line_count).map(|_| 0).collect(),
             wraps: (0..line_count).map(|_| Vec::new()).collect(),
-            indent: (0..line_count).map(|_| 0).collect(),
-            selections: vec![Selection {
-                cursor: Point { line: 0, byte: 0 },
-                anchor: Point { line: 7, byte: 28 },
-                affinity: Affinity::Before,
-            }],
-            pending_selection: None,
+            selections: vec![Selection::default()].into(),
+            pending_selection_index: None,
         }));
         self.documents[document.0].sessions.insert(session);
         self.update_y(session);
@@ -305,20 +322,21 @@ impl State {
                 }
                 Wrapped::Wrap => {
                     column_count = column_count.max(column);
-                    column = line_ref.indent();
+                    column = line_ref.indent_column_count_after_wrap();
                 }
             }
         }
         self.sessions[session.0].column_count[line] = Some(column_count.max(column));
     }
 
-    fn update_indent_and_wraps(&mut self, session: SessionId, line: usize) {
-        let (indent, wraps) = self.line(session, line).compute_indent_and_wraps(
+    fn update_wraps(&mut self, session: SessionId, line: usize) {
+        let (wraps, indent_column_count_after_wrap) = self.line(session, line).compute_wraps(
             self.sessions[session.0].max_column,
             self.settings.tab_column_count,
         );
         self.sessions[session.0].wraps[line] = wraps;
-        self.sessions[session.0].indent[line] = indent;
+        self.sessions[session.0].indent_column_count_after_wrap[line] =
+            indent_column_count_after_wrap;
         self.update_column_count(session, line);
         self.sessions[session.0].y.truncate(line + 1);
     }
@@ -332,14 +350,14 @@ impl State {
         self.sessions.remove(session.0);
     }
 
-    fn create_document(&mut self, path: Option<PathBuf>, text: Vec<String>) -> DocumentId {
-        let line_count = text.len();
+    fn create_document(&mut self, path: Option<PathBuf>, text: Text) -> DocumentId {
+        let line_count = text.as_lines().len();
         let document = DocumentId(self.documents.insert(Document {
             path,
             text,
             tokens: (0..line_count).map(|_| Vec::new()).collect(),
-            inline_inlays: (0..line_count).map(|_| Vec::new()).collect(),
-            block_inlays: Vec::new(),
+            inline_inlays_by_byte: (0..line_count).map(|_| Vec::new()).collect(),
+            block_inlays_by_line: Vec::new(),
             sessions: HashSet::new(),
         }));
         if let Some(path) = &self.documents[document.0].path {
@@ -359,7 +377,7 @@ impl State {
 #[derive(Clone, Debug)]
 pub struct Blocks<'a> {
     pub(super) lines: Lines<'a>,
-    pub(super) block_inlays: Iter<'a, (usize, BlockInlay)>,
+    pub(super) block_inlays_by_line: Iter<'a, (usize, BlockInlay)>,
     pub(super) line: usize,
 }
 
@@ -368,12 +386,12 @@ impl<'a> Iterator for Blocks<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self
-            .block_inlays
+            .block_inlays_by_line
             .as_slice()
             .first()
             .map_or(false, |&(line, _)| line == self.line)
         {
-            let (_, block_inlay) = self.block_inlays.next().unwrap();
+            let (_, block_inlay) = self.block_inlays_by_line.next().unwrap();
             return Some(match *block_inlay {
                 BlockInlay::Widget(widget) => Block::Widget(widget),
             });
@@ -397,13 +415,13 @@ pub enum Block<'a> {
 pub struct Lines<'a> {
     pub y: Iter<'a, f64>,
     pub column_count: Iter<'a, Option<usize>>,
-    pub fold: Iter<'a, usize>,
+    pub fold_column: Iter<'a, usize>,
     pub scale: Iter<'a, f64>,
-    pub indent: Iter<'a, usize>,
+    pub indent_column_count_after_wrap: Iter<'a, usize>,
     pub text: Iter<'a, String>,
     pub tokens: Iter<'a, Vec<Token>>,
-    pub inline_inlays: Iter<'a, Vec<(usize, InlineInlay)>>,
-    pub wraps: Iter<'a, Vec<usize>>,
+    pub inline_inlays_by_byte: Iter<'a, Vec<(usize, InlineInlay)>>,
+    pub wraps_by_byte: Iter<'a, Vec<usize>>,
 }
 
 impl<'a> Iterator for Lines<'a> {
@@ -414,13 +432,13 @@ impl<'a> Iterator for Lines<'a> {
         Some(Line {
             y: self.y.next().copied(),
             column_count: *self.column_count.next().unwrap(),
-            fold: *self.fold.next().unwrap(),
+            fold_column: *self.fold_column.next().unwrap(),
             scale: *self.scale.next().unwrap(),
-            indent: *self.indent.next().unwrap(),
+            indent_column_count_after_wrap: *self.indent_column_count_after_wrap.next().unwrap(),
             text,
             tokens: self.tokens.next().unwrap(),
-            inline_inlays: self.inline_inlays.next().unwrap(),
-            wraps: self.wraps.next().unwrap(),
+            inline_inlays_by_byte: self.inline_inlays_by_byte.next().unwrap(),
+            wraps_by_byte: self.wraps_by_byte.next().unwrap(),
         })
     }
 }
@@ -437,20 +455,20 @@ struct Session {
     max_column: usize,
     y: Vec<f64>,
     column_count: Vec<Option<usize>>,
-    fold: Vec<usize>,
+    fold_column: Vec<usize>,
     scale: Vec<f64>,
+    indent_column_count_after_wrap: Vec<usize>,
     wraps: Vec<Vec<usize>>,
-    indent: Vec<usize>,
-    selections: Vec<Selection>,
-    pending_selection: Option<usize>,
+    selections: SelectionSet,
+    pending_selection_index: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
 struct Document {
     path: Option<PathBuf>,
-    text: Vec<String>,
+    text: Text,
     tokens: Vec<Vec<Token>>,
-    inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
-    block_inlays: Vec<(usize, BlockInlay)>,
+    inline_inlays_by_byte: Vec<Vec<(usize, InlineInlay)>>,
+    block_inlays_by_line: Vec<(usize, BlockInlay)>,
     sessions: HashSet<SessionId>,
 }
