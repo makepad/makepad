@@ -14,6 +14,7 @@ pub mod str;
 pub mod text;
 pub mod token;
 pub mod widgets;
+pub mod wrap;
 
 pub use self::{
     change::Change, code_editor::CodeEditor, extent::Extent, line::Line, point::Point,
