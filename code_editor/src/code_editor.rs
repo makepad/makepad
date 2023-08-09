@@ -1,6 +1,5 @@
 use {
     crate::{
-        char::CharExt,
         line::Wrapped,
         selection::Affinity,
         state::{Block, Session},
@@ -147,14 +146,14 @@ impl CodeEditor {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
-                session.fold_indent_level(2);
+                session.fold();
                 cx.redraw_all();
             }
             Event::KeyUp(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
-                session.unfold_all();
+                session.unfold();
                 cx.redraw_all();
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
@@ -263,13 +262,7 @@ impl CodeEditor {
                                                 text_0,
                                             );
                                             column += text_0
-                                                .chars()
-                                                .map(|char| {
-                                                    char.column_count(
-                                                        session.settings().tab_column_count,
-                                                    )
-                                                })
-                                                .sum::<usize>();
+                                                .column_count(session.settings().tab_column_count);
                                         }
                                     }
                                     Wrapped::Text {
@@ -285,14 +278,8 @@ impl CodeEditor {
                                                 - self.viewport_rect.pos,
                                             text,
                                         );
-                                        column += text
-                                            .chars()
-                                            .map(|char| {
-                                                char.column_count(
-                                                    session.settings().tab_column_count,
-                                                )
-                                            })
-                                            .sum::<usize>();
+                                        column +=
+                                            text.column_count(session.settings().tab_column_count);
                                     }
                                     Wrapped::Widget(widget) => {
                                         column += widget.column_count;
@@ -365,13 +352,7 @@ impl CodeEditor {
                                         let next_byte = byte + grapheme.len();
                                         let next_column = column
                                             + grapheme
-                                                .chars()
-                                                .map(|char| {
-                                                    char.column_count(
-                                                        session.settings().tab_column_count,
-                                                    )
-                                                })
-                                                .sum::<usize>();
+                                                .column_count(session.settings().tab_column_count);
                                         let next_y = y + line_ref.scale();
                                         let x = line_ref.column_to_x(column);
                                         let next_x = line_ref.column_to_x(next_column);
@@ -402,14 +383,7 @@ impl CodeEditor {
                                     text,
                                 } => {
                                     let next_column = column
-                                        + text
-                                            .chars()
-                                            .map(|char| {
-                                                char.column_count(
-                                                    session.settings().tab_column_count,
-                                                )
-                                            })
-                                            .sum::<usize>();
+                                        + text.column_count(session.settings().tab_column_count);
                                     let next_y = y + line_ref.scale();
                                     let x = line_ref.column_to_x(column);
                                     let next_x = line_ref.column_to_x(next_column);
@@ -498,13 +472,7 @@ impl<'a> DrawSelections<'a> {
                                         );
                                         byte += grapheme.len();
                                         column += grapheme
-                                            .chars()
-                                            .map(|char| {
-                                                char.column_count(
-                                                    session.settings().tab_column_count,
-                                                )
-                                            })
-                                            .sum::<usize>();
+                                            .column_count(session.settings().tab_column_count);
                                         self.handle_event(
                                             cx,
                                             line,
@@ -520,12 +488,8 @@ impl<'a> DrawSelections<'a> {
                                     is_inlay: true,
                                     text,
                                 } => {
-                                    column += text
-                                        .chars()
-                                        .map(|char| {
-                                            char.column_count(session.settings().tab_column_count)
-                                        })
-                                        .sum::<usize>();
+                                    column +=
+                                        text.column_count(session.settings().tab_column_count);
                                 }
                                 Wrapped::Widget(widget) => {
                                     column += widget.column_count;

@@ -220,18 +220,18 @@ impl Session {
         self.update_y();
     }
 
-    pub fn fold_indent_level(&mut self, min_indent_level: usize) {
+    pub fn fold(&mut self) {
         let document = self.document.borrow();
         let lines = document.text.as_lines();
         for line in 0..lines.len() {
-            if let Some(indent) = lines[line].indent() {
-                let indent_column_count: usize = indent
-                    .chars()
-                    .map(|char| char.column_count(self.settings().tab_column_count))
-                    .sum();
-                let indent_level = indent_column_count / self.settings().indent_level_column_count;
-                if indent_level >= min_indent_level && !self.folded_lines.contains(&line) {
-                    self.fold_column[line] = min_indent_level * self.settings.indent_level_column_count;
+            if let Some(total_indent) = lines[line].total_indent() {
+                if total_indent.column_count(self.settings().tab_column_count)
+                    / self.settings().indent_column_count
+                    >= self.settings.fold_level
+                    && !self.folded_lines.contains(&line)
+                {
+                    self.fold_column[line] =
+                        self.settings.fold_level * self.settings.indent_column_count;
                     self.unfolding_lines.remove(&line);
                     self.folding_lines.insert(line);
                 }
@@ -239,7 +239,7 @@ impl Session {
         }
     }
 
-    pub fn unfold_all(&mut self) {
+    pub fn unfold(&mut self) {
         for line in self.folding_lines.drain() {
             self.unfolding_lines.insert(line);
         }

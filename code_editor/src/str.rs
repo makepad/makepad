@@ -1,11 +1,20 @@
+use crate::char::CharExt;
+
 pub trait StrExt {
-    fn indent(&self) -> Option<&str>;
+    fn column_count(&self, tab_column_count: usize) -> usize;
+    fn total_indent(&self) -> Option<&str>;
     fn graphemes(&self) -> Graphemes<'_>;
     fn split_whitespace_boundaries(&self) -> SplitWhitespaceBoundaries<'_>;
 }
 
 impl StrExt for str {
-    fn indent(&self) -> Option<&str> {
+    fn column_count(&self, tab_column_count: usize) -> usize {
+        self.chars()
+            .map(|char| char.column_count(tab_column_count))
+            .sum()
+    }
+
+    fn total_indent(&self) -> Option<&str> {
         self.char_indices()
             .find(|(_, char)| !char.is_whitespace())
             .map(|(index, _)| &self[..index])
