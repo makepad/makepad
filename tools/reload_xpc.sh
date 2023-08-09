@@ -6,10 +6,10 @@ echo "<dict>">>$PLIST
 echo "  <key>Label</key>">>$PLIST 
 echo "  <string>dev.makepad.metalxpc</string>">>$PLIST 
 echo "  <key>Program</key>">>$PLIST 
-echo "  <string>$PWD/target/debug/makepad_studio</string>">>$PLIST 
+echo "  <string>$PWD/target/debug/makepad-studio</string>">>$PLIST 
 echo "  <key>ProgramArguments</key>">>$PLIST
 echo "  <array>">>$PLIST
-echo "    <string>$PWD/target/debug/makepad_studio</string>">>$PLIST
+echo "    <string>$PWD/target/debug/makepad-studio</string>">>$PLIST
 echo "    <string>--metal-xpc</string>">>$PLIST
 echo "  </array>">>$PLIST
 echo "    <key>MachServices</key>">>$PLIST 
@@ -20,8 +20,7 @@ echo "    </dict>">>$PLIST
 echo "</dict>">>$PLIST 
 echo "</plist>">>$PLIST
 echo "">>$PLIST
-
+cargo build -p makepad-studio
 launchctl unload $PLIST  
 launchctl load $PLIST
 
-#$PWD/target/debug/makepad_studio --render-to=0

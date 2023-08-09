@@ -3,7 +3,7 @@ use {
         makepad_platform::*,
         turtle::{Walk, Size, Align},
         font_atlas::{CxFontsAtlasTodo, CxFont, CxFontsAtlas, Font},
-        view::ManyInstances,
+        draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         cx_2d::Cx2d
     },
@@ -172,7 +172,7 @@ impl<'a> WordIterator<'a> {
                     with_newline: false
                 };
                 
-                let adv = if let Some(glyph) = font.ttf_font.get_glyph(c) {
+                let adv = if let Some(glyph) = font.get_glyph(c) {
                     glyph.horizontal_metrics.advance_width * self.font_size_total
                 }else {0.0};
                 
@@ -239,7 +239,6 @@ pub struct DrawText {
     #[live] pub geometry: GeometryQuad2D,
     #[live] pub text_style: TextStyle,
     #[live] pub wrap: TextWrap,
-    
     #[live(1.0)] pub font_scale: f64,
     #[live(1.0)] pub draw_depth: f32,
     
@@ -341,6 +340,7 @@ impl DrawText {
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.text_style.font_size);
         
         let font = &mut cxfont.ttf_font;
+        let owned_font_face = &cxfont.owned_font_face;
         
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * font.units_per_em);
         let font_size_pixels = font_size_logical * dpi_factor;
@@ -350,76 +350,106 @@ impl DrawText {
         let mi = if let Some(mi) = &mut self.many_instances {mi} else {return};
         let zbias_step = 0.00001;
         let mut char_depth = self.draw_depth;
-        for wc in chunk.chars() {
-            
-            let unicode = wc as usize;
-            let glyph_id = font.char_code_to_glyph_index_map[unicode];
-            
-            let glyph = &font.glyphs[glyph_id];
-            
-            let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
-            
-            // snap width/height to pixel granularity
-            let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
-            let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
-            
-            // this one needs pixel snapping
-            let min_pos_x = walk_x + font_size_logical * glyph.bounds.p_min.x;
-            let min_pos_y = pos.y - font_size_logical * glyph.bounds.p_min.y + self.text_style.font_size * self.text_style.top_drop;
-            
-            // compute subpixel shift
-            let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
-            let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
-            // scale and snap it
-            // only use a subpixel id for small fonts
-            let subpixel_id = if self.text_style.font_size>32.0 {
-                0
-            }
-            else { // subtle 64 index subpixel id
-                ((subpixel_y_fract * dpi_factor * 7.0) as usize) << 3 |
-                (subpixel_x_fract * dpi_factor * 7.0) as usize
-            };
-            
-            let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
-                //println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
-                tc
-            }
-            else {
-                // see if we can fit it
-                // allocate slot
-                fonts_atlas.alloc.todo.push(CxFontsAtlasTodo {
-                    subpixel_x_fract,
-                    subpixel_y_fract,
-                    font_id,
-                    atlas_page_id,
-                    glyph_id,
-                    subpixel_id
-                });
+
+        let mut rustybuzz_buffer = rustybuzz::UnicodeBuffer::new();
+
+        // This relies on the UBA ("Unicode Bidirectional Algorithm")
+        // (see http://www.unicode.org/reports/tr9/#Basic_Display_Algorithm),
+        // as implemented by `unicode_bidi`, to slice the text into substrings
+        // that can be individually shaped, then assembled visually.
+        let bidi_info = unicode_bidi::BidiInfo::new(chunk, None);
+
+        // NOTE(eddyb) the caller of `draw_inner` has already processed the text,
+        // such that `chunk` won't contain e.g. any `\n`.
+        let runs_with_level_and_range = {
+            assert_eq!(bidi_info.paragraphs.len(), 1);
+            let para = &bidi_info.paragraphs[0];
+            // Split `chunk` into "runs" (that differ in their LTR/RTL "level").
+            let (adjusted_levels, runs) = bidi_info.visual_runs(para, para.range.clone());
+            runs.into_iter().map(move |run_range| (adjusted_levels[run_range.start], run_range))
+        };
+
+        for (run_level, run_range) in runs_with_level_and_range {
+            // FIXME(eddyb) UBA/`unicode_bidi` only offers a LTR/RTL distinction,
+            // even if `rustybuzz` has vertical `Direction`s as well.
+            rustybuzz_buffer.set_direction(if run_level.is_rtl() {
+                rustybuzz::Direction::RightToLeft
+            } else {
+                rustybuzz::Direction::LeftToRight
+            });
+            rustybuzz_buffer.push_str(&bidi_info.text[run_range]);
+            let glyph_buffer = owned_font_face.with_ref(|face| rustybuzz::shape(face, &[], rustybuzz_buffer));
+            let glyphs = glyph_buffer.glyph_infos().iter().map(|glyph| glyph.glyph_id as usize);
+
+            for glyph_id in glyphs {
+                let glyph = &font.glyphs[glyph_id];
                 
-                atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
-                    fonts_atlas.alloc.alloc_atlas_glyph(w, h)
-                );
+                let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                 
-                atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
-            };
-            
-            let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
-            let delta_y = -font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
-            // give the callback a chance to do things
-            //et scaled_min_pos_x = walk_x + delta_x;
-            //let scaled_min_pos_y = pos.y - delta_y;
-            self.font_t1 = tc.t1;
-            self.font_t2 = tc.t2;
-            self.rect_pos = dvec2(walk_x + delta_x, pos.y + delta_y).into();
-            self.rect_size = dvec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor).into();
-            self.char_depth = char_depth;
-            self.delta.x = delta_x as f32;
-            self.delta.y = delta_y as f32;
-            self.font_size = self.text_style.font_size as f32;
-            self.advance = advance as f32; //char_offset as f32;
-            char_depth += zbias_step;
-            mi.instances.extend_from_slice(self.draw_vars.as_slice());
-            walk_x += advance;
+                // snap width/height to pixel granularity
+                let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
+                let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
+                
+                // this one needs pixel snapping
+                let min_pos_x = walk_x + font_size_logical * glyph.bounds.p_min.x;
+                let min_pos_y = pos.y - font_size_logical * glyph.bounds.p_min.y + self.text_style.font_size * self.text_style.top_drop;
+                
+                // compute subpixel shift
+                let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
+                let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
+                // scale and snap it
+                // only use a subpixel id for small fonts
+                let subpixel_id = if self.text_style.font_size>32.0 {
+                    0
+                }
+                else { // subtle 64 index subpixel id
+                    ((subpixel_y_fract * dpi_factor * 7.0) as usize) << 3 |
+                    (subpixel_x_fract * dpi_factor * 7.0) as usize
+                };
+                
+                let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
+                    //println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
+                    tc
+                }
+                else {
+                    // see if we can fit it
+                    // allocate slot
+                    fonts_atlas.alloc.todo.push(CxFontsAtlasTodo {
+                        subpixel_x_fract,
+                        subpixel_y_fract,
+                        font_id,
+                        atlas_page_id,
+                        glyph_id,
+                        subpixel_id
+                    });
+                    
+                    atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
+                        fonts_atlas.alloc.alloc_atlas_glyph(w, h)
+                    );
+                    
+                    atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
+                };
+                
+                let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
+                let delta_y = -font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
+                // give the callback a chance to do things
+                //et scaled_min_pos_x = walk_x + delta_x;
+                //let scaled_min_pos_y = pos.y - delta_y;
+                self.font_t1 = tc.t1;
+                self.font_t2 = tc.t2;
+                self.rect_pos = dvec2(walk_x + delta_x, pos.y + delta_y).into();
+                self.rect_size = dvec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor).into();
+                self.char_depth = char_depth;
+                self.delta.x = delta_x as f32;
+                self.delta.y = delta_y as f32;
+                self.font_size = self.text_style.font_size as f32;
+                self.advance = advance as f32; //char_offset as f32;
+                char_depth += zbias_step;
+                mi.instances.extend_from_slice(self.draw_vars.as_slice());
+                walk_x += advance;
+            }
+
+            rustybuzz_buffer = glyph_buffer.clear();
         }
         
         if !in_many {
@@ -445,7 +475,7 @@ impl DrawText {
         
         match if walk.width.is_fit() {&TextWrap::Line}else{ &self.wrap} {
             TextWrap::Ellipsis => {
-                let ellip_width = if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph('.') {
+                let ellip_width = if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().get_glyph('.') {
                     glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale
                 }
                 else {
@@ -459,7 +489,7 @@ impl DrawText {
                     if measured_width + ellip_width * 3.0 < eval_width {
                         ellip_pt = Some((i, measured_width, 3));
                     }
-                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
+                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                         // ok so now what.
                         if measured_width + adv >= eval_width { // we have to drop back to ellip_pt
@@ -499,7 +529,7 @@ impl DrawText {
                 let mut iter = WordIterator::new(text.char_indices(), eval_width, font_size_logical * self.font_scale);
                 while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_ref().unwrap()) {
                     if measured_width + word.width >= eval_width {
-                        measured_height += line_height;
+                        measured_height += line_height* self.text_style.line_spacing;
                         measured_width = word.width;
                     }
                     else {
@@ -507,7 +537,7 @@ impl DrawText {
                     }
                     if measured_width > max_width {max_width = measured_width}
                     if word.with_newline {
-                        measured_height += line_height;
+                        measured_height += line_height * self.text_style.line_spacing;
                         measured_width = 0.0;
                     }
                 }
@@ -527,9 +557,9 @@ impl DrawText {
                 
                 for c in text.chars() {
                     if c == '\n'{
-                        measured_height += line_height;
+                        measured_height += line_height * self.text_style.line_spacing;
                     }
-                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
+                    if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().get_glyph(c) {
                         let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                         measured_width += adv;
                     }
@@ -613,14 +643,14 @@ impl DrawText {
                     let mut iter = WordIterator::new(text.char_indices(), geom.eval_width, font_size_logical * self.font_scale);
                     while let Some(word) = iter.next_word(fonts_atlas.fonts[font_id].as_ref().unwrap()) {
                         if pos.x + word.width >= geom.eval_width {
-                            pos.y += line_height;
+                            pos.y += line_height * self.text_style.line_spacing;
                             pos.x = 0.0;
                         }
                         self.draw_inner(cx, rect.pos + pos, &text[word.start..word.end], fonts_atlas);
                         pos.x += word.width;
                         
                         if word.with_newline {
-                            pos.y += line_height;
+                            pos.y += line_height * self.text_style.line_spacing;
                             pos.x = 0.0;
                         }
                     }
@@ -638,7 +668,7 @@ impl DrawText {
                     let mut ypos = 0.0;
                     for line in text.split('\n'){
                         self.draw_inner(cx, rect.pos + dvec2(0.0, y_align + ypos), line, fonts_atlas);
-                        ypos += line_height;
+                        ypos += line_height * self.text_style.line_spacing;
                     }
                     
                 }
@@ -727,13 +757,13 @@ impl DrawText {
         if fonts_atlas.fonts[font_id].is_none() {
             return DVec2::default();
         }
-        let font = &fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font;
-        let slot = font.char_code_to_glyph_index_map[33];
-        let glyph = &font.glyphs[slot];
+        let font = fonts_atlas.fonts[font_id].as_ref().unwrap();
+        let slot = font.owned_font_face.with_ref(|face| face.glyph_index('!').map_or(0, |id| id.0 as usize));
+        let glyph = &font.ttf_font.glyphs[slot];
         
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         DVec2 {
-            x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.units_per_em)),
+            x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.ttf_font.units_per_em)),
             y: self.text_style.line_spacing
         }
     }

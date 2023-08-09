@@ -19,7 +19,6 @@ pub enum WidgetCache {
 pub struct WidgetUid(pub u64);
 
 pub trait WidgetDesign{
-    
 }
 
 pub trait Widget: LiveApply {
@@ -76,6 +75,8 @@ pub trait Widget: LiveApply {
     fn draw_widget_all(&mut self, cx: &mut Cx2d) {
         while self.draw_widget(cx).is_hook() {};
     }
+    
+    
     /*
     fn create_child(
         &mut self,
@@ -192,7 +193,7 @@ pub struct WidgetRef(Rc<RefCell<Option<Box<dyn Widget >> >>);
 
 impl Debug for WidgetRef{
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
-        write!(f,"Unwrap error on draw_widget means you need to implement widget hooks")
+        write!(f, "WidgetRef {}", self.widget_uid().0)
     }
 }
 
@@ -702,6 +703,10 @@ impl<T: Clone> DrawStateWrap<T> {
     
     pub fn get(&self) -> Option<T> {
         self.state.clone()
+    }
+    
+    pub fn as_ref(&self) -> Option<&T> {
+        self.state.as_ref()
     }
     
     pub fn as_mut(&mut self) -> Option<&mut T> {
