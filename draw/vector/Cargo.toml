@@ -11,3 +11,12 @@ metadata.makepad-auto-version = "3GWDmuzlo49-DLW_xADwmtdViPI="
 
 [dependencies]
 
+[dependencies.ttf-parser]
+version = "0.19"
+default-features = false
+# NOTE(eddyb) this is the minimal set of features that could enable shaping,
+# (`apple-layout` being the other notable shaping-related feature), and it's
+# enabled to estimate build time impacts, even if it's not in use yet.
+features = [
+    "opentype-layout"
+]
