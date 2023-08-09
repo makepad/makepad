@@ -352,10 +352,18 @@ impl Session {
         self.modify_selections(reset_anchor, |session, selection| {
             selection.update_cursor(|cursor, _, _| {
                 (
-                    move_ops::move_left(cursor, session.document.borrow().text.as_lines()),
+                    move_ops::move_left(session.document.borrow().text.as_lines(), cursor),
                     Affinity::Before,
                     None,
                 )
+            })
+        });
+    }
+
+    pub fn move_up(&mut self, reset_anchor: bool) {
+        self.modify_selections(reset_anchor, |session, selection| {
+            selection.update_cursor(|cursor, affinity, preferred_column| {
+                move_ops::move_up(session, cursor, affinity, preferred_column)
             })
         });
     }

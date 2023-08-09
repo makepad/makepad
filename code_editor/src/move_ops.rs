@@ -1,36 +1,36 @@
 use crate::{selection::Affinity, str::StrExt, Point, Session};
 
-pub fn move_left(point: Point, lines: &[String]) -> Point {
+pub fn move_left(lines: &[String], point: Point) -> Point {
     if !is_at_start_of_line(point) {
-        return move_to_prev_grapheme(point, lines);
+        return move_to_prev_grapheme(lines, point);
     }
     if !is_at_first_line(point) {
-        return move_to_end_of_prev_line(point, lines);
+        return move_to_end_of_prev_line(lines, point);
     }
     point
 }
 
 pub fn move_right(point: Point, lines: &[String]) -> Point {
-    if !is_at_end_of_line(point, lines) {
-        return move_to_next_grapheme(point, lines);
+    if !is_at_end_of_line(lines, point) {
+        return move_to_next_grapheme(lines, point);
     }
-    if !is_at_last_line(point, lines) {
+    if !is_at_last_line(lines, point) {
         return move_to_start_of_next_line(point);
     }
     point
 }
 
 pub fn move_up(
+    session: &Session,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
-    session: &Session,
 ) -> (Point, Affinity, Option<usize>) {
-    if !is_at_first_row_of_line(point, affinity, session) {
-        return move_to_prev_row_of_line(point, affinity, preferred_column, session);
+    if !is_at_first_row_of_line(session, point, affinity) {
+        return move_to_prev_row_of_line(session, point, affinity, preferred_column);
     }
     if !is_at_first_line(point) {
-        return move_to_last_row_of_prev_line(point, affinity, preferred_column, session);
+        return move_to_last_row_of_prev_line(session, point, affinity, preferred_column);
     }
     (point, affinity, preferred_column)
 }
@@ -39,7 +39,7 @@ fn is_at_first_line(point: Point) -> bool {
     point.line == 0
 }
 
-fn is_at_last_line(point: Point, lines: &[String]) -> bool {
+fn is_at_last_line(lines: &[String], point: Point) -> bool {
     point.line == lines.len()
 }
 
@@ -47,11 +47,11 @@ fn is_at_start_of_line(point: Point) -> bool {
     point.byte == 0
 }
 
-fn is_at_end_of_line(point: Point, lines: &[String]) -> bool {
+fn is_at_end_of_line(lines: &[String], point: Point) -> bool {
     point.byte == lines[point.line].len()
 }
 
-fn is_at_first_row_of_line(point: Point, affinity: Affinity, session: &Session) -> bool {
+fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -62,7 +62,7 @@ fn is_at_first_row_of_line(point: Point, affinity: Affinity, session: &Session) 
     })
 }
 
-fn is_at_last_row_of_line(point: Point, affinity: Affinity, session: &Session) -> bool {
+fn is_at_last_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
     session.line(point.line, |line| {
         let (row, _) = line.byte_and_affinity_to_row_and_column(
             point.byte,
@@ -73,7 +73,7 @@ fn is_at_last_row_of_line(point: Point, affinity: Affinity, session: &Session) -
     })
 }
 
-fn move_to_prev_grapheme(point: Point, lines: &[String]) -> Point {
+fn move_to_prev_grapheme(lines: &[String], point: Point) -> Point {
     Point {
         line: point.line,
         byte: lines[point.line][..point.byte]
@@ -84,7 +84,7 @@ fn move_to_prev_grapheme(point: Point, lines: &[String]) -> Point {
     }
 }
 
-fn move_to_next_grapheme(point: Point, lines: &[String]) -> Point {
+fn move_to_next_grapheme(lines: &[String], point: Point) -> Point {
     let line = &lines[point.line];
     Point {
         line: point.line,
@@ -96,7 +96,7 @@ fn move_to_next_grapheme(point: Point, lines: &[String]) -> Point {
     }
 }
 
-fn move_to_end_of_prev_line(point: Point, lines: &[String]) -> Point {
+fn move_to_end_of_prev_line(lines: &[String], point: Point) -> Point {
     let prev_line = point.line - 1;
     Point {
         line: prev_line,
@@ -112,10 +112,10 @@ fn move_to_start_of_next_line(point: Point) -> Point {
 }
 
 fn move_to_prev_row_of_line(
+    session: &Session,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
-    session: &Session,
 ) -> (Point, Affinity, Option<usize>) {
     session.line(point.line, |line| {
         let (row, mut column) = line.byte_and_affinity_to_row_and_column(
@@ -163,10 +163,10 @@ fn move_to_next_row_of_line(view: &View<'_>, cursor: Cursor) -> Cursor {
 */
 
 fn move_to_last_row_of_prev_line(
+    session: &Session,
     point: Point,
     affinity: Affinity,
     preferred_column: Option<usize>,
-    session: &Session,
 ) -> (Point, Affinity, Option<usize>) {
     session.line(point.line, |line| {
         let (_, mut column) = line.byte_and_affinity_to_row_and_column(

@@ -105,7 +105,7 @@ impl<'a> Line<'a> {
                     text,
                 } => {
                     for grapheme in text.graphemes() {
-                        let next_column = column + grapheme.column_count(tab_width);
+                        let next_column = current_column + grapheme.column_count(tab_width);
                         if current_row == row && (current_column..next_column).contains(&column) {
                             return (byte, Affinity::After);
                         }
@@ -117,7 +117,7 @@ impl<'a> Line<'a> {
                     is_inlay: true,
                     text,
                 } => {
-                    let next_column = column + text.column_count(tab_width);
+                    let next_column = current_column + text.column_count(tab_width);
                     if current_row == row && (current_column..next_column).contains(&column) {
                         return (byte, Affinity::Before);
                     }
