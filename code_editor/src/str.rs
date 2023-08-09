@@ -5,6 +5,7 @@ pub trait StrExt {
     fn indentation(&self) -> Option<&str>;
     fn longest_common_prefix(&self, other: &str) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
+    fn grapheme_indices(&self) -> GraphemeIndices<'_>;
     fn split_whitespace_boundaries(&self) -> SplitWhitespaceBoundaries<'_>;
 }
 
@@ -32,6 +33,13 @@ impl StrExt for str {
 
     fn graphemes(&self) -> Graphemes<'_> {
         Graphemes { string: self }
+    }
+
+    fn grapheme_indices(&self) -> GraphemeIndices<'_> {
+        GraphemeIndices {
+            graphemes: self.graphemes(),
+            start: self.as_ptr() as usize,
+        }
     }
 
     fn split_whitespace_boundaries(&self) -> SplitWhitespaceBoundaries<'_> {
@@ -73,6 +81,28 @@ impl<'a> DoubleEndedIterator for Graphemes<'a> {
         let (string, grapheme) = self.string.split_at(start);
         self.string = string;
         Some(grapheme)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GraphemeIndices<'a> {
+    graphemes: Graphemes<'a>,
+    start: usize,
+}
+
+impl<'a> Iterator for GraphemeIndices<'a> {
+    type Item = (usize, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let grapheme = self.graphemes.next()?;
+        Some((grapheme.as_ptr() as usize - self.start, grapheme))
+    }
+}
+
+impl<'a> DoubleEndedIterator for GraphemeIndices<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let grapheme = self.graphemes.next_back()?;
+        Some((grapheme.as_ptr() as usize - self.start, grapheme))
     }
 }
 
