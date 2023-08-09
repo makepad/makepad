@@ -556,7 +556,11 @@ impl Session {
         self.update_column_count(line);
     }
 
-    fn modify_selections(&mut self, reset_anchor: bool, mut f: impl FnMut(&Session, Selection) -> Selection) {
+    fn modify_selections(
+        &mut self,
+        reset_anchor: bool,
+        mut f: impl FnMut(&Session, Selection) -> Selection,
+    ) {
         let mut selections = mem::take(&mut self.selections);
         for selection in &mut selections {
             *selection = f(&self, *selection);
