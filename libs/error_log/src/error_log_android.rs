@@ -1,5 +1,5 @@
 use std::panic;
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_int};
     
 #[macro_export]
 macro_rules!log {

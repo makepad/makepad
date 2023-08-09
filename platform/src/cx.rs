@@ -12,7 +12,8 @@ use {
     },
     crate::{
         makepad_live_compiler::{
-            LiveRegistry
+            LiveRegistry,
+            LiveFileChange
         },
         makepad_shader_compiler::{
             ShaderRegistry
@@ -108,6 +109,7 @@ pub struct Cx {
     pub (crate) triggers: HashMap<Area, Vec<Trigger >>,
     
     pub live_registry: Rc<RefCell<LiveRegistry >>,
+    pub live_file_changes: Option<std::sync::mpsc::Receiver<Vec<LiveFileChange>>>,
     pub shader_registry: ShaderRegistry,
     
     #[allow(dead_code)]
@@ -262,6 +264,7 @@ impl Cx {
             triggers: Default::default(),
             
             live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
+            live_file_changes: None,
             shader_registry: ShaderRegistry::new(),
             
             command_settings: HashMap::new(),

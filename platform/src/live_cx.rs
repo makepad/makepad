@@ -2,6 +2,7 @@ use {
     crate::{
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_compiler::{
+            LiveFileChange,
             TextPos,
             LiveValue,
             LiveNode,
@@ -163,8 +164,60 @@ impl Cx {
     
     pub fn start_live_file_watcher(&mut self){
         let live_registry = self.live_registry.borrow();
+        let (send, recv) = std::sync::mpsc::channel();
+        self.live_file_changes = Some(recv);
+        let mut file_list:Vec<(String,Option<String>)> = Vec::new();
         for file in &live_registry.live_files {
-            //log!("{}. {}", file.module_id.0, file.module_id.1);        // lets expand the f'er
+            file_list.push((file.file_name.clone(), None));
+        }
+        std::thread::spawn(move || loop{
+            let mut changed_files = Vec::new();
+            for (file_name, content) in &mut file_list{
+                let next = std::fs::read_to_string(&file_name);
+                if let Ok(next) = next{
+                    if let Some(content_str) = content{
+                        if content_str != &next{
+                            changed_files.push(LiveFileChange{
+                                file_name:file_name.clone(), 
+                                content: next.clone()
+                            });
+                            *content = Some(next);
+                        }
+                    }
+                    else{
+                        *content = Some(next);
+                    }
+                }
+            }
+            if changed_files.len()>0{
+                send.send(changed_files).unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+    }
+    
+    pub fn check_live_file_watcher(&mut self)->bool{
+        // ok so we have a life filechange
+        // now what. now we need to 'reload' our entire live system.. how.
+        // what we can do is tokenize the entire file
+        // then find the token-slice we need
+        let mut all_changes = Vec::new();
+        if let Some(live_file_changes) = &self.live_file_changes{
+            while let Ok(changes) = live_file_changes.try_recv(){
+                all_changes.extend(changes);
+            }
+        }
+        if all_changes.len()>0{
+            let mut live_registry = self.live_registry.borrow_mut();
+            let mut errs = Vec::new();
+            live_registry.process_file_changes(all_changes, &mut errs);
+            for err in errs {
+                error!("check_live_file_watcher: Error expanding live file {}", err);
+            }
+            true
+        }
+        else{
+            false
         }
     }
     
@@ -198,7 +251,6 @@ impl Cx {
             }
         }
     }
-    
     
     pub fn register_live_body(&mut self, live_body: LiveBody) {
         //println!("START");
