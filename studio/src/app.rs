@@ -165,7 +165,7 @@ impl AppMain for App {
                 else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
                     self.build_manager.draw_log_list(cx, &mut *list_view);
                 }
-                else if let Some(mut code_editor) = next.into_code_editor().borrow_mut(){
+                else if let Some(mut code_editor) = next.as_code_editor().borrow_mut(){
                     // lets fetch a session
                     let current_id = dock.get_drawing_item_id().unwrap();
                     let session = match self.sessions.entry(current_id){
@@ -188,7 +188,7 @@ impl AppMain for App {
         
         // lets iterate over the editors and handle events
         for (item_id,item) in dock.borrow_mut().unwrap().items().iter(){
-            if let Some(mut code_editor) = item.clone().into_code_editor().borrow_mut(){
+            if let Some(mut code_editor) = item.as_code_editor().borrow_mut(){
                 if let Some(session) = self.sessions.get_mut(&item_id.id){
                      code_editor.handle_event(cx, event, session);
                  }

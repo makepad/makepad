@@ -199,13 +199,13 @@ impl BuildManager {
                 match msg {
                     BuildMsg::Bare(msg) => {
                         let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
-                        let item = list.get_item(cx, item_id, template).unwrap().into_frame();
+                        let item = list.get_item(cx, item_id, template).unwrap().as_frame();
                         item.get_label(id!(label)).set_label(&msg.line);
                         item.draw_widget_all(cx);
                     }
                     BuildMsg::Location(msg) => {
                         let template = if is_even{live_id!(WaitEven)}else{live_id!(WaitOdd)};
-                        let item = list.get_item(cx, item_id, template).unwrap().into_frame();
+                        let item = list.get_item(cx, item_id, template).unwrap().as_frame();
                         item.get_label(id!(link_label)).set_label(&msg.file_name);
                         item.get_label(id!(label)).set_label(&msg.msg);
                         item.draw_widget_all(cx);
@@ -215,7 +215,7 @@ impl BuildManager {
             }
             else{ // draw empty items
                 let template = if is_even{live_id!(EmptyEven)}else{live_id!(EmptyOdd)};
-                let item = list.get_item(cx, item_id, template).unwrap().into_frame();
+                let item = list.get_item(cx, item_id, template).unwrap().as_frame();
                 item.draw_widget_all(cx);
             }
         }
