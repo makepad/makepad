@@ -8,6 +8,7 @@ pub mod extent;
 pub mod inlays;
 pub mod iter;
 pub mod line;
+pub mod move_ops;
 pub mod point;
 pub mod range;
 pub mod selection;

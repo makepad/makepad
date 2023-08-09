@@ -42,7 +42,7 @@ impl AppMain for App {
         }
         self.ui.handle_widget_event(cx, event);
         self.code_editor
-            .handle_event(cx, &mut self.state.session, event);
+            .handle_event(cx, event, &mut self.state.session);
     }
 }
 
