@@ -171,7 +171,7 @@ impl CodeEditor {
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
         });
-        match event {
+        match *event {
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
@@ -186,7 +186,15 @@ impl CodeEditor {
                 session.unfold();
                 cx.redraw_all();
             }
-            Event::TextInput(TextInputEvent { input, .. }) => {
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowLeft,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                session.move_left(!shift);
+                cx.redraw_all();
+            }
+            Event::TextInput(TextInputEvent { ref input, .. }) => {
                 session.insert(input.into());
                 cx.redraw_all();
             }
