@@ -705,6 +705,10 @@ impl<T: Clone> DrawStateWrap<T> {
         self.state.clone()
     }
     
+    pub fn as_ref(&self) -> Option<&T> {
+        self.state.as_ref()
+    }
+    
     pub fn as_mut(&mut self) -> Option<&mut T> {
         self.state.as_mut()
     }
