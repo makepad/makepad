@@ -224,17 +224,16 @@ impl Session {
         let document = self.document.borrow();
         let lines = document.text.as_lines();
         for line in 0..lines.len() {
-            if let Some(total_indent) = lines[line].total_indent() {
-                if total_indent.column_count(self.settings().tab_column_count)
-                    / self.settings().indent_column_count
-                    >= self.settings.fold_level
-                    && !self.folded_lines.contains(&line)
-                {
-                    self.fold_column[line] =
-                        self.settings.fold_level * self.settings.indent_column_count;
-                    self.unfolding_lines.remove(&line);
-                    self.folding_lines.insert(line);
-                }
+            let indent_level = lines[line]
+                .indentation()
+                .unwrap_or("")
+                .column_count(self.settings.tab_column_count)
+                / self.settings.indent_column_count;
+            if indent_level >= self.settings.fold_level && !self.folded_lines.contains(&line) {
+                self.fold_column[line] =
+                    self.settings.fold_level * self.settings.indent_column_count;
+                self.unfolding_lines.remove(&line);
+                self.folding_lines.insert(line);
             }
         }
     }
@@ -357,19 +356,18 @@ impl Session {
     pub fn enter(&mut self) {
         self.document
             .borrow_mut()
-            .edit(&self.selections, |text, point, _| {
-                let line = &text.as_lines()[point.line];
+            .edit(&self.selections, |line, index, _| {
                 (
-                    if line[..point.byte].chars().all(|char| char.is_whitespace()) {
+                    if line[..index].chars().all(|char| char.is_whitespace()) {
                         Extent {
                             line_count: 0,
-                            byte_count: point.byte,
+                            byte_count: index,
                         }
                     } else {
                         Extent::zero()
                     },
                     Some(Text::newline()),
-                    if line[..point.byte]
+                    if line[..index]
                         .chars()
                         .rev()
                         .find_map(|char| {
@@ -382,7 +380,7 @@ impl Session {
                             None
                         })
                         .unwrap_or(false)
-                        && line[point.byte..]
+                        && line[index..]
                             .chars()
                             .find_map(|char| {
                                 if char.is_closing_delimiter() {
@@ -403,6 +401,40 @@ impl Session {
             });
     }
 
+    pub fn indent(&mut self) {
+        self.document
+            .borrow_mut()
+            .reindent(&self.selections, |line| {
+                reindent(
+                    line,
+                    self.settings.use_soft_tabs,
+                    self.settings.tab_column_count,
+                    |indentation_column_count| {
+                        (indentation_column_count + self.settings.indent_column_count)
+                            / self.settings.indent_column_count
+                            * self.settings.indent_column_count
+                    },
+                )
+            });
+    }
+
+    pub fn outdent(&mut self) {
+        self.document
+            .borrow_mut()
+            .reindent(&self.selections, |line| {
+                reindent(
+                    line,
+                    self.settings.use_soft_tabs,
+                    self.settings.tab_column_count,
+                    |indentation_column_count| {
+                        indentation_column_count.saturating_sub(1)
+                            / self.settings.indent_column_count
+                            * self.settings.indent_column_count
+                    },
+                )
+            });
+    }
+
     pub fn delete(&mut self) {
         self.document
             .borrow_mut()
@@ -412,10 +444,10 @@ impl Session {
     pub fn backspace(&mut self) {
         self.document
             .borrow_mut()
-            .edit(&self.selections, |text, point, is_empty| {
+            .edit(&self.selections, |line, index, is_empty| {
                 (
                     if is_empty {
-                        if point.byte == 0 {
+                        if index == 0 {
                             Extent {
                                 line_count: 1,
                                 byte_count: 0,
@@ -423,11 +455,7 @@ impl Session {
                         } else {
                             Extent {
                                 line_count: 0,
-                                byte_count: text.as_lines()[point.line]
-                                    .graphemes()
-                                    .next_back()
-                                    .unwrap()
-                                    .len(),
+                                byte_count: line.graphemes().next_back().unwrap().len(),
                             }
                         }
                     } else {
@@ -682,7 +710,7 @@ impl Document {
     fn edit(
         &mut self,
         selections: &[Selection],
-        mut f: impl FnMut(&Text, Point, bool) -> (Extent, Option<Text>, Option<Text>),
+        mut f: impl FnMut(&String, usize, bool) -> (Extent, Option<Text>, Option<Text>),
     ) {
         let mut changes = Vec::new();
         let mut point = Point::zero();
@@ -707,8 +735,11 @@ impl Document {
                 self.text.apply_change(change.clone());
                 changes.push(change);
             }
-            let (delete_extent, insert_text_before, insert_text_after) =
-                f(&self.text, point, range.is_empty());
+            let (delete_extent, insert_text_before, insert_text_after) = f(
+                &self.text.as_lines()[point.line],
+                point.byte,
+                range.is_empty(),
+            );
             if delete_extent != Extent::zero() {
                 if delete_extent.line_count == 0 {
                     point.byte -= delete_extent.byte_count;
@@ -746,6 +777,62 @@ impl Document {
             prev_range_end = range.end();
         }
         self.apply_changes(&changes);
+    }
+
+    fn reindent(
+        &mut self,
+        selections: &[Selection],
+        mut f: impl FnMut(&str) -> (usize, usize, String),
+    ) {
+        let mut changes = Vec::new();
+        for line_range in selections
+            .iter()
+            .copied()
+            .map(|selection| selection.line_range())
+            .merge(|line_range_0, line_range_1| {
+                if line_range_0.end >= line_range_1.start {
+                    Ok(line_range_0.start..line_range_1.end)
+                } else {
+                    Err((line_range_0, line_range_1))
+                }
+            })
+        {
+            for line in line_range {
+                self.reindent_internal(line, &mut changes, &mut f);
+            }
+        }
+        self.apply_changes(&changes);
+    }
+
+    fn reindent_internal(
+        &mut self,
+        line: usize,
+        changes: &mut Vec<Change>,
+        mut f: impl FnMut(&str) -> (usize, usize, String),
+    ) {
+        let (byte, delete_byte_count, insert_text) = f(&self.text.as_lines()[line]);
+        if delete_byte_count > 0 {
+            let change = Change {
+                drift: Drift::Before,
+                kind: ChangeKind::Delete(Range::from_start_and_extent(
+                    Point { line, byte },
+                    Extent {
+                        line_count: 0,
+                        byte_count: delete_byte_count,
+                    },
+                )),
+            };
+            self.text.apply_change(change.clone());
+            changes.push(change);
+        }
+        if !insert_text.is_empty() {
+            let change = Change {
+                drift: Drift::Before,
+                kind: ChangeKind::Insert(Point { line, byte }, insert_text.into()),
+            };
+            self.text.apply_change(change.clone());
+            changes.push(change);
+        }
     }
 
     fn apply_changes(&mut self, changes: &[Change]) {
@@ -959,4 +1046,41 @@ fn tokenize(text: &str) -> impl Iterator<Item = Token> + '_ {
             TokenKind::Unknown
         },
     })
+}
+
+fn reindent(
+    string: &str,
+    use_soft_tabs: bool,
+    tab_column_count: usize,
+    f: impl FnOnce(usize) -> usize,
+) -> (usize, usize, String) {
+    let indentation = string.indentation().unwrap_or("");
+    let indentation_column_count = indentation.column_count(tab_column_count);
+    let new_indentation_column_count = f(indentation_column_count);
+    let new_indentation = new_indentation(
+        new_indentation_column_count,
+        use_soft_tabs,
+        tab_column_count,
+    );
+    let len = indentation.longest_common_prefix(&new_indentation).len();
+    (
+        len,
+        indentation.len() - len.min(indentation.len()),
+        new_indentation[len..].to_owned(),
+    )
+}
+
+fn new_indentation(column_count: usize, use_soft_tabs: bool, tab_column_count: usize) -> String {
+    let tab_count;
+    let space_count;
+    if use_soft_tabs {
+        tab_count = 0;
+        space_count = column_count;
+    } else {
+        tab_count = column_count / tab_column_count;
+        space_count = column_count % tab_column_count;
+    }
+    let tabs = iter::repeat("\t").take(tab_count);
+    let spaces = iter::repeat(" ").take(space_count);
+    tabs.chain(spaces).collect()
 }

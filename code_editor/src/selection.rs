@@ -1,4 +1,7 @@
-use crate::{Change, Extent, Point, Range};
+use {
+    crate::{Change, Extent, Point, Range},
+    std::ops,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Hash, Eq)]
 pub struct Selection {
@@ -50,6 +53,18 @@ impl Selection {
 
     pub fn range(self) -> Range {
         Range::new(self.start(), self.end()).unwrap()
+    }
+
+    pub fn line_range(self) -> ops::Range<usize> {
+        if self.anchor <= self.cursor {
+            self.anchor.line..self.cursor.line + 1
+        } else {
+            self.cursor.line..if self.anchor.byte == 0 {
+                self.anchor.line
+            } else {
+                self.anchor.line + 1
+            }
+        }
     }
 
     pub fn merge(self, other: Self) -> Option<Self> {
