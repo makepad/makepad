@@ -195,7 +195,6 @@ impl AppMain for App {
              }
         }
         
-        
         for action in self.build_manager.handle_event(cx, event) {
             match action {
                 BuildManagerAction::RedrawLog => {
