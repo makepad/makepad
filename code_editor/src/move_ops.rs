@@ -35,6 +35,21 @@ pub fn move_up(
     (point, affinity, preferred_column)
 }
 
+pub fn move_down(
+    session: &Session,
+    point: Point,
+    affinity: Affinity,
+    preferred_column: Option<usize>,
+) -> (Point, Affinity, Option<usize>) {
+    if !is_at_last_row_of_line(session, point, affinity) {
+        return move_to_next_row_of_line(session, point, affinity, preferred_column);
+    }
+    if !is_at_last_line(session.document().borrow().text().as_lines(), point) {
+        return move_to_first_row_of_next_line(session, point, affinity, preferred_column);
+    }
+    (point, affinity, preferred_column)
+}
+
 fn is_at_first_line(point: Point) -> bool {
     point.line == 0
 }
@@ -142,25 +157,36 @@ fn move_to_prev_row_of_line(
     })
 }
 
-/*
-fn move_to_next_row_of_line(view: &View<'_>, cursor: Cursor) -> Cursor {
-    use crate::Point;
-
-    let line = view.line(cursor.biased_pos.pos.line);
-    let mut point = line.biased_byte_to_point(cursor.biased_pos.biased_byte());
-    if let Some(column) = cursor.column {
-        point.column = column;
-    }
-    let biased_byte = line.point_to_biased_byte(Point {
-        row: point.row + 1,
-        ..point
-    });
-    Cursor {
-        biased_pos: BiasedPos::from_line_and_biased_byte(cursor.biased_pos.pos.line, biased_byte),
-        column: Some(point.column),
-    }
+fn move_to_next_row_of_line(
+    session: &Session,
+    point: Point,
+    affinity: Affinity,
+    preferred_column: Option<usize>,
+) -> (Point, Affinity, Option<usize>) {
+    session.line(point.line, |line| {
+        let (row, mut column) = line.byte_and_affinity_to_row_and_column(
+            point.byte,
+            affinity,
+            session.settings().tab_column_count,
+        );
+        if let Some(preferred_column) = preferred_column {
+            column = preferred_column;
+        }
+        let (byte, affinity) = line.row_and_column_to_byte_and_affinity(
+            row + 1,
+            column,
+            session.settings().tab_column_count,
+        );
+        (
+            Point {
+                line: point.line,
+                byte,
+            },
+            affinity,
+            Some(column),
+        )
+    })
 }
-*/
 
 fn move_to_last_row_of_prev_line(
     session: &Session,
@@ -195,24 +221,35 @@ fn move_to_last_row_of_prev_line(
     })
 }
 
-/*
-fn move_to_first_row_of_next_line(view: &View<'_>, cursor: Cursor) -> Cursor {
-    use crate::Point;
-
-    let mut point = view
-        .line(cursor.biased_pos.pos.line)
-        .biased_byte_to_point(cursor.biased_pos.biased_byte());
-    if let Some(column) = cursor.column {
-        point.column = column;
-    }
-    let next_line = cursor.biased_pos.pos.line + 1;
-    let biased_byte = view.line(next_line).point_to_biased_byte(Point {
-        row: 0,
-        column: point.column,
-    });
-    Cursor {
-        biased_pos: BiasedPos::from_line_and_biased_byte(next_line, biased_byte),
-        column: Some(point.column),
-    }
+fn move_to_first_row_of_next_line(
+    session: &Session,
+    point: Point,
+    affinity: Affinity,
+    preferred_column: Option<usize>,
+) -> (Point, Affinity, Option<usize>) {
+    session.line(point.line, |line| {
+        let (_, mut column) = line.byte_and_affinity_to_row_and_column(
+            point.byte,
+            affinity,
+            session.settings().tab_column_count,
+        );
+        if let Some(preferred_column) = preferred_column {
+            column = preferred_column;
+        }
+        session.line(point.line + 1, |next_line| {
+            let (byte, affinity) = next_line.row_and_column_to_byte_and_affinity(
+                0,
+                column,
+                session.settings().tab_column_count,
+            );
+            (
+                Point {
+                    line: point.line + 1,
+                    byte,
+                },
+                affinity,
+                Some(column),
+            )
+        })
+    })
 }
-*/
