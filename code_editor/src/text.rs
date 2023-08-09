@@ -1,6 +1,6 @@
 use {
-    crate::{Diff, TextLen, TextPos, TextRange},
-    std::{borrow::Cow, ops::AddAssign},
+    crate::{change, Change, Extent, Point, Range},
+    std::{io, io::BufRead, iter},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -13,14 +13,29 @@ impl Text {
         Self::default()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == TextLen::default()
+    pub fn newline() -> Self {
+        Self {
+            lines: vec![String::new(), String::new()],
+        }
     }
 
-    pub fn len(&self) -> TextLen {
-        TextLen {
-            lines: self.lines.len() - 1,
-            bytes: self.lines.last().unwrap().len(),
+    pub fn from_buf_reader<R>(reader: R) -> io::Result<Self>
+    where
+        R: BufRead,
+    {
+        Ok(Self {
+            lines: reader.lines().collect::<Result<_, _>>()?,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.extent() == Extent::zero()
+    }
+
+    pub fn extent(&self) -> Extent {
+        Extent {
+            line_count: self.lines.len() - 1,
+            byte_count: self.lines.last().unwrap().len(),
         }
     }
 
@@ -28,99 +43,45 @@ impl Text {
         &self.lines
     }
 
-    pub fn slice(&self, range: TextRange) -> Self {
-        let mut lines = Vec::new();
-        if range.start().line == range.end().line {
-            lines.push(
-                self.lines[range.start().line][range.start().byte..range.end().byte].to_string(),
-            );
-        } else {
-            lines.reserve(range.end().line - range.start().line + 1);
-            lines.push(self.lines[range.start().line][range.start().byte..].to_string());
-            lines.extend(
-                self.lines[range.start().line + 1..range.end().line]
-                    .iter()
-                    .cloned(),
-            );
-            lines.push(self.lines[range.end().line][..range.end().byte].to_string());
-        }
-        Text { lines }
-    }
-
-    pub fn take(&mut self, len: TextLen) -> Self {
-        let mut lines = self.lines.drain(..len.lines as usize).collect::<Vec<_>>();
-        lines.push(self.lines.first().unwrap()[..len.bytes].to_string());
-        self.lines
-            .first_mut()
-            .unwrap()
-            .replace_range(..len.bytes, "");
-        Text { lines }
-    }
-
-    pub fn skip(&mut self, len: TextLen) {
-        self.lines.drain(..len.lines);
-        self.lines
-            .first_mut()
-            .unwrap()
-            .replace_range(..len.bytes, "");
-    }
-
-    pub fn insert(&mut self, pos: TextPos, mut text: Self) {
-        if text.len().lines == 0 {
-            self.lines[pos.line].replace_range(pos.byte..pos.byte, text.lines.first().unwrap());
+    pub fn insert(&mut self, point: Point, mut text: Self) {
+        if text.extent().line_count == 0 {
+            self.lines[point.line]
+                .replace_range(point.byte..point.byte, text.lines.first().unwrap());
         } else {
             text.lines
                 .first_mut()
                 .unwrap()
-                .replace_range(..0, &self.lines[pos.line][..pos.byte]);
+                .replace_range(..0, &self.lines[point.line][..point.byte]);
             text.lines
                 .last_mut()
                 .unwrap()
-                .push_str(&self.lines[pos.line][pos.byte..]);
-            self.lines.splice(pos.line..pos.line + 1, text.lines);
+                .push_str(&self.lines[point.line][point.byte..]);
+            self.lines.splice(point.line..point.line + 1, text.lines);
         }
     }
 
-    pub fn delete(&mut self, pos: TextPos, len: TextLen) {
-        use std::iter;
-
-        if len.lines == 0 {
-            self.lines[pos.line].replace_range(pos.byte..pos.byte + len.bytes, "");
+    pub fn delete(&mut self, range: Range) {
+        if range.start().line == range.end().line {
+            self.lines[range.start().line].replace_range(range.start().byte..range.end().byte, "");
         } else {
-            let mut line = self.lines[pos.line][..pos.byte].to_string();
-            line.push_str(&self.lines[pos.line + len.lines][len.bytes..]);
+            let mut line = self.lines[range.start().line][..range.start().byte].to_string();
+            line.push_str(&self.lines[range.end().line][range.end().byte..]);
             self.lines
-                .splice(pos.line..pos.line + len.lines + 1, iter::once(line));
+                .splice(range.start().line..range.end().line + 1, iter::once(line));
         }
     }
 
-    pub fn apply_diff(&mut self, diff: Diff) {
-        use super::text_diff::Op;
-
-        let mut pos = TextPos::default();
-        for operation in diff {
-            match operation {
-                Op::Delete(len) => self.delete(pos, len),
-                Op::Retain(len) => pos += len,
-                Op::Insert(text) => {
-                    let len = text.len();
-                    self.insert(pos, text);
-                    pos += len;
-                }
+    pub fn apply_change(&mut self, change: Change) {
+        match change.kind {
+            change::ChangeKind::Insert(point, additional_text) => {
+                self.insert(point, additional_text)
             }
+            change::ChangeKind::Delete(range) => self.delete(range),
         }
     }
-}
 
-impl AddAssign for Text {
-    fn add_assign(&mut self, mut other: Self) {
-        other
-            .lines
-            .first_mut()
-            .unwrap()
-            .replace_range(..0, self.lines.last().unwrap());
+    pub fn into_line_count(self) -> Vec<String> {
         self.lines
-            .splice(self.lines.len() - 1..self.lines.len(), other.lines);
     }
 }
 
@@ -132,24 +93,11 @@ impl Default for Text {
     }
 }
 
-impl From<char> for Text {
-    fn from(char: char) -> Self {
-        Self {
-            lines: match char {
-                '\n' => vec![String::new(), String::new()],
-                _ => vec![char.into()],
-            },
-        }
-    }
-}
-
 impl From<&str> for Text {
     fn from(string: &str) -> Self {
-        let mut lines: Vec<_> = string.split("\n").map(|line| line.to_owned()).collect();
-        if lines.is_empty() {
-            lines.push(String::new());
+        Self {
+            lines: string.lines().map(|string| string.to_owned()).collect(),
         }
-        Self { lines }
     }
 }
 
@@ -162,11 +110,5 @@ impl From<&String> for Text {
 impl From<String> for Text {
     fn from(string: String) -> Self {
         string.as_str().into()
-    }
-}
-
-impl From<Cow<'_, str>> for Text {
-    fn from(string: Cow<'_, str>) -> Self {
-        string.as_ref().into()
     }
 }
