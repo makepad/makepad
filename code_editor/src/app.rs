@@ -31,7 +31,7 @@ impl AppMain for App {
         if let Event::Draw(event) = event {
             let mut cx = Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(&mut cx).hook_widget() {
-                if let Some(mut code_editor) = next.as_code_editor().borrow_mut(){
+                if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
                     code_editor.draw(&mut cx, &mut self.state.session);
                 }
             }

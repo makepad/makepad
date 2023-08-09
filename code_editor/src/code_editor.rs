@@ -213,6 +213,15 @@ impl CodeEditor {
                 session.move_left(!shift);
                 cx.redraw_all();
             }
+
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowUp,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                session.move_up(!shift);
+                cx.redraw_all();
+            }
             Event::TextInput(TextInputEvent { ref input, .. }) => {
                 session.insert(input.into());
                 cx.redraw_all();
