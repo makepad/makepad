@@ -73,11 +73,19 @@ pub trait LiveNew: LiveApply {
         {
             let live_registry_rc = cx.live_registry.clone();
             let mut live_registry = live_registry_rc.borrow_mut();
-            if let Some(file_id) = live_registry.module_id_to_file_id.get(&lti.module_id) {
-                live_registry.main_module = Some(*file_id);
-            }
+            live_registry.main_module = Some((lti.module_id, lti.type_name));
         }
         Self::new_from_module(cx, lti.module_id, lti.type_name).unwrap()
+    }
+    
+    fn update_main(&mut self, cx:&mut Cx){
+        let (module_id, id) = {
+            let live_registry_rc = cx.live_registry.clone();
+            let live_registry = live_registry_rc.borrow_mut();
+            live_registry.main_module.unwrap()
+        };
+        self.update_from_module(cx, module_id, id);
+        crate::log!("We got a LiveEdit event");
     }
     
     fn new_local(cx: &mut Cx) -> Self where Self: Sized {
@@ -97,6 +105,17 @@ pub trait LiveNew: LiveApply {
             }
         }
         None
+    }
+    
+    fn update_from_module(&mut self, cx: &mut Cx, module_id: LiveModuleId, id: LiveId)  {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        if let Some(file_id) = live_registry.module_id_to_file_id.get(&module_id) {
+            let file = live_registry.file_id_to_file(*file_id);
+            if let Some(index) = file.expanded.nodes.child_by_name(0, id.as_instance()) {
+                self.apply(cx, ApplyFrom::UpdateFromDoc {file_id: *file_id}, index, &file.expanded.nodes);
+            }
+        }
     }
 }
 
