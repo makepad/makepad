@@ -5,6 +5,7 @@ use {
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
         line::Wrapped,
+        move_ops,
         selection::Affinity,
         str::StrExt,
         token::TokenKind,
@@ -284,6 +285,7 @@ impl Session {
             anchor: cursor,
             cursor,
             affinity,
+            preferred_column: None,
         });
         self.pending_selection_index = Some(0);
     }
@@ -293,6 +295,7 @@ impl Session {
             anchor: cursor,
             cursor,
             affinity,
+            preferred_column: None,
         };
         self.pending_selection_index = Some(
             match self.selections.binary_search_by(|selection| {
@@ -343,6 +346,18 @@ impl Session {
             self.selections.remove(next_selection_index);
         }
         self.pending_selection_index = Some(pending_selection_index);
+    }
+
+    pub fn move_left(&mut self, reset_anchor: bool) {
+        self.modify_selections(reset_anchor, |session, selection| {
+            selection.update_cursor(|cursor, _, _| {
+                (
+                    move_ops::move_left(cursor, session.document.borrow().text.as_lines()),
+                    Affinity::Before,
+                    None,
+                )
+            })
+        });
     }
 
     pub fn insert(&mut self, text: Text) {
@@ -539,6 +554,35 @@ impl Session {
         self.wrap_data[line] = Some(wrap_data);
         self.y.truncate(line + 1);
         self.update_column_count(line);
+    }
+
+    fn modify_selections(&mut self, reset_anchor: bool, mut f: impl FnMut(&Session, Selection) -> Selection) {
+        let mut selections = mem::take(&mut self.selections);
+        for selection in &mut selections {
+            *selection = f(&self, *selection);
+            if reset_anchor {
+                *selection = selection.reset_anchor();
+            }
+        }
+        self.selections = selections;
+        let mut current_selection_index = 0;
+        while current_selection_index + 1 < self.selections.len() {
+            let next_selection_index = current_selection_index + 1;
+            let current_selection = self.selections[current_selection_index];
+            let next_selection = self.selections[next_selection_index];
+            assert!(current_selection.start() <= next_selection.start());
+            if let Some(merged_selection) = current_selection.merge(next_selection) {
+                self.selections[current_selection_index] = merged_selection;
+                self.selections.remove(next_selection_index);
+                if let Some(pending_selection_index) = self.pending_selection_index.as_mut() {
+                    if next_selection_index < *pending_selection_index {
+                        *pending_selection_index -= 1;
+                    }
+                }
+            } else {
+                current_selection_index += 1;
+            }
+        }
     }
 
     fn apply_changes(&mut self, changes: &[Change]) {
