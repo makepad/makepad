@@ -4,13 +4,13 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_error_log::*,
-        makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
+        makepad_live_tokenizer::{/*Delim, TokenPos, TokenRange, TokenWithLen,*/ FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
         live_error::{LiveError, LiveErrorSpan, LiveFileError},
         live_parser::LiveParser,
         live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveIdAsProp},
-        live_node_reader::{LiveNodeMutReader},
-        live_node_vec::{LiveNodeSliceApi, LiveNodeVecApi},
+        /*live_node_reader::{LiveNodeMutReader},*/
+        live_node_vec::{LiveNodeSliceApi, /*LiveNodeVecApi*/},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId, LiveFileGeneration},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
         span::{TextSpan, TextPos},
@@ -21,14 +21,14 @@ use {
 
 #[derive(Default)]
 pub struct LiveFile {
-    pub(crate) reexpand: bool,
+    pub (crate) reexpand: bool,
     
     pub module_id: LiveModuleId,
-    pub(crate) start_pos: TextPos,
+    pub (crate) start_pos: TextPos,
     pub file_name: String,
-    pub(crate) cargo_manifest_path: String,
-    pub(crate) source: String,
-    pub(crate) deps: BTreeSet<LiveModuleId>,
+    pub (crate) cargo_manifest_path: String,
+    pub (crate) source: String,
+    pub (crate) deps: BTreeSet<LiveModuleId>,
     
     pub generation: LiveFileGeneration,
     pub original: LiveOriginal,
@@ -39,23 +39,19 @@ pub struct LiveFile {
 }
 
 pub struct LiveRegistry {
-    pub(crate) file_ids: HashMap<String, LiveFileId>,
+    pub (crate) file_ids: HashMap<String, LiveFileId>,
     pub module_id_to_file_id: HashMap<LiveModuleId, LiveFileId>,
     pub live_files: Vec<LiveFile>,
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
     //pub ignore_no_dsl: HashSet<LiveId>,
-    pub main_module: Option<LiveFileId>,
+    pub main_module: Option<(LiveModuleId, LiveId)>,
     pub components: LiveComponentRegistries,
     pub package_root: Option<String>
 }
 
 impl Default for LiveRegistry {
     fn default() -> Self {
-        //let mut ignore_no_dsl = HashSet::new();
-        //ignore_no_dsl.insert(live_id!(Namespace));
-        //ignore_no_dsl.insert(live_id!(struct));
         Self {
-            //ignore_no_dsl,
             main_module: None,
             file_ids: HashMap::new(),
             module_id_to_file_id: HashMap::new(),
@@ -63,8 +59,6 @@ impl Default for LiveRegistry {
             live_type_infos: HashMap::new(),
             components: LiveComponentRegistries::default(),
             package_root: None
-            //mutated_apply: None,
-            //mutated_tokens: None
         }
     }
 }
@@ -81,14 +75,16 @@ pub enum LiveScopeTarget {
     LivePtr(LivePtr)
 }
 
+
 #[derive(Clone, Debug, PartialEq)]
-pub enum LiveEditEvent {
-    ReparseDocument,
-    Mutation {tokens: Vec<LiveTokenId>, apply: Vec<LiveNode>, live_ptrs: Vec<LivePtr>},
+pub struct LiveFileChange {
+    pub file_name: String,
+    pub content: String
 }
 
-impl LiveRegistry {
 
+impl LiveRegistry {
+    
     pub fn generation_valid(&self, live_ptr: LivePtr) -> bool {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         doc.generation == live_ptr.generation
@@ -102,9 +98,9 @@ impl LiveRegistry {
         doc.expanded.resolve_ptr(live_ptr.index as usize)
     }
     
-    pub fn file_name_to_file_id(&self, file_name:&str) -> Option<LiveFileId> {
-        for (index, file) in self.live_files.iter().enumerate(){
-            if file.file_name == file_name{
+    pub fn file_name_to_file_id(&self, file_name: &str) -> Option<LiveFileId> {
+        for (index, file) in self.live_files.iter().enumerate() {
+            if file.file_name == file_name {
                 return Some(LiveFileId::new(index))
             }
         }
@@ -118,26 +114,26 @@ impl LiveRegistry {
     pub fn file_id_to_cargo_manifest_path(&self, file_id: LiveFileId) -> String {
         let file = &self.live_files[file_id.to_index()];
         let manifest_path = &file.cargo_manifest_path;
-        if let Some(package_root) = &self.package_root{
-            if file.module_id.0.0 == 0{
+        if let Some(package_root) = &self.package_root {
+            if file.module_id.0.0 == 0 {
                 return package_root.to_string();
             }
-            return format!("{}/{}", package_root, file.module_id.0); 
+            return format!("{}/{}", package_root, file.module_id.0);
         }
         manifest_path.to_string()
     }
- 
+    
     pub fn crate_name_to_cargo_manifest_path(&self, crate_name: &str) -> Option<String> {
-        let crate_name = crate_name.replace('-',"_");
+        let crate_name = crate_name.replace('-', "_");
         let base_crate = LiveId::from_str(&crate_name).unwrap();
-        for file in &self.live_files{
-            if file.module_id.0 == base_crate{
-                if let Some(package_root) = &self.package_root{
-                    return Some(format!("{}/{}", package_root, crate_name)); 
+        for file in &self.live_files {
+            if file.module_id.0 == base_crate {
+                if let Some(package_root) = &self.package_root {
+                    return Some(format!("{}/{}", package_root, crate_name));
                 }
                 return Some(file.cargo_manifest_path.to_string())
             }
-        }  
+        }
         None
     }
     
@@ -161,8 +157,12 @@ impl LiveRegistry {
         &self.live_files[file_id.to_index()]
     }
     
-    pub fn file_id_index_to_live_ptr(&self, file_id: LiveFileId, index:usize) -> LivePtr {
-        LivePtr{
+    pub fn file_id_to_file_mut(&mut self, file_id: LiveFileId) -> &mut LiveFile {
+        &mut self.live_files[file_id.to_index()]
+    }
+    
+    pub fn file_id_index_to_live_ptr(&self, file_id: LiveFileId, index: usize) -> LivePtr {
+        LivePtr {
             file_id,
             index: index as u32,
             generation: self.live_files[file_id.to_index()].generation
@@ -186,7 +186,7 @@ impl LiveRegistry {
         None
     }
     
-
+    
     pub fn token_id_to_origin_doc(&self, token_id: LiveTokenId) -> &LiveOriginal {
         &self.live_files[token_id.file_id().unwrap().to_index()].original
     }
@@ -247,9 +247,9 @@ impl LiveRegistry {
         None
     }
     
-     pub fn module_id_and_name_to_ptr(&self, module_id: LiveModuleId, name: LiveId) -> Option<LivePtr> {
+    pub fn module_id_and_name_to_ptr(&self, module_id: LiveModuleId, name: LiveId) -> Option<LivePtr> {
         if let Some(file_id) = self.module_id_to_file_id.get(&module_id) {
-            let live= &self.live_files[file_id.to_index()];
+            let live = &self.live_files[file_id.to_index()];
             let doc = &live.expanded;
             if name != LiveId::empty() {
                 if doc.nodes.is_empty() {
@@ -257,14 +257,14 @@ impl LiveRegistry {
                     return None
                 }
                 if let Some(index) = doc.nodes.child_by_name(0, name.as_instance()) {
-                    return Some(LivePtr {file_id:*file_id, index:index as u32, generation:live.generation});
+                    return Some(LivePtr {file_id: *file_id, index: index as u32, generation: live.generation});
                 }
                 else {
                     return None
                 }
             }
             else {
-                return Some(LivePtr {file_id:*file_id, index:0, generation:live.generation});
+                return Some(LivePtr {file_id: *file_id, index: 0, generation: live.generation});
             }
         }
         None
@@ -306,7 +306,7 @@ impl LiveRegistry {
         // ok lets find it in that other doc
         if let Some(file_id) = self.module_id_to_file_id(module_id) {
             let file = self.file_id_to_file(file_id);
-            if file.expanded.nodes.is_empty(){
+            if file.expanded.nodes.is_empty() {
                 log!("Looking for {} but its not expanded yet, dependency order bug", file.file_name);
                 return None
             }
@@ -318,12 +318,12 @@ impl LiveRegistry {
         }
         None
     }
-      
+    
     pub fn find_scope_target(&self, item: LiveId, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
-        if let LiveValue::Root{id_resolve} = &nodes[0].value{
+        if let LiveValue::Root {id_resolve} = &nodes[0].value {
             id_resolve.get(&item).cloned()
         }
-        else{
+        else {
             log!("Can't find scope target on rootnode without id_resolve");
             None
         }
@@ -363,11 +363,11 @@ impl LiveRegistry {
                 }
             }
             LiveErrorSpan::Token(token_span) => {
-                let (file_name, span) = if let Some(file_id) = token_span.token_id.file_id(){
-                    let live_file= &self.live_files[file_id.to_index()];
-                    (live_file.file_name.as_str(),live_file.original.tokens[token_span.token_id.token_index()].span)
+                let (file_name, span) = if let Some(file_id) = token_span.token_id.file_id() {
+                    let live_file = &self.live_files[file_id.to_index()];
+                    (live_file.file_name.as_str(), live_file.original.tokens[token_span.token_id.token_index()].span)
                 }
-                else{
+                else {
                     ("<file id is not defined>", TextSpan::default())
                 };
                 LiveFileError {
@@ -428,7 +428,7 @@ impl LiveRegistry {
         tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok(tokens)
     }
-    
+    /*
     // called by the live editor to update a live file
     pub fn live_edit_file<'a, CB>(
         &mut self,
@@ -571,9 +571,72 @@ impl LiveRegistry {
         }
         
         Ok(None)
-    }
+    }*/
     
+    pub fn process_file_changes(&mut self, changes: Vec<LiveFileChange>, errors:&mut Vec<LiveError >){
+        for change in changes {
+            let file_id = self.file_name_to_file_id(&change.file_name).unwrap();
+            let live_file = self.file_id_to_file_mut(file_id);
+            
+            match Self::tokenize_from_str(&change.content, TextPos::default(), file_id) {
+                Err(msg) => errors.push(msg), //panic!("Lex error {}", msg),
+                Ok(new_tokens) => {
+                    // ok we now have to find a token pair
+                    #[derive(Debug)]
+                    enum State{
+                        FindStart,
+                        FindEnd(usize, usize),
+                        Done(usize, usize),
+                        Error
+                    }
+                    let mut state = State::FindStart;
+                    for i in 0..new_tokens.len(){
+                        if let State::FindStart = state{
+                            if let LiveToken::Ident(live_id!(live_design)) = new_tokens[i].token{
+                                state = State::FindEnd(i, 0)
+                            }
+                        }
+                        else if let State::FindEnd(start, depth) = &mut state{
+                            if new_tokens[i].token.is_open(){
+                                *depth += 1;
+                            }
+                            else if new_tokens[i].token.is_close(){
+                                if *depth== 0{
+                                    state = State::Error;
+                                    break;
+                                }
+                                *depth -=1;
+                                if *depth== 0{
+                                    // we have found the closing brace
+                                    state = State::Done(*start, i);
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    // we have our live_design!{} thing
+                    if let State::Done(start, end) = state{
+                        let mut parser = LiveParser::new(&new_tokens[(start+3)..(end)], &live_file.live_type_infos, file_id);
+                        match parser.parse_live_document() {
+                            Err(msg) => {
+                                errors.push(msg);
+                            },
+                            Ok(ld) => { // only swap it out when it parses
+                                live_file.original = ld;
+                                live_file.reexpand = true;
+                                live_file.generation.next_gen();
+                            }
+                        };
+                    }
+                }
+            };
+        }
+        // try to re-expand
+        self.expand_all_documents(errors);
+    }
+    /*
     pub fn process_next_originals_and_expand(&mut self) -> Result<(), Vec<LiveError >> {
+        
         for live_file in &mut self.live_files {
             if live_file.next_original.is_some() {
                 live_file.original = live_file.next_original.take().unwrap();
@@ -590,8 +653,8 @@ impl LiveRegistry {
         } else {
             Ok(())
         }
-    }
-    
+    }*/
+    /*
     fn update_documents_from_mutated_tokens(
         &mut self,
         mutated_tokens: &[LiveTokenId]
@@ -665,7 +728,7 @@ impl LiveRegistry {
         }
         diff.close();
         (diff, live_ptrs)
-    }
+    }*/
     
     pub fn register_live_file(
         &mut self,
@@ -739,7 +802,7 @@ impl LiveRegistry {
         }
         
         let live_file = LiveFile {
-            cargo_manifest_path:cargo_manifest_path.to_string(),
+            cargo_manifest_path: cargo_manifest_path.to_string(),
             reexpand: true,
             module_id: own_module_id,
             file_name: file_name.to_string(),
@@ -889,7 +952,7 @@ impl FileDepIter {
         for (file_index, live_file) in live_files.iter().enumerate() {
             if live_file.deps.contains(&module_id) {
                 let dep_id = LiveFileId::new(file_index);
-                if !self.files_done.iter().any(|v| *v == dep_id) {
+                if !self.files_done.iter().any( | v | *v == dep_id) {
                     self.files_todo.push(dep_id);
                 }
             }

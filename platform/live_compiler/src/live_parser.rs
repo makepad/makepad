@@ -66,7 +66,12 @@ impl<'a> LiveParser<'a> {
     
     fn skip_token(&mut self) {
         self.end = self.token_with_span.span.end;
-        self.token_with_span = self.tokens_with_span.next().unwrap();
+        if let Some(next) = self.tokens_with_span.next(){
+            self.token_with_span = next;
+        }
+        else {
+            self.token_with_span.token = LiveToken::Eof
+        }
         self.token_index += 1;
     }
     

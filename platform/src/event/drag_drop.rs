@@ -2,9 +2,11 @@ use {
     std::cell::{Cell},
     std::rc::Rc,
     crate::{
+        makepad_live_id::*,
         makepad_math::*,
         event::{
-            finger::{HitOptions,Margin},
+            KeyModifiers,
+            finger::{HitOptions, Margin},
             event::{Event, DragHit}
         },
         cx::Cx,
@@ -15,32 +17,37 @@ use {
 
 #[derive(Clone, Debug)]
 pub struct DragEvent {
+    pub modifiers: KeyModifiers,
     pub handled: Cell<bool>,
     pub abs: DVec2,
-    pub state: DragState,
+    pub items: Rc<Vec<DragItem >>,
     pub response: Rc<Cell<DragResponse >>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DropEvent {
+    pub modifiers: KeyModifiers,
     pub handled: Cell<bool>,
     pub abs: DVec2,
-    pub dragged_item: DraggedItem,
+    pub items: Rc<Vec<DragItem >>,
 }
 
-#[derive(Debug, PartialEq)]
-pub struct DragHitEvent<'a> {
+#[derive(Clone, Debug, PartialEq)]
+pub struct DragHitEvent {
+    pub modifiers: KeyModifiers,
     pub abs: DVec2,
     pub rect: Rect,
     pub state: DragState,
-    pub response: &'a Cell<DragResponse>,
+    pub items: Rc<Vec<DragItem >>,
+    pub response: Rc<Cell<DragResponse >>,
 }
 
-#[derive(Debug, PartialEq)]
-pub struct DropHitEvent<'a> {
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropHitEvent {
+    pub modifiers: KeyModifiers,
     pub abs: DVec2,
     pub rect: Rect,
-    pub dragged_item: &'a DraggedItem,
+    pub items: Rc<Vec<DragItem >>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,9 +66,11 @@ pub enum DragResponse {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DraggedItem {
-    pub file_urls: Vec<String>
+pub enum DragItem {
+    FilePath {path: String, internal_id: Option<LiveId>},
+    String {value: String, internal_id: Option<LiveId>}
 }
+
 /*
 pub enum HitTouch {
     Single,
@@ -73,12 +82,12 @@ pub enum HitTouch {
 
 
 #[derive(Default)]
-pub struct CxFingerDrag {
+pub struct CxDragDrop {
     drag_area: Area,
     next_drag_area: Area,
 }
 
-impl CxFingerDrag {
+impl CxDragDrop {
     #[allow(dead_code)]
     pub (crate) fn cycle_drag(&mut self) {
         self.drag_area = self.next_drag_area;
@@ -102,33 +111,39 @@ impl Event {
         match self {
             Event::Drag(event) => {
                 let rect = area.get_clipped_rect(cx);
-                if area == cx.finger_drag.drag_area {
+                if area == cx.drag_drop.drag_area {
                     if !event.handled.get() && Margin::rect_contains_with_margin(&rect, event.abs, &options.margin) {
-                        cx.finger_drag.next_drag_area = area;
+                        cx.drag_drop.next_drag_area = area;
                         event.handled.set(true);
                         DragHit::Drag(DragHitEvent {
                             rect,
+                            modifiers: event.modifiers,
                             abs: event.abs,
-                            state: event.state.clone(),
-                            response: &event.response
+                            items: event.items.clone(),
+                            state: DragState::Over,
+                            response: event.response.clone()
                         })
                     } else {
                         DragHit::Drag(DragHitEvent {
                             rect,
+                            modifiers: event.modifiers,
                             state: DragState::Out,
+                            items: event.items.clone(),
                             abs: event.abs,
-                            response: &event.response
+                            response: event.response.clone()
                         })
                     }
                 } else {
                     if !event.handled.get() && Margin::rect_contains_with_margin(&rect, event.abs, &options.margin) {
-                        cx.finger_drag.next_drag_area = area;
+                        cx.drag_drop.next_drag_area = area;
                         event.handled.set(true);
                         DragHit::Drag(DragHitEvent {
+                            modifiers: event.modifiers,
                             rect,
                             state: DragState::In,
+                            items: event.items.clone(),
                             abs: event.abs,
-                            response: &event.response
+                            response: event.response.clone()
                         })
                     } else {
                         DragHit::NoHit
@@ -138,12 +153,13 @@ impl Event {
             Event::Drop(event) => {
                 let rect = area.get_clipped_rect(cx);
                 if !event.handled.get() && Margin::rect_contains_with_margin(&rect, event.abs, &options.margin) {
-                    cx.finger_drag.next_drag_area = Area::default();
+                    cx.drag_drop.next_drag_area = Area::default();
                     event.handled.set(true);
                     DragHit::Drop(DropHitEvent {
+                        modifiers: event.modifiers,
                         rect,
                         abs: event.abs,
-                        dragged_item: &event.dragged_item
+                        items: event.items.clone()
                     })
                 } else {
                     DragHit::NoHit

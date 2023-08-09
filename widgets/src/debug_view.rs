@@ -15,14 +15,13 @@ live_design!{
         draw_depth: 20.0
     }
     
-    DebugView = {{DebugView}} {
+    DebugView = {{DebugView}} {  
         label: {
             text_style: {
                 font_size: 6
             },
             color: #a
         }
-        view: {}
     }
 }
 
@@ -36,7 +35,7 @@ pub struct DrawRect {
 
 #[derive(Live, LiveHook)]
 pub struct DebugView {
-    #[live] view: View,
+    #[live] draw_list: DrawList2d,
     #[live] rect: DrawRect,
     #[live] label: DrawText
 }
@@ -44,12 +43,12 @@ pub struct DebugView {
 impl DebugView {
     pub fn handle_event(&mut self, cx: &mut Cx, _event: &Event) {
         if cx.debug.has_data() {
-            self.view.redraw(cx);
+            self.draw_list.redraw(cx);
         }
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if !self.view.begin(cx, Walk::default()).is_redrawing() {
+        if !self.draw_list.begin(cx, Walk::default()).is_redrawing() {
             return
         }
         let debug = cx.debug.clone();
@@ -76,7 +75,7 @@ impl DebugView {
             self.label.draw_abs(cx, point, &label);
         }
         
-        self.view.end(cx);
+        self.draw_list.end(cx);
         
     }
 }

@@ -9,7 +9,7 @@ live_design!{
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
     
-    Tab= {{Tab}} {
+    Tab = {{Tab}} {
         draw_name: {
             text_style: <FONT_LABEL> {}
             instance hover: 0.0
@@ -50,7 +50,7 @@ live_design!{
                 return sdf.stroke(BORDER_COLOR, BORDER_WIDTH)*/
             }
         }
-        walk:{
+        walk: {
             width: Fit,
             height: Fill, //Fixed((DIM_TAB_HEIGHT)),
         }
@@ -65,7 +65,7 @@ live_design!{
             },
         }
         
-        state:{
+        state: {
             hover = {
                 default: off
                 off = {
@@ -113,11 +113,11 @@ live_design!{
 #[derive(Live, LiveHook)]
 pub struct Tab {
     #[rust] is_selected: bool,
-    #[rust] is_dragged: bool,
+    #[rust] is_dragging: bool,
     
     #[live] draw_bg: DrawQuad,
     #[live] draw_name: DrawText,
-    #[live] draw_drag: DrawColor,
+    //#[live] draw_drag: DrawColor,
     
     #[state] state: LiveState,
     
@@ -127,15 +127,20 @@ pub struct Tab {
     
     #[live] hover: f32,
     #[live] selected: f32,
-
-    #[live] walk: Walk, 
+    
+    #[live(10.0)] min_drag_dist: f64,
+    
+    #[live] walk: Walk,
     #[live] layout: Layout,
+    
 }
 
 pub enum TabAction {
     WasPressed,
     CloseWasPressed,
-    ReceivedDraggedItem(DraggedItem),
+    ShouldTabStartDrag,
+    ShouldTabStopDrag
+    //DragHit(DragHit)
 }
 
 impl Tab {
@@ -155,15 +160,18 @@ impl Tab {
         //self.name_text.color = self.name_color(self.is_selected);
         self.close_button.draw(cx);
         //cx.turtle_align_y();
-        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(),  name);
+        self.draw_name.draw_walk(cx, Walk::fit(), Align::default(), name);
         //cx.turtle_align_y();
         self.draw_bg.end(cx);
         
-        if self.is_dragged {
-            self.draw_drag.draw_abs(cx, self.draw_bg.area().get_clipped_rect(cx));
-        }
+        //if self.is_dragged {
+        //    self.draw_drag.draw_abs(cx, self.draw_bg.area().get_clipped_rect(cx));
+        //}
     }
     
+    pub fn area(&self)->Area{
+        self.draw_bg.area()
+    }
     
     pub fn handle_event_with(
         &mut self,
@@ -188,36 +196,53 @@ impl Tab {
             Hit::FingerHoverOut(_) => if !block_hover_out {
                 self.animate_state(cx, id!(hover.off));
             }
+            Hit::FingerMove(e) => {
+                if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist {
+                    self.is_dragging = true;
+                    dispatch_action(cx, TabAction::ShouldTabStartDrag);
+                }
+            }
+            Hit::FingerUp(_) => {
+                if self.is_dragging {
+                    dispatch_action(cx, TabAction::ShouldTabStopDrag);
+                    self.is_dragging = false;
+                }
+            }
             Hit::FingerDown(_) => {
                 dispatch_action(cx, TabAction::WasPressed);
             }
             _ => {}
         }
+        /*
         match event.drag_hits(cx, self.draw_bg.area()) {
+            DragHit::NoHit => (),
+            hit => dispatch_action(cx, TabAction::DragHit(hit))
+            /*
             DragHit::Drag(f) => match f.state {
                 DragState::In => {
-                    self.is_dragged = true;
-                    self.draw_bg.redraw(cx);
-                    f.response.set(DragResponse::Copy);
+                    log!("DRAGSTATE IN");
+                    //self.is_dragged = true;
+                    //self.draw_bg.redraw(cx);
+                    //f.response.set(DragResponse::Copy);
                 }
                 DragState::Out => {
-                    self.is_dragged = false;
-                    self.draw_bg.redraw(cx);
+                    //self.is_dragged = false;
+                    //self.draw_bg.redraw(cx);
                 }
-                DragState::Over => match event {
-                    Event::Drag(event) => {
-                        event.response.set(DragResponse::Copy);
-                    }
-                    _ => panic!(),
+                DragState::Over => {
+                    //Event::Drag(event) => {
+                    //    event.response.set(DragResponse::Copy);
+                    //}
+                    //_ => panic!(),
                 },
             },
-            DragHit::Drop(f) => {
-                self.is_dragged = false;
-                self.draw_bg.area().redraw(cx);
-                dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))
+            DragHit::Drop(_f) => {
+                //self.is_dragged = false;
+                //self.draw_bg.area().redraw(cx);
+                //dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))
             }
-            _ => {}
-        }
+            _ => {}*/
+        }*/
     }
 }
 

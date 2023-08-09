@@ -3,7 +3,7 @@ use {
         collections::{HashSet, HashMap}
     },
     crate::{
-        makepad_live_compiler::LiveEditEvent,
+        //makepad_live_compiler::LiveEditEvent,
         makepad_live_id::LiveId,
         cx::Cx,
         area::Area,
@@ -34,7 +34,7 @@ pub enum Event {
     Resume,
 
     Draw(DrawEvent),
-    LiveEdit(LiveEditEvent),
+    LiveEdit,
     AppGotFocus,
     AppLostFocus,
     NextFrame(NextFrameEvent),
@@ -107,9 +107,10 @@ pub enum Hit{
     Nothing
 }
 
-pub enum DragHit<'a>{
-    Drag(DragHitEvent<'a>),
-    Drop(DropHitEvent<'a>),
+#[derive(Clone)]
+pub enum DragHit{
+    Drag(DragHitEvent),
+    Drop(DropHitEvent),
     DragEnd,
     NoHit
 }
