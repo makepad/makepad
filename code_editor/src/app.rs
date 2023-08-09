@@ -1,6 +1,11 @@
 use {
-    makepad_code_editor::{code_editor, state::ViewId, CodeEditor},
+    makepad_code_editor::{
+        code_editor,
+        state::{Document, Session},
+        CodeEditor,
+    },
     makepad_widgets::*,
+    std::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
@@ -30,15 +35,14 @@ impl AppMain for App {
             let mut cx = Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(&mut cx).hook_widget() {
                 if next == self.ui.get_widget(id!(code_editor)) {
-                    let mut context = self.state.code_editor.context(self.state.view_id);
-                    self.code_editor.draw(&mut cx, &mut context);
+                    self.code_editor.draw(&mut cx, &mut self.state.session);
                 }
             }
             return;
         }
         self.ui.handle_widget_event(cx, event);
         self.code_editor
-            .handle_event(cx, &mut self.state.code_editor, self.state.view_id, event)
+            .handle_event(cx, &mut self.state.session, event);
     }
 }
 
@@ -50,17 +54,15 @@ impl LiveHook for App {
 }
 
 struct State {
-    code_editor: makepad_code_editor::State,
-    view_id: ViewId,
+    session: Session,
 }
 
 impl Default for State {
     fn default() -> Self {
-        let mut code_editor = makepad_code_editor::State::new();
-        let view_id = code_editor.open_view("code_editor/test.rs").unwrap();
         Self {
-            code_editor,
-            view_id,
+            session: Session::new(Rc::new(RefCell::new(Document::new(
+                include_str!("state.rs").into(),
+            )))),
         }
     }
 }

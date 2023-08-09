@@ -1,27 +1,22 @@
-pub mod bias;
-pub mod biased_text_pos;
+pub mod change;
 pub mod char;
 pub mod code_editor;
-pub mod context;
-pub mod cursor;
-pub mod text_diff;
-pub mod edit_ops;
-pub mod text_len;
+pub mod extent;
+pub mod inlays;
+pub mod iter;
 pub mod line;
-pub mod move_ops;
-pub mod text_pos;
-pub mod text_range;
+pub mod point;
+pub mod range;
 pub mod selection;
 pub mod settings;
 pub mod state;
 pub mod str;
 pub mod text;
 pub mod token;
-pub mod tokenizer;
-pub mod view;
+pub mod widgets;
+pub mod wrap;
 
-pub use crate::{
-    bias::Bias, biased_text_pos::BiasedTextPos, code_editor::CodeEditor, context::Context, cursor::Cursor,
-    text_diff::Diff, text_len::TextLen, line::Line, text_pos::TextPos, text_range::TextRange, selection::Selection,
-    settings::Settings, state::State, text::Text, token::Token, tokenizer::Tokenizer, view::View,
+pub use self::{
+    change::Change, code_editor::CodeEditor, extent::Extent, line::Line, point::Point,
+    range::Range, selection::Selection, settings::Settings, text::Text, token::Token,
 };
