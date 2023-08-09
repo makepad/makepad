@@ -8,6 +8,7 @@ pub struct Selection {
     pub anchor: Point,
     pub cursor: Point,
     pub affinity: Affinity,
+    pub preferred_column: Option<usize>,
 }
 
 impl Selection {
@@ -67,6 +68,23 @@ impl Selection {
         }
     }
 
+    pub fn reset_anchor(self) -> Self {
+        Self {
+            anchor: self.cursor,
+            ..self
+        }
+    }
+
+    pub fn update_cursor(self, f: impl FnOnce(Point, Affinity, Option<usize>) -> (Point, Affinity, Option<usize>)) -> Self {
+        let (cursor, affinity, preferred_column) = f(self.cursor, self.affinity, self.preferred_column);
+        Self {
+            cursor,
+            affinity,
+            preferred_column,
+            ..self
+        }
+    }
+
     pub fn merge(self, other: Self) -> Option<Self> {
         if self.should_merge(other) {
             Some(if self.anchor <= self.cursor {
@@ -74,12 +92,14 @@ impl Selection {
                     anchor: self.anchor,
                     cursor: other.cursor,
                     affinity: other.affinity,
+                    preferred_column: other.preferred_column,
                 }
             } else {
                 Selection {
                     anchor: other.anchor,
                     cursor: self.cursor,
                     affinity: self.affinity,
+                    preferred_column: self.preferred_column,
                 }
             })
         } else {
