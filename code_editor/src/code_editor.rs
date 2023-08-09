@@ -86,20 +86,30 @@ live_design! {
 
 #[derive(Live)]
 pub struct CodeEditor {
-    #[live] scroll_bars: ScrollBars,
-    #[live] walk: Walk,
-    #[rust] draw_state: DrawStateWrap<Walk>,
-    #[live] draw_text: DrawText,
-    #[live] draw_selection: DrawSelection,
-    #[live] draw_cursor: DrawColor,
-    #[rust] viewport_rect: Rect,
-    #[rust] cell_size: DVec2,
-    #[rust] start: usize,
-    #[rust] end: usize,
+    #[live]
+    scroll_bars: ScrollBars,
+    #[live]
+    walk: Walk,
+    #[rust]
+    draw_state: DrawStateWrap<Walk>,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    draw_selection: DrawSelection,
+    #[live]
+    draw_cursor: DrawColor,
+    #[rust]
+    viewport_rect: Rect,
+    #[rust]
+    cell_size: DVec2,
+    #[rust]
+    start: usize,
+    #[rust]
+    end: usize,
 }
 
 impl LiveHook for CodeEditor {
-    fn before_live_design(cx:&mut Cx){
+    fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, CodeEditor)
     }
 }
@@ -108,20 +118,27 @@ impl Widget for CodeEditor {
     fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_bars.redraw(cx);
     }
-    
-    fn handle_widget_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+
+    fn handle_widget_event_with(
+        &mut self,
+        _cx: &mut Cx,
+        _event: &Event,
+        _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
+    ) {
         //let uid = self.widget_uid();
         /*self.handle_event_with(cx, event, &mut | cx, action | {
             dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
         });*/
         //self.handle_event
     }
-    
-    fn get_walk(&self) -> Walk {self.walk}
-    
+
+    fn get_walk(&self) -> Walk {
+        self.walk
+    }
+
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if self.draw_state.begin(cx, walk) {
-            return WidgetDraw::hook_above()
+            return WidgetDraw::hook_above();
         }
         self.draw_state.end();
         WidgetDraw::done()
@@ -129,31 +146,33 @@ impl Widget for CodeEditor {
 }
 
 #[derive(Clone, PartialEq, WidgetRef)]
-pub struct CodeEditorRef(WidgetRef); 
+pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
-        
-        let walk = if let Some(walk) = self.draw_state.get(){walk}else{panic!()};
+        let walk = if let Some(walk) = self.draw_state.get() {
+            walk
+        } else {
+            panic!()
+        };
         /*let rect = cx.walk_turtle(walk);*/
-        
+
         self.scroll_bars.begin(cx, walk, Layout::default());
-        
+
         self.viewport_rect = cx.turtle().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
-        
+
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         session.handle_changes();
         session.set_wrap_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
-        self.start =
-            session.find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
+        self.start = session.find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
         self.end = session.find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
-        
+
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
         cx.turtle_mut().set_used(
@@ -252,7 +271,7 @@ impl CodeEditor {
                     cx.redraw_all();
                 }
             }
-            Hit::FingerMove(FingerMoveEvent { abs,  .. }) => {
+            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
                     cx.redraw_all();
@@ -718,5 +737,3 @@ impl DrawSelection {
         }
     }
 }
-
-

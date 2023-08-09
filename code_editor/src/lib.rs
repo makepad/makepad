@@ -21,9 +21,17 @@ pub mod widgets;
 pub mod wrap;
 
 pub use self::{
-    state::{Session,Document},
-    change::Change, code_editor::CodeEditor, extent::Extent, line::Line, point::Point,
-    range::Range, selection::Selection, settings::Settings, text::Text, token::Token,
+    change::Change,
+    code_editor::CodeEditor,
+    extent::Extent,
+    line::Line,
+    point::Point,
+    range::Range,
+    selection::Selection,
+    settings::Settings,
+    state::{Document, Session},
+    text::Text,
+    token::Token,
 };
 
 pub fn live_design(cx: &mut Cx) {
