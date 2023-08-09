@@ -452,7 +452,7 @@ impl LiveHook for Frame {
             match cx.get_dependency(image_path) {
                 Ok(data) => {
                     if image_path.ends_with(".jpg") {
-                        match jpeg::decode(data) {
+                        match jpeg::decode(&data) {
                             Ok(image) => {
                                 if self.image_scale != 0.0 {
                                     self.walk = Walk::fixed_size(DVec2 {x: image.width as f64 * self.image_scale, y: image.height as f64 * self.image_scale});
@@ -465,7 +465,7 @@ impl LiveHook for Frame {
                         }
                     }
                     else if image_path.ends_with(".png") {
-                        match png::decode(data) {
+                        match png::decode(&data) {
                             Ok(image) => {
                                 if self.image_scale != 0.0 {
                                     self.walk = Walk::fixed_size(DVec2 {x: image.width as f64 * self.image_scale, y: image.height as f64 * self.image_scale});
