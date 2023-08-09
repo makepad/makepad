@@ -251,7 +251,7 @@ impl Session {
             },
         );
     }
-
+    
     pub fn move_to(&mut self, cursor: Point, affinity: Affinity) {
         let mut pending_selection_index = self.pending_selection_index.unwrap();
         self.selections[pending_selection_index] = Selection {
@@ -295,7 +295,10 @@ impl Session {
             .edit(&self.selections, |text, point, _| {
                 let line = &text.as_lines()[point.line];
                 (
-                    if line[..point.byte].chars().all(|char| char.is_whitespace()) {
+                    if line[..point.byte]
+                        .chars()
+                        .all(|char| char.is_whitespace())
+                    {
                         Extent {
                             line_count: 0,
                             byte_count: point.byte,
