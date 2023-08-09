@@ -168,6 +168,22 @@ impl CodeEditor {
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
+                key_code: KeyCode::RBracket,
+                modifiers: KeyModifiers { logo: true, .. },
+                ..
+            }) => {
+                session.indent();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::LBracket,
+                modifiers: KeyModifiers { logo: true, .. },
+                ..
+            }) => {
+                session.outdent();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
                 ..
             }) => {
