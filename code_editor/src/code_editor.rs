@@ -145,10 +145,24 @@ impl CodeEditor {
                 cx.redraw_all();
             }
             Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Backspace,
+                key_code: KeyCode::ReturnKey,
+                ..
+            }) => {
+                session.enter();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Delete,
                 ..
             }) => {
                 session.delete();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                session.backspace();
                 cx.redraw_all();
             }
             _ => {}
@@ -266,7 +280,7 @@ impl CodeEditor {
                                         column += widget.column_count;
                                     }
                                     Wrapped::Wrap => {
-                                        column = line.wrap_indent_column();
+                                        column = line.wrap_indent_column_count();
                                         y += line.scale();
                                     }
                                 }
@@ -396,7 +410,7 @@ impl CodeEditor {
                                     if (y..=next_y).contains(&point.y) {
                                         return Some((Point { line, byte }, Affinity::Before));
                                     }
-                                    column = line_ref.wrap_indent_column();
+                                    column = line_ref.wrap_indent_column_count();
                                     y = next_y;
                                 }
                             }
@@ -502,7 +516,7 @@ impl<'a> DrawSelections<'a> {
                                     if self.active_selection.is_some() {
                                         self.draw_selection(cx, line_ref, y, column);
                                     }
-                                    column = line_ref.wrap_indent_column();
+                                    column = line_ref.wrap_indent_column_count();
                                     y += line_ref.scale();
                                 }
                             }
@@ -575,7 +589,7 @@ impl<'a> DrawSelections<'a> {
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, line: Line<'_>, y: f64, column_index: usize) {
+    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, line: Line<'_>, y: f64, column: usize) {
         let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
         self.code_editor.draw_selection.draw(
             cx,
@@ -583,19 +597,19 @@ impl<'a> DrawSelections<'a> {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
                     - self.code_editor.viewport_rect.pos,
                 size: DVec2 {
-                    x: line.column_to_x(column_index) - start_x,
+                    x: line.column_to_x(column) - start_x,
                     y: line.scale(),
                 } * self.code_editor.cell_size,
             },
         );
     }
 
-    fn draw_cursor(&mut self, cx: &mut Cx2d<'_>, line: Line<'_>, y: f64, column_index: usize) {
+    fn draw_cursor(&mut self, cx: &mut Cx2d<'_>, line: Line<'_>, y: f64, column: usize) {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
                 pos: DVec2 {
-                    x: line.column_to_x(column_index),
+                    x: line.column_to_x(column),
                     y,
                 } * self.code_editor.cell_size
                     - self.code_editor.viewport_rect.pos,

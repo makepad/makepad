@@ -1,5 +1,5 @@
 use {
-    crate::{char::CharExt, inlays::InlineInlay, str::StrExt, widgets::InlineWidget, Token},
+    crate::{inlays::InlineInlay, widgets::InlineWidget, wrap::WrapData, Token},
     std::slice::Iter,
 };
 
@@ -12,8 +12,7 @@ pub struct Line<'a> {
     pub text: &'a str,
     pub tokens: &'a [Token],
     pub inline_inlays: &'a [(usize, InlineInlay)],
-    pub wraps: &'a [usize],
-    pub wrap_indent_column: usize,
+    pub wrap_data: Option<&'a WrapData>,
 }
 
 impl<'a> Line<'a> {
@@ -22,7 +21,7 @@ impl<'a> Line<'a> {
     }
 
     pub fn row_count(&self) -> usize {
-        self.wraps.len() + 1
+        self.wrap_data.unwrap().wraps.len() + 1
     }
 
     pub fn column_count(&self) -> usize {
@@ -51,8 +50,8 @@ impl<'a> Line<'a> {
         self.scale
     }
 
-    pub fn wrap_indent_column(self) -> usize {
-        self.wrap_indent_column
+    pub fn wrap_indent_column_count(self) -> usize {
+        self.wrap_data.unwrap().indent_column_count
     }
 
     pub fn text(&self) -> &str {
@@ -76,76 +75,9 @@ impl<'a> Line<'a> {
         Wrappeds {
             inline: inlines.next(),
             inlines,
-            wraps: self.wraps.iter(),
+            wraps: self.wrap_data.unwrap().wraps.iter(),
             position: 0,
         }
-    }
-
-    pub(super) fn compute_wraps(
-        &self,
-        wrap_column: usize,
-        tab_column_count: usize,
-    ) -> (Vec<usize>, usize) {
-        let mut wrap_indent_column: usize = self
-            .text
-            .leading_whitespace()
-            .unwrap_or("")
-            .chars()
-            .map(|char| char.column_count(tab_column_count))
-            .sum();
-        for inline in self.inlines() {
-            match inline {
-                Inline::Text { text, .. } => {
-                    for string in text.split_whitespace_boundaries() {
-                        let column_count: usize = string
-                            .chars()
-                            .map(|char| char.column_count(tab_column_count))
-                            .sum();
-                        if wrap_indent_column + column_count > wrap_column {
-                            wrap_indent_column = 0;
-                            break;
-                        }
-                    }
-                }
-                Inline::Widget(widget) => {
-                    if wrap_indent_column + widget.column_count > wrap_column {
-                        wrap_indent_column = 0;
-                        break;
-                    }
-                }
-            }
-        }
-        let mut byte = 0;
-        let mut column = 0;
-        let mut wraps = Vec::new();
-        for inline in self.inlines() {
-            match inline {
-                Inline::Text { text, .. } => {
-                    for string in text.split_whitespace_boundaries() {
-                        let column_count: usize = string
-                            .chars()
-                            .map(|char| char.column_count(tab_column_count))
-                            .sum();
-                        if column + column_count > wrap_column {
-                            column = wrap_indent_column;
-                            wraps.push(byte);
-                        } else {
-                            column += column_count;
-                        }
-                        byte += string.len();
-                    }
-                }
-                Inline::Widget(widget) => {
-                    if column + widget.column_count > wrap_column {
-                        column = wrap_indent_column;
-                        wraps.push(wrap_indent_column);
-                    } else {
-                        column += widget.column_count;
-                    }
-                }
-            }
-        }
-        (wraps, wrap_indent_column)
     }
 }
 
