@@ -2,7 +2,8 @@ use crate::char::CharExt;
 
 pub trait StrExt {
     fn column_count(&self, tab_column_count: usize) -> usize;
-    fn total_indent(&self) -> Option<&str>;
+    fn indentation(&self) -> Option<&str>;
+    fn longest_common_prefix(&self, other: &str) -> &str;
     fn graphemes(&self) -> Graphemes<'_>;
     fn split_whitespace_boundaries(&self) -> SplitWhitespaceBoundaries<'_>;
 }
@@ -14,10 +15,19 @@ impl StrExt for str {
             .sum()
     }
 
-    fn total_indent(&self) -> Option<&str> {
+    fn indentation(&self) -> Option<&str> {
         self.char_indices()
             .find(|(_, char)| !char.is_whitespace())
             .map(|(index, _)| &self[..index])
+    }
+
+    fn longest_common_prefix(&self, other: &str) -> &str {
+        &self[..self
+            .char_indices()
+            .zip(other.chars())
+            .find(|((_, char_0), char_1)| char_0 == char_1)
+            .map(|((index, _), _)| index)
+            .unwrap_or_else(|| self.len().min(other.len()))]
     }
 
     fn graphemes(&self) -> Graphemes<'_> {
