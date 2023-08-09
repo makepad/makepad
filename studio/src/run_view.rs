@@ -38,7 +38,7 @@ pub struct DrawApp {
 #[derive(Live)]
 pub struct RunView {
     #[live] walk: Walk,
-    #[rust] draw_state: DrawStateWrap<DrawState>,
+    #[rust] draw_state: DrawStateWrap<Walk>,
     #[live] draw_bg: DrawApp,
     #[state] state: LiveState,
     #[live] frame_delta: f64,
@@ -48,10 +48,6 @@ pub struct RunView {
     #[rust] frame: u64
 }
 
-#[derive(Clone)]
-enum  DrawState{
-    Draw(Walk),
-}
 
 impl LiveHook for RunView {
     fn before_live_design(cx:&mut Cx){
@@ -144,7 +140,7 @@ impl RunView {
         // alright so here we draw em texturezs
         // pick a texture off the buildstate
         let dpi_factor = cx.current_dpi_factor();
-        let walk = if let Some(DrawState::Draw(walk)) = self.draw_state.get(){walk}else{panic!()};
+        let walk = if let Some(walk) = self.draw_state.get(){walk}else{panic!()};
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         // lets pixelsnap rect in position and size
         for client in &manager.clients {
@@ -176,14 +172,6 @@ impl RunView {
 }
 
 impl Widget for RunView{
-   fn handle_widget_event_with(
-        &mut self,
-        _cx: &mut Cx,
-        _event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)
-    ) {
-    }
-
     fn get_walk(&self)->Walk{
         self.walk
     }
@@ -193,9 +181,10 @@ impl Widget for RunView{
     }
     
     fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        if self.draw_state.begin(cx, DrawState::Draw(walk)) {
+        if self.draw_state.begin(cx, walk) {
             return WidgetDraw::hook_above();
         }
+        self.draw_state.end();
         WidgetDraw::done()
     }
 }
@@ -203,22 +192,3 @@ impl Widget for RunView{
 #[derive(Clone, PartialEq, WidgetRef)]
 pub struct RunViewRef(WidgetRef); 
 
-impl RunViewRef{
-    pub fn handle_event(&self, cx: &mut Cx, event: &Event, manager: &mut BuildManager){
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.handle_event(cx, event, manager);
-        }
-    }
-
-    pub fn handle_stdin_to_host(&self, cx: &mut Cx, cmd_id: BuildCmdId, msg: StdinToHost, manager: &mut BuildManager) {
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.handle_stdin_to_host(cx, cmd_id, msg, manager);
-        }
-    }
-    
-    pub fn draw(&self, cx: &mut Cx2d, manager: &BuildManager){
-        if let Some(mut inner) = self.borrow_mut(){
-            inner.draw(cx, manager);
-        }
-    }
-}
