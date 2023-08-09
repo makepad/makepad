@@ -132,6 +132,9 @@ impl CodeEditor {
             session.height() * self.cell_size.y,
         );
         self.scroll_bars.end(cx);
+        if session.update_folds() {
+            cx.redraw_all();
+        }
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, session: &mut Session, event: &Event) {
@@ -140,6 +143,20 @@ impl CodeEditor {
             cx.redraw_all();
         });
         match event {
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Escape,
+                ..
+            }) => {
+                session.fold_indent_level(2);
+                cx.redraw_all();
+            }
+            Event::KeyUp(KeyEvent {
+                key_code: KeyCode::Escape,
+                ..
+            }) => {
+                session.unfold_all();
+                cx.redraw_all();
+            }
             Event::TextInput(TextInputEvent { input, .. }) => {
                 session.insert(input.into());
                 cx.redraw_all();
@@ -202,6 +219,7 @@ impl CodeEditor {
                 for block in blocks {
                     match block {
                         Block::Line { line, .. } => {
+                            self.draw_text.font_scale = line.scale();
                             let mut token_iter = line.tokens().iter().copied();
                             let mut token_slot = token_iter.next();
                             let mut column = 0;
