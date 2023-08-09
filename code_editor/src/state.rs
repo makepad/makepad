@@ -16,7 +16,7 @@ use {
     std::{
         cell::RefCell,
         cmp,
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         iter, mem,
         rc::Rc,
         slice::Iter,
@@ -40,6 +40,9 @@ pub struct Session {
     fold_column: Vec<usize>,
     scale: Vec<f64>,
     wrap_data: Vec<Option<WrapData>>,
+    folding_lines: HashSet<usize>,
+    folded_lines: HashSet<usize>,
+    unfolding_lines: HashSet<usize>,
     selections: Vec<Selection>,
     pending_selection_index: Option<usize>,
     change_receiver: Receiver<Vec<Change>>,
@@ -61,6 +64,9 @@ impl Session {
             fold_column: (0..line_count).map(|_| 0).collect(),
             scale: (0..line_count).map(|_| 1.0).collect(),
             wrap_data: (0..line_count).map(|_| None).collect(),
+            folding_lines: HashSet::new(),
+            folded_lines: HashSet::new(),
+            unfolding_lines: HashSet::new(),
             selections: vec![Selection::default()].into(),
             pending_selection_index: None,
             change_receiver,
@@ -214,6 +220,65 @@ impl Session {
         self.update_y();
     }
 
+    pub fn fold_indent_level(&mut self, min_indent_level: usize) {
+        let document = self.document.borrow();
+        let lines = document.text.as_lines();
+        for line in 0..lines.len() {
+            if let Some(indent) = lines[line].indent() {
+                let indent_column_count: usize = indent
+                    .chars()
+                    .map(|char| char.column_count(self.settings().tab_column_count))
+                    .sum();
+                let indent_level = indent_column_count / self.settings().indent_level_column_count;
+                if indent_level >= min_indent_level && !self.folded_lines.contains(&line) {
+                    self.fold_column[line] = min_indent_level * self.settings.indent_level_column_count;
+                    self.unfolding_lines.remove(&line);
+                    self.folding_lines.insert(line);
+                }
+            }
+        }
+    }
+
+    pub fn unfold_all(&mut self) {
+        for line in self.folding_lines.drain() {
+            self.unfolding_lines.insert(line);
+        }
+        for line in self.folded_lines.drain() {
+            self.unfolding_lines.insert(line);
+        }
+    }
+
+    pub fn update_folds(&mut self) -> bool {
+        if self.folding_lines.is_empty() && self.unfolding_lines.is_empty() {
+            return false;
+        }
+        let mut new_folding_lines = HashSet::new();
+        for &line in &self.folding_lines {
+            self.scale[line] *= 0.9;
+            if self.scale[line] < 0.1 + 0.001 {
+                self.scale[line] = 0.1;
+                self.folded_lines.insert(line);
+            } else {
+                new_folding_lines.insert(line);
+            }
+            self.y.truncate(line + 1);
+        }
+        self.folding_lines = new_folding_lines;
+        let mut new_unfolding_lines = HashSet::new();
+        for &line in &self.unfolding_lines {
+            self.scale[line] = 1.0 - 0.9 * (1.0 - self.scale[line]);
+            if self.scale[line] > 1.0 - 0.001 {
+                self.scale[line] = 1.0;
+            } else {
+                new_unfolding_lines.insert(line);
+            }
+            self.y.truncate(line + 1);
+        }
+        self.unfolding_lines = new_unfolding_lines;
+        self.update_y();
+        true
+    }
+
     pub fn set_cursor(&mut self, cursor: Point, affinity: Affinity) {
         self.selections.clear();
         self.selections.push(Selection {
@@ -251,7 +316,7 @@ impl Session {
             },
         );
     }
-    
+
     pub fn move_to(&mut self, cursor: Point, affinity: Affinity) {
         let mut pending_selection_index = self.pending_selection_index.unwrap();
         self.selections[pending_selection_index] = Selection {
@@ -295,10 +360,7 @@ impl Session {
             .edit(&self.selections, |text, point, _| {
                 let line = &text.as_lines()[point.line];
                 (
-                    if line[..point.byte]
-                        .chars()
-                        .all(|char| char.is_whitespace())
-                    {
+                    if line[..point.byte].chars().all(|char| char.is_whitespace()) {
                         Extent {
                             line_count: 0,
                             byte_count: point.byte,
