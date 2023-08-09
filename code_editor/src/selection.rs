@@ -1,22 +1,18 @@
-use crate::{BiasedTextPos, Cursor, TextLen, TextPos};
+use crate::{Change, Extent, Point, Range};
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Hash, Eq)]
 pub struct Selection {
-    pub anchor: BiasedTextPos,
-    pub cursor: Cursor,
+    pub anchor: Point,
+    pub cursor: Point,
+    pub affinity: Affinity,
 }
 
 impl Selection {
     pub fn is_empty(self) -> bool {
-        self.anchor == self.cursor.pos
+        self.anchor == self.cursor
     }
 
-    pub fn should_merge(mut self, mut other: Self) -> bool {
-        use std::mem;
-
-        if self.start() > other.start() {
-            mem::swap(&mut self, &mut other);
-        }
+    pub fn should_merge(self, other: Self) -> bool {
         if self.is_empty() || other.is_empty() {
             self.end() >= other.start()
         } else {
@@ -24,50 +20,75 @@ impl Selection {
         }
     }
 
-    pub fn length(&self) -> TextLen {
-        self.end().pos - self.start().pos
+    pub fn start(self) -> Point {
+        self.anchor.min(self.cursor)
     }
 
-    pub fn start(self) -> BiasedTextPos {
-        self.anchor.min(self.cursor.pos)
+    pub fn start_affinity(self) -> Affinity {
+        if self.anchor < self.cursor {
+            Affinity::After
+        } else {
+            self.affinity
+        }
     }
 
-    pub fn end(self) -> BiasedTextPos {
-        self.anchor.max(self.cursor.pos)
+    pub fn end(self) -> Point {
+        self.anchor.max(self.cursor)
     }
 
-    pub fn reset_anchor(self) -> Self {
+    pub fn end_affinity(self) -> Affinity {
+        if self.cursor < self.anchor {
+            Affinity::Before
+        } else {
+            self.affinity
+        }
+    }
+
+    pub fn extent(self) -> Extent {
+        self.end() - self.start()
+    }
+
+    pub fn range(self) -> Range {
+        Range::new(self.start(), self.end()).unwrap()
+    }
+
+    pub fn merge(self, other: Self) -> Option<Self> {
+        if self.should_merge(other) {
+            Some(if self.anchor <= self.cursor {
+                Selection {
+                    anchor: self.anchor,
+                    cursor: other.cursor,
+                    affinity: other.affinity,
+                }
+            } else {
+                Selection {
+                    anchor: other.anchor,
+                    cursor: self.cursor,
+                    affinity: self.affinity,
+                }
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn apply_change(self, change: &Change) -> Selection {
         Self {
-            anchor: self.cursor.pos,
+            anchor: self.anchor.apply_change(change),
+            cursor: self.cursor.apply_change(change),
             ..self
         }
     }
-
-    pub fn update_cursor(self, f: impl FnOnce(Cursor) -> Cursor) -> Self {
-        Self {
-            cursor: f(self.cursor),
-            ..self
-        }
-    }
 }
 
-impl From<TextPos> for Selection {
-    fn from(pos: TextPos) -> Self {
-        Selection::from(BiasedTextPos::from(pos))
-    }
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Affinity {
+    Before,
+    After,
 }
 
-impl From<BiasedTextPos> for Selection {
-    fn from(pos: BiasedTextPos) -> Self {
-        Selection::from(Cursor::from(pos))
-    }
-}
-
-impl From<Cursor> for Selection {
-    fn from(cursor: Cursor) -> Self {
-        Self {
-            anchor: cursor.pos,
-            cursor,
-        }
+impl Default for Affinity {
+    fn default() -> Self {
+        Self::Before
     }
 }

@@ -1,6 +1,15 @@
 use {
-    crate::{state::ViewId, Bias, BiasedTextPos, Context, TextPos, Selection, State, View},
+    crate::{
+        char::CharExt,
+        line::Wrapped,
+        selection::Affinity,
+        state::{Block, Session},
+        str::StrExt,
+        token::TokenKind,
+        Line, Point, Selection, Token,
+    },
     makepad_widgets::*,
+    std::{mem, slice::Iter},
 };
 
 live_design! {
@@ -56,23 +65,12 @@ live_design! {
         }
     }
 
-    TokenColors = {{TokenColors}} {
-        unknown: #808080,
-        branch_keyword: #C485BE,
-        identifier: #D4D4D4,
-        loop_keyword: #FF8C00,
-        number: #B6CEAA,
-        other_keyword: #5B9BD3,
-        punctuator: #D4D4D4,
-        whitespace: #6E6E6E,
-    }
-
     CodeEditor = {{CodeEditor}} {
         walk: {
             width: Fill,
             height: Fill,
             margin: 0,
-        }
+        },
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -99,128 +97,89 @@ pub struct CodeEditor {
     draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
-    #[live]
-    token_colors: TokenColors,
     #[rust]
     viewport_rect: Rect,
     #[rust]
     cell_size: DVec2,
     #[rust]
-    start_line: usize,
+    start: usize,
     #[rust]
-    end_line: usize,
+    end: usize,
 }
 
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d<'_>, context: &mut Context<'_>) {
-        self.begin(cx, context);
-        let document = context.document();
-        self.draw_text(cx, &document);
-        self.draw_selections(cx, &document);
-        self.end(cx, context);
+    pub fn draw(&mut self, cx: &mut Cx2d<'_>, session: &mut Session) {
+        self.viewport_rect = Rect {
+            pos: self.scroll_bars.get_scroll_pos(),
+            size: cx.turtle().rect().size,
+        };
+        self.cell_size =
+            self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+        session.handle_changes();
+        session.set_wrap_column(Some(
+            (self.viewport_rect.size.x / self.cell_size.x) as usize,
+        ));
+        self.start =
+            session.find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
+        self.end = session.find_first_line_starting_after_y(
+            (self.viewport_rect.pos.y + self.viewport_rect.size.y) / self.cell_size.y,
+        );
+        self.scroll_bars.begin(cx, self.walk, Layout::default());
+        self.draw_text(cx, session);
+        self.draw_selections(cx, session);
+        cx.turtle_mut().set_used(
+            session.width() * self.cell_size.x,
+            session.height() * self.cell_size.y,
+        );
+        self.scroll_bars.end(cx);
+        if session.update_folds() {
+            cx.redraw_all();
+        }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, state: &mut State, view_id: ViewId, event: &Event) {
-        use crate::str::StrExt;
-
+    pub fn handle_event(&mut self, cx: &mut Cx, session: &mut Session, event: &Event) {
+        session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
         });
         match event {
-            Event::TextInput(TextInputEvent { input, .. }) => {
-                state.context(view_id).replace(input.into());
-                cx.redraw_all();
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ReturnKey,
-                ..
-            }) => {
-                state.context(view_id).enter();
-                cx.redraw_all();
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Delete,
-                ..
-            }) => {
-                state.context(view_id).delete();
-                cx.redraw_all();
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Backspace,
-                ..
-            }) => {
-                state.context(view_id).backspace();
-                cx.redraw_all();
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ArrowLeft,
-                modifiers: KeyModifiers { shift, .. },
-                ..
-            }) => {
-                state.context(view_id).move_cursors_left(*shift);
-                cx.redraw_all();
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ArrowRight,
-                modifiers: KeyModifiers { shift, .. },
-                ..
-            }) => {
-                state.context(view_id).move_cursors_right(*shift);
-                cx.redraw_all();
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ArrowUp,
-                modifiers: KeyModifiers { shift, .. },
-                ..
-            }) => {
-                state.context(view_id).move_cursors_up(*shift);
-                cx.redraw_all();
-            }
-
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ArrowDown,
-                modifiers: KeyModifiers { shift, .. },
-                ..
-            }) => {
-                state.context(view_id).move_cursors_down(*shift);
-                cx.redraw_all();
-            }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
-                let mut context = state.context(view_id);
-                for line in 0..context.document().line_count() {
-                    let document = context.document();
-                    let settings = document.settings();
-                    if document
-                        .line(line)
-                        .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
-                        >= 2
-                    {
-                        context.fold_line(line, 2 * settings.indent_column_count);
-                    }
-                }
+                session.fold_indent_level(2);
                 cx.redraw_all();
             }
             Event::KeyUp(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
-                let mut context = state.context(view_id);
-                for line in 0..context.document().line_count() {
-                    let document = context.document();
-                    let settings = document.settings();
-                    if document
-                        .line(line)
-                        .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
-                        >= 2
-                    {
-                        context.unfold_line(line);
-                    }
-                }
+                session.unfold_all();
+                cx.redraw_all();
+            }
+            Event::TextInput(TextInputEvent { input, .. }) => {
+                session.insert(input.into());
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                ..
+            }) => {
+                session.enter();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Delete,
+                ..
+            }) => {
+                session.delete();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                session.backspace();
                 cx.redraw_all();
             }
             _ => {}
@@ -232,22 +191,18 @@ impl CodeEditor {
                 modifiers: KeyModifiers { alt, .. },
                 ..
             }) => {
-                let document = state.document(view_id);
-                if let Some(cursor) = self.pick(&document, abs - rect.pos) {
-                    let mut context = state.context(view_id);
+                if let Some((cursor, affinity)) = self.pick(session, abs - rect.pos) {
                     if alt {
-                        context.insert_cursor(cursor);
+                        session.add_cursor(cursor, affinity);
                     } else {
-                        context.set_cursor_pos(cursor);
+                        session.set_cursor(cursor, affinity);
                     }
                     cx.redraw_all();
                 }
             }
             Hit::FingerMove(FingerMoveEvent { abs, rect, .. }) => {
-                let document = state.document(view_id);
-                if let Some(cursor) = self.pick(&document, abs - rect.pos) {
-                    let mut context = state.context(view_id);
-                    context.move_cursor_to(true, cursor);
+                if let Some((cursor, affinity)) = self.pick(session, abs - rect.pos) {
+                    session.move_to(cursor, affinity);
                     cx.redraw_all();
                 }
             }
@@ -255,318 +210,355 @@ impl CodeEditor {
         }
     }
 
-    fn begin(&mut self, cx: &mut Cx2d<'_>, context: &mut Context<'_>) {
-        self.viewport_rect = Rect {
-            pos: self.scroll_bars.get_scroll_pos(),
-            size: cx.turtle().rect().size,
-        };
-        self.cell_size =
-            self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-        context.set_max_column(Some(
-            (self.viewport_rect.size.x / self.cell_size.x) as usize,
-        ));
-        let document = context.document();
-        self.start_line =
-            document.find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
-        self.end_line = document.find_first_line_starting_after_y(
-            (self.viewport_rect.pos.y + self.viewport_rect.size.y) / self.cell_size.y,
-        );
-        self.scroll_bars.begin(cx, self.walk, Layout::default());
-    }
-
-    fn end(&mut self, cx: &mut Cx2d<'_>, context: &mut Context<'_>) {
-        let document = context.document();
-        cx.turtle_mut().set_used(
-            document.compute_width() * self.cell_size.x,
-            document.height() * self.cell_size.y,
-        );
-        self.scroll_bars.end(cx);
-        if context.update_fold_animations() {
-            cx.redraw_all();
-        }
-    }
-
-    fn draw_text(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
-        use crate::{line, str::StrExt, token::TokenKind, view};
-
-        let mut y = document.line_y(self.start_line);
-        for element in document.elements(self.start_line, self.end_line) {
-            let mut column = 0;
-            match element {
-                view::Element::Line(_, line) => {
-                    self.draw_text.font_scale = line.scale();
-                    for wrapped_element in line.wrapped_elements() {
-                        match wrapped_element {
-                            line::WrappedElement::Token(_, token) => {
-                                self.draw_text.color = match token.kind {
-                                    TokenKind::Unknown => self.token_colors.unknown,
-                                    TokenKind::BranchKeyword => self.token_colors.branch_keyword,
-                                    TokenKind::Identifier => self.token_colors.identifier,
-                                    TokenKind::LoopKeyword => self.token_colors.loop_keyword,
-                                    TokenKind::Number => self.token_colors.number,
-                                    TokenKind::OtherKeyword => self.token_colors.other_keyword,
-                                    TokenKind::Punctuator => self.token_colors.punctuator,
-                                    TokenKind::Whitespace => self.token_colors.whitespace,
-                                };
-                                self.draw_text.draw_abs(
-                                    cx,
-                                    DVec2 {
-                                        x: line.column_to_x(column),
-                                        y,
-                                    } * self.cell_size
-                                        - self.viewport_rect.pos,
-                                    token.text,
-                                );
-                                column += token
-                                    .text
-                                    .column_count(document.settings().tab_column_count);
+    fn draw_text(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+        let mut y = 0.0;
+        session.blocks(
+            0,
+            session.document().borrow().text().as_lines().len(),
+            |blocks| {
+                for block in blocks {
+                    match block {
+                        Block::Line { line, .. } => {
+                            self.draw_text.font_scale = line.scale();
+                            let mut token_iter = line.tokens().iter().copied();
+                            let mut token_slot = token_iter.next();
+                            let mut column = 0;
+                            for wrapped in line.wrappeds() {
+                                match wrapped {
+                                    Wrapped::Text {
+                                        is_inlay: false,
+                                        mut text,
+                                    } => {
+                                        while !text.is_empty() {
+                                            let token = match token_slot {
+                                                Some(token) => {
+                                                    if text.len() < token.len {
+                                                        token_slot = Some(Token {
+                                                            len: token.len - text.len(),
+                                                            kind: token.kind,
+                                                        });
+                                                        Token {
+                                                            len: text.len(),
+                                                            kind: token.kind,
+                                                        }
+                                                    } else {
+                                                        token_slot = token_iter.next();
+                                                        token
+                                                    }
+                                                }
+                                                None => Token {
+                                                    len: text.len(),
+                                                    kind: TokenKind::Unknown,
+                                                },
+                                            };
+                                            let (text_0, text_1) = text.split_at(token.len);
+                                            text = text_1;
+                                            self.draw_text.draw_abs(
+                                                cx,
+                                                DVec2 {
+                                                    x: line.column_to_x(column),
+                                                    y,
+                                                } * self.cell_size
+                                                    - self.viewport_rect.pos,
+                                                text_0,
+                                            );
+                                            column += text_0
+                                                .chars()
+                                                .map(|char| {
+                                                    char.column_count(
+                                                        session.settings().tab_column_count,
+                                                    )
+                                                })
+                                                .sum::<usize>();
+                                        }
+                                    }
+                                    Wrapped::Text {
+                                        is_inlay: true,
+                                        text,
+                                    } => {
+                                        self.draw_text.draw_abs(
+                                            cx,
+                                            DVec2 {
+                                                x: line.column_to_x(column),
+                                                y,
+                                            } * self.cell_size
+                                                - self.viewport_rect.pos,
+                                            text,
+                                        );
+                                        column += text
+                                            .chars()
+                                            .map(|char| {
+                                                char.column_count(
+                                                    session.settings().tab_column_count,
+                                                )
+                                            })
+                                            .sum::<usize>();
+                                    }
+                                    Wrapped::Widget(widget) => {
+                                        column += widget.column_count;
+                                    }
+                                    Wrapped::Wrap => {
+                                        column = line.wrap_indent_column_count();
+                                        y += line.scale();
+                                    }
+                                }
                             }
-                            line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
-                            }
-                            line::WrappedElement::Wrap => {
-                                y += line.scale();
-                                column = line.start_column_after_wrap();
-                            }
+                            y += line.scale();
+                        }
+                        Block::Widget(widget) => {
+                            y += widget.height;
                         }
                     }
-                    y += line.scale();
                 }
-                view::Element::Widget(_, widget) => {
-                    y += widget.height;
-                }
-            }
-        }
+            },
+        );
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_selection = None;
-        let mut selections = document.selections();
-        while selections.first().map_or(false, |selection| {
-            selection.end().pos.line < self.start_line
-        }) {
-            selections = &selections[1..];
+        let mut selections = session.selections().iter();
+        while selections
+            .as_slice()
+            .first()
+            .map_or(false, |selection| selection.end().line < self.start)
+        {
+            selections.next().unwrap();
         }
-        if selections.first().map_or(false, |selection| {
-            selection.start().pos.line < self.start_line
-        }) {
-            let (selection, remaining_selections) = selections.split_first().unwrap();
-            selections = remaining_selections;
-            active_selection = Some(ActiveSelection::new(*selection, 0.0));
+        if selections
+            .as_slice()
+            .first()
+            .map_or(false, |selection| selection.start().line < self.start)
+        {
+            active_selection = Some(ActiveSelection {
+                selection: *selections.next().unwrap(),
+                start_x: 0.0,
+            });
         }
-        DrawSelectionsContext {
+        DrawSelections {
             code_editor: self,
             active_selection,
             selections,
         }
-        .draw_selections(cx, document)
+        .draw_selections(cx, session)
     }
 
-    fn pick(&self, document: &View<'_>, pos: DVec2) -> Option<BiasedTextPos> {
-        use crate::{line, str::StrExt, view};
-
-        let pos = (pos + self.viewport_rect.pos) / self.cell_size;
-        let mut line = document.find_first_line_ending_after_y(pos.y);
-        let mut y = document.line_y(line);
-        for element in document.elements(line, line + 1) {
-            match element {
-                view::Element::Line(false, line_ref) => {
-                    let mut byte = 0;
-                    let mut column = 0;
-                    for wrapped_element in line_ref.wrapped_elements() {
-                        match wrapped_element {
-                            line::WrappedElement::Token(false, token) => {
-                                for grapheme in token.text.graphemes() {
-                                    let next_byte = byte + grapheme.len();
+    fn pick(&self, session: &Session, point: DVec2) -> Option<(Point, Affinity)> {
+        let point = (point + self.viewport_rect.pos) / self.cell_size;
+        let mut line = session.find_first_line_ending_after_y(point.y);
+        let mut y = session.line(line, |line| line.y());
+        session.blocks(line, line + 1, |blocks| {
+            for block in blocks {
+                match block {
+                    Block::Line {
+                        is_inlay: false,
+                        line: line_ref,
+                    } => {
+                        let mut byte = 0;
+                        let mut column = 0;
+                        for wrapped in line_ref.wrappeds() {
+                            match wrapped {
+                                Wrapped::Text {
+                                    is_inlay: false,
+                                    text,
+                                } => {
+                                    for grapheme in text.graphemes() {
+                                        let next_byte = byte + grapheme.len();
+                                        let next_column = column
+                                            + grapheme
+                                                .chars()
+                                                .map(|char| {
+                                                    char.column_count(
+                                                        session.settings().tab_column_count,
+                                                    )
+                                                })
+                                                .sum::<usize>();
+                                        let next_y = y + line_ref.scale();
+                                        let x = line_ref.column_to_x(column);
+                                        let next_x = line_ref.column_to_x(next_column);
+                                        let mid_x = (x + next_x) / 2.0;
+                                        if (y..=next_y).contains(&point.y) {
+                                            if (x..=mid_x).contains(&point.x) {
+                                                return Some((
+                                                    Point { line, byte },
+                                                    Affinity::After,
+                                                ));
+                                            }
+                                            if (mid_x..=next_x).contains(&point.x) {
+                                                return Some((
+                                                    Point {
+                                                        line,
+                                                        byte: next_byte,
+                                                    },
+                                                    Affinity::Before,
+                                                ));
+                                            }
+                                        }
+                                        byte = next_byte;
+                                        column = next_column;
+                                    }
+                                }
+                                Wrapped::Text {
+                                    is_inlay: true,
+                                    text,
+                                } => {
                                     let next_column = column
-                                        + grapheme
-                                            .column_count(document.settings().tab_column_count);
+                                        + text
+                                            .chars()
+                                            .map(|char| {
+                                                char.column_count(
+                                                    session.settings().tab_column_count,
+                                                )
+                                            })
+                                            .sum::<usize>();
                                     let next_y = y + line_ref.scale();
                                     let x = line_ref.column_to_x(column);
                                     let next_x = line_ref.column_to_x(next_column);
-                                    let mid_x = (x + next_x) / 2.0;
-                                    if (y..=next_y).contains(&pos.y) {
-                                        if (x..=mid_x).contains(&pos.x) {
-                                            return Some(BiasedTextPos {
-                                                pos: TextPos { line, byte },
-                                                bias: Bias::After,
-                                            });
-                                        }
-                                        if (mid_x..=next_x).contains(&pos.x) {
-                                            return Some(BiasedTextPos {
-                                                pos: TextPos {
-                                                    line,
-                                                    byte: next_byte,
-                                                },
-                                                bias: Bias::Before,
-                                            });
-                                        }
+                                    if (y..=next_y).contains(&point.y)
+                                        && (x..=next_x).contains(&point.x)
+                                    {
+                                        return Some((Point { line, byte }, Affinity::Before));
                                     }
-                                    byte = next_byte;
                                     column = next_column;
                                 }
-                            }
-                            line::WrappedElement::Token(true, token) => {
-                                let next_column = column
-                                    + token
-                                        .text
-                                        .column_count(document.settings().tab_column_count);
-                                let x = line_ref.column_to_x(column);
-                                let next_x = line_ref.column_to_x(next_column);
-                                let next_y = y + line_ref.scale();
-                                if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
-                                    return Some(BiasedTextPos {
-                                        pos: TextPos { line, byte },
-                                        bias: Bias::Before,
-                                    });
+                                Wrapped::Widget(widget) => {
+                                    column += widget.column_count;
                                 }
-                                column = next_column;
-                            }
-                            line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
-                            }
-                            line::WrappedElement::Wrap => {
-                                let next_y = y + line_ref.scale();
-                                if (y..=next_y).contains(&pos.y) {
-                                    return Some(BiasedTextPos {
-                                        pos: TextPos { line, byte },
-                                        bias: Bias::Before,
-                                    });
+                                Wrapped::Wrap => {
+                                    let next_y = y + line_ref.scale();
+                                    if (y..=next_y).contains(&point.y) {
+                                        return Some((Point { line, byte }, Affinity::Before));
+                                    }
+                                    column = line_ref.wrap_indent_column_count();
+                                    y = next_y;
                                 }
-                                y = next_y;
-                                column = line_ref.start_column_after_wrap();
                             }
                         }
+                        let next_y = y + line_ref.scale();
+                        if (y..=y + next_y).contains(&point.y) {
+                            return Some((Point { line, byte }, Affinity::After));
+                        }
+                        line += 1;
+                        y = next_y;
                     }
-                    let next_y = y + line_ref.scale();
-                    if (y..=next_y).contains(&pos.y) {
-                        return Some(BiasedTextPos {
-                            pos: TextPos { line, byte },
-                            bias: Bias::After,
-                        });
+                    Block::Line {
+                        is_inlay: true,
+                        line: line_ref,
+                    } => {
+                        let next_y = y + line_ref.height();
+                        if (y..=next_y).contains(&point.y) {
+                            return Some((Point { line, byte: 0 }, Affinity::Before));
+                        }
+                        y = next_y;
                     }
-                    line += 1;
-                    y += next_y;
-                }
-                view::Element::Line(true, line_ref) => {
-                    let next_y = y + line_ref.height();
-                    if (y..=next_y).contains(&pos.y) {
-                        return Some(BiasedTextPos {
-                            pos: TextPos { line, byte: 0 },
-                            bias: Bias::Before,
-                        });
+                    Block::Widget(widget) => {
+                        y += widget.height;
                     }
-                    y = next_y;
-                }
-                view::Element::Widget(_, widget) => {
-                    y += widget.height;
                 }
             }
-        }
-        None
+            None
+        })
     }
 }
 
-struct DrawSelectionsContext<'a> {
+struct DrawSelections<'a> {
     code_editor: &'a mut CodeEditor,
     active_selection: Option<ActiveSelection>,
-    selections: &'a [Selection],
+    selections: Iter<'a, Selection>,
 }
 
-impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &View<'_>) {
-        use crate::{line, str::StrExt, view};
-
-        let mut line = self.code_editor.start_line;
-        let mut y = document.line_y(line);
-        for element in document.elements(self.code_editor.start_line, self.code_editor.end_line) {
-            match element {
-                view::Element::Line(false, line_ref) => {
-                    let mut byte = 0;
-                    let mut column = 0;
-                    self.handle_event(
-                        cx,
-                        line,
-                        byte,
-                        Bias::Before,
-                        line_ref.column_to_x(column),
-                        y,
-                        line_ref.scale(),
-                    );
-                    for wrapped_element in line_ref.wrapped_elements() {
-                        match wrapped_element {
-                            line::WrappedElement::Token(false, token) => {
-                                for grapheme in token.text.graphemes() {
-                                    self.handle_event(
-                                        cx,
-                                        line,
-                                        byte,
-                                        Bias::After,
-                                        line_ref.column_to_x(column),
-                                        y,
-                                        line_ref.scale(),
-                                    );
-                                    byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count(document.settings().tab_column_count);
-                                    self.handle_event(
-                                        cx,
-                                        line,
-                                        byte,
-                                        Bias::Before,
-                                        line_ref.column_to_x(column),
-                                        y,
-                                        line_ref.scale(),
-                                    );
+impl<'a> DrawSelections<'a> {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+        let mut line = self.code_editor.start;
+        let mut y = session.line(line, |line| line.y());
+        session.blocks(self.code_editor.start, self.code_editor.end, |blocks| {
+            for block in blocks {
+                match block {
+                    Block::Line {
+                        is_inlay: false,
+                        line: line_ref,
+                    } => {
+                        let mut byte = 0;
+                        let mut column = 0;
+                        self.handle_event(cx, line, line_ref, byte, Affinity::Before, y, column);
+                        for wrapped in line_ref.wrappeds() {
+                            match wrapped {
+                                Wrapped::Text {
+                                    is_inlay: false,
+                                    text,
+                                } => {
+                                    for grapheme in text.graphemes() {
+                                        self.handle_event(
+                                            cx,
+                                            line,
+                                            line_ref,
+                                            byte,
+                                            Affinity::After,
+                                            y,
+                                            column,
+                                        );
+                                        byte += grapheme.len();
+                                        column += grapheme
+                                            .chars()
+                                            .map(|char| {
+                                                char.column_count(
+                                                    session.settings().tab_column_count,
+                                                )
+                                            })
+                                            .sum::<usize>();
+                                        self.handle_event(
+                                            cx,
+                                            line,
+                                            line_ref,
+                                            byte,
+                                            Affinity::Before,
+                                            y,
+                                            column,
+                                        );
+                                    }
                                 }
-                            }
-                            line::WrappedElement::Token(true, token) => {
-                                column += token
-                                    .text
-                                    .column_count(document.settings().tab_column_count);
-                            }
-                            line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
-                            }
-                            line::WrappedElement::Wrap => {
-                                column += 1;
-                                if self.active_selection.is_some() {
-                                    self.draw_selection(
-                                        cx,
-                                        line_ref.column_to_x(column),
-                                        y,
-                                        line_ref.scale(),
-                                    );
+                                Wrapped::Text {
+                                    is_inlay: true,
+                                    text,
+                                } => {
+                                    column += text
+                                        .chars()
+                                        .map(|char| {
+                                            char.column_count(session.settings().tab_column_count)
+                                        })
+                                        .sum::<usize>();
                                 }
-                                y += line_ref.scale();
-                                column = line_ref.start_column_after_wrap();
+                                Wrapped::Widget(widget) => {
+                                    column += widget.column_count;
+                                }
+                                Wrapped::Wrap => {
+                                    if self.active_selection.is_some() {
+                                        self.draw_selection(cx, line_ref, y, column);
+                                    }
+                                    column = line_ref.wrap_indent_column_count();
+                                    y += line_ref.scale();
+                                }
                             }
                         }
+                        self.handle_event(cx, line, line_ref, byte, Affinity::After, y, column);
+                        column += 1;
+                        if self.active_selection.is_some() {
+                            self.draw_selection(cx, line_ref, y, column);
+                        }
+                        line += 1;
+                        y += line_ref.scale();
                     }
-                    self.handle_event(
-                        cx,
-                        line,
-                        byte,
-                        Bias::After,
-                        line_ref.column_to_x(column),
-                        y,
-                        line_ref.scale(),
-                    );
-                    column += 1;
-                    if self.active_selection.is_some() {
-                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
+                    Block::Line {
+                        is_inlay: true,
+                        line: line_ref,
+                    } => {
+                        y += line_ref.height();
                     }
-                    line += 1;
-                    y += line_ref.scale();
-                }
-                view::Element::Line(true, line_ref) => {
-                    y += line_ref.height();
-                }
-                view::Element::Widget(_, widget) => {
-                    y += widget.height;
+                    Block::Widget(widget) => {
+                        y += widget.height;
+                    }
                 }
             }
-        }
+        });
         if self.active_selection.is_some() {
             self.code_editor.draw_selection.end(cx);
         }
@@ -576,44 +568,46 @@ impl<'a> DrawSelectionsContext<'a> {
         &mut self,
         cx: &mut Cx2d<'_>,
         line: usize,
+        line_ref: Line<'_>,
         byte: usize,
-        bias: Bias,
-        x: f64,
+        affinity: Affinity,
         y: f64,
-        height: f64,
+        column: usize,
     ) {
-        let pos = TextPos { line, byte };
+        let point = Point { line, byte };
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == BiasedTextPos { pos, bias }
+            selection.selection.end() == point && selection.selection.end_affinity() == affinity
         }) {
-            self.draw_selection(cx, x, y, height);
+            self.draw_selection(cx, line_ref, y, column);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor.pos == (BiasedTextPos { pos, bias }) {
-                self.draw_cursor(cx, x, y, height);
+            if selection.cursor == point && selection.affinity == affinity {
+                self.draw_cursor(cx, line_ref, y, column);
             }
         }
-        if self.selections.first().map_or(false, |selection| {
-            selection.start() == BiasedTextPos { pos, bias }
-        }) {
-            let (selection, selections) = self.selections.split_first().unwrap();
-            self.selections = selections;
-            if selection.cursor.pos == (BiasedTextPos { pos, bias }) {
-                self.draw_cursor(cx, x, y, height);
+        if self
+            .selections
+            .as_slice()
+            .first()
+            .map_or(false, |selection| {
+                selection.start() == point && selection.start_affinity() == affinity
+            })
+        {
+            let selection = *self.selections.next().unwrap();
+            if selection.cursor == point && selection.affinity == affinity {
+                self.draw_cursor(cx, line_ref, y, column);
             }
             if !selection.is_empty() {
                 self.active_selection = Some(ActiveSelection {
-                    selection: *selection,
-                    start_x: x,
+                    selection,
+                    start_x: line_ref.column_to_x(column),
                 });
             }
             self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
-        use std::mem;
-
+    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, line: Line<'_>, y: f64, column: usize) {
         let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
         self.code_editor.draw_selection.draw(
             cx,
@@ -621,38 +615,34 @@ impl<'a> DrawSelectionsContext<'a> {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
                     - self.code_editor.viewport_rect.pos,
                 size: DVec2 {
-                    x: x - start_x,
-                    y: height,
+                    x: line.column_to_x(column) - start_x,
+                    y: line.scale(),
                 } * self.code_editor.cell_size,
             },
         );
     }
 
-    fn draw_cursor(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_cursor(&mut self, cx: &mut Cx2d<'_>, line: Line<'_>, y: f64, column: usize) {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 { x, y } * self.code_editor.cell_size
+                pos: DVec2 {
+                    x: line.column_to_x(column),
+                    y,
+                } * self.code_editor.cell_size
                     - self.code_editor.viewport_rect.pos,
                 size: DVec2 {
                     x: 2.0,
-                    y: height * self.code_editor.cell_size.y,
+                    y: line.scale() * self.code_editor.cell_size.y,
                 },
             },
         );
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
     selection: Selection,
     start_x: f64,
-}
-
-impl ActiveSelection {
-    fn new(selection: Selection, start_x: f64) -> Self {
-        Self { selection, start_x }
-    }
 }
 
 #[derive(Live, LiveHook)]
@@ -710,24 +700,4 @@ impl DrawSelection {
             self.draw_abs(cx, prev_rect);
         }
     }
-}
-
-#[derive(Live, LiveHook)]
-pub struct TokenColors {
-    #[live]
-    unknown: Vec4,
-    #[live]
-    branch_keyword: Vec4,
-    #[live]
-    identifier: Vec4,
-    #[live]
-    loop_keyword: Vec4,
-    #[live]
-    number: Vec4,
-    #[live]
-    other_keyword: Vec4,
-    #[live]
-    punctuator: Vec4,
-    #[live]
-    whitespace: Vec4,
 }
