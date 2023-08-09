@@ -16,6 +16,7 @@ use {
         event::WindowGeom,
         texture::Texture,
         live_traits::LiveNew,
+        thread::Signal,
         os::{
             metal_xpc::{
                 xpc_service_proxy,
@@ -117,9 +118,6 @@ impl Cx {
                                 self.stdin_handle_platform_ops(metal_cx, &fb_texture);
                             }
                         }
-                        HostToStdin::Signal(_) => {
-                            self.handle_triggers();
-                        }
                         HostToStdin::Tick {frame: _, time} => if let Some(ws) = window_size {
                             // poll the service for updates
                             let uid = if let Some((_, uid)) = fb_shared.lock().unwrap().borrow().as_ref() {*uid}else {0};
@@ -130,6 +128,17 @@ impl Cx {
                                     *fb_shared.lock().unwrap().borrow_mut() = Some((shared_handle, shared_uid));
                                 }
                             }));
+        
+                            // check signals
+                            if Signal::check_and_clear_ui_signal(){
+                                self.handle_media_signals();
+                                self.call_event_handler(&Event::Signal);
+                            }
+                            if self.check_live_file_watcher(){
+                                self.call_event_handler(&Event::LiveEdit);
+                                self.redraw_all();
+                            }
+                            self.handle_networking_events();
                             
                             // alright a tick.
                             // we should now run all the stuff.

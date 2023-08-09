@@ -197,7 +197,7 @@ live_design!{
                             return sdf.result
                         }
                     }
-                    image_scale: 0.65
+                    image_scale: .65
                     walk: {margin: 0}
                     layout: {padding: 0}
                 }
