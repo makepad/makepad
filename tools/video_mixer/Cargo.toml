@@ -1,5 +1,5 @@
 [package]
-name = "makepad-example-video-mixer"
+name = "makepad-video-mixer"
 version = "0.3.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"

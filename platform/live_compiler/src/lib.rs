@@ -40,7 +40,7 @@ pub use {
             LiveEval
         },
         live_registry::{
-            LiveEditEvent,
+            LiveFileChange,
             LiveRegistry,
             //LiveDocNodes,
         },

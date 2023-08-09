@@ -9,13 +9,13 @@ use {
 
  
 #[derive(Debug)]
-pub struct View { // draw info per UI element
+pub struct DrawList2d { // draw info per UI element
     pub (crate) draw_list: DrawList,
     pub (crate) dirty_check_rect: Rect,
 }
 
-impl LiveHook for View {}
-impl LiveNew for View {
+impl LiveHook for DrawList2d {}
+impl LiveNew for DrawList2d {
     fn new(cx: &mut Cx) -> Self {
         let draw_list = cx.draw_lists.alloc();
         Self {
@@ -34,7 +34,7 @@ impl LiveNew for View {
         }
     }
 }
-impl LiveApply for View {
+impl LiveApply for DrawList2d {
     //fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
@@ -61,7 +61,7 @@ impl LiveApply for View {
     }
 }
 
-impl View {
+impl DrawList2d {
     
     pub fn draw_list_id(&self) -> DrawListId {self.draw_list.id()}
     
@@ -127,11 +127,11 @@ impl View {
         self.begin_maybe(cx, None).expect_redraw();
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
+    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> Redrawing {
         self.begin_maybe(cx, Some(walk))
     }
     
-    fn begin_maybe(&mut self, cx: &mut Cx2d, cache_check: Option<Walk>) -> ViewRedrawing {
+    fn begin_maybe(&mut self, cx: &mut Cx2d, cache_check: Option<Walk>) -> Redrawing {
         
         // check if we have a pass id parent
         let pass_id = cx.pass_stack.last().unwrap().pass_id;
@@ -141,7 +141,7 @@ impl View {
         
         let codeflow_parent_id = cx.draw_list_stack.last().cloned();
         
-        let view_will_redraw = cache_check.is_none() || cx.view_will_redraw(self, cache_check.unwrap());
+        let will_redraw = cache_check.is_none() || cx.will_redraw(self, cache_check.unwrap());
         
         let is_main_draw_list = if cx.passes[pass_id].main_draw_list_id.is_none() {
             cx.passes[pass_id].main_draw_list_id = Some(self.draw_list.id());
@@ -165,7 +165,7 @@ impl View {
         cx.cx.draw_lists[self.draw_list.id()].codeflow_parent_id = codeflow_parent_id;
         
         // check redraw status
-        if cx.cx.draw_lists[self.draw_list.id()].draw_items.len() != 0 && !view_will_redraw {
+        if cx.cx.draw_lists[self.draw_list.id()].draw_items.len() != 0 && !will_redraw {
             /*
             let w = Size::Fixed(cx.cx.draw_lists[self.draw_list.id()].rect.size.x);
             let h = Size::Fixed(cx.cx.draw_lists[self.draw_list.id()].rect.size.y);
@@ -173,7 +173,7 @@ impl View {
             //let pos = cx.peek_walk_pos(walk);
             //if pos == cx.cx.draw_lists[self.draw_list.id()].rect.pos {
              cx.walk_turtle(walk);*/
-            return ViewRedrawing::no();
+            return Redrawing::no();
             //}
         }
         
@@ -187,7 +187,7 @@ impl View {
         
         cx.draw_list_stack.push(self.draw_list.id());
         
-        ViewRedrawing::yes()
+        Redrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
@@ -389,17 +389,17 @@ pub struct AlignedInstance {
     pub index: usize
 }
 
-pub type ViewRedrawing = Result<(), ()>;
+pub type Redrawing = Result<(), ()>;
 
-pub trait ViewRedrawingApi {
-    fn no() -> ViewRedrawing {Result::Err(())}
-    fn yes() -> ViewRedrawing {Result::Ok(())}
+pub trait RedrawingApi {
+    fn no() -> Redrawing {Result::Err(())}
+    fn yes() -> Redrawing {Result::Ok(())}
     fn is_redrawing(&self) -> bool;
     fn is_not_redrawing(&self) -> bool;
     fn expect_redraw(&self);
 }
 
-impl ViewRedrawingApi for ViewRedrawing {
+impl RedrawingApi for Redrawing {
     fn is_redrawing(&self) -> bool {
         match *self {
             Result::Ok(_) => true,

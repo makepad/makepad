@@ -17,7 +17,6 @@ live_design!{
             },
             color: #a
         }
-        view: {}
     }
 }
 
@@ -29,7 +28,7 @@ pub struct DrawFocusRect {
 
 #[derive(Live, LiveHook)]
 pub struct NavControl {
-    #[live] view: View,
+    #[live] draw_list: DrawList2d,
     #[live] draw_focus: DrawFocusRect,
     #[live] draw_label: DrawText,
     #[rust] _recent_focus: Area,
@@ -92,11 +91,11 @@ impl NavControl {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if !self.view.begin(cx, Walk::default()).is_redrawing() {
+        if !self.draw_list.begin(cx, Walk::default()).is_redrawing() {
             return
         }
         
-        self.view.end(cx);
+        self.draw_list.end(cx);
     }
 }
 

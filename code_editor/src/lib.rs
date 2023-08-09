@@ -1,3 +1,6 @@
+pub use makepad_widgets;
+use makepad_widgets::*;
+
 pub mod change;
 pub mod char;
 pub mod code_editor;
@@ -17,6 +20,11 @@ pub mod widgets;
 pub mod wrap;
 
 pub use self::{
+    state::{Session,Document},
     change::Change, code_editor::CodeEditor, extent::Extent, line::Line, point::Point,
     range::Range, selection::Selection, settings::Settings, text::Text, token::Token,
 };
+
+pub fn live_design(cx: &mut Cx) {
+    crate::code_editor::live_design(cx);
+}

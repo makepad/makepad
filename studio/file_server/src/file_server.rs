@@ -1,15 +1,15 @@
 use {
     crate::{
         makepad_live_id::LiveIdMap,
-        makepad_collab_protocol::{
+        makepad_file_protocol::{
             DirectoryEntry,
             TextFileId,
             FileNodeData,
             FileTreeData,
-            CollabError,
-            CollabNotification,
-            CollabRequest,
-            CollabResponse,
+            FileError,
+            FileNotification,
+            FileRequest,
+            FileResponse,
             unix_str::UnixString,
         },
     },
@@ -29,17 +29,17 @@ use {
 /// The collab server is designed to be transport agnostic. That is, it does not make any
 /// assumptions about whether it is running over Tcp, WebSockets, etc. The idea is that an embedder
 /// can take the server and easily implement its own transport layer on top of it.
-pub struct CollabServer {
+pub struct FileServer {
     // The id for the next connection
     next_connection_id: usize,
     // State that is shared between every connection
     shared: Arc<RwLock<Shared>>,
 }
 
-impl CollabServer {
+impl FileServer {
     /// Creates a new collab server rooted at the given path.
-    pub fn new<P: Into<PathBuf>>(path: P) -> CollabServer {
-        CollabServer {
+    pub fn new<P: Into<PathBuf>>(path: P) -> FileServer {
+        FileServer {
             next_connection_id: 0,
             shared: Arc::new(RwLock::new(Shared {
                 path: path.into(),
@@ -53,10 +53,10 @@ impl CollabServer {
     /// 
     /// The given `notification_sender` is called whenever the server wants to send a notification
     /// for this connection. The embedder is responsible for sending the notification.
-    pub fn connect(&mut self, notification_sender: Box<dyn NotificationSender>) -> CollabConnection {
+    pub fn connect(&mut self, notification_sender: Box<dyn NotificationSender>) -> FileConnection {
         let connection_id = ConnectionId(self.next_connection_id);
         self.next_connection_id += 1;
-        CollabConnection {
+        FileConnection {
             connection_id,
             shared: self.shared.clone(),
             _notification_sender:notification_sender
@@ -65,7 +65,7 @@ impl CollabServer {
 }
 
 /// A connection to a collab server.
-pub struct CollabConnection {
+pub struct FileConnection {
     // The id for this connection.
     connection_id: ConnectionId,
     // State is shared between every connection.
@@ -74,40 +74,40 @@ pub struct CollabConnection {
     _notification_sender: Box<dyn NotificationSender>,
 }
 
-impl CollabConnection {
+impl FileConnection {
     /// Handles the given `request` for this connection, and returns the corresponding response.
     /// 
     /// The embedder is responsible for receiving requests, calling this method to handle them, and
     /// sending back the response.
-    pub fn handle_request(&self, request: CollabRequest) -> CollabResponse {
+    pub fn handle_request(&self, request: FileRequest) -> FileResponse {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
         match request {
-            CollabRequest::LoadFileTree {with_data} => CollabResponse::LoadFileTree(self.load_file_tree(with_data)),
-            CollabRequest::OpenFile(path) => {
+            FileRequest::LoadFileTree {with_data} => FileResponse::LoadFileTree(self.load_file_tree(with_data)),
+            FileRequest::OpenFile(path) => {
                 let path = PathBuf::from(OsString::from_vec(path.into_unix_string().into_vec()));
                 let mut base_path = self.shared.read().unwrap().path.clone();
                 base_path.push(path);
-                CollabResponse::OpenFile(self.open_file(base_path))
+                FileResponse::OpenFile(self.open_file(base_path))
             }
-            CollabRequest::ApplyDelta(text_file_id, delta) => {
-                CollabResponse::ApplyDelta(self.apply_delta(text_file_id, delta))
+            FileRequest::ApplyDelta(text_file_id, delta) => {
+                FileResponse::ApplyDelta(self.apply_delta(text_file_id, delta))
             }
-            CollabRequest::CloseFile(path) => CollabResponse::CloseFile(self.close_file(path)),
+            FileRequest::CloseFile(path) => FileResponse::CloseFile(self.close_file(path)),
         }
     }
     
     // Handles a `LoadFileTree` request.
-    fn load_file_tree(&self, with_data: bool) -> Result<FileTreeData, CollabError> {
+    fn load_file_tree(&self, with_data: bool) -> Result<FileTreeData, FileError> {
         use std::os::unix::ffi::OsStringExt;
         
         // A recursive helper function for traversing the entries of a directory and creating the
         // data structures that describe them.
-        fn get_directory_entries(path: &Path, with_data: bool) -> Result<Vec<DirectoryEntry>, CollabError> {
+        fn get_directory_entries(path: &Path, with_data: bool) -> Result<Vec<DirectoryEntry>, FileError> {
             let mut entries = Vec::new();
-            for entry in fs::read_dir(path).map_err( | error | CollabError::Unknown(error.to_string()))? {
+            for entry in fs::read_dir(path).map_err( | error | FileError::Unknown(error.to_string()))? {
                 // We can't get the entry for some unknown reason. Raise an error.
-                let entry = entry.map_err( | error | CollabError::Unknown(error.to_string()))?;
+                let entry = entry.map_err( | error | FileError::Unknown(error.to_string()))?;
                 // Get the path for the entry.
                 let entry_path = entry.path();
                 // Get the file name for the entry.
@@ -139,7 +139,7 @@ impl CollabConnection {
                     } else if entry_path.is_file() {
                         if with_data {
                             let bytes: Vec<u8> = fs::read(&entry_path).map_err(
-                                | error | CollabError::Unknown(error.to_string())
+                                | error | FileError::Unknown(error.to_string())
                             ) ?;
                             FileNodeData::File {data: Some(bytes)}
                         }
@@ -181,7 +181,7 @@ impl CollabConnection {
     }
     
     // Handles an `OpenFile` request.
-    fn open_file(&self, path: PathBuf) -> Result<(TextFileId, String), CollabError> {
+    fn open_file(&self, path: PathBuf) -> Result<(TextFileId, String), FileError> {
         // We need to update the list of files in the shared state, so lock it for writing. This is
         // necessary so other clients cannot close the file while we are still in the process of
         // opening it.
@@ -206,7 +206,7 @@ impl CollabConnection {
                     .contains_key(&self.connection_id)
                 {
                     // The client is already a participant for this file. Raise an error.
-                    return Err(CollabError::AlreadyAParticipant);
+                    return Err(FileError::AlreadyAParticipant);
                 }
                 // Add the client as a participant.
                 file_guard.participants_by_connection_id.insert(
@@ -232,7 +232,7 @@ impl CollabConnection {
                 // Get the contents of the file from disk. If this fails for some unknown reason,
                 // raise an error.
                 let bytes = fs::read(&path).map_err(
-                    | error | CollabError::Unknown(error.to_string())
+                    | error | FileError::Unknown(error.to_string())
                 ) ?;
                 // Converts the file contents to a `Text`. This is necessarily a lossy conversion
                 // because `Text` assumes everything is UTF-8 encoded, and this isn't always the
@@ -279,7 +279,7 @@ impl CollabConnection {
         &self,
         file_id: TextFileId,
         _delta: String,
-    ) -> Result<TextFileId, CollabError> {
+    ) -> Result<TextFileId, FileError> {
         /*
         // We need only need to get the list of files in the shared state, so lock it for reading.
         // This is necessary so other clients cannot close the file while we are still in the
@@ -354,7 +354,7 @@ impl CollabConnection {
     }
     
     // Handles a `CloseFile` request.
-    fn close_file(&self, file_id: TextFileId) -> Result<TextFileId, CollabError> {
+    fn close_file(&self, file_id: TextFileId) -> Result<TextFileId, FileError> {
         // We need to update the list of files in the shared state, so lock it for writing. This is
         // necessary so other clients cannot reopen file while we are still in the process of
         // closing it.
@@ -366,7 +366,7 @@ impl CollabConnection {
             .map_err(| _ | {
                 // The client is already a participant for this file (because it doesn't even
                 // exist). Raise an error.
-                CollabError::NotAParticipant
+                FileError::NotAParticipant
             })?;
         
         if !file_guard
@@ -374,7 +374,7 @@ impl CollabConnection {
             .contains_key(&self.connection_id)
         {
             // The client is not a participant for this file. Raise an error.
-            return Err(CollabError::NotAParticipant);
+            return Err(FileError::NotAParticipant);
         }
 
         // Remove the client from the list of participants for this file.
@@ -408,15 +408,15 @@ pub trait NotificationSender: Send {
     fn box_clone(&self) -> Box<dyn NotificationSender>;
     
     /// This method is called to send a notification over the corresponding connection.
-    fn send_notification(&self, notification: CollabNotification);
+    fn send_notification(&self, notification: FileNotification);
 }
 
-impl<F: Clone + Fn(CollabNotification) + Send + 'static> NotificationSender for F {
+impl<F: Clone + Fn(FileNotification) + Send + 'static> NotificationSender for F {
     fn box_clone(&self) -> Box<dyn NotificationSender> {
         Box::new(self.clone())
     }
     
-    fn send_notification(&self, notification: CollabNotification) {
+    fn send_notification(&self, notification: FileNotification) {
         self (notification)
     }
 }
