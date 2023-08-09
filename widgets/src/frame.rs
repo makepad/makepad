@@ -430,6 +430,12 @@ impl LiveHook for Frame {
         register_widget!(cx, Frame)
     }
     
+    fn before_apply(&mut self,  cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = from{
+            self.draw_order.clear();
+        }
+    }
+    
     fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
