@@ -1,5 +1,8 @@
 use {
-    crate::{inlays::InlineInlay, widgets::InlineWidget, wrap::WrapData, Token},
+    crate::{
+        inlays::InlineInlay, selection::Affinity, str::StrExt, widgets::InlineWidget,
+        wrap::WrapData, Token,
+    },
     std::slice::Iter,
 };
 
@@ -34,6 +37,108 @@ impl<'a> Line<'a> {
 
     pub fn width(&self) -> f64 {
         self.column_to_x(self.column_count())
+    }
+
+    pub fn byte_and_affinity_to_row_and_column(
+        &self,
+        byte: usize,
+        affinity: Affinity,
+        tab_column_count: usize,
+    ) -> (usize, usize) {
+        let mut current_byte = 0;
+        let mut row = 0;
+        let mut column = 0;
+        if current_byte == byte && affinity == Affinity::Before {
+            return (row, column);
+        }
+        for wrapped in self.wrappeds() {
+            match wrapped {
+                Wrapped::Text {
+                    is_inlay: false,
+                    text,
+                } => {
+                    for grapheme in text.graphemes() {
+                        if current_byte == byte && affinity == Affinity::After {
+                            return (row, column);
+                        }
+                        current_byte += grapheme.len();
+                        column += grapheme.column_count(tab_column_count);
+                        if current_byte == byte && affinity == Affinity::Before {
+                            return (row, column);
+                        }
+                    }
+                }
+                Wrapped::Text {
+                    is_inlay: true,
+                    text,
+                } => {
+                    column += text.column_count(tab_column_count);
+                }
+                Wrapped::Widget(widget) => {
+                    column += widget.column_count;
+                }
+                Wrapped::Wrap => {
+                    row += 1;
+                    column = self.wrap_indent_column_count();
+                }
+            }
+        }
+        if current_byte == byte && affinity == Affinity::After {
+            return (row, column);
+        }
+        panic!()
+    }
+
+    fn row_and_column_to_byte_and_affinity(
+        &self,
+        row: usize,
+        column: usize,
+        tab_width: usize,
+    ) -> (usize, Affinity) {
+        let mut current_row = 0;
+        let mut current_column = 0;
+        let mut byte = 0;
+        for wrapped in self.wrappeds() {
+            match wrapped {
+                Wrapped::Text {
+                    is_inlay: false,
+                    text,
+                } => {
+                    for grapheme in text.graphemes() {
+                        let next_column = column + grapheme.column_count(tab_width);
+                        if current_row == row && (current_column..next_column).contains(&column) {
+                            return (byte, Affinity::After);
+                        }
+                        byte += grapheme.len();
+                        current_column = next_column;
+                    }
+                }
+                Wrapped::Text {
+                    is_inlay: true,
+                    text,
+                } => {
+                    let next_column = column + text.column_count(tab_width);
+                    if current_row == row && (current_column..next_column).contains(&column) {
+                        return (byte, Affinity::Before);
+                    }
+                    current_column = next_column;
+                }
+                Wrapped::Widget(widget) => {
+                    current_column += widget.column_count;
+                }
+                Wrapped::Wrap => {
+                    if current_row == row {
+                        return (byte, Affinity::Before);
+                    }
+                    current_row += 1;
+                    current_column = self.wrap_indent_column_count();
+                }
+            }
+        }
+        if current_row == row {
+            return (byte, Affinity::After);
+        }
+        panic!()
     }
 
     pub fn column_to_x(&self, column: usize) -> f64 {
