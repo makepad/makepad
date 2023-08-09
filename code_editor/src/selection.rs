@@ -75,8 +75,12 @@ impl Selection {
         }
     }
 
-    pub fn update_cursor(self, f: impl FnOnce(Point, Affinity, Option<usize>) -> (Point, Affinity, Option<usize>)) -> Self {
-        let (cursor, affinity, preferred_column) = f(self.cursor, self.affinity, self.preferred_column);
+    pub fn update_cursor(
+        self,
+        f: impl FnOnce(Point, Affinity, Option<usize>) -> (Point, Affinity, Option<usize>),
+    ) -> Self {
+        let (cursor, affinity, preferred_column) =
+            f(self.cursor, self.affinity, self.preferred_column);
         Self {
             cursor,
             affinity,
