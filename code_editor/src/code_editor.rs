@@ -141,10 +141,7 @@ impl CodeEditor {
         self.scroll_bars.begin(cx, walk, Layout::default());
         
         self.viewport_rect = cx.turtle().rect();
-        /*Rect {
-            pos: self.scroll_bars.get_scroll_pos(),
-            size: cx.turtle().rect().size,
-        };*/
+        let scroll_pos = self.scroll_bars.get_scroll_pos();
         
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
@@ -153,11 +150,11 @@ impl CodeEditor {
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
         self.start =
-            session.find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
+            session.find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
         self.end = session.find_first_line_starting_after_y(
-            (self.viewport_rect.pos.y + self.viewport_rect.size.y) / self.cell_size.y,
+            (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
-        
+        log!("{} {}", self.start, self.end);
         
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
