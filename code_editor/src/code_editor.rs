@@ -119,8 +119,8 @@ impl CodeEditor {
         session.set_wrap_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
-        self.start = session
-            .find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
+        self.start =
+            session.find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
         self.end = session.find_first_line_starting_after_y(
             (self.viewport_rect.pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
@@ -181,43 +181,69 @@ impl CodeEditor {
 
     fn draw_text(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut y = 0.0;
-        session.blocks(0, session.document().borrow().text().as_lines().len(),|blocks| {
-            for block in blocks {
-                match block {
-                    Block::Line { line, .. } => {
-                        let mut token_iter = line.tokens().iter().copied();
-                        let mut token_slot = token_iter.next();
-                        let mut column = 0;
-                        for wrapped in line.wrappeds() {
-                            match wrapped {
-                                Wrapped::Text {
-                                    is_inlay: false,
-                                    mut text,
-                                } => {
-                                    while !text.is_empty() {
-                                        let token = match token_slot {
-                                            Some(token) => {
-                                                if text.len() < token.len {
-                                                    token_slot = Some(Token {
-                                                        len: token.len - text.len(),
-                                                        kind: token.kind,
-                                                    });
-                                                    Token {
-                                                        len: text.len(),
-                                                        kind: token.kind,
+        session.blocks(
+            0,
+            session.document().borrow().text().as_lines().len(),
+            |blocks| {
+                for block in blocks {
+                    match block {
+                        Block::Line { line, .. } => {
+                            let mut token_iter = line.tokens().iter().copied();
+                            let mut token_slot = token_iter.next();
+                            let mut column = 0;
+                            for wrapped in line.wrappeds() {
+                                match wrapped {
+                                    Wrapped::Text {
+                                        is_inlay: false,
+                                        mut text,
+                                    } => {
+                                        while !text.is_empty() {
+                                            let token = match token_slot {
+                                                Some(token) => {
+                                                    if text.len() < token.len {
+                                                        token_slot = Some(Token {
+                                                            len: token.len - text.len(),
+                                                            kind: token.kind,
+                                                        });
+                                                        Token {
+                                                            len: text.len(),
+                                                            kind: token.kind,
+                                                        }
+                                                    } else {
+                                                        token_slot = token_iter.next();
+                                                        token
                                                     }
-                                                } else {
-                                                    token_slot = token_iter.next();
-                                                    token
                                                 }
-                                            }
-                                            None => Token {
-                                                len: text.len(),
-                                                kind: TokenKind::Unknown,
-                                            },
-                                        };
-                                        let (text_0, text_1) = text.split_at(token.len);
-                                        text = text_1;
+                                                None => Token {
+                                                    len: text.len(),
+                                                    kind: TokenKind::Unknown,
+                                                },
+                                            };
+                                            let (text_0, text_1) = text.split_at(token.len);
+                                            text = text_1;
+                                            self.draw_text.draw_abs(
+                                                cx,
+                                                DVec2 {
+                                                    x: line.column_to_x(column),
+                                                    y,
+                                                } * self.cell_size
+                                                    - self.viewport_rect.pos,
+                                                text_0,
+                                            );
+                                            column += text_0
+                                                .chars()
+                                                .map(|char| {
+                                                    char.column_count(
+                                                        session.settings().tab_column_count,
+                                                    )
+                                                })
+                                                .sum::<usize>();
+                                        }
+                                    }
+                                    Wrapped::Text {
+                                        is_inlay: true,
+                                        text,
+                                    } => {
                                         self.draw_text.draw_abs(
                                             cx,
                                             DVec2 {
@@ -225,53 +251,35 @@ impl CodeEditor {
                                                 y,
                                             } * self.cell_size
                                                 - self.viewport_rect.pos,
-                                            text_0,
+                                            text,
                                         );
-                                        column += text_0
+                                        column += text
                                             .chars()
                                             .map(|char| {
-                                                char.column_count(session.settings().tab_column_count)
+                                                char.column_count(
+                                                    session.settings().tab_column_count,
+                                                )
                                             })
                                             .sum::<usize>();
                                     }
-                                }
-                                Wrapped::Text {
-                                    is_inlay: true,
-                                    text,
-                                } => {
-                                    self.draw_text.draw_abs(
-                                        cx,
-                                        DVec2 {
-                                            x: line.column_to_x(column),
-                                            y,
-                                        } * self.cell_size
-                                            - self.viewport_rect.pos,
-                                        text,
-                                    );
-                                    column += text
-                                        .chars()
-                                        .map(|char| {
-                                            char.column_count(session.settings().tab_column_count)
-                                        })
-                                        .sum::<usize>();
-                                }
-                                Wrapped::Widget(widget) => {
-                                    column += widget.column_count;
-                                }
-                                Wrapped::Wrap => {
-                                    column = line.wrap_indent_column();
-                                    y += line.scale();
+                                    Wrapped::Widget(widget) => {
+                                        column += widget.column_count;
+                                    }
+                                    Wrapped::Wrap => {
+                                        column = line.wrap_indent_column();
+                                        y += line.scale();
+                                    }
                                 }
                             }
+                            y += line.scale();
                         }
-                        y += line.scale();
-                    }
-                    Block::Widget(widget) => {
-                        y += widget.height;
+                        Block::Widget(widget) => {
+                            y += widget.height;
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
     }
 
     fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
@@ -327,7 +335,9 @@ impl CodeEditor {
                                             + grapheme
                                                 .chars()
                                                 .map(|char| {
-                                                    char.column_count(session.settings().tab_column_count)
+                                                    char.column_count(
+                                                        session.settings().tab_column_count,
+                                                    )
                                                 })
                                                 .sum::<usize>();
                                         let next_y = y + line_ref.scale();
@@ -336,7 +346,10 @@ impl CodeEditor {
                                         let mid_x = (x + next_x) / 2.0;
                                         if (y..=next_y).contains(&point.y) {
                                             if (x..=mid_x).contains(&point.x) {
-                                                return Some((Point { line, byte }, Affinity::After));
+                                                return Some((
+                                                    Point { line, byte },
+                                                    Affinity::After,
+                                                ));
                                             }
                                             if (mid_x..=next_x).contains(&point.x) {
                                                 return Some((
@@ -360,7 +373,9 @@ impl CodeEditor {
                                         + text
                                             .chars()
                                             .map(|char| {
-                                                char.column_count(session.settings().tab_column_count)
+                                                char.column_count(
+                                                    session.settings().tab_column_count,
+                                                )
                                             })
                                             .sum::<usize>();
                                     let next_y = y + line_ref.scale();
@@ -453,7 +468,9 @@ impl<'a> DrawSelections<'a> {
                                         column += grapheme
                                             .chars()
                                             .map(|char| {
-                                                char.column_count(session.settings().tab_column_count)
+                                                char.column_count(
+                                                    session.settings().tab_column_count,
+                                                )
                                             })
                                             .sum::<usize>();
                                         self.handle_event(
