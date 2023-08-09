@@ -53,6 +53,13 @@ impl LiveHook for ListView {
     fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, ListView)
     }
+    
+    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if let ApplyFrom::UpdateFromDoc {..} = from{
+            self.templates.clear();
+        }
+    }
+    
     // hook the apply flow to collect our templates and apply to instanced childnodes
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;

@@ -178,7 +178,10 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-
+                    if self.check_live_file_watcher(){
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
+                    }
                     self.handle_networking_events();
 
                     return EventFlow::Poll;
