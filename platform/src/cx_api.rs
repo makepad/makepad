@@ -2,6 +2,7 @@ use {
     makepad_futures::executor::Spawner,
     std::{
         any::{TypeId, Any},
+        rc::Rc,
     },
     crate::{
         makepad_math::{DVec2, Rect},
@@ -84,12 +85,12 @@ impl Cx {
         CxRef(self.self_ref.clone().unwrap())
     }
     
-    pub fn get_dependency(&self, path: &str) -> Result<&Vec<u8>,
+    pub fn get_dependency(&self, path: &str) -> Result<Rc<Vec<u8>>,
     String> { 
         if let Some(data) = self.dependencies.get(path) {
             if let Some(data) = &data.data {
                 return match data {
-                    Ok(data) => Ok(data),
+                    Ok(data) => Ok(data.clone()),
                     Err(s) => Err(s.clone())
                 }
             } 

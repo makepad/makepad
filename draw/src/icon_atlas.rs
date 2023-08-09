@@ -192,7 +192,7 @@ impl CxIconAtlas {
                         }
                         None
                     }
-                    if let Some(data) = find_path_str(data){
+                    if let Some(data) = find_path_str(&data){
                         return self.parse_and_cache_path(path_hash, data)
                     }
                     return None
