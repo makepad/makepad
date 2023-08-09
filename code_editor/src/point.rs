@@ -28,7 +28,7 @@ impl Point {
                     Drift::Before => self + text.extent(),
                     Drift::After => self,
                 },
-                Ordering::Greater => self + text.extent(),
+                Ordering::Greater => point + text.extent() + (self - point),
             },
             ChangeKind::Delete(range) => {
                 if self < range.start() {

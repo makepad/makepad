@@ -414,17 +414,28 @@ impl Session {
                     }
                 }
                 ChangeKind::Delete(range) => {
-                    
-                }
-            }
-            let line_count = self.document.borrow().text.as_lines().len();
-            for line in 0..line_count {
-                if self.wrap_data[line].is_none() {
-                    self.update_wrap_data(line);
+                    self.column_count[range.start().line] = None;
+                    self.wrap_data[range.start().line] = None;
+                    let line_count = range.extent().line_count;
+                    if line_count > 0 {
+                        let start_line = range.start().line + 1;
+                        let end_line = start_line + line_count;
+                        self.y.truncate(start_line);
+                        self.column_count.drain(start_line..end_line);
+                        self.fold_column.drain(start_line..end_line);
+                        self.scale.drain(start_line..end_line);
+                        self.wrap_data.drain(start_line..end_line);
+                    }
                 }
             }
             for selection in &mut self.selections {
                 *selection = selection.apply_change(&change);
+            }
+        }
+        let line_count = self.document.borrow().text.as_lines().len();
+        for line in 0..line_count {
+            if self.wrap_data[line].is_none() {
+                self.update_wrap_data(line);
             }
         }
         self.update_y();
@@ -740,7 +751,7 @@ impl Document {
                         .collect::<Vec<_>>();
                     tokens.extend(self.tokens[range.end().line][end..].iter().copied());
                     self.tokens
-                        .splice(range.start().line..range.end().line + 1, iter::once(tokens));
+                        .splice(range.start().line..range.end().line + 1, iter::once(tokens));     
                 }
             }
         }
