@@ -1,7 +1,6 @@
 pub mod change;
 pub mod char;
 pub mod code_editor;
-pub mod edit_ops;
 pub mod extent;
 pub mod inlays;
 pub mod iter;
@@ -17,7 +16,6 @@ pub mod token;
 pub mod widgets;
 
 pub use self::{
-    change::Change, code_editor::CodeEditor, extent::Extent, line::Line,
-    point::Point, range::Range, selection::Selection, settings::Settings,
-    text::Text, token::Token,
+    change::Change, code_editor::CodeEditor, extent::Extent, line::Line, point::Point,
+    range::Range, selection::Selection, settings::Settings, text::Text, token::Token,
 };
