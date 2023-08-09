@@ -112,7 +112,6 @@ impl From<StdinScroll> for ScrollEvent {
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub enum HostToStdin{
     WindowSize(StdinWindowSize),
-    Signal(u64),
     Tick{
         frame: u64,
         time: f64,

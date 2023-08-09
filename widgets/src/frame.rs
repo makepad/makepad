@@ -430,7 +430,7 @@ impl LiveHook for Frame {
         register_widget!(cx, Frame)
     }
     
-    fn before_apply(&mut self,  cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn before_apply(&mut self,  _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from{
             self.draw_order.clear();
         }

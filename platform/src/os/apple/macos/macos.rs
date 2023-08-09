@@ -127,7 +127,7 @@ impl Cx {
         }
     }
 
-    fn handle_networking_events(&mut self) {
+    pub(crate) fn handle_networking_events(&mut self) {
         match self.os.networking_channel.receiver.try_recv() {
             Ok(message) => {
                 match message {
