@@ -380,7 +380,6 @@ impl DrawText {
             rustybuzz_buffer.push_str(&bidi_info.text[run_range]);
             let glyph_buffer = owned_font_face.with_ref(|face| rustybuzz::shape(face, &[], rustybuzz_buffer));
             let glyphs = glyph_buffer.glyph_infos().iter().map(|glyph| glyph.glyph_id as usize);
-
             for glyph_id in glyphs {
                 let glyph = &font.glyphs[glyph_id];
                 
