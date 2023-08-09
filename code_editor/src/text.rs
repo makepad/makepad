@@ -13,6 +13,12 @@ impl Text {
         Self::default()
     }
 
+    pub fn newline() -> Self {
+        Self {
+            lines: vec![String::new(), String::new()],
+        }
+    }
+
     pub fn from_buf_reader<R>(reader: R) -> io::Result<Self>
     where
         R: BufRead,

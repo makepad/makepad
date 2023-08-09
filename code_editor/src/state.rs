@@ -9,7 +9,9 @@ use {
         str::StrExt,
         token::TokenKind,
         widgets::BlockWidget,
-        Change, Line, Point, Range, Selection, Settings, Text, Token,
+        wrap,
+        wrap::WrapData,
+        Change, Extent, Line, Point, Range, Selection, Settings, Text, Token,
     },
     std::{
         cell::RefCell,
@@ -37,11 +39,10 @@ pub struct Session {
     column_count: Vec<Option<usize>>,
     fold_column: Vec<usize>,
     scale: Vec<f64>,
-    wraps: Vec<Vec<usize>>,
-    wrap_indent_column: Vec<usize>,
+    wrap_data: Vec<Option<WrapData>>,
     selections: Vec<Selection>,
     pending_selection_index: Option<usize>,
-    change_receiver: Receiver<Change>,
+    change_receiver: Receiver<Vec<Change>>,
 }
 
 impl Session {
@@ -49,26 +50,25 @@ impl Session {
         static ID: AtomicUsize = AtomicUsize::new(0);
 
         let (change_sender, change_receiver) = mpsc::channel();
-        let count = document.borrow().text.as_lines().len();
+        let line_count = document.borrow().text.as_lines().len();
         let mut session = Self {
             id: SessionId(ID.fetch_add(1, atomic::Ordering::AcqRel)),
             settings: Rc::new(Settings::default()),
             document,
             wrap_column: None,
             y: Vec::new(),
-            column_count: (0..count).map(|_| None).collect(),
-            fold_column: (0..count).map(|_| 0).collect(),
-            scale: (0..count).map(|_| 1.0).collect(),
-            wraps: (0..count).map(|_| Vec::new()).collect(),
-            wrap_indent_column: (0..count).map(|_| 0).collect(),
+            column_count: (0..line_count).map(|_| None).collect(),
+            fold_column: (0..line_count).map(|_| 0).collect(),
+            scale: (0..line_count).map(|_| 1.0).collect(),
+            wrap_data: (0..line_count).map(|_| None).collect(),
             selections: vec![Selection::default()].into(),
             pending_selection_index: None,
             change_receiver,
         };
-        session.update_y();
-        for index in 0..count {
-            session.update_wraps(index);
+        for line in 0..line_count {
+            session.update_wrap_data(line);
         }
+        session.update_y();
         session
             .document
             .borrow_mut()
@@ -126,8 +126,8 @@ impl Session {
             .y
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
-            Ok(index) => index,
-            Err(index) => index.saturating_sub(1),
+            Ok(line) => line,
+            Err(line) => line.saturating_sub(1),
         }
     }
 
@@ -136,56 +136,54 @@ impl Session {
             .y
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
-            Ok(index) => index + 1,
-            Err(index) => index,
+            Ok(line) => line + 1,
+            Err(line) => line,
         }
     }
 
-    pub fn line<T>(&self, index: usize, f: impl FnOnce(Line<'_>) -> T) -> T {
+    pub fn line<T>(&self, line: usize, f: impl FnOnce(Line<'_>) -> T) -> T {
         let document = self.document.borrow();
         f(Line {
-            y: self.y.get(index).copied(),
-            column_count: self.column_count[index],
-            fold_column: self.fold_column[index],
-            scale: self.scale[index],
-            text: &document.text.as_lines()[index],
-            tokens: &document.tokens[index],
-            inline_inlays: &document.inline_inlays[index],
-            wraps: &self.wraps[index],
-            wrap_indent_column: self.wrap_indent_column[index],
+            y: self.y.get(line).copied(),
+            column_count: self.column_count[line],
+            fold_column: self.fold_column[line],
+            scale: self.scale[line],
+            text: &document.text.as_lines()[line],
+            tokens: &document.tokens[line],
+            inline_inlays: &document.inline_inlays[line],
+            wrap_data: self.wrap_data[line].as_ref(),
         })
     }
 
-    pub fn lines<T>(&self, start: usize, end: usize, f: impl FnOnce(Lines<'_>) -> T) -> T {
+    pub fn lines<T>(&self, start_line: usize, end_line: usize, f: impl FnOnce(Lines<'_>) -> T) -> T {
         let document = self.document.borrow();
         f(Lines {
-            y: self.y[start.min(self.y.len())..end.min(self.y.len())].iter(),
-            column_count: self.column_count[start..end].iter(),
-            fold_column: self.fold_column[start..end].iter(),
-            scale: self.scale[start..end].iter(),
-            text: document.text.as_lines()[start..end].iter(),
-            tokens: document.tokens[start..end].iter(),
-            inline_inlays: document.inline_inlays[start..end].iter(),
-            wraps: self.wraps[start..end].iter(),
-            wrap_indent_column: self.wrap_indent_column[start..end].iter(),
+            y: self.y[start_line.min(self.y.len())..end_line.min(self.y.len())].iter(),
+            column_count: self.column_count[start_line..end_line].iter(),
+            fold_column: self.fold_column[start_line..end_line].iter(),
+            scale: self.scale[start_line..end_line].iter(),
+            text: document.text.as_lines()[start_line..end_line].iter(),
+            tokens: document.tokens[start_line..end_line].iter(),
+            inline_inlays: document.inline_inlays[start_line..end_line].iter(),
+            wrap_data: self.wrap_data[start_line..end_line].iter(),
         })
     }
 
-    pub fn blocks<T>(&self, start: usize, end: usize, f: impl FnOnce(Blocks<'_>) -> T) -> T {
+    pub fn blocks<T>(&self, start_line: usize, end_line: usize, f: impl FnOnce(Blocks<'_>) -> T) -> T {
         let document = self.document.borrow();
         let mut block_inlays = document.block_inlays.iter();
         while block_inlays
             .as_slice()
             .first()
-            .map_or(false, |&(position, _)| position < start)
+            .map_or(false, |&(position, _)| position < start_line)
         {
             block_inlays.next();
         }
-        self.lines(start, end, |lines| {
+        self.lines(start_line, end_line, |lines| {
             f(Blocks {
                 lines,
                 block_inlays,
-                position: start,
+                position: start_line,
             })
         })
     }
@@ -199,9 +197,9 @@ impl Session {
             return;
         }
         self.wrap_column = wrap_column;
-        let count = self.document.borrow().text.as_lines().len();
-        for index in 0..count {
-            self.update_wraps(index);
+        let line_count = self.document.borrow().text.as_lines().len();
+        for line in 0..line_count {
+            self.update_wrap_data(line);
         }
         self.update_y();
     }
@@ -274,23 +272,55 @@ impl Session {
     }
 
     pub fn insert(&mut self, text: Text) {
-        let mut changes = Vec::new();
-        self.document.borrow_mut().edit(&self.selections, &mut changes, |_, _| {
-            (Some(text.clone()), None)
-        });
-        for change in &changes {
-            self.document.borrow_mut().apply_change(change);
-        }
+        self.document
+            .borrow_mut()
+            .edit(&self.selections, |_, _, _| {
+                (Extent::zero(), Some(text.clone()), None)
+            });
+    }
+
+    pub fn enter(&mut self) {
+        self.document
+            .borrow_mut()
+            .edit(&self.selections, |_, _, _| {
+                (Extent::zero(), Some(Text::newline()), None)
+            });
     }
 
     pub fn delete(&mut self) {
-        let mut changes = Vec::new();
-        self.document.borrow_mut().edit(&self.selections, &mut changes, |_, _| {
-            (None, None)
-        });
-        for change in &changes {
-            self.document.borrow_mut().apply_change(change);
-        }
+        self.document
+            .borrow_mut()
+            .edit(&self.selections, |_, _, _| (Extent::zero(), None, None));
+    }
+
+    pub fn backspace(&mut self) {
+        self.document
+            .borrow_mut()
+            .edit(&self.selections, |text, point, is_empty| {
+                (
+                    if is_empty {
+                        if point.byte == 0 {
+                            Extent {
+                                line_count: 1,
+                                byte_count: 0,
+                            }
+                        } else {
+                            Extent {
+                                line_count: 0,
+                                byte_count: text.as_lines()[point.line]
+                                    .graphemes()
+                                    .next_back()
+                                    .unwrap()
+                                    .len(),
+                            }
+                        }
+                    } else {
+                        Extent::zero()
+                    },
+                    None,
+                    None,
+                )
+            });
     }
 
     fn update_y(&mut self) {
@@ -325,10 +355,8 @@ impl Session {
     }
 
     pub fn handle_changes(&mut self) {
-        while let Ok(change) = self.change_receiver.try_recv() {
-            for selection in &mut self.selections {
-                *selection = selection.apply_change(&change);
-            }
+        while let Ok(changes) = self.change_receiver.try_recv() {
+            self.apply_changes(&changes);
         }
     }
 
@@ -349,7 +377,7 @@ impl Session {
                     }
                     Wrapped::Wrap => {
                         column_count = column_count.max(column);
-                        column = line.wrap_indent_column();
+                        column = line.wrap_indent_column_count();
                     }
                 }
             }
@@ -357,17 +385,49 @@ impl Session {
         self.column_count[index] = Some(column_count.max(column));
     }
 
-    fn update_wraps(&mut self, index: usize) {
-        let (wraps, wrap_indent_column) = match self.wrap_column {
-            Some(wrap_column) => self.line(index, |line| {
-                line.compute_wraps(wrap_column, self.settings.tab_column_count)
+    fn update_wrap_data(&mut self, line: usize) {
+        let wrap_data = match self.wrap_column {
+            Some(wrap_column) => self.line(line, |line| {
+                wrap::compute_wrap_data(line, wrap_column, self.settings.tab_column_count)
             }),
-            None => (Vec::new(), 0),
+            None => WrapData::default(),
         };
-        self.wraps[index] = wraps;
-        self.wrap_indent_column[index] = wrap_indent_column;
-        self.y.truncate(index + 1);
-        self.update_column_count(index);
+        self.wrap_data[line] = Some(wrap_data);
+        self.y.truncate(line + 1);
+        self.update_column_count(line);
+    }
+
+    fn apply_changes(&mut self, changes: &[Change]) {
+        for change in changes {
+            match &change.kind {
+                ChangeKind::Insert(point, text) => {
+                    self.column_count[point.line] = None;
+                    self.wrap_data[point.line] = None;
+                    let line_count = text.extent().line_count;
+                    if line_count > 0 {
+                        let line = point.line + 1;
+                        self.y.truncate(line);
+                        self.column_count.splice(line..line, (0..line_count).map(|_| None));
+                        self.fold_column.splice(line..line, (0..line_count).map(|_| 0));
+                        self.scale.splice(line..line, (0..line_count).map(|_| 1.0));
+                        self.wrap_data.splice(line..line, (0..line_count).map(|_| None));
+                    }
+                }
+                ChangeKind::Delete(range) => {
+                    
+                }
+            }
+            let line_count = self.document.borrow().text.as_lines().len();
+            for line in 0..line_count {
+                if self.wrap_data[line].is_none() {
+                    self.update_wrap_data(line);
+                }
+            }
+            for selection in &mut self.selections {
+                *selection = selection.apply_change(&change);
+            }
+        }
+        self.update_y();
     }
 }
 
@@ -383,11 +443,10 @@ pub struct Lines<'a> {
     pub column_count: Iter<'a, Option<usize>>,
     pub fold_column: Iter<'a, usize>,
     pub scale: Iter<'a, f64>,
-    pub wrap_indent_column: Iter<'a, usize>,
     pub text: Iter<'a, String>,
     pub tokens: Iter<'a, Vec<Token>>,
     pub inline_inlays: Iter<'a, Vec<(usize, InlineInlay)>>,
-    pub wraps: Iter<'a, Vec<usize>>,
+    pub wrap_data: Iter<'a, Option<WrapData>>,
 }
 
 impl<'a> Iterator for Lines<'a> {
@@ -403,8 +462,7 @@ impl<'a> Iterator for Lines<'a> {
             text,
             tokens: self.tokens.next().unwrap(),
             inline_inlays: self.inline_inlays.next().unwrap(),
-            wraps: self.wraps.next().unwrap(),
-            wrap_indent_column: *self.wrap_indent_column.next().unwrap(),
+            wrap_data: self.wrap_data.next().unwrap().as_ref(),
         })
     }
 }
@@ -455,21 +513,21 @@ pub struct Document {
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
     block_inlays: Vec<(usize, BlockInlay)>,
-    change_senders: HashMap<SessionId, Sender<Change>>,
+    change_senders: HashMap<SessionId, Sender<Vec<Change>>>,
 }
 
 impl Document {
     pub fn new(text: Text) -> Self {
-        let count = text.as_lines().len();
-        let tokens: Vec<_> = (0..count)
-            .map(|index| tokenize(&text.as_lines()[index]).collect::<Vec<_>>())
+        let line_count = text.as_lines().len();
+        let tokens: Vec<_> = (0..line_count)
+            .map(|line| tokenize(&text.as_lines()[line]).collect::<Vec<_>>())
             .collect();
         Self {
             text,
             tokens,
-            inline_inlays: (0..count)
-                .map(|index| {
-                    if index % 2 == 0 {
+            inline_inlays: (0..line_count)
+                .map(|line| {
+                    if line % 5 == 0 {
                         [
                             (20, InlineInlay::Text("XXX".into())),
                             (40, InlineInlay::Text("XXX".into())),
@@ -494,9 +552,9 @@ impl Document {
     fn edit(
         &mut self,
         selections: &[Selection],
-        changes: &mut Vec<Change>,
-        mut f: impl FnMut(&Text, Point) -> (Option<Text>, Option<Text>),
+        mut f: impl FnMut(&Text, Point, bool) -> (Extent, Option<Text>, Option<Text>),
     ) {
+        let mut changes = Vec::new();
         let mut point = Point::zero();
         let mut prev_range_end = Point::zero();
         for range in selections
@@ -519,7 +577,22 @@ impl Document {
                 self.text.apply_change(change.clone());
                 changes.push(change);
             }
-            let (insert_text_before, insert_text_after) = f(&self.text, point);
+            let (delete_extent, insert_text_before, insert_text_after) =
+                f(&self.text, point, range.is_empty());
+            if delete_extent != Extent::zero() {
+                if delete_extent.line_count == 0 {
+                    point.byte -= delete_extent.byte_count;
+                } else {
+                    point.line -= delete_extent.line_count;
+                    point.byte = self.text.as_lines()[point.line].len() - delete_extent.byte_count;
+                }
+                let change = Change {
+                    drift: Drift::Before,
+                    kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent)),
+                };
+                self.text.apply_change(change.clone());
+                changes.push(change);
+            }
             if let Some(insert_text_before) = insert_text_before {
                 let extent = insert_text_before.extent();
                 let change = Change {
@@ -542,13 +615,16 @@ impl Document {
             }
             prev_range_end = range.end();
         }
+        self.apply_changes(&changes);
     }
 
-    fn apply_change(&mut self, change: &Change) {
-        self.apply_change_to_tokens(change);
-        self.apply_change_to_inline_inlays(change);
+    fn apply_changes(&mut self, changes: &[Change]) {
+        for change in changes {
+            self.apply_change_to_tokens(change);
+            self.apply_change_to_inline_inlays(change);
+        }
         for change_sender in self.change_senders.values() {
-            change_sender.send(change.clone()).unwrap();
+            change_sender.send(changes.to_vec()).unwrap();
         }
     }
 
@@ -586,7 +662,7 @@ impl Document {
                     self.tokens[point.line]
                         .splice(index..index, tokenize(text.as_lines().first().unwrap()));
                 } else {
-                    let mut tokens = (point.line..point.line + text.as_lines().len())
+                    let mut tokens = (0..text.as_lines().len())
                         .map(|line| tokenize(&text.as_lines()[line]).collect::<Vec<_>>())
                         .collect::<Vec<_>>();
                     tokens
