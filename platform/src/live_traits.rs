@@ -85,7 +85,6 @@ pub trait LiveNew: LiveApply {
             live_registry.main_module.unwrap()
         };
         self.update_from_module(cx, module_id, id);
-        crate::log!("We got a LiveEdit event");
     }
     
     fn new_local(cx: &mut Cx) -> Self where Self: Sized {
