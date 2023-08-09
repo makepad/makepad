@@ -22,7 +22,7 @@ use {
         font_atlas::{
             CxFontsAtlasRc,
         },
-        view::View,
+        draw_list_2d::DrawList2d,
         turtle::{Turtle, TurtleWalk, Walk, AlignEntry},
     }
 };
@@ -170,14 +170,14 @@ impl<'a> Cx2d<'a> {
         self.cx.get_pass_rect(self.pass_stack.last().unwrap().pass_id, self.current_dpi_factor()).unwrap().size
     }
     
-    pub fn view_will_redraw(&self, view: &mut View, walk: Walk) -> bool {
+    pub fn will_redraw(&self, draw_list_2d: &mut DrawList2d, walk: Walk) -> bool {
         // ok so we need to check if our turtle position has changed since last time.
         // if it did, we redraw
         let rect = self.peek_walk_turtle(walk);
-        if view.dirty_check_rect != rect {
-            view.dirty_check_rect = rect;
+        if draw_list_2d.dirty_check_rect != rect {
+            draw_list_2d.dirty_check_rect = rect;
             return true;
         }
-        self.draw_event.draw_list_will_redraw(self, view.draw_list.id())
+        self.draw_event.draw_list_will_redraw(self, draw_list_2d.draw_list.id())
     }
 }

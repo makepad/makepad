@@ -182,8 +182,8 @@ pub use {
             DragEvent,
             DropEvent,
             DragState,
+            DragItem,
             DragResponse,
-            DraggedItem,
             HitOptions,
             DragHitEvent,
             DropHitEvent,
@@ -227,7 +227,6 @@ pub use {
             LiveState,
             LiveStateImpl,
             StateAction,
-            StatePair
         },
         draw_vars::{
             shader_enum,

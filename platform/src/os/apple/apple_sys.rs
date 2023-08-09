@@ -115,6 +115,8 @@ extern {
     pub static NSTrackingArea: ObjcId;
     pub static NSStringPboardType: ObjcId;
     pub static NSPasteboardTypeFileURL: ObjcId;
+    pub static NSPasteboardTypeURL: ObjcId;
+    pub static NSPasteboardTypeString: ObjcId;
 }
 
 #[link(name = "Vision", kind = "framework")]

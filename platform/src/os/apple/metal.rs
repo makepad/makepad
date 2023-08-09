@@ -262,7 +262,7 @@ impl Cx {
         
         self.passes[pass_id].set_matrix(pass_rect.pos, pass_rect.size);
         self.passes[pass_id].paint_dirty = false;
-        
+
         if pass_rect.size.x <0.5 || pass_rect.size.y < 0.5 {
             return
         }
@@ -300,11 +300,12 @@ impl Cx {
         }
         else {
             for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+
                 let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
                 let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
                 let cxtexture = &mut self.textures[color_texture.texture_id];
-                
+
                 cxtexture.os.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_rect.size);
                 
                 let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
@@ -869,17 +870,20 @@ impl CxOsTexture {
                         ];
                         msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
                     }
+                    /*
                     TextureFormat::SharedBGRA(shared_id) => {
+                        log!("GOT HERE");
                         let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
                         let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
                         let texture: ObjcId = msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor];
                         // lets send this to the other side.
                         let shared: ObjcId = msg_send![texture, makeSharedTextureHandle];
                         // lets send it over
+                       
                         store_xpc_service_texture(shared_id, shared);
                         
                         texture
-                    }
+                    }*/
                     _ => panic!(),
                 }
             }).unwrap());
@@ -949,13 +953,13 @@ impl CxOsTexture {
                 let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
                 let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
                 match desc.format {
-                    TextureFormat::SharedBGRA(_shared_id) => {
+                    TextureFormat::SharedBGRA(shared_id) => {
                         let texture: ObjcId = msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor];
                         // lets send this to the other side.
-                        let _shared: ObjcId = msg_send![texture, newSharedTextureHandle];
+                        let shared: ObjcId = msg_send![texture, newSharedTextureHandle];
                         // lets send it over
                         //log!("STORING SHARED TEXTURE {}", shared_id);
-                        //store_xpc_service_texture(shared_id, shared);
+                        store_xpc_service_texture(shared_id, shared);
                         texture
                     }
                     _ => panic!(),
@@ -979,7 +983,6 @@ impl CxOsTexture {
         width: u64,
         height: u64,
     ) {
-        
         let texture = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
         }).unwrap());
@@ -988,7 +991,7 @@ impl CxOsTexture {
             is_initial: true,
             width,
             height,
-            format: TextureFormat::RenderBGRA,
+            format: TextureFormat::SharedBGRA(0),
             texture,
         });
     }
