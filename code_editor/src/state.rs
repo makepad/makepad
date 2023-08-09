@@ -155,7 +155,12 @@ impl Session {
         })
     }
 
-    pub fn lines<T>(&self, start_line: usize, end_line: usize, f: impl FnOnce(Lines<'_>) -> T) -> T {
+    pub fn lines<T>(
+        &self,
+        start_line: usize,
+        end_line: usize,
+        f: impl FnOnce(Lines<'_>) -> T,
+    ) -> T {
         let document = self.document.borrow();
         f(Lines {
             y: self.y[start_line.min(self.y.len())..end_line.min(self.y.len())].iter(),
@@ -169,7 +174,12 @@ impl Session {
         })
     }
 
-    pub fn blocks<T>(&self, start_line: usize, end_line: usize, f: impl FnOnce(Blocks<'_>) -> T) -> T {
+    pub fn blocks<T>(
+        &self,
+        start_line: usize,
+        end_line: usize,
+        f: impl FnOnce(Blocks<'_>) -> T,
+    ) -> T {
         let document = self.document.borrow();
         let mut block_inlays = document.block_inlays.iter();
         while block_inlays
@@ -282,8 +292,49 @@ impl Session {
     pub fn enter(&mut self) {
         self.document
             .borrow_mut()
-            .edit(&self.selections, |_, _, _| {
-                (Extent::zero(), Some(Text::newline()), None)
+            .edit(&self.selections, |text, point, _| {
+                let line = &text.as_lines()[point.line];
+                (
+                    if line[..point.byte].chars().all(|char| char.is_whitespace()) {
+                        Extent {
+                            line_count: 0,
+                            byte_count: point.byte,
+                        }
+                    } else {
+                        Extent::zero()
+                    },
+                    Some(Text::newline()),
+                    if line[..point.byte]
+                        .chars()
+                        .rev()
+                        .find_map(|char| {
+                            if char.is_opening_delimiter() {
+                                return Some(true);
+                            }
+                            if char.is_closing_delimiter() {
+                                return Some(false);
+                            }
+                            None
+                        })
+                        .unwrap_or(false)
+                        && line[point.byte..]
+                            .chars()
+                            .find_map(|char| {
+                                if char.is_closing_delimiter() {
+                                    return Some(true);
+                                }
+                                if !char.is_whitespace() {
+                                    return Some(false);
+                                }
+                                None
+                            })
+                            .unwrap_or(false)
+                    {
+                        Some(Text::newline())
+                    } else {
+                        None
+                    },
+                )
             });
     }
 
@@ -407,10 +458,13 @@ impl Session {
                     if line_count > 0 {
                         let line = point.line + 1;
                         self.y.truncate(line);
-                        self.column_count.splice(line..line, (0..line_count).map(|_| None));
-                        self.fold_column.splice(line..line, (0..line_count).map(|_| 0));
+                        self.column_count
+                            .splice(line..line, (0..line_count).map(|_| None));
+                        self.fold_column
+                            .splice(line..line, (0..line_count).map(|_| 0));
                         self.scale.splice(line..line, (0..line_count).map(|_| 1.0));
-                        self.wrap_data.splice(line..line, (0..line_count).map(|_| None));
+                        self.wrap_data
+                            .splice(line..line, (0..line_count).map(|_| None));
                     }
                 }
                 ChangeKind::Delete(range) => {
@@ -751,7 +805,7 @@ impl Document {
                         .collect::<Vec<_>>();
                     tokens.extend(self.tokens[range.end().line][end..].iter().copied());
                     self.tokens
-                        .splice(range.start().line..range.end().line + 1, iter::once(tokens));     
+                        .splice(range.start().line..range.end().line + 1, iter::once(tokens));
                 }
             }
         }
