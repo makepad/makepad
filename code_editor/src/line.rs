@@ -4,19 +4,19 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LineRef<'a> {
+pub struct Line<'a> {
     pub y: Option<f64>,
     pub column_count: Option<usize>,
     pub fold_column: usize,
     pub scale: f64,
-    pub indent_column_count: usize,
     pub text: &'a str,
     pub tokens: &'a [Token],
     pub inline_inlays: &'a [(usize, InlineInlay)],
     pub wraps: &'a [usize],
+    pub wrap_indent_column: usize,
 }
 
-impl<'a> LineRef<'a> {
+impl<'a> Line<'a> {
     pub fn y(&self) -> f64 {
         self.y.unwrap()
     }
@@ -51,8 +51,8 @@ impl<'a> LineRef<'a> {
         self.scale
     }
 
-    pub fn indent_column_count(self) -> usize {
-        self.indent_column_count
+    pub fn wrap_indent_column(self) -> usize {
+        self.wrap_indent_column
     }
 
     pub fn text(&self) -> &str {
@@ -67,7 +67,7 @@ impl<'a> LineRef<'a> {
         Inlines {
             text: self.text,
             inline_inlays: self.inline_inlays.iter(),
-            byte: 0,
+            position: 0,
         }
     }
 
@@ -77,18 +77,18 @@ impl<'a> LineRef<'a> {
             inline: inlines.next(),
             inlines,
             wraps: self.wraps.iter(),
-            byte: 0,
+            position: 0,
         }
     }
 
-    pub(super) fn compute_wrap_data(
+    pub(super) fn compute_wraps(
         &self,
-        max_column_count: usize,
+        wrap_column: usize,
         tab_column_count: usize,
-    ) -> (usize, Vec<usize>) {
-        let mut indent_column_count: usize = self
+    ) -> (Vec<usize>, usize) {
+        let mut wrap_indent_column: usize = self
             .text
-            .indent()
+            .leading_whitespace()
             .unwrap_or("")
             .chars()
             .map(|char| char.column_count(tab_column_count))
@@ -101,22 +101,22 @@ impl<'a> LineRef<'a> {
                             .chars()
                             .map(|char| char.column_count(tab_column_count))
                             .sum();
-                        if indent_column_count + column_count > max_column_count {
-                            indent_column_count = 0;
+                        if wrap_indent_column + column_count > wrap_column {
+                            wrap_indent_column = 0;
                             break;
                         }
                     }
                 }
                 Inline::Widget(widget) => {
-                    if indent_column_count + widget.column_count > max_column_count {
-                        indent_column_count = 0;
+                    if wrap_indent_column + widget.column_count > wrap_column {
+                        wrap_indent_column = 0;
                         break;
                     }
                 }
             }
         }
-        let mut byte_index = 0;
-        let mut column_index = 0;
+        let mut byte = 0;
+        let mut column = 0;
         let mut wraps = Vec::new();
         for inline in self.inlines() {
             match inline {
@@ -126,26 +126,26 @@ impl<'a> LineRef<'a> {
                             .chars()
                             .map(|char| char.column_count(tab_column_count))
                             .sum();
-                        if column_index + column_count > max_column_count {
-                            column_index = indent_column_count;
-                            wraps.push(byte_index);
+                        if column + column_count > wrap_column {
+                            column = wrap_indent_column;
+                            wraps.push(byte);
                         } else {
-                            column_index += column_count;
+                            column += column_count;
                         }
-                        byte_index += string.len();
+                        byte += string.len();
                     }
                 }
                 Inline::Widget(widget) => {
-                    if column_index + widget.column_count > max_column_count {
-                        column_index = indent_column_count;
-                        wraps.push(indent_column_count);
+                    if column + widget.column_count > wrap_column {
+                        column = wrap_indent_column;
+                        wraps.push(wrap_indent_column);
                     } else {
-                        column_index += widget.column_count;
+                        column += widget.column_count;
                     }
                 }
             }
         }
-        (indent_column_count, wraps)
+        (wraps, wrap_indent_column)
     }
 }
 
@@ -153,7 +153,7 @@ impl<'a> LineRef<'a> {
 pub struct Inlines<'a> {
     pub(super) text: &'a str,
     pub(super) inline_inlays: Iter<'a, (usize, InlineInlay)>,
-    pub(super) byte: usize,
+    pub(super) position: usize,
 }
 
 impl<'a> Iterator for Inlines<'a> {
@@ -164,7 +164,7 @@ impl<'a> Iterator for Inlines<'a> {
             .inline_inlays
             .as_slice()
             .first()
-            .map_or(false, |&(byte_index, _)| byte_index == self.byte)
+            .map_or(false, |&(position, _)| position == self.position)
         {
             let (_, inline_inlay) = self.inline_inlays.next().unwrap();
             return Some(match *inline_inlay {
@@ -180,11 +180,11 @@ impl<'a> Iterator for Inlines<'a> {
         }
         let mut mid = self.text.len();
         if let Some(&(byte, _)) = self.inline_inlays.as_slice().first() {
-            mid = mid.min(byte - self.byte);
+            mid = mid.min(byte - self.position);
         }
         let (text_0, text_1) = self.text.split_at(mid);
         self.text = text_1;
-        self.byte += text_0.len();
+        self.position += text_0.len();
         Some(Inline::Text {
             is_inlay: false,
             text: text_0,
@@ -203,7 +203,7 @@ pub struct Wrappeds<'a> {
     pub(super) inline: Option<Inline<'a>>,
     pub(super) inlines: Inlines<'a>,
     pub(super) wraps: Iter<'a, usize>,
-    pub(super) byte: usize,
+    pub(super) position: usize,
 }
 
 impl<'a> Iterator for Wrappeds<'a> {
@@ -214,7 +214,7 @@ impl<'a> Iterator for Wrappeds<'a> {
             .wraps
             .as_slice()
             .first()
-            .map_or(false, |&byte| byte == self.byte)
+            .map_or(false, |&position| position == self.position)
         {
             self.wraps.next();
             return Some(Wrapped::Wrap);
@@ -222,8 +222,8 @@ impl<'a> Iterator for Wrappeds<'a> {
         Some(match self.inline.take()? {
             Inline::Text { is_inlay, text } => {
                 let mut mid = text.len();
-                if let Some(&byte) = self.wraps.as_slice().first() {
-                    mid = mid.min(byte - self.byte);
+                if let Some(&position) = self.wraps.as_slice().first() {
+                    mid = mid.min(position - self.position);
                 }
                 let text = if mid < text.len() {
                     let (text_0, text_1) = text.split_at(mid);
@@ -236,11 +236,11 @@ impl<'a> Iterator for Wrappeds<'a> {
                     self.inline = self.inlines.next();
                     text
                 };
-                self.byte += text.len();
+                self.position += text.len();
                 Wrapped::Text { is_inlay, text }
             }
             Inline::Widget(widget) => {
-                self.byte += 1;
+                self.position += 1;
                 Wrapped::Widget(widget)
             }
         })
