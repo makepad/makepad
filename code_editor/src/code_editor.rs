@@ -136,11 +136,16 @@ impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
         
         let walk = if let Some(walk) = self.draw_state.get(){walk}else{panic!()};
+        /*let rect = cx.walk_turtle(walk);*/
         
-        self.viewport_rect = Rect {
+        self.scroll_bars.begin(cx, walk, Layout::default());
+        
+        self.viewport_rect = cx.turtle().rect();
+        /*Rect {
             pos: self.scroll_bars.get_scroll_pos(),
             size: cx.turtle().rect().size,
-        };
+        };*/
+        
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         session.handle_changes();
@@ -152,7 +157,8 @@ impl CodeEditor {
         self.end = session.find_first_line_starting_after_y(
             (self.viewport_rect.pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
-        self.scroll_bars.begin(cx, self.walk, Layout::default());
+        
+        
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
         cx.turtle_mut().set_used(
@@ -215,11 +221,10 @@ impl CodeEditor {
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::FingerDown(FingerDownEvent {
                 abs,
-                rect,
                 modifiers: KeyModifiers { alt, .. },
                 ..
             }) => {
-                if let Some((cursor, affinity)) = self.pick(session, abs - rect.pos) {
+                if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
                         session.add_cursor(cursor, affinity);
                     } else {
@@ -228,8 +233,8 @@ impl CodeEditor {
                     cx.redraw_all();
                 }
             }
-            Hit::FingerMove(FingerMoveEvent { abs, rect, .. }) => {
-                if let Some((cursor, affinity)) = self.pick(session, abs - rect.pos) {
+            Hit::FingerMove(FingerMoveEvent { abs,  .. }) => {
+                if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
                     cx.redraw_all();
                 }
@@ -287,7 +292,7 @@ impl CodeEditor {
                                                     x: line.column_to_x(column),
                                                     y,
                                                 } * self.cell_size
-                                                    - self.viewport_rect.pos,
+                                                    + self.viewport_rect.pos,
                                                 text_0,
                                             );
                                             column += text_0
@@ -310,7 +315,7 @@ impl CodeEditor {
                                                 x: line.column_to_x(column),
                                                 y,
                                             } * self.cell_size
-                                                - self.viewport_rect.pos,
+                                                + self.viewport_rect.pos,
                                             text,
                                         );
                                         column += text
@@ -371,7 +376,7 @@ impl CodeEditor {
     }
 
     fn pick(&self, session: &Session, point: DVec2) -> Option<(Point, Affinity)> {
-        let point = (point + self.viewport_rect.pos) / self.cell_size;
+        let point = (point - self.viewport_rect.pos) / self.cell_size;
         let mut line = session.find_first_line_ending_after_y(point.y);
         let mut y = session.line(line, |line| line.y());
         session.blocks(line, line + 1, |blocks| {
@@ -641,7 +646,7 @@ impl<'a> DrawSelections<'a> {
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
-                    - self.code_editor.viewport_rect.pos,
+                    + self.code_editor.viewport_rect.pos,
                 size: DVec2 {
                     x: line.column_to_x(column) - start_x,
                     y: line.scale(),
@@ -658,7 +663,7 @@ impl<'a> DrawSelections<'a> {
                     x: line.column_to_x(column),
                     y,
                 } * self.code_editor.cell_size
-                    - self.code_editor.viewport_rect.pos,
+                    + self.code_editor.viewport_rect.pos,
                 size: DVec2 {
                     x: 2.0,
                     y: line.scale() * self.code_editor.cell_size.y,

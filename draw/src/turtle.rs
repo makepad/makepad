@@ -792,6 +792,14 @@ impl Turtle {
             size: dvec2(self.width, self.height)
         }
     }
+    
+   pub fn unscrolled_rect(&self) -> Rect {
+        Rect {
+            pos: self.origin + self.layout.scroll,
+            size: dvec2(self.width, self.height)
+        }
+    }
+    
     pub fn padded_rect_used(&self) -> Rect {
         Rect {
             pos: self.origin + self.layout.padding.left_top(),
