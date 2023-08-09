@@ -22,13 +22,13 @@ impl Point {
 
     pub fn apply_change(self, change: &Change) -> Self {
         match change.kind {
-            ChangeKind::Insert(point, ref additional_text) => match self.cmp(&point) {
+            ChangeKind::Insert(point, ref text) => match self.cmp(&point) {
                 Ordering::Less => self,
                 Ordering::Equal => match change.drift {
-                    Drift::Before => self + additional_text.extent(),
+                    Drift::Before => self + text.extent(),
                     Drift::After => self,
                 },
-                Ordering::Greater => self + additional_text.extent(),
+                Ordering::Greater => self + text.extent(),
             },
             ChangeKind::Delete(range) => {
                 if self < range.start() {

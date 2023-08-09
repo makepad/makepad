@@ -100,3 +100,9 @@ impl From<&String> for Text {
         string.as_str().into()
     }
 }
+
+impl From<String> for Text {
+    fn from(string: String) -> Self {
+        string.as_str().into()
+    }
+}
