@@ -10,7 +10,7 @@ pub fn move_left(lines: &[String], point: Point) -> Point {
     point
 }
 
-pub fn move_right(point: Point, lines: &[String]) -> Point {
+pub fn move_right(lines: &[String], point: Point) -> Point {
     if !is_at_end_of_line(lines, point) {
         return move_to_next_grapheme(lines, point);
     }
