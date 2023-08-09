@@ -1,13 +1,13 @@
-//! `ttf_parser::Face` wrapper owning (instead of borrowing) font bytes, similar
-//! to what the `owned_ttf_parser` crate offers, but expandable to `rustybuzz`,
-//! and using `Rc<Vec<u8>>` instead of `Vec<u8>` (to avoid cloning any bytes).
+//! `rustybuzz::Face` wrapper owning (instead of borrowing) font bytes, similar
+//! to what the `owned_ttf_parser` crate offers for `ttf_parser::Face`, and also
+//! using `Rc<Vec<u8>>` instead of `Vec<u8>` (to avoid cloning any font bytes).
 
-use makepad_vector::ttf_parser::Face;
+use rustybuzz::Face;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::rc::Rc;
 
-pub use makepad_vector::ttf_parser::FaceParsingError;
+pub use rustybuzz::ttf_parser::FaceParsingError;
 
 pub struct OwnedFace(Pin<Box<FaceWithFontData>>);
 
@@ -24,8 +24,9 @@ impl OwnedFace {
         pinned_box
             .as_mut()
             .with_face_slot_mut_and_font_data(|face_slot, font_data| {
-                let ttf_parser_face = Face::parse(font_data, index_in_collection)?;
-                *face_slot = Some(ttf_parser_face);
+                let ttf_parser_face =
+                    rustybuzz::ttf_parser::Face::parse(font_data, index_in_collection)?;
+                *face_slot = Some(Face::from_face(ttf_parser_face));
                 Ok(())
             })?;
         Ok(Self(pinned_box))
