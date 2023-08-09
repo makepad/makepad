@@ -1,4 +1,4 @@
-use crate::{str::StrExt, char::CharExt, Line, line::Inline};
+use crate::{char::CharExt, line::Inline, str::StrExt, Line};
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct WrapData {
@@ -6,11 +6,7 @@ pub struct WrapData {
     pub indent_column_count: usize,
 }
 
-pub fn compute_wrap_data(
-    line: Line<'_>,
-    wrap_column: usize,
-    tab_column_count: usize,
-) -> WrapData {
+pub fn compute_wrap_data(line: Line<'_>, wrap_column: usize, tab_column_count: usize) -> WrapData {
     let mut indent_column_count: usize = line
         .text
         .leading_whitespace()
