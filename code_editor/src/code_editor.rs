@@ -85,30 +85,58 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct CodeEditor {
-    #[live]
-    scroll_bars: ScrollBars,
-    #[live]
-    walk: Walk,
-    #[live]
-    draw_text: DrawText,
-    #[live]
-    draw_selection: DrawSelection,
-    #[live]
-    draw_cursor: DrawColor,
-    #[rust]
-    viewport_rect: Rect,
-    #[rust]
-    cell_size: DVec2,
-    #[rust]
-    start: usize,
-    #[rust]
-    end: usize,
+    #[live] scroll_bars: ScrollBars,
+    #[live] walk: Walk,
+    #[rust] draw_state: DrawStateWrap<Walk>,
+    #[live] draw_text: DrawText,
+    #[live] draw_selection: DrawSelection,
+    #[live] draw_cursor: DrawColor,
+    #[rust] viewport_rect: Rect,
+    #[rust] cell_size: DVec2,
+    #[rust] start: usize,
+    #[rust] end: usize,
 }
 
+impl LiveHook for CodeEditor {
+    fn before_live_design(cx:&mut Cx){
+        register_widget!(cx, CodeEditor)
+    }
+}
+
+impl Widget for CodeEditor {
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.scroll_bars.redraw(cx);
+    }
+    
+    fn handle_widget_event_with(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem)) {
+        //let uid = self.widget_uid();
+        /*self.handle_event_with(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
+        });*/
+        //self.handle_event
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        if self.draw_state.begin(cx, walk) {
+            return WidgetDraw::hook_above()
+        }
+        self.draw_state.end();
+        WidgetDraw::done()
+    }
+}
+
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct CodeEditorRef(WidgetRef); 
+
 impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d<'_>, session: &mut Session) {
+    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+        
+        let walk = if let Some(walk) = self.draw_state.get(){walk}else{panic!()};
+        
         self.viewport_rect = Rect {
             pos: self.scroll_bars.get_scroll_pos(),
             size: cx.turtle().rect().size,
@@ -137,7 +165,7 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, session: &mut Session, event: &Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
@@ -210,7 +238,7 @@ impl CodeEditor {
         }
     }
 
-    fn draw_text(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut y = 0.0;
         session.blocks(
             0,
@@ -467,7 +495,7 @@ struct DrawSelections<'a> {
 }
 
 impl<'a> DrawSelections<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
+    fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut line = self.code_editor.start;
         let mut y = session.line(line, |line| line.y());
         session.blocks(self.code_editor.start, self.code_editor.end, |blocks| {
@@ -566,7 +594,7 @@ impl<'a> DrawSelections<'a> {
 
     fn handle_event(
         &mut self,
-        cx: &mut Cx2d<'_>,
+        cx: &mut Cx2d,
         line: usize,
         line_ref: Line<'_>,
         byte: usize,
@@ -607,7 +635,7 @@ impl<'a> DrawSelections<'a> {
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, line: Line<'_>, y: f64, column: usize) {
+    fn draw_selection(&mut self, cx: &mut Cx2d, line: Line<'_>, y: f64, column: usize) {
         let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
         self.code_editor.draw_selection.draw(
             cx,
@@ -669,13 +697,13 @@ impl DrawSelection {
         debug_assert!(self.prev_rect.is_none());
     }
 
-    fn end(&mut self, cx: &mut Cx2d<'_>) {
+    fn end(&mut self, cx: &mut Cx2d) {
         self.draw_rect_internal(cx, None);
         self.prev_prev_rect = None;
         self.prev_rect = None;
     }
 
-    fn draw(&mut self, cx: &mut Cx2d<'_>, rect: Rect) {
+    fn draw(&mut self, cx: &mut Cx2d, rect: Rect) {
         self.draw_rect_internal(cx, Some(rect));
         self.prev_prev_rect = self.prev_rect;
         self.prev_rect = Some(rect);
@@ -701,3 +729,5 @@ impl DrawSelection {
         }
     }
 }
+
+

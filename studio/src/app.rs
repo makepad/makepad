@@ -1,5 +1,10 @@
 use {
+    std::rc::Rc, 
+    std::cell::RefCell,
+    std::collections::{HashMap,hash_map},
     crate::{
+        makepad_code_editor::{Session,Document},
+        makepad_code_editor::code_editor::*,
         makepad_platform::*,
         makepad_draw::*,
         makepad_widgets::*,
@@ -23,6 +28,7 @@ live_design!{
     import makepad_widgets::file_tree::FileTree;
     import makepad_widgets::dock::*;
     import makepad_widgets::desktop_window::DesktopWindow;
+    import makepad_code_editor::code_editor::CodeEditor;
     
     import makepad_studio::run_view::RunView;
     import makepad_studio::build::build_manager::LogList;
@@ -65,8 +71,8 @@ live_design!{
                 }
                 
                 file1 = Tab {
-                    name: "File1"
-                    kind: Empty1
+                    name: "Empty1"
+                    kind: CodeEditor
                 }
                 
                 file2 = Tab {
@@ -93,7 +99,7 @@ live_design!{
                     name: "Run",
                     kind: RunView
                 }
-                
+                CodeEditor = <CodeEditor>{}
                 Empty1 = <Rect> {draw_bg: {color: #533}}
                 Empty2 = <Rect> {draw_bg: {color: #353}}
                 Empty3 = <Rect> {draw_bg: {color: #335}}
@@ -111,12 +117,14 @@ live_design!{
 pub struct App {
     #[live] ui: WidgetRef,
     #[live] build_manager: BuildManager,
-    #[rust] file_system: FileSystem
+    #[rust] file_system: FileSystem,
+    #[rust] sessions: HashMap<LiveId,Session>,
 }
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
+        crate::makepad_code_editor::live_design(cx);
         crate::build::build_manager::live_design(cx);
         crate::run_view::live_design(cx);
     }
@@ -151,13 +159,22 @@ impl AppMain for App {
                         &mut *file_tree
                     );
                 }
-                
-                if let Some(mut run_view) = run_view.has_widget(&next).borrow_mut() {
+                else if let Some(mut run_view) = run_view.has_widget(&next).borrow_mut() {
                     run_view.draw(cx, &self.build_manager);
                 }
-                
-                if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
+                else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
                     self.build_manager.draw_log_list(cx, &mut *list_view);
+                }
+                else if let Some(mut code_editor) = next.into_code_editor().borrow_mut(){
+                    // lets fetch a session
+                    let current_id = dock.get_drawing_item_id().unwrap();
+                    let session = match self.sessions.entry(current_id){
+                        hash_map::Entry::Occupied(o) => o.into_mut(),
+                        hash_map::Entry::Vacant(v) => v.insert(Session::new(Rc::new(RefCell::new(Document::new(
+                            include_str!("app.rs").into(),
+                        )))))
+                    };
+                    code_editor.draw(cx, session)
                 }
             }
             return
@@ -165,14 +182,26 @@ impl AppMain for App {
         
         self.file_system.handle_event(cx, event, &self.ui);
         
-        run_view.handle_event(cx, event, &mut self.build_manager);
+        if let Some(mut run_view) = run_view.borrow_mut(){
+            run_view.handle_event(cx, event, &mut self.build_manager);
+        }
+        
+        // lets iterate over the editors and handle events
+        for (item_id,item) in dock.borrow_mut().unwrap().items().iter(){
+            if let Some(mut code_editor) = item.clone().into_code_editor().borrow_mut(){
+                if let Some(session) = self.sessions.get_mut(&item_id.id){
+                     code_editor.handle_event(cx, event, session);
+                 }
+             }
+        }
+        
         
         for action in self.build_manager.handle_event(cx, event) {
             match action {
                 BuildManagerAction::RedrawLog => {
                     log_list.redraw(cx);
                 }
-                BuildManagerAction::StdinToHost{cmd_id, msg}=>{
+                BuildManagerAction::StdinToHost{cmd_id, msg}=>if let Some(mut run_view) = run_view.borrow_mut(){
                     run_view.handle_stdin_to_host(cx, cmd_id, msg, &mut self.build_manager);
                 }
                 _ => ()
