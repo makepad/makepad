@@ -102,9 +102,16 @@ pub struct Dock {
     
     #[rust] dock_items: ComponentMap<LiveId, DockItem>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] items: ComponentMap<(LiveId, LiveId), WidgetRef>,
+    #[rust] items: ComponentMap<DockItemId, WidgetRef>,
     #[rust] drop_state: Option<DropPosition>,
 }
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct DockItemId {
+    pub kind: LiveId,
+    pub id: LiveId
+}
+
 
 struct TabBarWrap {
     tab_bar: TabBar,
@@ -211,8 +218,8 @@ impl LiveHook for Dock {
                         let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                         self.templates.insert(id, live_ptr);
                         // lets apply this thing over all our childnodes with that template
-                        for ((_, templ_id), node) in self.items.iter_mut() {
-                            if *templ_id == id {
+                        for (DockItemId{kind,..}, node) in self.items.iter_mut() {
+                            if *kind == id {
                                 node.apply(cx, from, index, nodes);
                             }
                         }
@@ -359,15 +366,22 @@ impl Dock {
         }
         None
     }
+
+
+    
     
     pub fn get_item(&mut self, cx: &mut Cx, entry_id: LiveId, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
-            let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
+            let entry = self.items.get_or_insert(cx, DockItemId{id:entry_id, kind:template}, | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
             });
             return Some(entry.clone())
         }
         None
+    }
+    
+    pub fn items(&mut self) -> &ComponentMap<DockItemId, WidgetRef> {
+        &self.items
     }
     
     fn set_parent_split(&mut self, what_item: LiveId, replace_item: LiveId) {
@@ -388,12 +402,12 @@ impl Dock {
         }
     }
     
-    fn redraw_item(&mut self, cx: &mut Cx, item_id: LiveId) {
-        if let Some(tab_bar) = self.tab_bars.get_mut(&item_id) {
+    fn redraw_item(&mut self, cx: &mut Cx, what_item_id: LiveId) {
+        if let Some(tab_bar) = self.tab_bars.get_mut(&what_item_id) {
             tab_bar.contents_draw_list.redraw(cx);
         }
-        for ((id, _kind), item) in self.items.iter_mut() {
-            if *id == item_id {
+        for (item_id, item) in self.items.iter_mut() {
+            if item_id.id == what_item_id {
                 item.redraw(cx);
             }
         }
@@ -648,6 +662,18 @@ impl Dock {
         }
     }
     
+    pub fn get_drawing_item_id(&self)->Option<LiveId>{
+        if let Some(stack) = self.draw_state.as_ref() {        
+            match stack.last(){
+                Some(DrawStackItem::Tab {id})=>{
+                    return Some(*id)
+                }
+                _=>()
+            }
+        }
+        None
+    }
+    
 }
 
 
@@ -734,7 +760,7 @@ impl Widget for Dock {
     
     fn find_widgets(&mut self, path: &[LiveId], cached: WidgetCache, results: &mut WidgetSet) {
         if let Some(DockItem::Tab {kind, ..}) = self.dock_items.get(&path[0]) {
-            if let Some(widget) = self.items.get_mut(&(path[0], *kind)) {
+            if let Some(widget) = self.items.get_mut(&DockItemId{id: path[0], kind:*kind}) {
                 if path.len()>1 {
                     widget.find_widgets(&path[1..], cached, results);
                 }
@@ -835,7 +861,7 @@ impl Widget for Dock {
                     stack.push(DrawStackItem::Tab {id});
                     if let Some(DockItem::Tab {kind, ..}) = self.dock_items.get(&id) {
                         if let Some(ptr) = self.templates.get(&kind) {
-                            let entry = self.items.get_or_insert(cx, (id, *kind), | cx | {
+                            let entry = self.items.get_or_insert(cx,DockItemId{id, kind:*kind}, | cx | {
                                 WidgetRef::new_from_ptr(cx, Some(*ptr))
                             });
                             entry.draw_widget(cx) ?;
@@ -923,6 +949,13 @@ impl DockRef {
                 dock.drop_state = None;
             }
         }
+    }
+    
+    pub fn get_drawing_item_id(&self)->Option<LiveId>{
+        if let Some(dock) = self.borrow() {
+            return dock.get_drawing_item_id();
+        }
+        None
     }
     
     pub fn drop_clone(&self, cx:&mut Cx, abs:DVec2, old_item:LiveId, new_item:LiveId){
