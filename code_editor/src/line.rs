@@ -89,7 +89,7 @@ impl<'a> Line<'a> {
         panic!()
     }
 
-    fn row_and_column_to_byte_and_affinity(
+    pub fn row_and_column_to_byte_and_affinity(
         &self,
         row: usize,
         column: usize,
