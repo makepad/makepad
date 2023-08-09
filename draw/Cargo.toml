@@ -17,3 +17,4 @@ makepad-vector = { path = "./vector", version = "0.3.0" }
 # ends up being published in a release (only affects build times, not behavior).
 rustybuzz = { version = "0.8.0", git = "https://github.com/RazrFalcon/rustybuzz", rev = "a0b8aa3" }
 unicode-bidi = "0.3"
+
