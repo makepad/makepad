@@ -1,11 +1,11 @@
 pub trait StrExt {
-    fn indent(&self) -> Option<&str>;
+    fn leading_whitespace(&self) -> Option<&str>;
     fn graphemes(&self) -> Graphemes<'_>;
     fn split_whitespace_boundaries(&self) -> SplitWhitespaceBoundaries<'_>;
 }
 
 impl StrExt for str {
-    fn indent(&self) -> Option<&str> {
+    fn leading_whitespace(&self) -> Option<&str> {
         self.char_indices()
             .find(|(_, char)| !char.is_whitespace())
             .map(|(index, _)| &self[..index])
