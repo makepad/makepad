@@ -29,16 +29,16 @@ workspace.resolver = "2"
 #strip = true   
 
 
-[profile.dev.package.makepad-live-tokenizer]
-opt-level = 3
-[profile.dev.package.makepad-live-compiler]
-opt-level = 3
-[profile.dev.package.makepad-shader-compiler]
-opt-level = 3
-[profile.dev.package.makepad-platform]
-opt-level = 3
-[profile.dev.package.makepad-draw]
-opt-level = 3
+#[profile.dev.package.makepad-live-tokenizer]
+#opt-level = 3
+#[profile.dev.package.makepad-live-compiler]
+#opt-level = 3
+#[profile.dev.package.makepad-shader-compiler]
+#opt-level = 3
+#[profile.dev.package.makepad-platform]
+#opt-level = 3
+#[profile.dev.package.makepad-draw]
+#opt-level = 3
 [profile.dev.package.makepad-vector]
 opt-level = 3
 [profile.dev.package.rustybuzz]

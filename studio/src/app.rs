@@ -22,6 +22,7 @@ live_design!{
     import makepad_widgets::theme::*;
     import makepad_widgets::frame::*;
     import makepad_widgets::file_tree::FileTree;
+    import makepad_widgets::label::Label;
     import makepad_widgets::dock::*;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_code_editor::code_editor::CodeEditor;
@@ -98,8 +99,9 @@ live_design!{
                 }
                 CodeEditor = <CodeEditor>{}
                 Welcome = <Rect> {
-                    draw_bg: {color: #535}
+                    draw_bg: {color: #135}
                     // sebastian do things here
+                    <Label>{label:"HELLO WORLD"}
                 }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
