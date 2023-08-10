@@ -188,8 +188,10 @@ live_design!{
                 layout: {flow: Down, padding: 0.0}
                 profile_img = <Image> {
                     source: (IMG_PROFILE_A)
+                    walk: {margin: 0, width: 50., height: 50.}
+                    layout: {padding: 0}
+
                     draw_bg: {
-                        scale: 0.65
                         fn pixel(self) -> vec4 {
                             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                             let c = self.rect_size * 0.5;
@@ -199,8 +201,6 @@ live_design!{
                             return sdf.result
                         }
                     }
-                    walk: {margin: 0}
-                    layout: {padding: 0}
                 }
             }
             content = <Frame> {
