@@ -1,6 +1,6 @@
 use {
     crate::{change, Change, Extent, Point, Range},
-    std::{io, io::BufRead, iter},
+    std::{fmt, io, io::BufRead, iter},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -109,6 +109,16 @@ impl Default for Text {
         Self {
             lines: vec![String::new()],
         }
+    }
+}
+
+impl fmt::Display for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (last_line, remaining_lines) = self.lines.split_last().unwrap();
+        for line in remaining_lines {
+            writeln!(f, "{}", line)?;
+        }
+        write!(f, "{}", last_line)
     }
 }
 
