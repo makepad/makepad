@@ -289,7 +289,12 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: KeyModifiers { logo: true, shift: false, .. },
+                modifiers:
+                    KeyModifiers {
+                        logo: true,
+                        shift: false,
+                        ..
+                    },
                 ..
             }) => {
                 session.undo();
@@ -297,7 +302,12 @@ impl CodeEditor {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
-                modifiers: KeyModifiers { logo: true, shift: true, .. },
+                modifiers:
+                    KeyModifiers {
+                        logo: true,
+                        shift: true,
+                        ..
+                    },
                 ..
             }) => {
                 session.redo();
@@ -330,86 +340,60 @@ impl CodeEditor {
 
     fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut y = session.line(self.start_line, |line| line.y());
-        session.blocks(
-            self.start_line,
-            self.end_line,
-            |blocks| {
-                for block in blocks {
-                    match block {
-                        Block::Line { line, .. } => {
-                            self.draw_text.font_scale = line.scale();
-                            let mut token_iter = line.tokens().iter().copied();
-                            let mut token_slot = token_iter.next();
-                            let mut column = 0;
-                            for wrapped in line.wrappeds() {
-                                match wrapped {
-                                    Wrapped::Text {
-                                        is_inlay: false,
-                                        mut text,
-                                    } => {
-                                        while !text.is_empty() {
-                                            let token = match token_slot {
-                                                Some(token) => {
-                                                    if text.len() < token.len {
-                                                        token_slot = Some(Token {
-                                                            len: token.len - text.len(),
-                                                            kind: token.kind,
-                                                        });
-                                                        Token {
-                                                            len: text.len(),
-                                                            kind: token.kind,
-                                                        }
-                                                    } else {
-                                                        token_slot = token_iter.next();
-                                                        token
+        session.blocks(self.start_line, self.end_line, |blocks| {
+            for block in blocks {
+                match block {
+                    Block::Line { line, .. } => {
+                        self.draw_text.font_scale = line.scale();
+                        let mut token_iter = line.tokens().iter().copied();
+                        let mut token_slot = token_iter.next();
+                        let mut column = 0;
+                        for wrapped in line.wrappeds() {
+                            match wrapped {
+                                Wrapped::Text {
+                                    is_inlay: false,
+                                    mut text,
+                                } => {
+                                    while !text.is_empty() {
+                                        let token = match token_slot {
+                                            Some(token) => {
+                                                if text.len() < token.len {
+                                                    token_slot = Some(Token {
+                                                        len: token.len - text.len(),
+                                                        kind: token.kind,
+                                                    });
+                                                    Token {
+                                                        len: text.len(),
+                                                        kind: token.kind,
                                                     }
+                                                } else {
+                                                    token_slot = token_iter.next();
+                                                    token
                                                 }
-                                                None => Token {
-                                                    len: text.len(),
-                                                    kind: TokenKind::Unknown,
-                                                },
-                                            };
-                                            let (text_0, text_1) = text.split_at(token.len);
-                                            text = text_1;
-                                            self.draw_text.color = match token.kind {
-                                                TokenKind::Unknown => self.token_colors.unknown,
-                                                TokenKind::BranchKeyword => {
-                                                    self.token_colors.branch_keyword
-                                                }
-                                                TokenKind::Identifier => {
-                                                    self.token_colors.identifier
-                                                }
-                                                TokenKind::LoopKeyword => {
-                                                    self.token_colors.loop_keyword
-                                                }
-                                                TokenKind::Number => self.token_colors.number,
-                                                TokenKind::OtherKeyword => {
-                                                    self.token_colors.other_keyword
-                                                }
-                                                TokenKind::Punctuator => {
-                                                    self.token_colors.punctuator
-                                                }
-                                                TokenKind::Whitespace => {
-                                                    self.token_colors.whitespace
-                                                }
-                                            };
-                                            self.draw_text.draw_abs(
-                                                cx,
-                                                DVec2 {
-                                                    x: line.column_to_x(column),
-                                                    y,
-                                                } * self.cell_size
-                                                    + self.viewport_rect.pos,
-                                                text_0,
-                                            );
-                                            column += text_0
-                                                .column_count(session.settings().tab_column_count);
-                                        }
-                                    }
-                                    Wrapped::Text {
-                                        is_inlay: true,
-                                        text,
-                                    } => {
+                                            }
+                                            None => Token {
+                                                len: text.len(),
+                                                kind: TokenKind::Unknown,
+                                            },
+                                        };
+                                        let (text_0, text_1) = text.split_at(token.len);
+                                        text = text_1;
+                                        self.draw_text.color = match token.kind {
+                                            TokenKind::Unknown => self.token_colors.unknown,
+                                            TokenKind::BranchKeyword => {
+                                                self.token_colors.branch_keyword
+                                            }
+                                            TokenKind::Identifier => self.token_colors.identifier,
+                                            TokenKind::LoopKeyword => {
+                                                self.token_colors.loop_keyword
+                                            }
+                                            TokenKind::Number => self.token_colors.number,
+                                            TokenKind::OtherKeyword => {
+                                                self.token_colors.other_keyword
+                                            }
+                                            TokenKind::Punctuator => self.token_colors.punctuator,
+                                            TokenKind::Whitespace => self.token_colors.whitespace,
+                                        };
                                         self.draw_text.draw_abs(
                                             cx,
                                             DVec2 {
@@ -417,29 +401,45 @@ impl CodeEditor {
                                                 y,
                                             } * self.cell_size
                                                 + self.viewport_rect.pos,
-                                            text,
+                                            text_0,
                                         );
-                                        column +=
-                                            text.column_count(session.settings().tab_column_count);
-                                    }
-                                    Wrapped::Widget(widget) => {
-                                        column += widget.column_count;
-                                    }
-                                    Wrapped::Wrap => {
-                                        column = line.wrap_indent_column_count();
-                                        y += line.scale();
+                                        column += text_0
+                                            .column_count(session.settings().tab_column_count);
                                     }
                                 }
+                                Wrapped::Text {
+                                    is_inlay: true,
+                                    text,
+                                } => {
+                                    self.draw_text.draw_abs(
+                                        cx,
+                                        DVec2 {
+                                            x: line.column_to_x(column),
+                                            y,
+                                        } * self.cell_size
+                                            + self.viewport_rect.pos,
+                                        text,
+                                    );
+                                    column +=
+                                        text.column_count(session.settings().tab_column_count);
+                                }
+                                Wrapped::Widget(widget) => {
+                                    column += widget.column_count;
+                                }
+                                Wrapped::Wrap => {
+                                    column = line.wrap_indent_column_count();
+                                    y += line.scale();
+                                }
                             }
-                            y += line.scale();
                         }
-                        Block::Widget(widget) => {
-                            y += widget.height;
-                        }
+                        y += line.scale();
+                    }
+                    Block::Widget(widget) => {
+                        y += widget.height;
                     }
                 }
-            },
-        );
+            }
+        });
     }
 
     fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
@@ -585,85 +585,97 @@ impl<'a> DrawSelections<'a> {
     fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut line = self.code_editor.start_line;
         let mut y = session.line(line, |line| line.y());
-        session.blocks(self.code_editor.start_line, self.code_editor.end_line, |blocks| {
-            for block in blocks {
-                match block {
-                    Block::Line {
-                        is_inlay: false,
-                        line: line_ref,
-                    } => {
-                        let mut byte = 0;
-                        let mut column = 0;
-                        self.handle_event(cx, line, line_ref, byte, Affinity::Before, y, column);
-                        for wrapped in line_ref.wrappeds() {
-                            match wrapped {
-                                Wrapped::Text {
-                                    is_inlay: false,
-                                    text,
-                                } => {
-                                    for grapheme in text.graphemes() {
-                                        self.handle_event(
-                                            cx,
-                                            line,
-                                            line_ref,
-                                            byte,
-                                            Affinity::After,
-                                            y,
-                                            column,
-                                        );
-                                        byte += grapheme.len();
-                                        column += grapheme
-                                            .column_count(session.settings().tab_column_count);
-                                        self.handle_event(
-                                            cx,
-                                            line,
-                                            line_ref,
-                                            byte,
-                                            Affinity::Before,
-                                            y,
-                                            column,
-                                        );
+        session.blocks(
+            self.code_editor.start_line,
+            self.code_editor.end_line,
+            |blocks| {
+                for block in blocks {
+                    match block {
+                        Block::Line {
+                            is_inlay: false,
+                            line: line_ref,
+                        } => {
+                            let mut byte = 0;
+                            let mut column = 0;
+                            self.handle_event(
+                                cx,
+                                line,
+                                line_ref,
+                                byte,
+                                Affinity::Before,
+                                y,
+                                column,
+                            );
+                            for wrapped in line_ref.wrappeds() {
+                                match wrapped {
+                                    Wrapped::Text {
+                                        is_inlay: false,
+                                        text,
+                                    } => {
+                                        for grapheme in text.graphemes() {
+                                            self.handle_event(
+                                                cx,
+                                                line,
+                                                line_ref,
+                                                byte,
+                                                Affinity::After,
+                                                y,
+                                                column,
+                                            );
+                                            byte += grapheme.len();
+                                            column += grapheme
+                                                .column_count(session.settings().tab_column_count);
+                                            self.handle_event(
+                                                cx,
+                                                line,
+                                                line_ref,
+                                                byte,
+                                                Affinity::Before,
+                                                y,
+                                                column,
+                                            );
+                                        }
                                     }
-                                }
-                                Wrapped::Text {
-                                    is_inlay: true,
-                                    text,
-                                } => {
-                                    column +=
-                                        text.column_count(session.settings().tab_column_count);
-                                }
-                                Wrapped::Widget(widget) => {
-                                    column += widget.column_count;
-                                }
-                                Wrapped::Wrap => {
-                                    if self.active_selection.is_some() {
-                                        self.draw_selection(cx, line_ref, y, column);
+                                    Wrapped::Text {
+                                        is_inlay: true,
+                                        text,
+                                    } => {
+                                        column +=
+                                            text.column_count(session.settings().tab_column_count);
                                     }
-                                    column = line_ref.wrap_indent_column_count();
-                                    y += line_ref.scale();
+                                    Wrapped::Widget(widget) => {
+                                        column += widget.column_count;
+                                    }
+                                    Wrapped::Wrap => {
+                                        if self.active_selection.is_some() {
+                                            self.draw_selection(cx, line_ref, y, column);
+                                        }
+                                        column = line_ref.wrap_indent_column_count();
+                                        y += line_ref.scale();
+                                    }
                                 }
                             }
+                            self.handle_event(cx, line, line_ref, byte, Affinity::After, y, column);
+                            column += 1;
+                            if self.active_selection.is_some() {
+                                self.draw_selection(cx, line_ref, y, column);
+                            }
+                            line += 1;
+                            y += line_ref.scale();
                         }
-                        self.handle_event(cx, line, line_ref, byte, Affinity::After, y, column);
-                        column += 1;
-                        if self.active_selection.is_some() {
-                            self.draw_selection(cx, line_ref, y, column);
+                        Block::Line {
+                            is_inlay: true,
+                            line: line_ref,
+                        } => {
+                            y += line_ref.height();
                         }
-                        line += 1;
-                        y += line_ref.scale();
-                    }
-                    Block::Line {
-                        is_inlay: true,
-                        line: line_ref,
-                    } => {
-                        y += line_ref.height();
-                    }
-                    Block::Widget(widget) => {
-                        y += widget.height;
+                        Block::Widget(widget) => {
+                            y += widget.height;
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
         if self.active_selection.is_some() {
             self.code_editor.draw_selection.end(cx);
         }
