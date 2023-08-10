@@ -22,6 +22,7 @@ live_design!{
     import makepad_widgets::theme::*;
     import makepad_widgets::frame::*;
     import makepad_widgets::file_tree::FileTree;
+    import makepad_widgets::button::Button;
     import makepad_widgets::label::Label;
     import makepad_widgets::dock::*;
     import makepad_widgets::desktop_window::DesktopWindow;
@@ -29,6 +30,32 @@ live_design!{
     
     import makepad_studio::run_view::RunView;
     import makepad_studio::build_manager::build_manager::LogList;
+
+    Logo = <Button> {
+        draw_icon: {
+            svg_file: dep("crate://self/resources/logo_makepad.svg"),
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #f00,
+                        #0ff,
+                        self.hover
+                    ),
+                    #fff,
+                    self.pressed
+                )
+            }
+        }
+        icon_walk: { width: 100.0, height: Fit }
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                return sdf.result
+            }
+        }
+        layout: { padding: 50.0 }
+        label: "TEST"
+    }
     
     App = {{App}} {
         ui: <DesktopWindow> {
@@ -67,8 +94,8 @@ live_design!{
                     tabs: [run_view],
                     selected: 0
                 }
-                welcome= Tab {
-                    name: "Welcome" 
+                welcome = Tab {
+                    name: "Welcome"
                     kind: Welcome
                 }
                 /*
@@ -97,11 +124,35 @@ live_design!{
                     no_close: true
                     kind: RunView
                 }
-                CodeEditor = <CodeEditor>{}
+                CodeEditor = <CodeEditor> {}
                 Welcome = <Rect> {
-                    draw_bg: {color: #135}
-                    // sebastian do things here
-                    <Label>{label:"Welcome to\nMakepad\n\n欢迎来到 Makepad"}
+                    draw_bg: {color: #052329}
+
+                    <Frame> {
+                        walk: { width: Fill, height: Fill}
+                        layout: {
+                            padding: 10.0
+                            align: {
+                                x: 0.5,
+                                y: 0.5
+                            }
+                        }
+
+                        <Logo> {}
+
+                        <Label>{
+                            label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
+                            draw_label: {
+                                text_style: {
+                                    font_size: 40.0,
+                                    height_factor: 1.0,
+                                    font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
+                                },
+                            }    
+                        }
+
+                    }
+
                 }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
@@ -162,10 +213,10 @@ impl AppMain for App {
                 else if let Some(mut list_view) = log_list.has_widget(&next).borrow_mut() {
                     self.build_manager.draw_log_list(cx, &mut *list_view);
                 }
-                else if let Some(mut code_editor) = next.as_code_editor().borrow_mut(){
+                else if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
                     // lets fetch a session
                     let current_id = dock.get_drawing_item_id().unwrap();
-                    if let Some(session) = self.file_system.get_session_mut(current_id){
+                    if let Some(session) = self.file_system.get_session_mut(current_id) {
                         code_editor.draw(cx, session);
                     }
                 }
@@ -175,17 +226,24 @@ impl AppMain for App {
         
         self.file_system.handle_event(cx, event, &self.ui);
         
-        if let Some(mut run_view) = run_view.borrow_mut(){
+        if let Some(mut run_view) = run_view.borrow_mut() {
             run_view.handle_event(cx, event, &mut self.build_manager);
         }
         
         // lets iterate over the editors and handle events
-        for (item_id,item) in dock.borrow_mut().unwrap().items().iter(){
-            if let Some(mut code_editor) = item.as_code_editor().borrow_mut(){
-                if let Some(session) = self.file_system.get_session_mut(item_id.id){
-                     code_editor.handle_event(cx, event, session);
-                 }
-             }
+        for (item_id, item) in dock.borrow_mut().unwrap().items().iter() {
+            if let Some(mut code_editor) = item.as_code_editor().borrow_mut() {
+                if let Some(session) = self.file_system.get_session_mut(item_id.id) {
+                    for action in code_editor.handle_event(cx, event, session) {
+                        match action {
+                            CodeEditorAction::TextDidChange => {
+                                // lets write the file
+                                self.file_system.request_save_file(item_id.id)
+                            }
+                        }
+                    }
+                }
+            }
         }
         
         for action in self.build_manager.handle_event(cx, event) {
@@ -193,7 +251,7 @@ impl AppMain for App {
                 BuildManagerAction::RedrawLog => {
                     log_list.redraw(cx);
                 }
-                BuildManagerAction::StdinToHost{cmd_id, msg}=>if let Some(mut run_view) = run_view.borrow_mut(){
+                BuildManagerAction::StdinToHost {cmd_id, msg} => if let Some(mut run_view) = run_view.borrow_mut() {
                     run_view.handle_stdin_to_host(cx, cmd_id, msg, &mut self.build_manager);
                 }
                 _ => ()
