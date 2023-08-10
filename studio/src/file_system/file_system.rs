@@ -120,6 +120,18 @@ impl FileSystem {
         }
     }
     
+    
+    pub fn request_save_file(&mut self, tab_id:LiveId){
+        // ok lets see if we have a document
+        // ifnot, we create a new one
+        if let Some(path) = self.tab_id_to_path.get(&tab_id){
+            if let Some(Some(doc)) = self.open_documents.get(path){
+                let text = doc.borrow().text().to_string();
+                self.file_client.send_request(FileRequest::SaveFile(path.clone(), text));
+            }
+        };
+    }
+    
     pub fn draw_file_node(&self, cx: &mut Cx2d, file_node_id: FileNodeId, file_tree: &mut FileTree) {
         if let Some(file_node) = self.file_nodes.get(&file_node_id) {
             match &file_node.child_edges {
