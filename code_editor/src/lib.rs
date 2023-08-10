@@ -17,6 +17,7 @@ pub mod state;
 pub mod str;
 pub mod text;
 pub mod token;
+pub mod tokenizer;
 pub mod widgets;
 pub mod wrap;
 
@@ -32,6 +33,7 @@ pub use self::{
     state::{Document, Session},
     text::Text,
     token::Token,
+    tokenizer::Tokenizer,
 };
 
 pub fn live_design(cx: &mut Cx) {

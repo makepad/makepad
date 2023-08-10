@@ -12,7 +12,7 @@ use {
         widgets::BlockWidget,
         wrap,
         wrap::WrapData,
-        Change, Extent, Line, Point, Range, Selection, Settings, Text, Token,
+        Change, Extent, Line, Point, Range, Selection, Settings, Text, Token, Tokenizer,
     },
     std::{
         cell::RefCell,
@@ -747,6 +747,7 @@ pub struct Document {
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
     block_inlays: Vec<(usize, BlockInlay)>,
+    tokenizer: Tokenizer,
     change_senders: HashMap<SessionId, Sender<Vec<Change>>>,
 }
 
@@ -756,7 +757,7 @@ impl Document {
         let tokens: Vec<_> = (0..line_count)
             .map(|line| tokenize(&text.as_lines()[line]).collect::<Vec<_>>())
             .collect();
-        Self {
+        let mut document = Self {
             text,
             tokens,
             inline_inlays: (0..line_count)
@@ -775,8 +776,11 @@ impl Document {
                 })
                 .collect(),
             block_inlays: Vec::new(),
+            tokenizer: Tokenizer::new(line_count),
             change_senders: HashMap::new(),
-        }
+        };
+        document.tokenizer.update(&document.text, &mut document.tokens);
+        document
     }
 
     pub fn text(&self) -> &Text {
@@ -915,7 +919,9 @@ impl Document {
         for change in changes {
             self.apply_change_to_tokens(change);
             self.apply_change_to_inline_inlays(change);
+            self.tokenizer.apply_change(change);
         }
+        self.tokenizer.update(&self.text, &mut self.tokens);
         for change_sender in self.change_senders.values() {
             change_sender.send(changes.to_vec()).unwrap();
         }
@@ -1053,7 +1059,7 @@ impl Document {
                         cmp::Ordering::Greater => true,
                     })
                     .unwrap_or(self.inline_inlays[point.line].len());
-                if self.text.extent().line_count == 0 {
+                if text.extent().line_count == 0 {
                     for (byte, _) in &mut self.inline_inlays[point.line][index..] {
                         *byte += text.extent().byte_count;
                     }
