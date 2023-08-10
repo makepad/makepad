@@ -5,6 +5,7 @@ pub mod change;
 pub mod char;
 pub mod code_editor;
 pub mod extent;
+pub mod history;
 pub mod inlays;
 pub mod iter;
 pub mod line;
@@ -25,6 +26,7 @@ pub use self::{
     change::Change,
     code_editor::CodeEditor,
     extent::Extent,
+    history::History,
     line::Line,
     point::Point,
     range::Range,
