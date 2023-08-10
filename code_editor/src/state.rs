@@ -394,7 +394,11 @@ impl Session {
     pub fn insert(&mut self, text: Text) {
         self.document.borrow_mut().edit(
             self.id,
-            EditKind::Insert,
+            if text.as_lines().len() == 1 && &text.as_lines()[0] == " " {
+                EditKind::Space
+            } else {
+                EditKind::Insert
+            },
             &self.selections,
             self.settings.use_soft_tabs,
             self.settings.tab_column_count,
