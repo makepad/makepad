@@ -17,6 +17,7 @@ use {
 
 live_design!{
     import makepad_widgets::frame::*;
+    import makepad_widgets::image::Image;
     import makepad_widgets::slides_view::Slide;
     import makepad_widgets::slides_view::SlidesView;
     import makepad_widgets::slides_view::SlideBody;
@@ -106,7 +107,7 @@ live_design!{
     }
     
     MeetupOverlay = <Image> {
-        image: dep("crate://self/rust-meetup-breda.png"),
+        source: dep("crate://self/rust-meetup-breda.png"),
         walk: {width: 1920, height: 1080}
     }
     
