@@ -235,6 +235,20 @@ impl LiveHook for Dock {
         nodes.skip_node(index)
     }
     
+    // alright lets update our tabs and splitters as well
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        if let Some(index) = nodes.child_by_name(index, live_id!(tab_bar).as_field()) {
+            for tab_bar in self.tab_bars.values_mut() {
+                tab_bar.tab_bar.apply(cx, from, index, nodes);
+            }
+        }
+        if let Some(index) = nodes.child_by_name(index, live_id!(splitter).as_field()) {
+            for splitter in self.splitters.values_mut() {
+                splitter.apply(cx, from, index, nodes);
+            }
+        }
+    }    
+    
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         // make sure our items exist
         let mut items = Vec::new();
