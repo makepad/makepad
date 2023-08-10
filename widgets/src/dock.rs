@@ -188,10 +188,11 @@ pub enum DockItem {
         a: LiveId,
         b: LiveId
     },
-    #[live {tabs: vec![], selected: 0}]
+    #[live {tabs: vec![], selected: 0, no_close:false}]
     Tabs {
         tabs: Vec<LiveId>,
-        selected: usize
+        selected: usize,
+        no_close: bool
     },
     #[pick {name: "Tab".to_string(), kind: LiveId(0), no_close: false}]
     Tab {
@@ -441,7 +442,7 @@ impl Dock {
     fn select_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
-                DockItem::Tabs {tabs, selected} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
+                DockItem::Tabs {tabs, selected,..} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
                     *selected = pos;
                     // ok now lets redraw the area of the tab
                     if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
@@ -483,12 +484,15 @@ impl Dock {
         // if we are the last tab we need to remove a splitter
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
-                DockItem::Tabs {tabs, selected} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
+                DockItem::Tabs {tabs, selected, no_close} => if let Some(pos) = tabs.iter().position( | v | *v == tab_id) {
                     // remove from the tabs array
                     let tabs_id = *tabs_id;
                     tabs.remove(pos);
                     if tabs.len() == 0 { // unsplit
-                        self.unsplit_tabs(cx, tabs_id);
+                        if !*no_close{
+                            self.unsplit_tabs(cx, tabs_id);
+                        }
+                        self.area.redraw(cx);
                         return None
                     }
                     else {
@@ -567,6 +571,7 @@ impl Dock {
                     });
                     self.dock_items.insert(new_tabs, DockItem::Tabs {
                         tabs: vec![item],
+                        no_close: false,
                         selected: 0,
                     });
                     return true
@@ -578,7 +583,7 @@ impl Dock {
                         }
                         self.close_tab(cx, item, true);
                     }
-                    if let Some(DockItem::Tabs {tabs, selected}) = self.dock_items.get_mut(&pos.id) {
+                    if let Some(DockItem::Tabs {tabs, selected,..}) = self.dock_items.get_mut(&pos.id) {
                         tabs.push(item);
                         *selected = tabs.len() - 1;
                         if let Some(tab_bar) = self.tab_bars.get(&pos.id) {
@@ -594,7 +599,7 @@ impl Dock {
                         }
                         self.close_tab(cx, item, true);
                     }
-                    if let Some(DockItem::Tabs {tabs, selected}) = self.dock_items.get_mut(&pos.id) {
+                    if let Some(DockItem::Tabs {tabs, selected,..}) = self.dock_items.get_mut(&pos.id) {
                         tabs.push(item);
                         *selected = tabs.len() - 1;
                         if let Some(tab_bar) = self.tab_bars.get(&pos.id) {
@@ -612,7 +617,7 @@ impl Dock {
                         self.close_tab(cx, item, true);
                     }
                     let tab_bar_id = self.find_tab_bar_from_tab(pos.id).unwrap();
-                    if let Some(DockItem::Tabs {tabs, selected}) = self.dock_items.get_mut(&tab_bar_id) {
+                    if let Some(DockItem::Tabs {tabs, selected,..}) = self.dock_items.get_mut(&tab_bar_id) {
                         if let Some(pos) = tabs.iter().position( | v | *v == pos.id) {
                             let old = tabs[pos];
                             tabs[pos] = item;
@@ -851,7 +856,7 @@ impl Widget for Dock {
                     else {panic!()}
                 }
                 Some(DrawStackItem::TabLabel {id, index}) => {
-                    if let Some(DockItem::Tabs {tabs, selected}) = self.dock_items.get(&id) {
+                    if let Some(DockItem::Tabs {tabs, selected,..}) = self.dock_items.get(&id) {
                         let tab_bar = self.tab_bars.get_mut(&id).unwrap();
                         if index < tabs.len() {
                             if let Some(DockItem::Tab {name, ..}) = self.dock_items.get(&tabs[index]) {
