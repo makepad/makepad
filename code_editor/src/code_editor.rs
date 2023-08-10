@@ -24,6 +24,7 @@ live_design! {
         other_keyword: #5B9BD3,
         punctuator: #D4D4D4,
         string: #CC917B,
+        typename: #56C9B1;
         whitespace: #6E6E6E,
     }
 
@@ -431,6 +432,7 @@ impl CodeEditor {
                                             }
                                             TokenKind::Punctuator => self.token_colors.punctuator,
                                             TokenKind::String => self.token_colors.string,
+                                            TokenKind::Typename => self.token_colors.typename,
                                             TokenKind::Whitespace => self.token_colors.whitespace,
                                         };
                                         self.draw_text.draw_abs(
@@ -824,6 +826,8 @@ struct TokenColors {
     punctuator: Vec4,
     #[live]
     string: Vec4,
+    #[live]
+    typename: Vec4,
     #[live]
     whitespace: Vec4,
 }

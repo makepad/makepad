@@ -13,6 +13,7 @@ pub enum TokenKind {
     OtherKeyword,
     Number,
     Punctuator,
+    Typename,
     String,
     Whitespace,
 }
