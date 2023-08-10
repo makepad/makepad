@@ -25,7 +25,7 @@ impl History {
     ) {
         if self
             .current_edit
-            .map_or(false, |current_edit| current_edit == (origin_id, kind))
+            .map_or(false, |(current_origin_id, current_kind)| current_origin_id == origin_id && current_kind.can_merge(kind))
         {
             self.undos.last_mut().unwrap().1.extend(inverted_changes);
         } else {
@@ -77,6 +77,15 @@ pub enum EditKind {
     Outdent,
     Space,
     Other
+}
+
+impl EditKind {
+    fn can_merge(self, other: Self) -> bool {
+        if self == Self::Other {
+            return false;
+        }
+        self == other
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

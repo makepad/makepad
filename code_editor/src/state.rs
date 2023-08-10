@@ -410,7 +410,7 @@ impl Session {
     pub fn enter(&mut self) {
         self.document.borrow_mut().edit(
             self.id,
-            EditKind::Insert,
+            EditKind::Other,
             &self.selections,
             self.settings.use_soft_tabs,
             self.settings.tab_column_count,
