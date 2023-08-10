@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_micro_serde::*,
         makepad_code_editor::Range,
-        build::{
+        build_manager::{
             build_protocol::*,
             child_process::{
                 ChildStdIn, 
