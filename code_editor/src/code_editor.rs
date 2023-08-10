@@ -180,7 +180,6 @@ impl CodeEditor {
         self.end = session.find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
-
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
         cx.turtle_mut().set_used(
