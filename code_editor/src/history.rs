@@ -39,8 +39,8 @@ impl History {
         if let Some((selections, changes)) = self.undos.pop() {
             self.current_edit = None;
             let mut inverted_changes = Vec::new();
-            for change in changes.iter().rev() {
-                let inverted_change = change.clone().invert(&text);
+            for change in changes.iter().cloned().rev() {
+                let inverted_change = change.invert(&text);
                 text.apply_change(inverted_change.clone());
                 inverted_changes.push(inverted_change);
             }
@@ -54,8 +54,8 @@ impl History {
     pub fn redo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<Change>)> {
         if let Some((selections, changes)) = self.redos.pop() {
             self.current_edit = None;
-            for change in &changes {
-                text.apply_change(change.clone());
+            for change in changes.iter().cloned() {
+                text.apply_change(change);
             }
             self.undos.push((selections.clone(), changes.clone()));
             Some((selections, changes))

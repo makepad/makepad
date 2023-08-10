@@ -289,6 +289,7 @@ impl Session {
             preferred_column: None,
         });
         self.pending_selection_index = Some(0);
+        self.document.borrow_mut().force_new_edit_group();
     }
 
     pub fn add_cursor(&mut self, cursor: Point, affinity: Affinity) {
@@ -318,6 +319,7 @@ impl Session {
                 }
             },
         );
+        self.document.borrow_mut().force_new_edit_group();
     }
 
     pub fn move_to(&mut self, cursor: Point, affinity: Affinity) {
@@ -347,6 +349,7 @@ impl Session {
             self.selections.remove(next_selection_index);
         }
         self.pending_selection_index = Some(pending_selection_index);
+        self.document.borrow_mut().force_new_edit_group();
     }
 
     pub fn move_left(&mut self, reset_anchor: bool) {
@@ -566,7 +569,7 @@ impl Session {
 
     pub fn handle_changes(&mut self) {
         while let Ok((selections, changes)) = self.change_receiver.try_recv() {
-            self.apply_changes(selections, changes);
+            self.apply_changes(selections, &changes);
         }
     }
 
@@ -578,9 +581,7 @@ impl Session {
                 match wrapped {
                     Wrapped::Text { text, .. } => {
                         column += text
-                            .chars()
-                            .map(|char| char.column_count(self.settings.tab_column_count))
-                            .sum::<usize>();
+                            .column_count(self.settings.tab_column_count);
                     }
                     Wrapped::Widget(widget) => {
                         column += widget.column_count;
@@ -638,10 +639,11 @@ impl Session {
                 current_selection_index += 1;
             }
         }
+        self.document.borrow_mut().force_new_edit_group();
     }
 
-    fn apply_changes(&mut self, selections: Option<Vec<Selection>>, changes: Vec<Change>) {
-        for change in &changes {
+    fn apply_changes(&mut self, selections: Option<Vec<Selection>>, changes: &[Change]) {
+        for change in changes {
             match &change.kind {
                 ChangeKind::Insert(point, text) => {
                     self.column_count[point.line] = None;
@@ -893,7 +895,7 @@ impl Document {
         }
         self.history
             .edit(origin_id, kind, selections, changes.clone());
-        self.apply_changes(origin_id, None, changes);
+        self.apply_changes(origin_id, None, &changes);
     }
 
     fn edit_lines(
@@ -922,7 +924,7 @@ impl Document {
         }
         self.history
             .edit(origin_id, kind, selections, changes.clone());
-        self.apply_changes(origin_id, None, changes);
+        self.apply_changes(origin_id, None, &changes);
     }
 
     fn edit_lines_internal(
@@ -956,15 +958,19 @@ impl Document {
         }
     }
 
+    fn force_new_edit_group(&mut self) {
+        self.history.force_new_edit_group()
+    }
+
     fn undo(&mut self, origin_id: SessionId) {
         if let Some((selections, changes)) = self.history.undo(&mut self.text) {
-            self.apply_changes(origin_id, Some(selections), changes);
+            self.apply_changes(origin_id, Some(selections), &changes);
         }
     }
 
     fn redo(&mut self, origin_id: SessionId) {
         if let Some((selections, changes)) = self.history.redo(&mut self.text) {
-            self.apply_changes(origin_id, Some(selections), changes);
+            self.apply_changes(origin_id, Some(selections), &changes);
         }
     }
 
@@ -972,9 +978,9 @@ impl Document {
         &mut self,
         origin_id: SessionId,
         selections: Option<Vec<Selection>>,
-        changes: Vec<Change>,
+        changes: &[Change],
     ) {
-        for change in &changes {
+        for change in changes {
             self.apply_change_to_tokens(change);
             self.apply_change_to_inline_inlays(change);
             self.tokenizer.apply_change(change);
@@ -983,7 +989,7 @@ impl Document {
         for (&session_id, change_sender) in &self.change_senders {
             if session_id == origin_id {
                 change_sender
-                    .send((selections.clone(), changes.clone()))
+                    .send((selections.clone(), changes.to_vec()))
                     .unwrap();
             } else {
                 change_sender
