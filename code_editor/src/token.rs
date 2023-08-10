@@ -7,5 +7,11 @@ pub struct Token {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TokenKind {
     Unknown,
+    BranchKeyword,
+    Identifier,
+    LoopKeyword,
+    OtherKeyword,
+    Number,
+    Punctuator,
     Whitespace,
 }

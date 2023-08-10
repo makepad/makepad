@@ -15,6 +15,17 @@ live_design! {
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
 
+    TokenColors = {{TokenColors}} {
+        unknown: #808080,
+        branch_keyword: #C485BE,
+        identifier: #D4D4D4,
+        loop_keyword: #FF8C00,
+        number: #B6CEAA,
+        other_keyword: #5B9BD3,
+        punctuator: #D4D4D4,
+        whitespace: #6E6E6E,
+    }
+
     DrawSelection = {{DrawSelection}} {
         uniform gloopiness: 8.0
         uniform border_radius: 2.0
@@ -94,6 +105,8 @@ pub struct CodeEditor {
     draw_state: DrawStateWrap<Walk>,
     #[live]
     draw_text: DrawText,
+    #[live]
+    token_colors: TokenColors,
     #[live]
     draw_selection: DrawSelection,
     #[live]
@@ -349,6 +362,16 @@ impl CodeEditor {
                                             };
                                             let (text_0, text_1) = text.split_at(token.len);
                                             text = text_1;
+                                            self.draw_text.color = match token.kind {
+                                                TokenKind::Unknown => self.token_colors.unknown,
+                                                TokenKind::BranchKeyword => self.token_colors.branch_keyword,
+                                                TokenKind::Identifier => self.token_colors.identifier,
+                                                TokenKind::LoopKeyword => self.token_colors.loop_keyword,
+                                                TokenKind::Number => self.token_colors.number,
+                                                TokenKind::OtherKeyword => self.token_colors.other_keyword,
+                                                TokenKind::Punctuator => self.token_colors.punctuator,
+                                                TokenKind::Whitespace => self.token_colors.whitespace,
+                                            };
                                             self.draw_text.draw_abs(
                                                 cx,
                                                 DVec2 {
@@ -704,6 +727,26 @@ impl<'a> DrawSelections<'a> {
 struct ActiveSelection {
     selection: Selection,
     start_x: f64,
+}
+
+#[derive(Live, LiveHook)]
+struct TokenColors {
+    #[live]
+    unknown: Vec4,
+    #[live]
+    branch_keyword: Vec4,
+    #[live]
+    identifier: Vec4,
+    #[live]
+    loop_keyword: Vec4,
+    #[live]
+    number: Vec4,
+    #[live]
+    other_keyword: Vec4,
+    #[live]
+    punctuator: Vec4,
+    #[live]
+    whitespace: Vec4,
 }
 
 #[derive(Live, LiveHook)]
