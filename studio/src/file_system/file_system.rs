@@ -113,8 +113,8 @@ impl FileSystem {
     pub fn request_open_file(&mut self, tab_id:LiveId, path:UnixPathBuf){
         // ok lets see if we have a document
         // ifnot, we create a new one
+        self.tab_id_to_path.insert(tab_id, path.clone());
         if self.open_documents.get(&path).is_none(){
-            self.tab_id_to_path.insert(tab_id, path.clone());
             self.open_documents.insert(path.clone(), None);
             self.file_client.send_request(FileRequest::OpenFile(path));
         }
