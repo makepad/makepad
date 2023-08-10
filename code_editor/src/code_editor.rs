@@ -204,7 +204,7 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event,session: &mut Session) -> Vec<CodeEditorAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) -> Vec<CodeEditorAction> {
         let mut a = Vec::new();
         self.handle_event_with(cx, event, session, &mut | _, v | a.push(v));
         a
