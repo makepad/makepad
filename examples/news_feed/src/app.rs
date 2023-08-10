@@ -144,7 +144,7 @@ live_design!{
             walk: {width: Fill, height: Fit, margin: 0.0}
             layout: {flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}}
             
-            <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 20.0, height: Fit}, label: "欢迎来到"}
+            <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 20.0, height: Fit}, label: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_FIND)} icon_walk: {width: 18.0, height: Fit}, label: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_ADD)} icon_walk: {width: 40.0, height: Fit}, label: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_LIKES)} icon_walk: {width: 20.0, height: Fit}, label: ""}
@@ -358,7 +358,7 @@ impl AppMain for App {
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             // check for actions inside the list item
             if item.get_button(id!(likes)).clicked(&actions) {
-                log!("CLICKED LIKES on item {}", item_id);
+                log!("Clicker on item {}", item_id);
             }
         }
         

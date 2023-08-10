@@ -10,6 +10,7 @@ use {
         makepad_widgets::file_tree::*,
         makepad_widgets::dock::*,
         file_system::FileClient,
+        build_manager::build_manager::BuildManager,
         makepad_file_protocol::{
             FileRequest,
             FileError,
@@ -71,7 +72,7 @@ impl FileSystem {
         None
     }
     
-    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef){
+    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef, build_manager:&mut BuildManager){
         for action in self.file_client.handle_event(cx, event) {
             match action {
                 FileClientAction::Response(response) => match response {
@@ -99,7 +100,16 @@ impl FileSystem {
                         }
                     }
                     FileResponse::SaveFile(result)=>match result{
-                        Ok(_)=>{}
+                        Ok((path, old, new))=>{
+                            for i in 0..old.len().min(new.len()){
+                                if old.as_bytes()[i] != new.as_bytes()[i]{
+                                    if i > 10300{ // 
+                                        build_manager.start_recompile_timer(cx);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                         Err(_)=>{}
                         // ok we saved a file, we should check however what changed
                         // to see if we need a recompile
