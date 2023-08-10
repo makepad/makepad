@@ -59,7 +59,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             session: Session::new(Rc::new(RefCell::new(Document::new(
-                include_str!("state.rs").into(),
+                include_str!("test.rs").into(),
             )))),
         }
     }
