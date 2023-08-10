@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        view::ManyInstances,
+        draw_list_2d::ManyInstances,
         geometry::GeometryQuad2D,
         cx_2d::Cx2d,
         turtle::{Walk, Layout}
