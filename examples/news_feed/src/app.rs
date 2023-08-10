@@ -1,5 +1,5 @@
-use makepad_widgets::*;
-
+use makepad_widgets::*; 
+ 
 live_design!{
     import makepad_widgets::theme::*;
     import makepad_draw::shader::std::*;
@@ -119,24 +119,24 @@ live_design!{
             }
         }
         layout: {padding: 9.0}
-        label: "34"
+        label: "1"
     }
     
     
     Header = <BoxY> {
-        walk: {width: Fill, height: 100}
+        walk: {width: Fill, height: 70}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, -0.5, -1.0, 0.0), radius: vec2(0.5, 4.5)}
         
         <Logo> {
-            walk: {height: Fit, width: Fill, margin: {top: 30.0}}
+            walk: {height: Fit, width: Fill, margin: {top: 0.0}}
             icon_walk: {width: Fit, height: 27.0}
         }
         
     }
     
     Menu = <BoxY> {
-        walk: {width: Fill, height: 100}
+        walk: {width: Fill, height: 80}
         layout: {flow: Right, padding: 10.0, spacing: 10.0}
         draw_bg: {color: (COLOR_OVERLAY_BG), inset: vec4(-0.5, 0.0, -1.0, -1.0), radius: vec2(4.5, 0.5)}
         
@@ -144,7 +144,7 @@ live_design!{
             walk: {width: Fill, height: Fit, margin: 0.0}
             layout: {flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}}
             
-            <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 20.0, height: Fit}, label: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 30.0, height: Fit}, label: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_FIND)} icon_walk: {width: 18.0, height: Fit}, label: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_ADD)} icon_walk: {width: 40.0, height: Fit}, label: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_LIKES)} icon_walk: {width: 20.0, height: Fit}, label: ""}
@@ -212,9 +212,8 @@ live_design!{
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
                     }
-                    label: "@username · 13h"
+                    label: "@Here is your username · 13h"
                 }
-                
                 text = <Label> {
                     walk: {width: Fill, height: Fit},
                     draw_label: {
@@ -287,7 +286,7 @@ live_design!{
             news_feed = <ListView> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
-                TopSpace = <Frame> {walk: {height: 100}}
+                TopSpace = <Frame> {walk: {height: 60}}
                 Post = <Post> {}
                 PostImage = <PostImage> {}
                 BottomSpace = <Frame> {walk: {height: 100}}
@@ -338,10 +337,10 @@ impl AppMain for App {
                         };
                         let item = list.get_item(cx, item_id, template).unwrap();
                         let text = match item_id % 4 {
-                            0 => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit", item_id),
+                            0 => format!("This area is : {} Lorem ipsum dolor sit amet, consectetur adipiscing elit", item_id),
                             1 => format!("Item: {} 欢迎来到, adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
                             2 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
-                            _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.", item_id),
+                            _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea", item_id),
                         };
                         item.get_label(id!(content.text)).set_label(&text);
                         item.get_button(id!(likes)).set_label(&format!("{}", item_id % 23));
