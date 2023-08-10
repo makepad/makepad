@@ -311,6 +311,7 @@ impl LiveHook for FileTree {
 pub enum FileTreeAction {
     None,
     FileClicked(FileNodeId),
+    FolderClicked(FileNodeId),
     ShouldFileStartDrag(FileNodeId),
 }
 
@@ -536,6 +537,15 @@ impl FileTree {
         self.tree_nodes.remove(&file_node_id);
     }
     
+    pub fn is_folder(&mut self, file_node_id: FileNodeId)->bool {
+        if let Some((node,id)) = self.tree_nodes.get(&file_node_id){
+            node.is_folder
+        }
+        else{
+            false
+        }
+    }
+    
     pub fn set_folder_is_open(
         &mut self,
         cx: &mut Cx,
@@ -604,7 +614,12 @@ impl FileTree {
                         }
                     }
                     self.selected_node_id = Some(node_id);
-                    dispatch_action(cx, FileTreeAction::FileClicked(node_id));
+                    if self.is_folder(node_id){
+                        dispatch_action(cx, FileTreeAction::FolderClicked(node_id));
+                    }
+                    else{
+                        dispatch_action(cx, FileTreeAction::FileClicked(node_id));
+                    }
                 }
                 FileTreeNodeAction::ShouldStartDrag => {
                     if self.dragging_node_id.is_none() {
