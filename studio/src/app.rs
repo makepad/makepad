@@ -35,26 +35,19 @@ live_design!{
         draw_icon: {
             svg_file: dep("crate://self/resources/logo_makepad.svg"),
             fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        #f00,
-                        #0ff,
-                        self.hover
-                    ),
-                    #fff,
-                    self.pressed
-                )
+                return #xffffff
             }
         }
-        icon_walk: {width: 100.0, height: Fit}
+        icon_walk: { width: 300.0, height: Fit }
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 return sdf.result
             }
         }
-        layout: {padding: 50.0}
-        label: "TEST"
+        walk: { margin: {top: 20.0, right: 0.0, bottom: 30.0, left: 0.0} }
+        layout: { padding: 0.0 }
+        label: ""
     }
     
     App = {{App}} {
@@ -126,32 +119,33 @@ live_design!{
                 CodeEditor = <CodeEditor> {}
                 Welcome = <Rect> {
                     draw_bg: {color: #052329}
-                    
-                    <Frame> {
-                        walk: {width: Fill, height: Fill}
-                        layout: {
-                            padding: 10.0
-                            align: {
-                                x: 0.5,
-                                y: 0.5
+
+                        <Frame> {
+                            walk: { width: Fill, height: Fill}
+                            layout: {
+                                align: {
+                                    x: 0.5,
+                                    y: 0.5
+                                }
+                                flow: Down
                             }
-                        }
-                        
-                        <Logo> {}
-                        
-                        <Label> {
-                            label: "Welcome to\nMakepad\n\n欢迎来到\nMakepad"
-                            draw_label: {
-                                text_style: {
-                                    font_size: 40.0,
-                                    height_factor: 1.0,
-                                    font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
-                                },
+
+                            <Logo> {}
+
+                            <Label>{
+                                label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
+                                walk: {width: Fit}
+                                draw_label: {
+                                    text_style: {
+                                        font_size: 20.0,
+                                        height_factor: 1.0,
+                                        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
+                                    },
+                                }    
                             }
+
                         }
-                        
-                    }
-                    
+
                 }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
