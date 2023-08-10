@@ -179,6 +179,8 @@ impl Cx {
                         self.call_event_handler(&Event::Signal);
                     }
                     if self.check_live_file_watcher(){
+                        // self.draw_shaders.ptr_to_item.clear();
+                        // self.draw_shaders.fingerprints.clear();
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
                     }
