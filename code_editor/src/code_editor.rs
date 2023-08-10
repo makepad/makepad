@@ -81,8 +81,12 @@ live_design! {
             height: Fill,
             margin: 0,
         },
-        draw_text: {
+        draw_bg:{
             draw_depth: 0.0,
+            color:#3
+        }
+        draw_text: {
+            draw_depth: 0.5,
             text_style: <FONT_CODE> {}
         }
         draw_selection: {
@@ -111,6 +115,9 @@ pub struct CodeEditor {
     draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
+    #[live]
+    draw_bg: DrawColor,
+
     #[rust]
     viewport_rect: Rect,
     #[rust]
@@ -166,10 +173,14 @@ impl CodeEditor {
         let walk = self.draw_state.get().unwrap();
 
         self.scroll_bars.begin(cx, walk, Layout::default());
+        
+        self.viewport_rect = cx.turtle().rect();
 
         self.viewport_rect = cx.turtle().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
-
+        
+        self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
+        
         self.cell_size =
             self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
         session.handle_changes();
@@ -192,12 +203,18 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event,session: &mut Session) -> Vec<CodeEditorAction> {
+        let mut a = Vec::new();
+        self.handle_event_with(cx, event, session, &mut | _, v | a.push(v));
+        a
+    }
+
+    pub fn handle_event_with(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         session: &mut Session,
-        mut dispatch_action: impl FnMut(Action),
+        dispatch_action: &mut dyn  FnMut(&mut Cx, CodeEditorAction),
     ) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
@@ -255,7 +272,7 @@ impl CodeEditor {
             Hit::TextInput(TextInputEvent { ref input, .. }) => {
                 session.insert(input.into());
                 cx.redraw_all();
-                dispatch_action(Action::TextDidChange);
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
@@ -263,7 +280,7 @@ impl CodeEditor {
             }) => {
                 session.enter();
                 cx.redraw_all();
-                dispatch_action(Action::TextDidChange);
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::RBracket,
@@ -272,7 +289,7 @@ impl CodeEditor {
             }) => {
                 session.indent();
                 cx.redraw_all();
-                dispatch_action(Action::TextDidChange);
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::LBracket,
@@ -281,7 +298,7 @@ impl CodeEditor {
             }) => {
                 session.outdent();
                 cx.redraw_all();
-                dispatch_action(Action::TextDidChange);
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
@@ -289,7 +306,7 @@ impl CodeEditor {
             }) => {
                 session.delete();
                 cx.redraw_all();
-                dispatch_action(Action::TextDidChange);
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
@@ -297,7 +314,7 @@ impl CodeEditor {
             }) => {
                 session.backspace();
                 cx.redraw_all();
-                dispatch_action(Action::TextDidChange);
+                dispatch_action(cx, CodeEditorAction::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -311,7 +328,7 @@ impl CodeEditor {
             }) => {
                 if session.undo() {
                     cx.redraw_all();
-                    dispatch_action(Action::TextDidChange);
+                    dispatch_action(cx, CodeEditorAction::TextDidChange);
                 }
             }
             Hit::KeyDown(KeyEvent {
@@ -326,7 +343,7 @@ impl CodeEditor {
             }) => {
                 if session.redo() {
                     cx.redraw_all();
-                    dispatch_action(Action::TextDidChange);
+                    dispatch_action(cx, CodeEditorAction::TextDidChange);
                 }
             }
             Hit::FingerDown(FingerDownEvent {
@@ -593,7 +610,7 @@ impl CodeEditor {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Action {
+pub enum CodeEditorAction {
     TextDidChange,
 }
 
