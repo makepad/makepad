@@ -264,7 +264,7 @@ impl BuildManager {
     pub fn file_change(&mut self, _cx: &mut Cx) {
         for wrap in &mut self.clients {
             if let Some(process) = wrap.processes.get_mut(WHAT_TO_BUILD) {
-                
+                self.messages.clear();
                 process.cmd_id = wrap.client.send_cmd(BuildCmd::CargoRun {
                     what: WHAT_TO_BUILD.into(),
                 });
