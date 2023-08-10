@@ -39,7 +39,7 @@ impl AppMain for App {
         }
         self.ui.handle_widget_event(cx, event);
         if let Some(mut code_editor) = self.ui.get_code_editor(id!(code_editor)).borrow_mut() {
-            code_editor.handle_event(cx, event, &mut self.state.session);
+            code_editor.handle_event(cx, event, &mut self.state.session, |_| {});
         }
     }
 }
