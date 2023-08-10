@@ -292,6 +292,22 @@ impl CodeEditor {
                 session.backspace();
                 cx.redraw_all();
             }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers: KeyModifiers { logo: true, shift: false, .. },
+                ..
+            }) => {
+                session.undo();
+                cx.redraw_all();
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers: KeyModifiers { logo: true, shift: true, .. },
+                ..
+            }) => {
+                session.redo();
+                cx.redraw_all();
+            }
             _ => {}
         }
         match event.hits(cx, self.scroll_bars.area()) {
@@ -364,13 +380,25 @@ impl CodeEditor {
                                             text = text_1;
                                             self.draw_text.color = match token.kind {
                                                 TokenKind::Unknown => self.token_colors.unknown,
-                                                TokenKind::BranchKeyword => self.token_colors.branch_keyword,
-                                                TokenKind::Identifier => self.token_colors.identifier,
-                                                TokenKind::LoopKeyword => self.token_colors.loop_keyword,
+                                                TokenKind::BranchKeyword => {
+                                                    self.token_colors.branch_keyword
+                                                }
+                                                TokenKind::Identifier => {
+                                                    self.token_colors.identifier
+                                                }
+                                                TokenKind::LoopKeyword => {
+                                                    self.token_colors.loop_keyword
+                                                }
                                                 TokenKind::Number => self.token_colors.number,
-                                                TokenKind::OtherKeyword => self.token_colors.other_keyword,
-                                                TokenKind::Punctuator => self.token_colors.punctuator,
-                                                TokenKind::Whitespace => self.token_colors.whitespace,
+                                                TokenKind::OtherKeyword => {
+                                                    self.token_colors.other_keyword
+                                                }
+                                                TokenKind::Punctuator => {
+                                                    self.token_colors.punctuator
+                                                }
+                                                TokenKind::Whitespace => {
+                                                    self.token_colors.whitespace
+                                                }
                                             };
                                             self.draw_text.draw_abs(
                                                 cx,
