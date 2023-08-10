@@ -830,6 +830,7 @@ impl Document {
         mut f: impl FnMut(&String, usize, bool) -> (Extent, Option<Text>, Option<Text>),
     ) {
         let mut changes = Vec::new();
+        let mut inverted_changes = Vec::new();
         let mut point = Point::zero();
         let mut prev_range_end = Point::zero();
         for range in selections
@@ -849,8 +850,10 @@ impl Document {
                     drift: Drift::Before,
                     kind: ChangeKind::Delete(Range::from_start_and_extent(point, range.extent())),
                 };
+                let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
                 changes.push(change);
+                inverted_changes.push(inverted_change);
             }
             let (delete_extent, insert_text_before, insert_text_after) = f(
                 &self.text.as_lines()[point.line],
@@ -868,8 +871,10 @@ impl Document {
                     drift: Drift::Before,
                     kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent)),
                 };
+                let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
                 changes.push(change);
+                inverted_changes.push(inverted_change);
             }
             if let Some(insert_text_before) = insert_text_before {
                 let extent = insert_text_before.extent();
@@ -877,9 +882,11 @@ impl Document {
                     drift: Drift::Before,
                     kind: ChangeKind::Insert(point, insert_text_before),
                 };
+                let inverted_change = change.clone().invert(&self.text);
                 point += extent;
                 self.text.apply_change(change.clone());
                 changes.push(change);
+                inverted_changes.push(inverted_change);
             }
             if let Some(insert_text_after) = insert_text_after {
                 let extent = insert_text_after.extent();
@@ -887,14 +894,16 @@ impl Document {
                     drift: Drift::After,
                     kind: ChangeKind::Insert(point, insert_text_after),
                 };
+                let inverted_change = change.clone().invert(&self.text);
                 point += extent;
                 self.text.apply_change(change.clone());
                 changes.push(change);
+                inverted_changes.push(inverted_change);
             }
             prev_range_end = range.end();
         }
         self.history
-            .edit(origin_id, kind, selections, changes.clone());
+            .edit(origin_id, kind, selections, inverted_changes);
         self.apply_changes(origin_id, None, &changes);
     }
 
@@ -906,6 +915,7 @@ impl Document {
         mut f: impl FnMut(&str) -> (usize, usize, String),
     ) {
         let mut changes = Vec::new();
+        let mut inverted_changes = Vec::new();
         for line_range in selections
             .iter()
             .copied()
@@ -919,11 +929,11 @@ impl Document {
             })
         {
             for line in line_range {
-                self.edit_lines_internal(line, &mut changes, &mut f);
+                self.edit_lines_internal(line, &mut changes, &mut inverted_changes, &mut f);
             }
         }
         self.history
-            .edit(origin_id, kind, selections, changes.clone());
+            .edit(origin_id, kind, selections, inverted_changes);
         self.apply_changes(origin_id, None, &changes);
     }
 
@@ -931,6 +941,7 @@ impl Document {
         &mut self,
         line: usize,
         changes: &mut Vec<Change>,
+        inverted_changes: &mut Vec<Change>,
         mut f: impl FnMut(&str) -> (usize, usize, String),
     ) {
         let (byte, delete_byte_count, insert_text) = f(&self.text.as_lines()[line]);
@@ -945,16 +956,20 @@ impl Document {
                     },
                 )),
             };
+            let inverted_change = change.clone().invert(&self.text);
             self.text.apply_change(change.clone());
             changes.push(change);
+            inverted_changes.push(inverted_change);
         }
         if !insert_text.is_empty() {
             let change = Change {
                 drift: Drift::Before,
                 kind: ChangeKind::Insert(Point { line, byte }, insert_text.into()),
             };
+            let inverted_change = change.clone().invert(&self.text);
             self.text.apply_change(change.clone());
             changes.push(change);
+            inverted_changes.push(inverted_change);
         }
     }
 
