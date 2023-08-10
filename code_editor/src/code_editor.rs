@@ -192,7 +192,13 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        session: &mut Session,
+        mut dispatch_action: impl FnMut(Action),
+    ) {
         session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
@@ -249,6 +255,7 @@ impl CodeEditor {
             Hit::TextInput(TextInputEvent { ref input, .. }) => {
                 session.insert(input.into());
                 cx.redraw_all();
+                dispatch_action(Action::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
@@ -256,6 +263,7 @@ impl CodeEditor {
             }) => {
                 session.enter();
                 cx.redraw_all();
+                dispatch_action(Action::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::RBracket,
@@ -264,6 +272,7 @@ impl CodeEditor {
             }) => {
                 session.indent();
                 cx.redraw_all();
+                dispatch_action(Action::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::LBracket,
@@ -272,6 +281,7 @@ impl CodeEditor {
             }) => {
                 session.outdent();
                 cx.redraw_all();
+                dispatch_action(Action::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
@@ -279,6 +289,7 @@ impl CodeEditor {
             }) => {
                 session.delete();
                 cx.redraw_all();
+                dispatch_action(Action::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
@@ -286,6 +297,7 @@ impl CodeEditor {
             }) => {
                 session.backspace();
                 cx.redraw_all();
+                dispatch_action(Action::TextDidChange);
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -297,8 +309,10 @@ impl CodeEditor {
                     },
                 ..
             }) => {
-                session.undo();
-                cx.redraw_all();
+                if session.undo() {
+                    cx.redraw_all();
+                    dispatch_action(Action::TextDidChange);
+                }
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -310,8 +324,10 @@ impl CodeEditor {
                     },
                 ..
             }) => {
-                session.redo();
-                cx.redraw_all();
+                if session.redo() {
+                    cx.redraw_all();
+                    dispatch_action(Action::TextDidChange);
+                }
             }
             Hit::FingerDown(FingerDownEvent {
                 abs,
@@ -574,6 +590,11 @@ impl CodeEditor {
             None
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Action {
+    TextDidChange,
 }
 
 struct DrawSelections<'a> {
