@@ -119,32 +119,30 @@ live_design!{
                 CodeEditor = <CodeEditor> {}
                 Welcome = <Rect> {
                     draw_bg: {color: #052329}
-
-                        <Frame> {
-                            walk: { width: Fill, height: Fill}
-                            layout: {
-                                align: {
-                                    x: 0.5,
-                                    y: 0.5
-                                }
-                                flow: Down
+                    <Frame> {
+                        walk: { width: Fill, height: Fill}
+                        layout: {
+                            align: {
+                                x: 0.5,
+                                y: 0.5
                             }
-
-                            <Logo> {}
-
-                            <Label>{
-                                label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
-                                walk: {width: Fit}
-                                draw_label: {
-                                    text_style: {
-                                        font_size: 20.0,
-                                        height_factor: 1.0,
-                                        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
-                                    },
-                                }    
-                            }
-
+                            flow: Down
                         }
+
+                        <Logo> {}
+
+                        <Label>{
+                            label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
+                            walk: {width: Fit, margin:{left:200}}
+                            draw_label: {
+                                text_style: {
+                                    font_size: 20.0,
+                                    height_factor: 1.0,
+                                    font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
+                                },
+                            }    
+                        }
+                    }
 
                 }
                 RunView = <RunView> {}
