@@ -40,11 +40,8 @@ pub enum FileRequest {
     OpenFile(UnixPathBuf),
     /// Requests the collab server to apply the given delta to the given revision of the file with
     /// the given id.
-    ApplyDelta(TextFileId, String),
-    /// Requests the collab server to remove the client as a participant from the file with the
-    /// given id. If the client was the last participant for the file, this also closes the file on
-    /// the collab server.
-    CloseFile(TextFileId),
+    SaveFile(UnixPathBuf, String),
+
 }
 
 /// A type for representing either a response or a notification from the collab server.
@@ -63,20 +60,17 @@ pub enum FileResponse {
     LoadFileTree(Result<FileTreeData, FileError>),
     /// The result of requesting the collab server to add the client as a participant to the file
     /// with the given id.
-    OpenFile(Result<(TextFileId, String), FileError>),
+    OpenFile(Result<(UnixPathBuf, String), FileError>),
     /// The result of requesting the collab server to apply a delta to a revision of the file with
     /// the given id.
-    ApplyDelta(Result<TextFileId, FileError>),
-    /// The result of requesting the collab server to remove the client as a participant from the
-    /// file with the given id.
-    CloseFile(Result<TextFileId, FileError>),
+    SaveFile(Result<UnixPathBuf, FileError>),
 }
 
 /// A type for representing data about a file tree.
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub struct FileTreeData {
     /// The path to the root of this file tree.
-    pub path: UnixPathBuf,
+    pub root_path: UnixPathBuf,
     /// Data about the root of this file tree.
     pub root: FileNodeData,
 }
@@ -112,14 +106,8 @@ pub enum FileNotification {
 /// A type for representing errors from the collab server.
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum FileError {
-    /// Attempted to add the client as a participant to a file for which it was already a
-    /// participant.
-    AlreadyAParticipant,
-    /// Attempted to either apply a delta to, or remove the client as a participant from a file for
-    /// which it was not a participant.
-    NotAParticipant,
-    /// Unknown error
     Unknown(String),
+    CannotOpen(UnixPathBuf)
 }
 
 /// An identifier for files on the collab server.

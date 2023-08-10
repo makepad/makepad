@@ -1,9 +1,9 @@
 use crate::{
     makepad_draw::*,
     makepad_widgets::*,
-    build::build_manager::BuildManager,
     makepad_platform::os::cx_stdin::*,
-    build::{
+    build_manager::{
+        build_manager::BuildManager,
         build_protocol::*,
     }
 };

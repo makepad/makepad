@@ -5,7 +5,7 @@ live_design!{
     FONT_LABEL = {
         font_size: 9.4,
         font: {
-            path: dep("crate://self/resources/IBMPlexSans-Text.ttf")
+            path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
     

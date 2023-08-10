@@ -1,18 +1,14 @@
 use {
-    std::rc::Rc, 
-    std::cell::RefCell,
-    std::collections::{HashMap,hash_map},
     crate::{
-        makepad_code_editor::{Session,Document},
         makepad_code_editor::code_editor::*,
         makepad_platform::*,
         makepad_draw::*,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
         makepad_widgets::dock::*,
-        file_client::file_system::*,
+        file_system::file_system::*,
         run_view::*,
-        build::{
+        build_manager::{
             build_manager::{
                 BuildManager,
                 BuildManagerAction
@@ -31,7 +27,7 @@ live_design!{
     import makepad_code_editor::code_editor::CodeEditor;
     
     import makepad_studio::run_view::RunView;
-    import makepad_studio::build::build_manager::LogList;
+    import makepad_studio::build_manager::build_manager::LogList;
     
     App = {{App}} {
         ui: <DesktopWindow> {
@@ -61,7 +57,7 @@ live_design!{
                 }
                 
                 open_files = Tabs {
-                    tabs: [file1, file2, file3],
+                    tabs: [],
                     selected: 0
                 }
                 
@@ -69,9 +65,9 @@ live_design!{
                     tabs: [run_view],
                     selected: 0
                 }
-                
+                /*
                 file1 = Tab {
-                    name: "Empty1"
+                    name: "File1" 
                     kind: CodeEditor
                 }
                 
@@ -83,7 +79,7 @@ live_design!{
                 file3 = Tab {
                     name: "File3"
                     kind: Empty3
-                }
+                }*/
                 
                 file_tree = Tab {
                     name: "FileTree",
@@ -118,14 +114,13 @@ pub struct App {
     #[live] ui: WidgetRef,
     #[live] build_manager: BuildManager,
     #[rust] file_system: FileSystem,
-    #[rust] sessions: HashMap<LiveId,Session>,
 }
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         crate::makepad_widgets::live_design(cx);
         crate::makepad_code_editor::live_design(cx);
-        crate::build::build_manager::live_design(cx);
+        crate::build_manager::build_manager::live_design(cx);
         crate::run_view::live_design(cx);
     }
     
@@ -168,13 +163,9 @@ impl AppMain for App {
                 else if let Some(mut code_editor) = next.as_code_editor().borrow_mut(){
                     // lets fetch a session
                     let current_id = dock.get_drawing_item_id().unwrap();
-                    let session = match self.sessions.entry(current_id){
-                        hash_map::Entry::Occupied(o) => o.into_mut(),
-                        hash_map::Entry::Vacant(v) => v.insert(Session::new(Rc::new(RefCell::new(Document::new(
-                            include_str!("app.rs").into(),
-                        )))))
-                    };
-                    code_editor.draw(cx, session)
+                    if let Some(session) = self.file_system.get_session_mut(current_id){
+                        code_editor.draw(cx, session);
+                    }
                 }
             }
             return
@@ -189,7 +180,7 @@ impl AppMain for App {
         // lets iterate over the editors and handle events
         for (item_id,item) in dock.borrow_mut().unwrap().items().iter(){
             if let Some(mut code_editor) = item.as_code_editor().borrow_mut(){
-                if let Some(session) = self.sessions.get_mut(&item_id.id){
+                if let Some(session) = self.file_system.get_session_mut(item_id.id){
                      code_editor.handle_event(cx, event, session);
                  }
              }
@@ -258,9 +249,14 @@ impl AppMain for App {
         }
         
         if let Some(file_id) = file_tree.file_clicked(&actions) {
-            let path = self.file_system.file_nodes.get(&file_id).unwrap().name.clone();
+            let unix_path = self.file_system.file_node_path(file_id);
+            let tab_name = self.file_system.file_node_name(file_id);
+            // ok lets open the file
+            let tab_id = LiveId::unique();
+            self.file_system.request_open_file(tab_id, unix_path);
+            
             // lets add a file tab 'somewhere'
-            dock.create_tab(cx, live_id!(content2), LiveId::unique(), live_id!(Empty4), path);
+            dock.create_tab(cx, live_id!(open_files), tab_id, live_id!(CodeEditor), tab_name);
         }
     }
 }
