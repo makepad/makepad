@@ -226,7 +226,7 @@ impl AppMain for App {
             }
         }
         
-        self.file_system.handle_event(cx, event, &self.ui);
+        self.file_system.handle_event(cx, event, &self.ui, &mut self.build_manager);
         
         if let Some(mut run_view) = run_view.borrow_mut() {
             run_view.handle_event(cx, event, &mut self.build_manager);
