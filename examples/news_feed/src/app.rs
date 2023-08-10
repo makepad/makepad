@@ -144,7 +144,7 @@ live_design!{
             walk: {width: Fill, height: Fit, margin: 0.0}
             layout: {flow: Right, padding: 0.0, spacing: 25.0, align: {x: 0.5, y: 0.5}}
             
-            <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 20.0, height: Fit}, label: ""}
+            <IconButton> {draw_icon: {svg_file: (ICO_HOME)} icon_walk: {width: 20.0, height: Fit}, label: "欢迎来到"}
             <IconButton> {draw_icon: {svg_file: (ICO_FIND)} icon_walk: {width: 18.0, height: Fit}, label: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_ADD)} icon_walk: {width: 40.0, height: Fit}, label: ""}
             <IconButton> {draw_icon: {svg_file: (ICO_LIKES)} icon_walk: {width: 20.0, height: Fit}, label: ""}
@@ -328,7 +328,7 @@ impl AppMain for App {
                 if let Some(mut list) = news_feeds.has_widget(&next).borrow_mut() {
                     // lets set our scroll range so the scrollbar has something
                     list.set_item_range(0, 1000, 1);
-                    // next visible item only returns items that are visible
+                    // next nly returns items that are visible
                     // this means the performance here is O(visible)
                     while let Some(item_id) = list.next_visible_item(cx) {
                         let template = match item_id {
@@ -339,7 +339,7 @@ impl AppMain for App {
                         let item = list.get_item(cx, item_id, template).unwrap();
                         let text = match item_id % 4 {
                             0 => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit", item_id),
-                            1 => format!("Item: {} 欢迎来到, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
+                            1 => format!("Item: {} 欢迎来到, adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
                             2 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
                             _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.", item_id),
                         };
