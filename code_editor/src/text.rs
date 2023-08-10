@@ -1,6 +1,6 @@
 use {
-    crate::{Diff, Length, Position, Range},
-    std::{borrow::Cow, ops::AddAssign},
+    crate::{change, Change, Extent, Point, Range},
+    std::{io, io::BufRead, iter},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -13,12 +13,27 @@ impl Text {
         Self::default()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.length() == Length::default()
+    pub fn newline() -> Self {
+        Self {
+            lines: vec![String::new(), String::new()],
+        }
     }
 
-    pub fn length(&self) -> Length {
-        Length {
+    pub fn from_buf_reader<R>(reader: R) -> io::Result<Self>
+    where
+        R: BufRead,
+    {
+        Ok(Self {
+            lines: reader.lines().collect::<Result<_, _>>()?,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.extent() == Extent::zero()
+    }
+
+    pub fn extent(&self) -> Extent {
+        Extent {
             line_count: self.lines.len() - 1,
             byte_count: self.lines.last().unwrap().len(),
         }
@@ -47,88 +62,45 @@ impl Text {
         Text { lines }
     }
 
-    pub fn take(&mut self, len: Length) -> Self {
-        let mut lines = self
-            .lines
-            .drain(..len.line_count as usize)
-            .collect::<Vec<_>>();
-        lines.push(self.lines.first().unwrap()[..len.byte_count].to_string());
-        self.lines
-            .first_mut()
-            .unwrap()
-            .replace_range(..len.byte_count, "");
-        Text { lines }
-    }
-
-    pub fn skip(&mut self, len: Length) {
-        self.lines.drain(..len.line_count);
-        self.lines
-            .first_mut()
-            .unwrap()
-            .replace_range(..len.byte_count, "");
-    }
-
-    pub fn insert(&mut self, position: Position, mut text: Self) {
-        if text.length().line_count == 0 {
-            self.lines[position.line]
-                .replace_range(position.byte..position.byte, text.lines.first().unwrap());
+    pub fn insert(&mut self, point: Point, mut text: Self) {
+        if text.extent().line_count == 0 {
+            self.lines[point.line]
+                .replace_range(point.byte..point.byte, text.lines.first().unwrap());
         } else {
             text.lines
                 .first_mut()
                 .unwrap()
-                .replace_range(..0, &self.lines[position.line][..position.byte]);
+                .replace_range(..0, &self.lines[point.line][..point.byte]);
             text.lines
                 .last_mut()
                 .unwrap()
-                .push_str(&self.lines[position.line][position.byte..]);
-            self.lines
-                .splice(position.line..position.line + 1, text.lines);
+                .push_str(&self.lines[point.line][point.byte..]);
+            self.lines.splice(point.line..point.line + 1, text.lines);
         }
     }
 
-    pub fn delete(&mut self, position: Position, length: Length) {
-        use std::iter;
-
-        if length.line_count == 0 {
-            self.lines[position.line]
-                .replace_range(position.byte..position.byte + length.byte_count, "");
+    pub fn delete(&mut self, range: Range) {
+        if range.start().line == range.end().line {
+            self.lines[range.start().line].replace_range(range.start().byte..range.end().byte, "");
         } else {
-            let mut line = self.lines[position.line][..position.byte].to_string();
-            line.push_str(&self.lines[position.line + length.line_count][length.byte_count..]);
-            self.lines.splice(
-                position.line..position.line + length.line_count + 1,
-                iter::once(line),
-            );
+            let mut line = self.lines[range.start().line][..range.start().byte].to_string();
+            line.push_str(&self.lines[range.end().line][range.end().byte..]);
+            self.lines
+                .splice(range.start().line..range.end().line + 1, iter::once(line));
         }
     }
 
-    pub fn apply_diff(&mut self, diff: Diff) {
-        use super::diff::Operation;
-
-        let mut position = Position::default();
-        for operation in diff {
-            match operation {
-                Operation::Delete(length) => self.delete(position, length),
-                Operation::Retain(length) => position += length,
-                Operation::Insert(text) => {
-                    let length = text.length();
-                    self.insert(position, text);
-                    position += length;
-                }
+    pub fn apply_change(&mut self, change: Change) {
+        match change.kind {
+            change::ChangeKind::Insert(point, additional_text) => {
+                self.insert(point, additional_text)
             }
+            change::ChangeKind::Delete(range) => self.delete(range),
         }
     }
-}
 
-impl AddAssign for Text {
-    fn add_assign(&mut self, mut other: Self) {
-        other
-            .lines
-            .first_mut()
-            .unwrap()
-            .replace_range(..0, self.lines.last().unwrap());
+    pub fn into_line_count(self) -> Vec<String> {
         self.lines
-            .splice(self.lines.len() - 1..self.lines.len(), other.lines);
     }
 }
 
@@ -140,26 +112,14 @@ impl Default for Text {
     }
 }
 
-impl From<char> for Text {
-    fn from(char: char) -> Self {
+impl From<&str> for Text {
+    fn from(string: &str) -> Self {
         Self {
-            lines: match char {
-                '\n' | '\r' => vec![String::new(), String::new()],
-                _ => vec![char.into()],
-            },
+            lines: string.lines().map(|string| string.to_owned()).collect(),
         }
     }
 }
 
-impl From<&str> for Text {
-    fn from(string: &str) -> Self {
-        let mut lines: Vec<_> = string.split('\n').map(|line| line.to_string()).collect();
-        if lines.is_empty() {
-            lines.push(String::new());
-        }
-        Self { lines }
-    }
-}
 impl From<&String> for Text {
     fn from(string: &String) -> Self {
         string.as_str().into()
@@ -169,11 +129,5 @@ impl From<&String> for Text {
 impl From<String> for Text {
     fn from(string: String) -> Self {
         string.as_str().into()
-    }
-}
-
-impl From<Cow<'_, str>> for Text {
-    fn from(string: Cow<'_, str>) -> Self {
-        string.as_ref().into()
     }
 }
