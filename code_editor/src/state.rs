@@ -540,12 +540,12 @@ impl Session {
         );
     }
 
-    pub fn undo(&mut self) {
-        self.document.borrow_mut().undo(self.id);
+    pub fn undo(&mut self) -> bool {
+        self.document.borrow_mut().undo(self.id)
     }
 
-    pub fn redo(&mut self) {
-        self.document.borrow_mut().redo(self.id);
+    pub fn redo(&mut self) -> bool {
+        self.document.borrow_mut().redo(self.id)
     }
 
     fn update_y(&mut self) {
@@ -803,21 +803,7 @@ impl Document {
         let mut document = Self {
             text,
             tokens,
-            inline_inlays: (0..line_count)
-                .map(|line| {
-                    if line % 5 == 0 {
-                        [
-                            (20, InlineInlay::Text("XXX".into())),
-                            (40, InlineInlay::Text("XXX".into())),
-                            (60, InlineInlay::Text("XXX".into())),
-                            (80, InlineInlay::Text("XXX".into())),
-                        ]
-                        .into()
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect(),
+            inline_inlays: (0..line_count).map(|_| Vec::new()).collect(),
             block_inlays: Vec::new(),
             history: History::new(),
             tokenizer: Tokenizer::new(line_count),
@@ -1013,15 +999,19 @@ impl Document {
                 })
                 .unwrap_or(0);
             for line in line_range {
-                if self.text.as_lines()[line].chars().find_map(|char| {
-                    if char.is_closing_delimiter() {
-                        return Some(true);
-                    }
-                    if !char.is_whitespace() {
-                        return Some(false);
-                    }
-                    None
-                }).unwrap_or(false) {
+                if self.text.as_lines()[line]
+                    .chars()
+                    .find_map(|char| {
+                        if char.is_closing_delimiter() {
+                            return Some(true);
+                        }
+                        if !char.is_whitespace() {
+                            return Some(false);
+                        }
+                        None
+                    })
+                    .unwrap_or(false)
+                {
                     desired_indentation_column_count -= 4;
                 }
                 self.edit_lines_internal(line, changes, inverted_changes, |line| {
@@ -1110,15 +1100,21 @@ impl Document {
         self.history.force_new_edit_group()
     }
 
-    fn undo(&mut self, origin_id: SessionId) {
+    fn undo(&mut self, origin_id: SessionId) -> bool {
         if let Some((selections, changes)) = self.history.undo(&mut self.text) {
             self.apply_changes(origin_id, Some(selections), &changes);
+            true
+        } else {
+            false
         }
     }
 
-    fn redo(&mut self, origin_id: SessionId) {
+    fn redo(&mut self, origin_id: SessionId) -> bool {
         if let Some((selections, changes)) = self.history.redo(&mut self.text) {
             self.apply_changes(origin_id, Some(selections), &changes);
+            true
+        } else {
+            false
         }
     }
 
