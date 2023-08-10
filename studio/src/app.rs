@@ -22,6 +22,7 @@ live_design!{
     import makepad_widgets::theme::*;
     import makepad_widgets::frame::*;
     import makepad_widgets::file_tree::FileTree;
+    import makepad_widgets::button::Button;
     import makepad_widgets::label::Label;
     import makepad_widgets::dock::*;
     import makepad_widgets::desktop_window::DesktopWindow;
@@ -29,6 +30,32 @@ live_design!{
     
     import makepad_studio::run_view::RunView;
     import makepad_studio::build_manager::build_manager::LogList;
+
+    Logo = <Button> {
+        draw_icon: {
+            svg_file: dep("crate://self/resources/logo_makepad.svg"),
+            fn get_color(self) -> vec4 {
+                return mix(
+                    mix(
+                        #f00,
+                        #0ff,
+                        self.hover
+                    ),
+                    #fff,
+                    self.pressed
+                )
+            }
+        }
+        icon_walk: { width: 100.0, height: Fit }
+        draw_bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                return sdf.result
+            }
+        }
+        layout: { padding: 50.0 }
+        label: "TEST"
+    }
     
     App = {{App}} {
         ui: <DesktopWindow> {
@@ -99,9 +126,33 @@ live_design!{
                 }
                 CodeEditor = <CodeEditor> {}
                 Welcome = <Rect> {
-                    draw_bg: {color: #135}
-                    // sebastian do things here
-                    <Label> {label: "Welcome to\nMakepad\n\n欢迎来到 Makepad"}
+                    draw_bg: {color: #052329}
+
+                    <Frame> {
+                        walk: { width: Fill, height: Fill}
+                        layout: {
+                            padding: 10.0
+                            align: {
+                                x: 0.5,
+                                y: 0.5
+                            }
+                        }
+
+                        <Logo> {}
+
+                        <Label>{
+                            label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
+                            draw_label: {
+                                text_style: {
+                                    font_size: 40.0,
+                                    height_factor: 1.0,
+                                    font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
+                                },
+                            }    
+                        }
+
+                    }
+
                 }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
