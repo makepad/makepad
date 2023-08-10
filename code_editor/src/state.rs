@@ -131,7 +131,7 @@ impl Session {
 
     pub fn find_first_line_ending_after_y(&self, y: f64) -> usize {
         match self
-            .y
+            .y[..self.y.len( ) - 1]
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
             Ok(line) => line,
@@ -141,7 +141,7 @@ impl Session {
 
     pub fn find_first_line_starting_after_y(&self, y: f64) -> usize {
         match self
-            .y
+            .y[..self.y.len( ) - 1]
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
             Ok(line) => line + 1,
