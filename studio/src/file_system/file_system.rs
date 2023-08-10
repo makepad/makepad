@@ -98,9 +98,12 @@ impl FileSystem {
                             // ignore
                         }
                     }
-                    _response => {
-                        //self.build_manager.handle_file_response(cx, &response);
-                        // self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
+                    FileResponse::SaveFile(result)=>match result{
+                        Ok(_)=>{}
+                        Err(_)=>{}
+                        // ok we saved a file, we should check however what changed
+                        // to see if we need a recompile
+                        
                     }
                 },
                 FileClientAction::Notification(_notification) => {

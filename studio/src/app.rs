@@ -30,7 +30,7 @@ live_design!{
     
     import makepad_studio::run_view::RunView;
     import makepad_studio::build_manager::build_manager::LogList;
-
+    
     Logo = <Button> {
         draw_icon: {
             svg_file: dep("crate://self/resources/logo_makepad.svg"),
@@ -46,14 +46,14 @@ live_design!{
                 )
             }
         }
-        icon_walk: { width: 100.0, height: Fit }
+        icon_walk: {width: 100.0, height: Fit}
         draw_bg: {
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 return sdf.result
             }
         }
-        layout: { padding: 50.0 }
+        layout: {padding: 50.0}
         label: "TEST"
     }
     
@@ -85,7 +85,7 @@ live_design!{
                 }
                 
                 open_files = Tabs {
-                    tabs: [welcome],
+                    tabs: [welcome, file1],
                     no_close: true,
                     selected: 0
                 }
@@ -98,12 +98,11 @@ live_design!{
                     name: "Welcome"
                     kind: Welcome
                 }
-                /*
-                file2 = Tab {
-                    name: "File2"
-                    kind: Empty2
+                file1 = Tab {
+                    name: "app.rs"
+                    kind: CodeEditor
                 }
-                
+                /*
                 file3 = Tab {
                     name: "File3"
                     kind: Empty3
@@ -127,9 +126,9 @@ live_design!{
                 CodeEditor = <CodeEditor> {}
                 Welcome = <Rect> {
                     draw_bg: {color: #052329}
-
+                    
                     <Frame> {
-                        walk: { width: Fill, height: Fill}
+                        walk: {width: Fill, height: Fill}
                         layout: {
                             padding: 10.0
                             align: {
@@ -137,22 +136,22 @@ live_design!{
                                 y: 0.5
                             }
                         }
-
+                        
                         <Logo> {}
-
-                        <Label>{
-                            label:"Welcome to\nMakepad\n\n欢迎来到\nMakepad"
+                        
+                        <Label> {
+                            label: "Welcome to\nMakepad\n\n欢迎来到\nMakepad"
                             draw_label: {
                                 text_style: {
                                     font_size: 40.0,
                                     height_factor: 1.0,
                                     font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
                                 },
-                            }    
+                            }
                         }
-
+                        
                     }
-
+                    
                 }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
@@ -180,6 +179,7 @@ impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.file_system.init(cx);
         self.build_manager.init(cx);
+        self.file_system.request_open_file(live_id!(file1), "examples/news_feed/src/app.rs".into());
     }
 }
 
@@ -222,6 +222,16 @@ impl AppMain for App {
                 }
             }
             return
+        }
+        
+        if let Event::KeyDown(KeyEvent {
+            key_code: KeyCode::Backtick,
+            modifiers: KeyModifiers {logo, ..},
+            ..
+        }) = event {
+            if *logo{
+                self.build_manager.file_change(cx);
+            }
         }
         
         self.file_system.handle_event(cx, event, &self.ui);
