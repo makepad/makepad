@@ -163,12 +163,7 @@ pub struct CodeEditorRef(WidgetRef);
 
 impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
-        let walk = if let Some(walk) = self.draw_state.get() {
-            walk
-        } else {
-            panic!()
-        };
-        /*let rect = cx.walk_turtle(walk);*/
+        let walk = self.draw_state.get().unwrap();
 
         self.scroll_bars.begin(cx, walk, Layout::default());
 

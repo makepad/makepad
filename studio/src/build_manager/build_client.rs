@@ -6,7 +6,7 @@ use {
     crate::{
         makepad_micro_serde::*,
         makepad_platform::*,
-        build::{
+        build_manager::{
             build_protocol::{BuildCmd, BuildCmdWrap, BuildMsgWrap, BuildCmdId},
             build_server::{BuildConnection, BuildServer},
         }

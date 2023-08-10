@@ -1,8 +1,8 @@
 //pub mod app_inner;
 //pub mod app_state;
 pub mod app;
-pub mod file_client;
-pub mod build;
+pub mod file_system;
+pub mod build_manager;
 
 //pub mod code_editor;
 //pub mod editors;

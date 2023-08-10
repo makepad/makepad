@@ -9,7 +9,7 @@ use {
             StdinToHost,
             StdinWindowSize
         },
-        build::{
+        build_manager::{
             build_protocol::*,
             build_server::{BuildConnection, BuildServer},
             build_client::BuildClient
@@ -284,7 +284,9 @@ impl BuildManager {
         response: &FileResponse,
     ) {
         match response {
-            FileResponse::ApplyDelta(response) => {
+            FileResponse::SaveFile(response) => {
+                // lets see if we need to recompile at all
+                
                 // something changed for file_id
                 let _file_id = response.clone().unwrap();
                 cx.stop_timer(self.recompile_timer);
