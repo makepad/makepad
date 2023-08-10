@@ -57,7 +57,8 @@ live_design!{
                 }
                 
                 open_files = Tabs {
-                    tabs: [],
+                    tabs: [welcome],
+                    no_close: true,
                     selected: 0
                 }
                 
@@ -65,12 +66,11 @@ live_design!{
                     tabs: [run_view],
                     selected: 0
                 }
-                /*
-                file1 = Tab {
-                    name: "File1" 
-                    kind: CodeEditor
+                welcome= Tab {
+                    name: "Welcome" 
+                    kind: Welcome
                 }
-                
+                /*
                 file2 = Tab {
                     name: "File2"
                     kind: Empty2
@@ -93,17 +93,17 @@ live_design!{
                 
                 run_view = Tab {
                     name: "Run",
+                    no_close: true
                     kind: RunView
                 }
                 CodeEditor = <CodeEditor>{}
-                Empty1 = <Rect> {draw_bg: {color: #533}}
-                Empty2 = <Rect> {draw_bg: {color: #353}}
-                Empty3 = <Rect> {draw_bg: {color: #335}}
-                Empty4 = <Rect> {draw_bg: {color: #535}}
+                Welcome = <Rect> {
+                    draw_bg: {color: #535}
+                    // sebastian do things here
+                }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
                 LogList = <LogList> {}
-                //LogList = <LogList>{}
             }
         }
     }
