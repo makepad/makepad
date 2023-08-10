@@ -193,15 +193,19 @@ impl FileServerConnection {
     fn save_file(
         &self,
         unix_path: UnixPathBuf,
-        content: String,
-    ) -> Result<UnixPathBuf, FileError> {
+        new_content: String,
+    ) -> Result<(UnixPathBuf, String, String), FileError> {
         let path = self.make_full_path(&unix_path);
         
-        fs::write(&path, &content).map_err(
+        let old_content = String::from_utf8_lossy(&fs::read(&path).map_err(
+            | error | FileError::Unknown(error.to_string())
+        ) ?).to_string();
+
+        fs::write(&path, &new_content).map_err(
             | error | FileError::Unknown(error.to_string())
         ) ?;
         
-        Ok(unix_path)
+        Ok((unix_path, old_content, new_content))
     }
 }
 

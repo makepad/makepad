@@ -276,7 +276,7 @@ impl CodeEditor {
                 session.move_down(!shift);
                 cx.redraw_all();
             }
-            Hit::TextInput(TextInputEvent { ref input, .. }) => {
+            Hit::TextInput(TextInputEvent { ref input, .. }) if input.len()>0 => {
                 session.insert(input.into());
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
