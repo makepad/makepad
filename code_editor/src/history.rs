@@ -21,30 +21,31 @@ impl History {
         origin_id: SessionId,
         kind: EditKind,
         selections: &[Selection],
-        changes: Vec<Change>,
+        inverted_changes: Vec<Change>,
     ) {
         if self
             .current_edit
             .map_or(false, |current_edit| current_edit == (origin_id, kind))
         {
-            self.undos.last_mut().unwrap().1.extend(changes);
+            self.undos.last_mut().unwrap().1.extend(inverted_changes);
         } else {
             self.current_edit = Some((origin_id, kind));
-            self.undos.push((selections.to_vec(), changes));
+            self.undos.push((selections.to_vec(), inverted_changes));
         }
         self.redos.clear();
     }
 
     pub fn undo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<Change>)> {
-        if let Some((selections, changes)) = self.undos.pop() {
+        if let Some((selections, mut inverted_changes)) = self.undos.pop() {
             self.current_edit = None;
-            let mut inverted_changes = Vec::new();
-            for change in changes.iter().cloned().rev() {
-                let inverted_change = change.invert(&text);
-                text.apply_change(inverted_change.clone());
-                inverted_changes.push(inverted_change);
+            let mut changes = Vec::new();
+            inverted_changes.reverse();
+            for inverted_change in inverted_changes.iter().cloned() {
+                let change = inverted_change.clone().invert(&text);
+                text.apply_change(inverted_change);
+                changes.push(change);
             }
-            self.redos.push((selections.clone(), changes));
+            self.redos.push((selections.clone(), changes.clone()));
             Some((selections, inverted_changes))
         } else {
             None
