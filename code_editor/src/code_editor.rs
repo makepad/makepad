@@ -23,6 +23,7 @@ live_design! {
         number: #B6CEAA,
         other_keyword: #5B9BD3,
         punctuator: #D4D4D4,
+        string: #CC917B,
         whitespace: #6E6E6E,
     }
 
@@ -426,6 +427,7 @@ impl CodeEditor {
                                                 self.token_colors.other_keyword
                                             }
                                             TokenKind::Punctuator => self.token_colors.punctuator,
+                                            TokenKind::String => self.token_colors.string,
                                             TokenKind::Whitespace => self.token_colors.whitespace,
                                         };
                                         self.draw_text.draw_abs(
@@ -817,6 +819,8 @@ struct TokenColors {
     other_keyword: Vec4,
     #[live]
     punctuator: Vec4,
+    #[live]
+    string: Vec4,
     #[live]
     whitespace: Vec4,
 }
