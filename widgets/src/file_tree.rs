@@ -538,7 +538,7 @@ impl FileTree {
     }
     
     pub fn is_folder(&mut self, file_node_id: FileNodeId)->bool {
-        if let Some((node,id)) = self.tree_nodes.get(&file_node_id){
+        if let Some((node,_)) = self.tree_nodes.get(&file_node_id){
             node.is_folder
         }
         else{
