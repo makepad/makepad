@@ -1,55 +1,40 @@
-use crate::{
-    token::{TokenInfo, TokenKind},
-    Diff, Text,
-};
+use crate::{change::ChangeKind, token::TokenKind, Change, Text, Token};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Tokenizer {
     state: Vec<Option<(State, State)>>,
-    token_infos: Vec<Vec<TokenInfo>>,
 }
 
 impl Tokenizer {
-    pub fn new(text: &Text) -> Self {
-        let line_count = text.as_lines().len();
-        let mut tokenizer = Self {
+    pub fn new(line_count: usize) -> Self {
+        Self {
             state: (0..line_count).map(|_| None).collect(),
-            token_infos: (0..line_count).map(|_| Vec::new()).collect(),
-        };
-        tokenizer.retokenize(&Diff::new(), text);
-        tokenizer
+        }
     }
 
-    pub fn token_infos(&self) -> &[Vec<TokenInfo>] {
-        &self.token_infos
-    }
-
-    pub fn retokenize(&mut self, diff: &Diff, text: &Text) {
-        use crate::diff::OperationInfo;
-
-        let mut line = 0;
-        for operation in diff {
-            match operation.info() {
-                OperationInfo::Delete(length) => {
-                    self.state.drain(line..line + length.line_count);
-                    self.token_infos.drain(line..line + length.line_count);
-                    self.state[line] = None;
-                    self.token_infos[line] = Vec::new();
+    pub fn apply_change(&mut self, change: &Change) {
+        match &change.kind {
+            ChangeKind::Insert(point, text) => {
+                self.state[point.line] = None;
+                let line_count = text.extent().line_count;
+                if line_count > 0 {
+                    let line = point.line + 1;
+                    self.state.splice(line..line, (0..line_count).map(|_| None));
                 }
-                OperationInfo::Retain(length) => {
-                    line += length.line_count;
-                }
-                OperationInfo::Insert(length) => {
-                    self.state[line] = None;
-                    self.token_infos[line] = Vec::new();
-                    self.state
-                        .splice(line..line, (0..length.line_count).map(|_| None));
-                    self.token_infos
-                        .splice(line..line, (0..length.line_count).map(|_| Vec::new()));
-                    line += length.line_count;
+            }
+            ChangeKind::Delete(range) => {
+                self.state[range.start().line] = None;
+                let line_count = range.extent().line_count;
+                if line_count > 0 {
+                    let start_line = range.start().line + 1;
+                    let end_line = start_line + line_count;
+                    self.state.drain(start_line..end_line);
                 }
             }
         }
+    }
+
+    pub fn update(&mut self, text: &Text, tokens: &mut [Vec<Token>]) {
         let mut state = State::default();
         for line in 0..text.as_lines().len() {
             match self.state[line] {
@@ -58,18 +43,18 @@ impl Tokenizer {
                 }
                 _ => {
                     let start_state = state;
-                    let mut token_infos = Vec::new();
+                    let mut new_tokens = Vec::new();
                     let mut cursor = Cursor::new(&text.as_lines()[line]);
                     loop {
                         let (next_state, token) = state.next(&mut cursor);
                         state = next_state;
                         match token {
-                            Some(token) => token_infos.push(token),
+                            Some(token) => new_tokens.push(token),
                             None => break,
                         }
                     }
                     self.state[line] = Some((start_state, state));
-                    self.token_infos[line] = token_infos;
+                    tokens[line] = new_tokens;
                 }
             }
         }
@@ -88,17 +73,23 @@ impl Default for State {
 }
 
 impl State {
-    pub fn next(self, cursor: &mut Cursor) -> (State, Option<TokenInfo>) {
+    pub fn next(self, cursor: &mut Cursor) -> (State, Option<Token>) {
         if cursor.peek(0) == '\0' {
             return (self, None);
         }
         let start = cursor.index;
-        let (next_state, token_kind) = match self {
+        let (next_state, kind) = match self {
             State::Initial(state) => state.next(cursor),
         };
         let end = cursor.index;
         assert!(start < end);
-        (next_state, Some(TokenInfo::new(end - start, token_kind)))
+        (
+            next_state,
+            Some(Token {
+                len: end - start,
+                kind,
+            }),
+        )
     }
 }
 

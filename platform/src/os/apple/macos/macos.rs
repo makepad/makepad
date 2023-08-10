@@ -30,12 +30,14 @@ use {
         pass::{CxPassParent},
         thread::Signal,
         event::{
+            MouseUpEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Event,
             HttpResponseEvent,
             HttpRequestErrorEvent,
         },
+        window::CxWindowPool,
         cx_api::{CxOsApi, CxOsOp},
         cx::{Cx, OsType},
     }
@@ -125,7 +127,7 @@ impl Cx {
         }
     }
 
-    fn handle_networking_events(&mut self) {
+    pub(crate) fn handle_networking_events(&mut self) {
         match self.os.networking_channel.receiver.try_recv() {
             Ok(message) => {
                 match message {
@@ -150,6 +152,8 @@ impl Cx {
     ) -> EventFlow {
         
         self.handle_platform_ops(metal_windows, metal_cx, cocoa_app);
+         
+        // send a mouse up when dragging starts
         
         let mut paint_dirty = false;
         match &event {
@@ -174,7 +178,10 @@ impl Cx {
                         self.handle_media_signals();
                         self.call_event_handler(&Event::Signal);
                     }
-
+                    if self.check_live_file_watcher(){
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
+                    }
                     self.handle_networking_events();
 
                     return EventFlow::Poll;
@@ -284,13 +291,28 @@ impl Cx {
                 self.call_event_handler(&Event::TextInput(e))
             }
             CocoaEvent::Drag(e) => {
-                self.call_event_handler(&Event::Drag(e))
+                self.call_event_handler(&Event::Drag(e));
+                self.drag_drop.cycle_drag();
             }
             CocoaEvent::Drop(e) => {
-                self.call_event_handler(&Event::Drop(e))
+                self.call_event_handler(&Event::Drop(e));
+                self.drag_drop.cycle_drag();
             }
             CocoaEvent::DragEnd => {
-                self.call_event_handler(&Event::DragEnd)
+                // lets send mousebutton ups to fix missing it.
+                // TODO! make this more resilient
+                self.call_event_handler(&Event::MouseUp(MouseUpEvent{
+                    abs: dvec2(0.0,0.0),
+                    button: 0,
+                    window_id: CxWindowPool::id_zero(),
+                    modifiers: Default::default(),
+                    time: 0.0
+                }));
+                self.fingers.mouse_up(0);
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                
+                self.call_event_handler(&Event::DragEnd);
+                self.drag_drop.cycle_drag();
             }
             CocoaEvent::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
@@ -321,7 +343,7 @@ impl Cx {
         }
     }
     
-    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp) {
+    fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp){
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -393,8 +415,8 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     cocoa_app.stop_timer(timer_id);
                 },
-                CxOsOp::StartDragging(dragged_item) => {
-                    cocoa_app.start_dragging(dragged_item);
+                CxOsOp::StartDragging(items) => {
+                    cocoa_app.start_dragging(items);
                 }
                 CxOsOp::UpdateMenu(menu) => {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)
@@ -411,6 +433,7 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.live_expand();
+        self.start_live_file_watcher();
         self.live_scan_dependencies();
         self.native_load_dependencies();
     }

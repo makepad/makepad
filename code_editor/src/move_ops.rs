@@ -1,239 +1,255 @@
-use crate::{Affinity, Document, Position};
+use crate::{selection::Affinity, str::StrExt, Point, Session};
 
-pub fn move_left(
-    document: &Document<'_>,
-    position: Position,
-) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_start_of_line(position) {
-        return move_to_prev_grapheme(document, position);
+pub fn move_left(lines: &[String], point: Point) -> Point {
+    if !is_at_start_of_line(point) {
+        return move_to_prev_grapheme(lines, point);
     }
-    if !is_at_first_line(position) {
-        return move_to_end_of_prev_line(document, position);
+    if !is_at_first_line(point) {
+        return move_to_end_of_prev_line(lines, point);
     }
-    ((position, Affinity::Before), None)
+    point
 }
 
-pub fn move_right(
-    document: &Document<'_>,
-    position: Position,
-) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_end_of_line(document, position) {
-        return move_to_next_grapheme(document, position);
+pub fn move_right(lines: &[String], point: Point) -> Point {
+    if !is_at_end_of_line(lines, point) {
+        return move_to_next_grapheme(lines, point);
     }
-    if !is_at_last_line(document, position) {
-        return move_to_start_of_next_line(position);
+    if !is_at_last_line(lines, point) {
+        return move_to_start_of_next_line(point);
     }
-    ((position, Affinity::After), None)
+    point
 }
 
 pub fn move_up(
-    document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    session: &Session,
+    point: Point,
+    affinity: Affinity,
     preferred_column: Option<usize>,
-) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_first_row_of_line(document, (position, affinity)) {
-        return move_to_prev_row_of_line(document, (position, affinity), preferred_column);
+) -> (Point, Affinity, Option<usize>) {
+    if !is_at_first_row_of_line(session, point, affinity) {
+        return move_to_prev_row_of_line(session, point, affinity, preferred_column);
     }
-    if !is_at_first_line(position) {
-        return move_to_last_row_of_prev_line(document, (position, affinity), preferred_column);
+    if !is_at_first_line(point) {
+        return move_to_last_row_of_prev_line(session, point, affinity, preferred_column);
     }
-    ((position, affinity), preferred_column)
+    (point, affinity, preferred_column)
 }
 
 pub fn move_down(
-    document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    session: &Session,
+    point: Point,
+    affinity: Affinity,
     preferred_column: Option<usize>,
-) -> ((Position, Affinity), Option<usize>) {
-    if !is_at_last_row_of_line(document, (position, affinity)) {
-        return move_to_next_row_of_line(document, (position, affinity), preferred_column);
+) -> (Point, Affinity, Option<usize>) {
+    if !is_at_last_row_of_line(session, point, affinity) {
+        return move_to_next_row_of_line(session, point, affinity, preferred_column);
     }
-    if !is_at_last_line(document, position) {
-        return move_to_first_row_of_next_line(document, (position, affinity), preferred_column);
+    if !is_at_last_line(session.document().borrow().text().as_lines(), point) {
+        return move_to_first_row_of_next_line(session, point, affinity, preferred_column);
     }
-    ((position, affinity), preferred_column)
+    (point, affinity, preferred_column)
 }
 
-fn is_at_start_of_line(position: Position) -> bool {
-    position.byte == 0
+fn is_at_first_line(point: Point) -> bool {
+    point.line == 0
 }
 
-fn is_at_end_of_line(document: &Document<'_>, position: Position) -> bool {
-    position.byte == document.line(position.line).text().len()
+fn is_at_last_line(lines: &[String], point: Point) -> bool {
+    point.line == lines.len()
 }
 
-fn is_at_first_row_of_line(
-    document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
-) -> bool {
-    document
-        .line(position.line)
-        .byte_affinity_to_row_column(
-            (position.byte, affinity),
-            document.settings().tab_column_count,
-        )
-        .0
-        == 0
+fn is_at_start_of_line(point: Point) -> bool {
+    point.byte == 0
 }
 
-fn is_at_last_row_of_line(
-    document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
-) -> bool {
-    let line = document.line(position.line);
-    line.byte_affinity_to_row_column(
-        (position.byte, affinity),
-        document.settings().tab_column_count,
-    )
-    .0 == line.row_count() - 1
+fn is_at_end_of_line(lines: &[String], point: Point) -> bool {
+    point.byte == lines[point.line].len()
 }
 
-fn is_at_first_line(position: Position) -> bool {
-    position.line == 0
+fn is_at_first_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+    session.line(point.line, |line| {
+        let (row, _) = line.byte_and_affinity_to_row_and_column(
+            point.byte,
+            affinity,
+            session.settings().tab_column_count,
+        );
+        row == 0
+    })
 }
 
-fn is_at_last_line(document: &Document<'_>, position: Position) -> bool {
-    position.line == document.line_count() - 1
+fn is_at_last_row_of_line(session: &Session, point: Point, affinity: Affinity) -> bool {
+    session.line(point.line, |line| {
+        let (row, _) = line.byte_and_affinity_to_row_and_column(
+            point.byte,
+            affinity,
+            session.settings().tab_column_count,
+        );
+        row == line.row_count() - 1
+    })
 }
 
-fn move_to_prev_grapheme(
-    document: &Document<'_>,
-    position: Position,
-) -> ((Position, Affinity), Option<usize>) {
-    use crate::str::StrExt;
-
-    (
-        (
-            Position::new(
-                position.line,
-                document.line(position.line).text()[..position.byte]
-                    .grapheme_indices()
-                    .next_back()
-                    .map(|(byte_index, _)| byte_index)
-                    .unwrap(),
-            ),
-            Affinity::After,
-        ),
-        None,
-    )
+fn move_to_prev_grapheme(lines: &[String], point: Point) -> Point {
+    Point {
+        line: point.line,
+        byte: lines[point.line][..point.byte]
+            .grapheme_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap(),
+    }
 }
 
-fn move_to_next_grapheme(
-    document: &Document<'_>,
-    position: Position,
-) -> ((Position, Affinity), Option<usize>) {
-    use crate::str::StrExt;
-
-    let line = document.line(position.line);
-    (
-        (
-            Position::new(
-                position.line,
-                line.text()[position.byte..]
-                    .grapheme_indices()
-                    .nth(1)
-                    .map(|(byte, _)| position.byte + byte)
-                    .unwrap_or(line.text().len()),
-            ),
-            Affinity::Before,
-        ),
-        None,
-    )
+fn move_to_next_grapheme(lines: &[String], point: Point) -> Point {
+    let line = &lines[point.line];
+    Point {
+        line: point.line,
+        byte: line[point.byte..]
+            .grapheme_indices()
+            .nth(1)
+            .map(|(index, _)| point.byte + index)
+            .unwrap_or(line.len()),
+    }
 }
 
-fn move_to_end_of_prev_line(
-    document: &Document<'_>,
-    position: Position,
-) -> ((Position, Affinity), Option<usize>) {
-    let prev_line = position.line - 1;
-    (
-        (
-            Position::new(prev_line, document.line(prev_line).text().len()),
-            Affinity::After,
-        ),
-        None,
-    )
+fn move_to_end_of_prev_line(lines: &[String], point: Point) -> Point {
+    let prev_line = point.line - 1;
+    Point {
+        line: prev_line,
+        byte: lines[prev_line].len(),
+    }
 }
 
-fn move_to_start_of_next_line(position: Position) -> ((Position, Affinity), Option<usize>) {
-    (
-        (Position::new(position.line + 1, 0), Affinity::Before),
-        None,
-    )
+fn move_to_start_of_next_line(point: Point) -> Point {
+    Point {
+        line: point.line + 1,
+        byte: 0,
+    }
 }
 
 fn move_to_prev_row_of_line(
-    document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    session: &Session,
+    point: Point,
+    affinity: Affinity,
     preferred_column: Option<usize>,
-) -> ((Position, Affinity), Option<usize>) {
-    let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
-        document.settings().tab_column_count,
-    );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
-    }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row - 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+) -> (Point, Affinity, Option<usize>) {
+    session.line(point.line, |line| {
+        let (row, mut column) = line.byte_and_affinity_to_row_and_column(
+            point.byte,
+            affinity,
+            session.settings().tab_column_count,
+        );
+        if let Some(preferred_column) = preferred_column {
+            column = preferred_column;
+        }
+        let (byte, affinity) = line.row_and_column_to_byte_and_affinity(
+            row - 1,
+            column,
+            session.settings().tab_column_count,
+        );
+        (
+            Point {
+                line: point.line,
+                byte,
+            },
+            affinity,
+            Some(column),
+        )
+    })
 }
 
 fn move_to_next_row_of_line(
-    document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    session: &Session,
+    point: Point,
+    affinity: Affinity,
     preferred_column: Option<usize>,
-) -> ((Position, Affinity), Option<usize>) {
-    let line = document.line(position.line);
-    let (row, mut column) = line.byte_affinity_to_row_column(
-        (position.byte, affinity),
-        document.settings().tab_column_count,
-    );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
-    }
-    let (byte, affinity) =
-        line.row_column_to_byte_affinity((row + 1, column), document.settings().tab_column_count);
-    ((Position::new(position.line, byte), affinity), Some(column))
+) -> (Point, Affinity, Option<usize>) {
+    session.line(point.line, |line| {
+        let (row, mut column) = line.byte_and_affinity_to_row_and_column(
+            point.byte,
+            affinity,
+            session.settings().tab_column_count,
+        );
+        if let Some(preferred_column) = preferred_column {
+            column = preferred_column;
+        }
+        let (byte, affinity) = line.row_and_column_to_byte_and_affinity(
+            row + 1,
+            column,
+            session.settings().tab_column_count,
+        );
+        (
+            Point {
+                line: point.line,
+                byte,
+            },
+            affinity,
+            Some(column),
+        )
+    })
 }
 
 fn move_to_last_row_of_prev_line(
-    document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    session: &Session,
+    point: Point,
+    affinity: Affinity,
     preferred_column: Option<usize>,
-) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
-        document.settings().tab_column_count,
-    );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
-    }
-    let prev_line = position.line - 1;
-    let prev_line_ref = document.line(prev_line);
-    let (byte, affinity) = prev_line_ref.row_column_to_byte_affinity(
-        (prev_line_ref.row_count() - 1, column),
-        document.settings().tab_column_count,
-    );
-    ((Position::new(prev_line, byte), affinity), Some(column))
+) -> (Point, Affinity, Option<usize>) {
+    session.line(point.line, |line| {
+        let (_, mut column) = line.byte_and_affinity_to_row_and_column(
+            point.byte,
+            affinity,
+            session.settings().tab_column_count,
+        );
+        if let Some(preferred_column) = preferred_column {
+            column = preferred_column;
+        }
+        session.line(point.line - 1, |prev_line| {
+            let (byte, affinity) = prev_line.row_and_column_to_byte_and_affinity(
+                prev_line.row_count() - 1,
+                column,
+                session.settings().tab_column_count,
+            );
+            (
+                Point {
+                    line: point.line - 1,
+                    byte,
+                },
+                affinity,
+                Some(column),
+            )
+        })
+    })
 }
 
 fn move_to_first_row_of_next_line(
-    document: &Document<'_>,
-    (position, affinity): (Position, Affinity),
+    session: &Session,
+    point: Point,
+    affinity: Affinity,
     preferred_column: Option<usize>,
-) -> ((Position, Affinity), Option<usize>) {
-    let (_, mut column) = document.line(position.line).byte_affinity_to_row_column(
-        (position.byte, affinity),
-        document.settings().tab_column_count,
-    );
-    if let Some(preferred_column) = preferred_column {
-        column = preferred_column;
-    }
-    let next_line = position.line + 1;
-    let (byte, affinity) = document
-        .line(next_line)
-        .row_column_to_byte_affinity((0, column), document.settings().tab_column_count);
-    ((Position::new(next_line, byte), affinity), Some(column))
+) -> (Point, Affinity, Option<usize>) {
+    session.line(point.line, |line| {
+        let (_, mut column) = line.byte_and_affinity_to_row_and_column(
+            point.byte,
+            affinity,
+            session.settings().tab_column_count,
+        );
+        if let Some(preferred_column) = preferred_column {
+            column = preferred_column;
+        }
+        session.line(point.line + 1, |next_line| {
+            let (byte, affinity) = next_line.row_and_column_to_byte_and_affinity(
+                0,
+                column,
+                session.settings().tab_column_count,
+            );
+            (
+                Point {
+                    line: point.line + 1,
+                    byte,
+                },
+                affinity,
+                Some(column),
+            )
+        })
+    })
 }

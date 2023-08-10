@@ -7,6 +7,7 @@ use {
         io::{BufReader},
     },
     crate::{
+        makepad_live_id::*,
         makepad_math::*,
         makepad_error_log::*,
         makepad_micro_serde::*,
@@ -15,6 +16,7 @@ use {
         event::WindowGeom,
         texture::Texture,
         live_traits::LiveNew,
+        thread::Signal,
         os::{
             metal_xpc::{
                 xpc_service_proxy,
@@ -52,15 +54,6 @@ impl Cx {
             }
         }
     }
-    /*
-    pub fn stdin_post_signal(signal: Signal) {
-        let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-signal\", \"signal\":{}}}\n", signal.0.0).as_bytes());
-    }
-    
-    pub fn stdin_render_done(buffer: u32) {
-        let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-render\", \"buffer\":{}}}\n", buffer).as_bytes());
-    }*/
-    
     
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
@@ -70,6 +63,9 @@ impl Cx {
         let service_proxy = xpc_service_proxy();
         let mut reader = BufReader::new(std::io::stdin());
         let mut window_size = None;
+        
+        self.call_event_handler(&Event::Construct);
+        
         loop {
             let mut line = String::new();
             if let Ok(len) = reader.read_line(&mut line) {
@@ -78,47 +74,37 @@ impl Cx {
                 }
                 // alright lets put the line in a json parser
                 let parsed: Result<HostToStdin, DeJsonErr> = DeJson::deserialize_json(&line);
+                
                 match parsed {
                     Ok(msg) => match msg {
+                        HostToStdin::ReloadFile{file:_, contents:_}=>{
+                            // alright lets reload this file in our DSL system
+                            
+                        }
                         HostToStdin::MouseDown(e) => {
-                            self.call_event_handler(&Event::MouseDown(e.into()));
-                            /*
-                            let digit_id = LiveId(fe.digit_id).into();
-                            self.fingers.alloc_digit(digit_id);
                             self.fingers.process_tap_count(
-                                digit_id,
-                                DVec2 {x: fe.x, y: fe.y},
-                                fe.time
+                                dvec2(e.x,e.y),
+                                e.time
                             );
-                            self.call_event_handler(&Event::FingerDown(
-                                fe.into_finger_down_event(&self.fingers)
-                            ));
-                            self.fingers.cycle_hover_area(digit_id);*/
+                            self.fingers.mouse_down(e.button);
+
+                            self.call_event_handler(&Event::MouseDown(e.into()));
                         }
                         HostToStdin::MouseMove(e) => {
                             self.call_event_handler(&Event::MouseMove(e.into()));
-                            /*
-                            let digit_id = LiveId(fe.digit_id).into();
-                            // lets grab the captured area
-                            self.call_event_handler(&Event::FingerMove(
-                                fe.into_finger_move_event(&self.fingers)
-                            ));
-                            self.fingers.cycle_hover_area(digit_id);*/
+                            self.fingers.cycle_hover_area(live_id!(mouse).into());
+                            self.fingers.switch_captures();
                         }
                         HostToStdin::MouseUp(e) => {
+                            let button = e.button;
                             self.call_event_handler(&Event::MouseUp(e.into()));
-                            /*
-                            let digit_id = LiveId(fe.digit_id).into();
-                            self.call_event_handler(&Event::FingerUp(
-                                fe.into_finger_up_event(&self.fingers)
-                            ));
-                            self.fingers.free_digit(digit_id);*/
+                            self.fingers.mouse_up(button);
+                            self.fingers.cycle_hover_area(live_id!(mouse).into());
+                        }
+                        HostToStdin::Scroll(e) => {
+                            self.call_event_handler(&Event::Scroll(e.into()))
                         }
                         HostToStdin::WindowSize(ws) => {
-                            if window_size.is_none() {
-                                // lets allocate our framebuffer textures
-                                self.call_event_handler(&Event::Construct);
-                            }
                             if window_size != Some(ws) {
                                 window_size = Some(ws);
                                 self.redraw_all();
@@ -129,12 +115,8 @@ impl Cx {
                                     inner_size: dvec2(ws.width, ws.height),
                                     ..Default::default()
                                 };
-                                
                                 self.stdin_handle_platform_ops(metal_cx, &fb_texture);
                             }
-                        }
-                        HostToStdin::Signal(_) => {
-                            self.handle_triggers();
                         }
                         HostToStdin::Tick {frame: _, time} => if let Some(ws) = window_size {
                             // poll the service for updates
@@ -146,6 +128,17 @@ impl Cx {
                                     *fb_shared.lock().unwrap().borrow_mut() = Some((shared_handle, shared_uid));
                                 }
                             }));
+        
+                            // check signals
+                            if Signal::check_and_clear_ui_signal(){
+                                self.handle_media_signals();
+                                self.call_event_handler(&Event::Signal);
+                            }
+                            if self.check_live_file_watcher(){
+                                self.call_event_handler(&Event::LiveEdit);
+                                self.redraw_all();
+                            }
+                            self.handle_networking_events();
                             
                             // alright a tick.
                             // we should now run all the stuff.
@@ -203,7 +196,8 @@ impl Cx {
                     // lets set up our render pass target
                     let pass = &mut self.passes[window.main_pass_id.unwrap()];
                     pass.color_textures = vec![CxPassColorTexture {
-                        clear_color: PassClearColor::ClearWith(pass.clear_color),
+                        clear_color: PassClearColor::ClearWith(vec4(1.0,1.0,0.0,1.0)),
+                        //clear_color: PassClearColor::ClearWith(pass.clear_color),
                         texture_id: main_texture.texture_id()
                     }];
                 },

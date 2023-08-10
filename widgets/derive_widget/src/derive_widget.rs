@@ -17,6 +17,13 @@ pub fn derive_widget_action_impl(input: TokenStream) -> TokenStream {
             tb.add("        Box::new(self)");
             tb.add("    }");
             tb.add("}");
+
+            tb.add("impl ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
+            tb.add("{");
+            tb.add("    fn into_action(self, uid:WidgetUid)->WidgetActionItem{");
+            tb.add("        WidgetActionItem::new(self.into(), uid)");
+            tb.add("    }");
+            tb.add("}");
             tb.add("impl").stream(generic.clone());
             tb.add("Default for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
             tb.add("    fn default()->Self{Self::None}");
@@ -152,19 +159,19 @@ pub fn derive_widget_ref_impl(input: TokenStream) -> TokenStream {
             let widget_ref_ext = format!("{}WidgetRefExt", clean_name);
             let widget_ext = format!("{}WidgetExt", clean_name);
             let get_fn = format!("get_{}", snake_name);
-            let into_fn = format!("into_{}", snake_name);
+            let as_fn = format!("as_{}", snake_name);
 
             tb.add("pub trait").ident(&widget_ref_ext).add("{");
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add(";");
-            tb.add("    fn ").ident(&into_fn).add("(self) -> ").ident(&ref_name).add(";");
+            tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add(";");
             tb.add("}");
 
             tb.add("impl ").ident(&widget_ref_ext).add(" for WidgetRef{");
             tb.add("    fn ").ident(&get_fn).add("(&self, path: &[LiveId]) -> ").ident(&ref_name).add("{");
             tb.add("        ").ident(&ref_name).add("(self.get_widget(path))");
             tb.add("    }");
-            tb.add("    fn ").ident(&into_fn).add("(self) -> ").ident(&ref_name).add("{");
-            tb.add("        ").ident(&ref_name).add("(self)");
+            tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&ref_name).add("{");
+            tb.add("        ").ident(&ref_name).add("(self.clone())");
             tb.add("    }");
             tb.add("}");
             
@@ -227,12 +234,12 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             let ref_ext = format!("{}SetWidgetRefExt", clean_name);
             let widget_ext = format!("{}SetWidgetExt", clean_name);
             let get_fn = format!("get_{}_set", snake_name);
-            let into_fn = format!("into_{}_set", snake_name);
+            let as_fn = format!("as_{}_set", snake_name);
             let ref_name = format!("{}Ref", clean_name);
             
             tb.add("pub trait").ident(&set_ext).add("{");
             tb.add("    fn ").ident(&get_fn).add("(&self, paths: &[&[LiveId]]) -> ").ident(&set_name).add(";");
-            tb.add("    fn ").ident(&into_fn).add("(self) -> ").ident(&set_name).add(";");
+            tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&set_name).add(";");
             tb.add("}");
 
             tb.add("impl ").ident(&set_name).add("{");
@@ -249,8 +256,8 @@ pub fn derive_widget_set_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn ").ident(&get_fn).add("(&self, paths: &[&[LiveId]]) -> ").ident(&set_name).add("{");
             tb.add("        ").ident(&set_name).add("(self.get_widgets(paths))");
             tb.add("    }");
-            tb.add("    fn ").ident(&into_fn).add("(self) -> ").ident(&set_name).add("{");
-            tb.add("        ").ident(&set_name).add("(self)");
+            tb.add("    fn ").ident(&as_fn).add("(&self) -> ").ident(&set_name).add("{");
+            tb.add("        ").ident(&set_name).add("(self.clone())");
             tb.add("    }");
             tb.add("}");
 
