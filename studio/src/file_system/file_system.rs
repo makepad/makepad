@@ -1,12 +1,18 @@
 use {
+    std::collections::{HashMap,hash_map},
+    std::rc::Rc,
+    std::cell::RefCell,
     crate::{
+        makepad_code_editor::{Document, Session},
         makepad_platform::*,
         makepad_draw::*,
         makepad_widgets::*,
         makepad_widgets::file_tree::*,
-        file_client::FileClient,
+        makepad_widgets::dock::*,
+        file_system::FileClient,
         makepad_file_protocol::{
             FileRequest,
+            FileError,
             FileResponse,
             FileClientAction,
             FileNodeData,
@@ -20,8 +26,11 @@ use {
 #[derive(Default)]
 pub struct FileSystem {
     pub file_client: FileClient,
-    pub path: UnixPathBuf,
+    pub root_path: UnixPathBuf,
     pub file_nodes: LiveIdMap<FileNodeId, FileNode>,
+    pub tab_id_to_path: HashMap<LiveId, UnixPathBuf>,
+    pub tab_id_to_session: HashMap<LiveId, Session>,
+    pub open_documents: HashMap<UnixPathBuf, Option<Rc<RefCell<Document>>>>
 }
 
 #[derive(Debug)]
@@ -49,6 +58,19 @@ impl FileSystem {
         self.file_client.send_request(FileRequest::LoadFileTree {with_data: false});
     }
     
+    pub fn get_session_mut(&mut self, tab_id:LiveId)->Option<&mut Session>{
+        // lets see if we have a document yet
+        if let Some(path) = self.tab_id_to_path.get(&tab_id){
+            if let Some(Some(document)) = self.open_documents.get(path){
+                return Some(match self.tab_id_to_session.entry(tab_id){
+                    hash_map::Entry::Occupied(o) => o.into_mut(),
+                    hash_map::Entry::Vacant(v) => v.insert(Session::new(document.clone()))
+                })
+            }
+        }
+        None
+    }
+    
     pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef){
         for action in self.file_client.handle_event(cx, event) {
             match action {
@@ -57,6 +79,24 @@ impl FileSystem {
                         self.load_file_tree(response.unwrap());
                         ui.get_file_tree(id!(file_tree)).redraw(cx);
                         // dock.select_tab(cx, dock, state, live_id!(file_tree).into(), live_id!(file_tree).into(), Animate::No);
+                    }
+                    FileResponse::OpenFile(result)=>match result{
+                        Ok((unix_path, data))=>{
+                            let dock = ui.get_dock(id!(dock));
+                            for (tab_id, path) in &self.tab_id_to_path{
+                                if unix_path == *path{
+                                    dock.redraw_tab(cx, *tab_id);
+                                }
+                            }
+                            self.open_documents.insert(unix_path, Some(Rc::new(RefCell::new(Document::new(data.into())))));
+                            ui.redraw(cx);
+                        }
+                        Err(FileError::CannotOpen(_unix_path))=>{
+                        }
+                        Err(FileError::Unknown(err))=>{
+                            log!("File error unknown {}", err);
+                            // ignore
+                        }
                     }
                     _response => {
                         //self.build_manager.handle_file_response(cx, &response);
@@ -67,6 +107,16 @@ impl FileSystem {
                     //self.editors.handle_collab_notification(cx, &mut state.editor_state, notification)
                 }
             }
+        }
+    }
+    
+    pub fn request_open_file(&mut self, tab_id:LiveId, path:UnixPathBuf){
+        // ok lets see if we have a document
+        // ifnot, we create a new one
+        if self.open_documents.get(&path).is_none(){
+            self.tab_id_to_path.insert(tab_id, path.clone());
+            self.open_documents.insert(path.clone(), None);
+            self.file_client.send_request(FileRequest::OpenFile(path));
         }
     }
     
@@ -88,18 +138,22 @@ impl FileSystem {
         }
     }
     
-    pub fn _file_node_path(&self, file_node_id: FileNodeId) -> UnixPathBuf {
+    pub fn file_node_name(&self, file_node_id: FileNodeId) -> String {
+        self.file_nodes.get(&file_node_id).unwrap().name.clone()
+    }
+    
+    pub fn file_node_path(&self, file_node_id: FileNodeId) -> UnixPathBuf {
         let mut components = Vec::new();
         let mut file_node = &self.file_nodes[file_node_id];
         while let Some(edge) = &file_node.parent_edge {
             components.push(&edge.name);
             file_node = &self.file_nodes[edge.file_node_id];
         }
-        self.path.join(components.into_iter().rev().collect::<UnixPathBuf>())
+        self.root_path.join(components.into_iter().rev().collect::<UnixPathBuf>())
     }
     
     pub fn _file_path_join(&self, components: &[&str]) -> UnixPathBuf {
-        self.path.join(components.into_iter().rev().collect::<UnixPathBuf>())
+        self.root_path.join(components.into_iter().rev().collect::<UnixPathBuf>())
     }
     
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
@@ -142,7 +196,7 @@ impl FileSystem {
             file_node_id
         }
         
-        self.path = tree_data.path;
+        self.root_path = tree_data.root_path;
         
         self.file_nodes.clear();
         

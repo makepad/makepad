@@ -3,7 +3,7 @@ use {
         makepad_micro_serde::*,
         makepad_platform::*,
         makepad_file_protocol::{FileRequest, FileClientAction},
-        makepad_file_server::{FileConnection, FileServer},
+        makepad_file_server::{FileServerConnection, FileServer},
     },
     std::{
         env,
@@ -141,7 +141,7 @@ fn spawn_connection_listener(listener: TcpListener, mut server: FileServer) {
 }
 
 fn spawn_remote_request_handler(
-    connection: FileConnection,
+    connection: FileServerConnection,
     mut stream: TcpStream,
     action_sender: Sender<FileClientAction>,
 ) {
@@ -205,7 +205,7 @@ fn spawn_response_or_notification_receiver(
 
 fn spawn_local_request_handler(
     request_receiver: Receiver<FileRequest>,
-    connection: FileConnection,
+    connection: FileServerConnection,
     action_signal: Signal,
     action_sender: Sender<FileClientAction>,
 ) {
