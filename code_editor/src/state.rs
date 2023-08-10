@@ -2,6 +2,7 @@ use {
     crate::{
         change::{ChangeKind, Drift},
         char::CharExt,
+        history::EditKind,
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
         line::Wrapped,
@@ -12,7 +13,7 @@ use {
         widgets::BlockWidget,
         wrap,
         wrap::WrapData,
-        Change, Extent, Line, Point, Range, Selection, Settings, Text, Token, Tokenizer,
+        Change, Extent, History, Line, Point, Range, Selection, Settings, Text, Token, Tokenizer,
     },
     std::{
         cell::RefCell,
@@ -46,7 +47,7 @@ pub struct Session {
     unfolding_lines: HashSet<usize>,
     selections: Vec<Selection>,
     pending_selection_index: Option<usize>,
-    change_receiver: Receiver<Vec<Change>>,
+    change_receiver: Receiver<(Option<Vec<Selection>>, Vec<Change>)>,
 }
 
 impl Session {
@@ -391,15 +392,17 @@ impl Session {
     pub fn insert(&mut self, text: Text) {
         self.document
             .borrow_mut()
-            .edit(&self.selections, |_, _, _| {
+            .edit(self.id, EditKind::Insert, &self.selections, |_, _, _| {
                 (Extent::zero(), Some(text.clone()), None)
             });
     }
 
     pub fn enter(&mut self) {
-        self.document
-            .borrow_mut()
-            .edit(&self.selections, |line, index, _| {
+        self.document.borrow_mut().edit(
+            self.id,
+            EditKind::Insert,
+            &self.selections,
+            |line, index, _| {
                 (
                     if line[..index].chars().all(|char| char.is_whitespace()) {
                         Extent {
@@ -441,13 +444,16 @@ impl Session {
                         None
                     },
                 )
-            });
+            },
+        );
     }
 
     pub fn indent(&mut self) {
-        self.document
-            .borrow_mut()
-            .reindent(&self.selections, |line| {
+        self.document.borrow_mut().edit_lines(
+            self.id,
+            EditKind::Indent,
+            &self.selections,
+            |line| {
                 reindent(
                     line,
                     self.settings.use_soft_tabs,
@@ -458,13 +464,16 @@ impl Session {
                             * self.settings.indent_column_count
                     },
                 )
-            });
+            },
+        );
     }
 
     pub fn outdent(&mut self) {
-        self.document
-            .borrow_mut()
-            .reindent(&self.selections, |line| {
+        self.document.borrow_mut().edit_lines(
+            self.id,
+            EditKind::Outdent,
+            &self.selections,
+            |line| {
                 reindent(
                     line,
                     self.settings.use_soft_tabs,
@@ -475,19 +484,24 @@ impl Session {
                             * self.settings.indent_column_count
                     },
                 )
-            });
+            },
+        );
     }
 
     pub fn delete(&mut self) {
         self.document
             .borrow_mut()
-            .edit(&self.selections, |_, _, _| (Extent::zero(), None, None));
+            .edit(self.id, EditKind::Delete, &self.selections, |_, _, _| {
+                (Extent::zero(), None, None)
+            });
     }
 
     pub fn backspace(&mut self) {
-        self.document
-            .borrow_mut()
-            .edit(&self.selections, |line, index, is_empty| {
+        self.document.borrow_mut().edit(
+            self.id,
+            EditKind::Delete,
+            &self.selections,
+            |line, index, is_empty| {
                 (
                     if is_empty {
                         if index == 0 {
@@ -507,7 +521,16 @@ impl Session {
                     None,
                     None,
                 )
-            });
+            },
+        );
+    }
+
+    pub fn undo(&mut self) {
+        self.document.borrow_mut().undo(self.id);
+    }
+
+    pub fn redo(&mut self) {
+        self.document.borrow_mut().redo(self.id);
     }
 
     fn update_y(&mut self) {
@@ -542,8 +565,8 @@ impl Session {
     }
 
     pub fn handle_changes(&mut self) {
-        while let Ok(changes) = self.change_receiver.try_recv() {
-            self.apply_changes(&changes);
+        while let Ok((selections, changes)) = self.change_receiver.try_recv() {
+            self.apply_changes(selections, changes);
         }
     }
 
@@ -617,8 +640,8 @@ impl Session {
         }
     }
 
-    fn apply_changes(&mut self, changes: &[Change]) {
-        for change in changes {
+    fn apply_changes(&mut self, selections: Option<Vec<Selection>>, changes: Vec<Change>) {
+        for change in &changes {
             match &change.kind {
                 ChangeKind::Insert(point, text) => {
                     self.column_count[point.line] = None;
@@ -651,14 +674,20 @@ impl Session {
                     }
                 }
             }
-            for selection in &mut self.selections {
-                *selection = selection.apply_change(&change);
-            }
         }
         let line_count = self.document.borrow().text.as_lines().len();
         for line in 0..line_count {
             if self.wrap_data[line].is_none() {
                 self.update_wrap_data(line);
+            }
+        }
+        if let Some(selections) = selections {
+            self.selections = selections;
+        } else {
+            for change in changes {
+                for selection in &mut self.selections {
+                    *selection = selection.apply_change(&change);
+                }
             }
         }
         self.update_y();
@@ -747,8 +776,9 @@ pub struct Document {
     tokens: Vec<Vec<Token>>,
     inline_inlays: Vec<Vec<(usize, InlineInlay)>>,
     block_inlays: Vec<(usize, BlockInlay)>,
+    history: History,
     tokenizer: Tokenizer,
-    change_senders: HashMap<SessionId, Sender<Vec<Change>>>,
+    change_senders: HashMap<SessionId, Sender<(Option<Vec<Selection>>, Vec<Change>)>>,
 }
 
 impl Document {
@@ -776,10 +806,13 @@ impl Document {
                 })
                 .collect(),
             block_inlays: Vec::new(),
+            history: History::new(),
             tokenizer: Tokenizer::new(line_count),
             change_senders: HashMap::new(),
         };
-        document.tokenizer.update(&document.text, &mut document.tokens);
+        document
+            .tokenizer
+            .update(&document.text, &mut document.tokens);
         document
     }
 
@@ -789,6 +822,8 @@ impl Document {
 
     fn edit(
         &mut self,
+        origin_id: SessionId,
+        kind: EditKind,
         selections: &[Selection],
         mut f: impl FnMut(&String, usize, bool) -> (Extent, Option<Text>, Option<Text>),
     ) {
@@ -856,11 +891,15 @@ impl Document {
             }
             prev_range_end = range.end();
         }
-        self.apply_changes(&changes);
+        self.history
+            .edit(origin_id, kind, selections, changes.clone());
+        self.apply_changes(origin_id, None, changes);
     }
 
-    fn reindent(
+    fn edit_lines(
         &mut self,
+        origin_id: SessionId,
+        kind: EditKind,
         selections: &[Selection],
         mut f: impl FnMut(&str) -> (usize, usize, String),
     ) {
@@ -878,13 +917,15 @@ impl Document {
             })
         {
             for line in line_range {
-                self.reindent_internal(line, &mut changes, &mut f);
+                self.edit_lines_internal(line, &mut changes, &mut f);
             }
         }
-        self.apply_changes(&changes);
+        self.history
+            .edit(origin_id, kind, selections, changes.clone());
+        self.apply_changes(origin_id, None, changes);
     }
 
-    fn reindent_internal(
+    fn edit_lines_internal(
         &mut self,
         line: usize,
         changes: &mut Vec<Change>,
@@ -915,15 +956,50 @@ impl Document {
         }
     }
 
-    fn apply_changes(&mut self, changes: &[Change]) {
-        for change in changes {
+    fn undo(&mut self, origin_id: SessionId) {
+        if let Some((selections, changes)) = self.history.undo(&mut self.text) {
+            self.apply_changes(origin_id, Some(selections), changes);
+        }
+    }
+
+    fn redo(&mut self, origin_id: SessionId) {
+        if let Some((selections, changes)) = self.history.redo(&mut self.text) {
+            self.apply_changes(origin_id, Some(selections), changes);
+        }
+    }
+
+    fn apply_changes(
+        &mut self,
+        origin_id: SessionId,
+        selections: Option<Vec<Selection>>,
+        changes: Vec<Change>,
+    ) {
+        for change in &changes {
             self.apply_change_to_tokens(change);
             self.apply_change_to_inline_inlays(change);
             self.tokenizer.apply_change(change);
         }
         self.tokenizer.update(&self.text, &mut self.tokens);
-        for change_sender in self.change_senders.values() {
-            change_sender.send(changes.to_vec()).unwrap();
+        for (&session_id, change_sender) in &self.change_senders {
+            if session_id == origin_id {
+                change_sender
+                    .send((selections.clone(), changes.clone()))
+                    .unwrap();
+            } else {
+                change_sender
+                    .send((
+                        None,
+                        changes
+                            .iter()
+                            .cloned()
+                            .map(|change| Change {
+                                drift: Drift::Before,
+                                ..change
+                            })
+                            .collect(),
+                    ))
+                    .unwrap();
+            }
         }
     }
 
