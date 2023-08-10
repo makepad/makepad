@@ -116,9 +116,9 @@ pub struct CodeEditor {
     #[rust]
     cell_size: DVec2,
     #[rust]
-    start: usize,
+    start_line: usize,
     #[rust]
-    end: usize,
+    end_line: usize,
 }
 
 impl LiveHook for CodeEditor {
@@ -176,11 +176,10 @@ impl CodeEditor {
         session.set_wrap_column(Some(
             (self.viewport_rect.size.x / self.cell_size.x) as usize,
         ));
-        self.start = session.find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
-        self.end = session.find_first_line_starting_after_y(
+        self.start_line = session.find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
+        self.end_line = session.find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
-
         self.draw_text(cx, session);
         self.draw_selections(cx, session);
         cx.turtle_mut().set_used(
@@ -330,10 +329,10 @@ impl CodeEditor {
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
-        let mut y = 0.0;
+        let mut y = session.line(self.start_line, |line| line.y());
         session.blocks(
-            0,
-            session.document().borrow().text().as_lines().len(),
+            self.start_line,
+            self.end_line,
             |blocks| {
                 for block in blocks {
                     match block {
@@ -449,14 +448,14 @@ impl CodeEditor {
         while selections
             .as_slice()
             .first()
-            .map_or(false, |selection| selection.end().line < self.start)
+            .map_or(false, |selection| selection.end().line < self.start_line)
         {
             selections.next().unwrap();
         }
         if selections
             .as_slice()
             .first()
-            .map_or(false, |selection| selection.start().line < self.start)
+            .map_or(false, |selection| selection.start().line < self.start_line)
         {
             active_selection = Some(ActiveSelection {
                 selection: *selections.next().unwrap(),
@@ -584,9 +583,9 @@ struct DrawSelections<'a> {
 
 impl<'a> DrawSelections<'a> {
     fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
-        let mut line = self.code_editor.start;
+        let mut line = self.code_editor.start_line;
         let mut y = session.line(line, |line| line.y());
-        session.blocks(self.code_editor.start, self.code_editor.end, |blocks| {
+        session.blocks(self.code_editor.start_line, self.code_editor.end_line, |blocks| {
             for block in blocks {
                 match block {
                     Block::Line {
