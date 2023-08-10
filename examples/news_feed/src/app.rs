@@ -32,13 +32,13 @@ live_design!{
     
     TEXT_SUB = {
         font_size: (FONT_SIZE_SUB),
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-SemiBold.ttf")}
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
     
     TEXT_P = {
         font_size: (FONT_SIZE_P),
         height_factor: 1.65,
-        font: {path: dep("crate://makepad-widgets/resources/IBMPlexSans-Text.ttf")}
+        font: {path: dep("crate://makepad-widgets/resources/GoNotoKurrent-Regular.ttf")}
     }
     
     COLOR_BG = #xfff8ee
@@ -222,7 +222,7 @@ live_design!{
                         text_style: <TEXT_P> {},
                         color: (COLOR_P)
                     }
-                    label: "Never underestimate the resilience it takes to live in a desert. It's a testament to life's adaptability, endurance, and tenacity. The cacti, creatures, and people who call it home are nature's ultimate survivalists. #DesertStrong"
+                    label: ""
                 }
                 
                 <LineH> {
@@ -339,7 +339,7 @@ impl AppMain for App {
                         let item = list.get_item(cx, item_id, template).unwrap();
                         let text = match item_id % 4 {
                             0 => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit", item_id),
-                            1 => format!("Item: {} amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
+                            1 => format!("Item: {} 欢迎来到, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
                             2 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
                             _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.", item_id),
                         };
@@ -355,10 +355,10 @@ impl AppMain for App {
         
         let actions = self.ui.handle_widget_event(cx, event);
         
-        for (_item_id, item) in news_feeds.items_with_actions(&actions) {
+        for (item_id, item) in news_feeds.items_with_actions(&actions) {
             // check for actions inside the list item
             if item.get_button(id!(likes)).clicked(&actions) {
-                //log!("CLICKED LIKES on item {}", item_id);
+                log!("CLICKED LIKES on item {}", item_id);
             }
         }
         

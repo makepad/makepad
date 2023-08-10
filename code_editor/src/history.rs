@@ -72,6 +72,7 @@ pub enum EditKind {
     Delete,
     Indent,
     Outdent,
+    Space,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

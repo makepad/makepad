@@ -19,6 +19,7 @@ use {
         cell::RefCell,
         cmp,
         collections::{HashMap, HashSet},
+        fmt::Write,
         iter, mem, ops,
         rc::Rc,
         slice::Iter,
@@ -393,7 +394,11 @@ impl Session {
     pub fn insert(&mut self, text: Text) {
         self.document.borrow_mut().edit(
             self.id,
-            EditKind::Insert,
+            if text.as_lines().len() == 1 && &text.as_lines()[0] == " " {
+                EditKind::Space
+            } else {
+                EditKind::Insert
+            },
             &self.selections,
             self.settings.use_soft_tabs,
             self.settings.tab_column_count,
@@ -540,6 +545,24 @@ impl Session {
                 )
             },
         );
+    }
+
+    pub fn copy(&self) -> String {
+        let mut string = String::new();
+        for range in self.selections
+            .iter()
+            .copied()
+            .merge(
+                |selection_0, selection_1| match selection_0.merge(selection_1) {
+                    Some(selection) => Ok(selection),
+                    None => Err((selection_0, selection_1)),
+                },
+            )
+            .map(|selection| selection.range())
+        {
+            write!(&mut string, "{}", self.document.borrow().text().slice(range)).unwrap();
+        }
+        string
     }
 
     pub fn undo(&mut self) -> bool {
