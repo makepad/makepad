@@ -272,12 +272,17 @@ impl BuildManager {
         }
     }
     
+    pub fn start_recompile_timer(&mut self, cx:&mut Cx){
+        cx.stop_timer(self.recompile_timer);
+        self.recompile_timer = cx.start_timeout(self.recompile_timeout);
+    }
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<BuildManagerAction> {
         let mut actions = Vec::new();
         self.handle_event_with(cx, event, &mut | _, action | actions.push(action));
         actions
     }
-    
+    /*
     pub fn handle_file_response(
         &mut self,
         cx: &mut Cx,
@@ -294,7 +299,7 @@ impl BuildManager {
             }
             _ => {}
         }
-    }
+    }*/
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if self.recompile_timer.is_event(event) {
