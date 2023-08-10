@@ -198,22 +198,23 @@ impl CodeEditor {
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
         });
-        match *event {
-            Event::KeyDown(KeyEvent {
+
+        match event.hits(cx, self.scroll_bars.area()) {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
                 session.fold();
                 cx.redraw_all();
             }
-            Event::KeyUp(KeyEvent {
+            Hit::KeyUp(KeyEvent {
                 key_code: KeyCode::Escape,
                 ..
             }) => {
                 session.unfold();
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers: KeyModifiers { shift, .. },
                 ..
@@ -221,7 +222,7 @@ impl CodeEditor {
                 session.move_left(!shift);
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 modifiers: KeyModifiers { shift, .. },
                 ..
@@ -229,7 +230,7 @@ impl CodeEditor {
                 session.move_right(!shift);
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
                 modifiers: KeyModifiers { shift, .. },
                 ..
@@ -238,7 +239,7 @@ impl CodeEditor {
                 cx.redraw_all();
             }
 
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers { shift, .. },
                 ..
@@ -246,18 +247,18 @@ impl CodeEditor {
                 session.move_down(!shift);
                 cx.redraw_all();
             }
-            Event::TextInput(TextInputEvent { ref input, .. }) => {
+            Hit::TextInput(TextInputEvent { ref input, .. }) => {
                 session.insert(input.into());
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey,
                 ..
             }) => {
                 session.enter();
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::RBracket,
                 modifiers: KeyModifiers { logo: true, .. },
                 ..
@@ -265,7 +266,7 @@ impl CodeEditor {
                 session.indent();
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::LBracket,
                 modifiers: KeyModifiers { logo: true, .. },
                 ..
@@ -273,28 +274,26 @@ impl CodeEditor {
                 session.outdent();
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
                 ..
             }) => {
                 session.delete();
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
                 session.backspace();
                 cx.redraw_all();
             }
-            _ => {}
-        }
-        match event.hits(cx, self.scroll_bars.area()) {
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 modifiers: KeyModifiers { alt, .. },
                 ..
             }) => {
+                cx.set_key_focus(self.scroll_bars.area());
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
                         session.add_cursor(cursor, affinity);
