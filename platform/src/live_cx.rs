@@ -177,7 +177,7 @@ impl Cx {
                 if let Ok(next) = next{
                     if let Some(content_str) = content{
                         if content_str != &next{
-                            crate::log!("File change detected for live file: {}",file_name.clone());
+                            crate::log!("Live reloading application: {}",file_name.clone());
 
                             changed_files.push(LiveFileChange{
                                 file_name:file_name.clone(), 

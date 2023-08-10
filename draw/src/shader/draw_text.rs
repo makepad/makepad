@@ -138,6 +138,7 @@ struct WordIterator<'a> {
     word_width: f64,
     word_start: usize,
     last_is_whitespace: bool,
+    last_char: char,
     last_index: usize,
     font_size_total: f64,
 }
@@ -157,6 +158,7 @@ impl<'a> WordIterator<'a> {
             last_is_whitespace: false,
             word_width: 0.0,
             word_start: 0,
+            last_char: '\0',
             last_index: 0,
             font_size_total
         }
@@ -165,6 +167,7 @@ impl<'a> WordIterator<'a> {
         if let Some(char_iter) = &mut self.char_iter {
             while let Some((i, c)) = char_iter.next() {
                 self.last_index = i;
+                self.last_char = c;
                 let ret = WordIteratorItem {
                     start: self.word_start,
                     end: i,
@@ -203,9 +206,13 @@ impl<'a> WordIterator<'a> {
                 self.word_width += adv;
             }
             self.char_iter = None;
+
+            let mut buffer = [0; 4];
+            let char_bytes_len = self.last_char.encode_utf8(&mut buffer).len();
+
             return Some(WordIteratorItem {
                 start: self.word_start,
-                end: self.last_index + 1,
+                end: self.last_index + char_bytes_len,
                 width: self.word_width,
                 with_newline: false
             });
