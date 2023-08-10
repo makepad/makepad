@@ -621,7 +621,8 @@ impl LiveRegistry {
                             Err(msg) => {
                                 errors.push(msg);
                             },
-                            Ok(ld) => { // only swap it out when it parses
+                            Ok(mut ld) => { // only swap it out when it parses
+                                ld.tokens = new_tokens[(start+3)..(end)].to_vec();
                                 live_file.original = ld;
                                 live_file.reexpand = true;
                                 live_file.generation.next_gen();
