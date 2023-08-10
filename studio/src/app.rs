@@ -101,7 +101,7 @@ live_design!{
                 Welcome = <Rect> {
                     draw_bg: {color: #135}
                     // sebastian do things here
-                    <Label>{label:"HELLO WORLD"}
+                    <Label>{label:"Welcome to\nMakepad\n\n欢迎来到 Makepad"}
                 }
                 RunView = <RunView> {}
                 FileTree = <FileTree> {}
