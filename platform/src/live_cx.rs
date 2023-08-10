@@ -194,7 +194,7 @@ impl Cx {
             if changed_files.len()>0{
                 send.send(changed_files).unwrap();
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         });
     }
     
