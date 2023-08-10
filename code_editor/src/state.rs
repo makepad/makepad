@@ -533,7 +533,7 @@ impl Session {
                         } else {
                             Extent {
                                 line_count: 0,
-                                byte_count: line.graphemes().next_back().unwrap().len(),
+                                byte_count: line[..index].graphemes().next_back().unwrap().len(),
                             }
                         }
                     } else {
