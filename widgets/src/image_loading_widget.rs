@@ -56,7 +56,7 @@ pub trait ImageLoadingWidget {
         match cx.get_dependency(image_path) {
             Ok(data) => {
                 if image_path.ends_with(".jpg") {
-                    match jpeg::decode(data) {
+                    match jpeg::decode(&data) {
                         Ok(image) => Some(image),
                         Err(err) => {
                             cx.apply_image_decoding_failed(
@@ -70,7 +70,7 @@ pub trait ImageLoadingWidget {
                         }
                     }
                 } else if image_path.ends_with(".png") {
-                    match png::decode(data) {
+                    match png::decode(&data) {
                         Ok(image) => Some(image),
                         Err(err) => {
                             cx.apply_image_decoding_failed(
