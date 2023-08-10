@@ -58,7 +58,7 @@ live_design!{
                 }
                 
                 open_files = Tabs {
-                    tabs: [welcome],
+                    tabs: [welcome, file1],
                     no_close: true,
                     selected: 0
                 }
@@ -71,12 +71,11 @@ live_design!{
                     name: "Welcome"
                     kind: Welcome
                 }
-                /*
-                file2 = Tab {
-                    name: "File2"
-                    kind: Empty2
+                file1 = Tab {
+                    name: "app.rs"
+                    kind: CodeEditor
                 }
-                
+                /*
                 file3 = Tab {
                     name: "File3"
                     kind: Empty3
@@ -129,6 +128,7 @@ impl LiveHook for App {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.file_system.init(cx);
         self.build_manager.init(cx);
+        self.file_system.request_open_file(live_id!(file1), "examples/news_feed/src/app.rs".into());
     }
 }
 
