@@ -1,9 +1,4 @@
-use crate::{
-    Token,
-    change::ChangeKind,
-    token::TokenKind,
-    Change, Text,
-};
+use crate::{change::ChangeKind, token::TokenKind, Change, Text, Token};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Tokenizer {
@@ -88,7 +83,13 @@ impl State {
         };
         let end = cursor.index;
         assert!(start < end);
-        (next_state, Some(Token { len: end - start, kind }))
+        (
+            next_state,
+            Some(Token {
+                len: end - start,
+                kind,
+            }),
+        )
     }
 }
 

@@ -43,6 +43,25 @@ impl Text {
         &self.lines
     }
 
+    pub fn slice(&self, range: Range) -> Self {
+        let mut lines = Vec::new();
+        if range.start().line == range.end().line {
+            lines.push(
+                self.lines[range.start().line][range.start().byte..range.end().byte].to_string(),
+            );
+        } else {
+            lines.reserve(range.end().line - range.start().line + 1);
+            lines.push(self.lines[range.start().line][range.start().byte..].to_string());
+            lines.extend(
+                self.lines[range.start().line + 1..range.end().line]
+                    .iter()
+                    .cloned(),
+            );
+            lines.push(self.lines[range.end().line][..range.end().byte].to_string());
+        }
+        Text { lines }
+    }
+
     pub fn insert(&mut self, point: Point, mut text: Self) {
         if text.extent().line_count == 0 {
             self.lines[point.line]
