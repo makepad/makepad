@@ -1,11 +1,30 @@
 use {
-    crate::{state::ViewId, Affinity, Context, Document, Position, Selection, State},
+    crate::{
+        line::Wrapped,
+        selection::Affinity,
+        state::{Block, Session},
+        str::StrExt,
+        token::TokenKind,
+        Line, Point, Selection, Token,
+    },
     makepad_widgets::*,
+    std::{mem, slice::Iter},
 };
 
 live_design! {
     import makepad_draw::shader::std::*;
     import makepad_widgets::theme::*;
+
+    TokenColors = {{TokenColors}} {
+        unknown: #808080,
+        branch_keyword: #C485BE,
+        identifier: #D4D4D4,
+        loop_keyword: #FF8C00,
+        number: #B6CEAA,
+        other_keyword: #5B9BD3,
+        punctuator: #D4D4D4,
+        whitespace: #6E6E6E,
+    }
 
     DrawSelection = {{DrawSelection}} {
         uniform gloopiness: 8.0
@@ -56,23 +75,12 @@ live_design! {
         }
     }
 
-    TokenColors = {{TokenColors}} {
-        unknown: #808080,
-        branch_keyword: #C485BE,
-        identifier: #D4D4D4,
-        loop_keyword: #FF8C00,
-        number: #B6CEAA,
-        other_keyword: #5B9BD3,
-        punctuator: #D4D4D4,
-        whitespace: #6E6E6E,
-    }
-
     CodeEditor = {{CodeEditor}} {
         walk: {
             width: Fill,
             height: Fill,
             margin: 0,
-        }
+        },
         draw_text: {
             draw_depth: 0.0,
             text_style: <FONT_CODE> {}
@@ -87,20 +95,22 @@ live_design! {
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct CodeEditor {
     #[live]
     scroll_bars: ScrollBars,
     #[live]
     walk: Walk,
+    #[rust]
+    draw_state: DrawStateWrap<Walk>,
     #[live]
     draw_text: DrawText,
+    #[live]
+    token_colors: TokenColors,
     #[live]
     draw_selection: DrawSelection,
     #[live]
     draw_cursor: DrawColor,
-    #[live]
-    token_colors: TokenColors,
     #[rust]
     viewport_rect: Rect,
     #[rust]
@@ -111,143 +121,217 @@ pub struct CodeEditor {
     end_line: usize,
 }
 
-impl CodeEditor {
-    pub fn draw(&mut self, cx: &mut Cx2d<'_>, context: &mut Context<'_>) {
-        self.begin(cx, context);
-        let document = context.document();
-        self.draw_text(cx, &document);
-        self.draw_selections(cx, &document);
-        self.end(cx, context);
+impl LiveHook for CodeEditor {
+    fn before_live_design(cx: &mut Cx) {
+        register_widget!(cx, CodeEditor)
+    }
+}
+
+impl Widget for CodeEditor {
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.scroll_bars.redraw(cx);
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, state: &mut State, view_id: ViewId, event: &Event) {
-        use crate::str::StrExt;
+    fn handle_widget_event_with(
+        &mut self,
+        _cx: &mut Cx,
+        _event: &Event,
+        _dispatch_action: &mut dyn FnMut(&mut Cx, WidgetActionItem),
+    ) {
+        //let uid = self.widget_uid();
+        /*self.handle_event_with(cx, event, &mut | cx, action | {
+            dispatch_action(cx, WidgetActionItem::new(action.into(), uid))
+        });*/
+        //self.handle_event
+    }
 
+    fn get_walk(&self) -> Walk {
+        self.walk
+    }
+
+    fn draw_walk_widget(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
+        if self.draw_state.begin(cx, walk) {
+            return WidgetDraw::hook_above();
+        }
+        self.draw_state.end();
+        WidgetDraw::done()
+    }
+}
+
+#[derive(Clone, PartialEq, WidgetRef)]
+pub struct CodeEditorRef(WidgetRef);
+
+impl CodeEditor {
+    pub fn draw(&mut self, cx: &mut Cx2d, session: &mut Session) {
+        let walk = self.draw_state.get().unwrap();
+
+        self.scroll_bars.begin(cx, walk, Layout::default());
+
+        self.viewport_rect = cx.turtle().rect();
+        let scroll_pos = self.scroll_bars.get_scroll_pos();
+
+        self.cell_size =
+            self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
+        session.handle_changes();
+        session.set_wrap_column(Some(
+            (self.viewport_rect.size.x / self.cell_size.x) as usize,
+        ));
+        self.start_line = session.find_first_line_ending_after_y(scroll_pos.y / self.cell_size.y);
+        self.end_line = session.find_first_line_starting_after_y(
+            (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
+        );
+        self.draw_text(cx, session);
+        self.draw_selections(cx, session);
+        cx.turtle_mut().set_used(
+            session.width() * self.cell_size.x,
+            session.height() * self.cell_size.y,
+        );
+        self.scroll_bars.end(cx);
+        if session.update_folds() {
+            cx.redraw_all();
+        }
+    }
+
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, session: &mut Session) {
+        session.handle_changes();
         self.scroll_bars.handle_event_with(cx, event, &mut |cx, _| {
             cx.redraw_all();
         });
-        match event {
-            Event::TextInput(TextInputEvent { input, .. }) => {
-                state.context(view_id).replace(input.into());
-                cx.redraw_all();
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ReturnKey,
+
+        match event.hits(cx, self.scroll_bars.area()) {
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Escape,
                 ..
             }) => {
-                state.context(view_id).enter();
+                session.fold();
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Delete,
+            Hit::KeyUp(KeyEvent {
+                key_code: KeyCode::Escape,
                 ..
             }) => {
-                state.context(view_id).delete();
+                session.unfold();
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Backspace,
-                ..
-            }) => {
-                state.context(view_id).backspace();
-                cx.redraw_all();
-            }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_left(*shift);
+                session.move_left(!shift);
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_right(*shift);
+                session.move_right(!shift);
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_up(*shift);
+                session.move_up(!shift);
                 cx.redraw_all();
             }
 
-            Event::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                state.context(view_id).move_cursors_down(*shift);
+                session.move_down(!shift);
                 cx.redraw_all();
             }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Escape,
+            Hit::TextInput(TextInputEvent { ref input, .. }) => {
+                session.insert(input.into());
+                cx.redraw_all();
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
                 ..
             }) => {
-                let mut context = state.context(view_id);
-                for line in 0..context.document().line_count() {
-                    let document = context.document();
-                    let settings = document.settings();
-                    if document
-                        .line(line)
-                        .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
-                        >= 2
-                    {
-                        context.fold_line(line, 2 * settings.indent_column_count);
-                    }
-                }
+                session.enter();
                 cx.redraw_all();
             }
-            Event::KeyUp(KeyEvent {
-                key_code: KeyCode::Escape,
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::RBracket,
+                modifiers: KeyModifiers { logo: true, .. },
                 ..
             }) => {
-                let mut context = state.context(view_id);
-                for line in 0..context.document().line_count() {
-                    let document = context.document();
-                    let settings = document.settings();
-                    if document
-                        .line(line)
-                        .text()
-                        .indent_level(settings.tab_column_count, settings.indent_column_count)
-                        >= 2
-                    {
-                        context.unfold_line(line);
-                    }
-                }
+                session.indent();
                 cx.redraw_all();
             }
-            _ => {}
-        }
-        match event.hits(cx, self.scroll_bars.area()) {
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::LBracket,
+                modifiers: KeyModifiers { logo: true, .. },
+                ..
+            }) => {
+                session.outdent();
+                cx.redraw_all();
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Delete,
+                ..
+            }) => {
+                session.delete();
+                cx.redraw_all();
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                session.backspace();
+                cx.redraw_all();
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers:
+                    KeyModifiers {
+                        logo: true,
+                        shift: false,
+                        ..
+                    },
+                ..
+            }) => {
+                session.undo();
+                cx.redraw_all();
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers:
+                    KeyModifiers {
+                        logo: true,
+                        shift: true,
+                        ..
+                    },
+                ..
+            }) => {
+                session.redo();
+                cx.redraw_all();
+            }
             Hit::FingerDown(FingerDownEvent {
                 abs,
-                rect,
                 modifiers: KeyModifiers { alt, .. },
                 ..
             }) => {
-                let document = state.document(view_id);
-                if let Some(cursor) = self.pick(&document, abs - rect.pos) {
-                    let mut context = state.context(view_id);
+                cx.set_key_focus(self.scroll_bars.area());
+                if let Some((cursor, affinity)) = self.pick(session, abs) {
                     if alt {
-                        context.insert_cursor(cursor);
+                        session.add_cursor(cursor, affinity);
                     } else {
-                        context.set_cursor(cursor);
+                        session.set_cursor(cursor, affinity);
                     }
                     cx.redraw_all();
                 }
             }
-            Hit::FingerMove(FingerMoveEvent { abs, rect, .. }) => {
-                let document = state.document(view_id);
-                if let Some(cursor) = self.pick(&document, abs - rect.pos) {
-                    let mut context = state.context(view_id);
-                    context.move_cursor_to(true, cursor);
+            Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+                cx.set_cursor(MouseCursor::Text);
+                if let Some((cursor, affinity)) = self.pick(session, abs) {
+                    session.move_to(cursor, affinity);
                     cx.redraw_all();
                 }
             }
@@ -255,302 +339,344 @@ impl CodeEditor {
         }
     }
 
-    fn begin(&mut self, cx: &mut Cx2d<'_>, context: &mut Context<'_>) {
-        self.viewport_rect = Rect {
-            pos: self.scroll_bars.get_scroll_pos(),
-            size: cx.turtle().rect().size,
-        };
-        self.cell_size =
-            self.draw_text.text_style.font_size * self.draw_text.get_monospace_base(cx);
-        context.set_max_column(Some((self.viewport_rect.size.x / self.cell_size.x) as usize));
-        let document = context.document();
-        self.start_line =
-            document.find_first_line_ending_after_y(self.viewport_rect.pos.y / self.cell_size.y);
-        self.end_line = document.find_first_line_starting_after_y(
-            (self.viewport_rect.pos.y + self.viewport_rect.size.y) / self.cell_size.y,
-        );
-        self.scroll_bars.begin(cx, self.walk, Layout::default());
-    }
-
-    fn end(&mut self, cx: &mut Cx2d<'_>, context: &mut Context<'_>) {
-        let document = context.document();
-        cx.turtle_mut().set_used(
-            document.compute_width() * self.cell_size.x,
-            document.height() * self.cell_size.y,
-        );
-        self.scroll_bars.end(cx);
-        if context.update_fold_animations() {
-            cx.redraw_all();
-        }
-    }
-
-    fn draw_text(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        use crate::{document, line, str::StrExt, token::TokenKind};
-
-        let mut y = document.line_y(self.start_line);
-        for element in document.elements(self.start_line, self.end_line) {
-            let mut column = 0;
-            match element {
-                document::Element::Line(_, line) => {
-                    self.draw_text.font_scale = line.scale();
-                    for wrapped_element in line.wrapped_elements() {
-                        match wrapped_element {
-                            line::WrappedElement::Token(_, token) => {
-                                self.draw_text.color = match token.kind {
-                                    TokenKind::Unknown => self.token_colors.unknown,
-                                    TokenKind::BranchKeyword => self.token_colors.branch_keyword,
-                                    TokenKind::Identifier => self.token_colors.identifier,
-                                    TokenKind::LoopKeyword => self.token_colors.loop_keyword,
-                                    TokenKind::Number => self.token_colors.number,
-                                    TokenKind::OtherKeyword => self.token_colors.other_keyword,
-                                    TokenKind::Punctuator => self.token_colors.punctuator,
-                                    TokenKind::Whitespace => self.token_colors.whitespace,
-                                };
-                                self.draw_text.draw_abs(
-                                    cx,
-                                    DVec2 {
-                                        x: line.column_to_x(column),
-                                        y,
-                                    } * self.cell_size
-                                        - self.viewport_rect.pos,
-                                    token.text,
-                                );
-                                column += token
-                                    .text
-                                    .column_count(document.settings().tab_column_count);
-                            }
-                            line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
-                            }
-                            line::WrappedElement::Wrap => {
-                                y += line.scale();
-                                column = line.start_column_after_wrap();
+    fn draw_text(&mut self, cx: &mut Cx2d, session: &Session) {
+        let mut y = session.line(self.start_line, |line| line.y());
+        session.blocks(self.start_line, self.end_line, |blocks| {
+            for block in blocks {
+                match block {
+                    Block::Line { line, .. } => {
+                        self.draw_text.font_scale = line.scale();
+                        let mut token_iter = line.tokens().iter().copied();
+                        let mut token_slot = token_iter.next();
+                        let mut column = 0;
+                        for wrapped in line.wrappeds() {
+                            match wrapped {
+                                Wrapped::Text {
+                                    is_inlay: false,
+                                    mut text,
+                                } => {
+                                    while !text.is_empty() {
+                                        let token = match token_slot {
+                                            Some(token) => {
+                                                if text.len() < token.len {
+                                                    token_slot = Some(Token {
+                                                        len: token.len - text.len(),
+                                                        kind: token.kind,
+                                                    });
+                                                    Token {
+                                                        len: text.len(),
+                                                        kind: token.kind,
+                                                    }
+                                                } else {
+                                                    token_slot = token_iter.next();
+                                                    token
+                                                }
+                                            }
+                                            None => Token {
+                                                len: text.len(),
+                                                kind: TokenKind::Unknown,
+                                            },
+                                        };
+                                        let (text_0, text_1) = text.split_at(token.len);
+                                        text = text_1;
+                                        self.draw_text.color = match token.kind {
+                                            TokenKind::Unknown => self.token_colors.unknown,
+                                            TokenKind::BranchKeyword => {
+                                                self.token_colors.branch_keyword
+                                            }
+                                            TokenKind::Identifier => self.token_colors.identifier,
+                                            TokenKind::LoopKeyword => {
+                                                self.token_colors.loop_keyword
+                                            }
+                                            TokenKind::Number => self.token_colors.number,
+                                            TokenKind::OtherKeyword => {
+                                                self.token_colors.other_keyword
+                                            }
+                                            TokenKind::Punctuator => self.token_colors.punctuator,
+                                            TokenKind::Whitespace => self.token_colors.whitespace,
+                                        };
+                                        self.draw_text.draw_abs(
+                                            cx,
+                                            DVec2 {
+                                                x: line.column_to_x(column),
+                                                y,
+                                            } * self.cell_size
+                                                + self.viewport_rect.pos,
+                                            text_0,
+                                        );
+                                        column += text_0
+                                            .column_count(session.settings().tab_column_count);
+                                    }
+                                }
+                                Wrapped::Text {
+                                    is_inlay: true,
+                                    text,
+                                } => {
+                                    self.draw_text.draw_abs(
+                                        cx,
+                                        DVec2 {
+                                            x: line.column_to_x(column),
+                                            y,
+                                        } * self.cell_size
+                                            + self.viewport_rect.pos,
+                                        text,
+                                    );
+                                    column +=
+                                        text.column_count(session.settings().tab_column_count);
+                                }
+                                Wrapped::Widget(widget) => {
+                                    column += widget.column_count;
+                                }
+                                Wrapped::Wrap => {
+                                    column = line.wrap_indent_column_count();
+                                    y += line.scale();
+                                }
                             }
                         }
+                        y += line.scale();
                     }
-                    y += line.scale();
-                }
-                document::Element::Widget(_, widget) => {
-                    y += widget.height;
+                    Block::Widget(widget) => {
+                        y += widget.height;
+                    }
                 }
             }
-        }
+        });
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
+    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, session: &Session) {
         let mut active_selection = None;
-        let mut selections = document.selections();
+        let mut selections = session.selections().iter();
         while selections
+            .as_slice()
             .first()
-            .map_or(false, |selection| selection.end().0.line < self.start_line)
+            .map_or(false, |selection| selection.end().line < self.start_line)
         {
-            selections = &selections[1..];
+            selections.next().unwrap();
         }
-        if selections.first().map_or(false, |selection| {
-            selection.start().0.line < self.start_line
-        }) {
-            let (selection, remaining_selections) = selections.split_first().unwrap();
-            selections = remaining_selections;
-            active_selection = Some(ActiveSelection::new(*selection, 0.0));
+        if selections
+            .as_slice()
+            .first()
+            .map_or(false, |selection| selection.start().line < self.start_line)
+        {
+            active_selection = Some(ActiveSelection {
+                selection: *selections.next().unwrap(),
+                start_x: 0.0,
+            });
         }
-        DrawSelectionsContext {
+        DrawSelections {
             code_editor: self,
             active_selection,
             selections,
         }
-        .draw_selections(cx, document)
+        .draw_selections(cx, session)
     }
 
-    fn pick(&self, document: &Document<'_>, pos: DVec2) -> Option<(Position, Affinity)> {
-        use crate::{document, line, str::StrExt};
-
-        let pos = (pos + self.viewport_rect.pos) / self.cell_size;
-        let mut line = document.find_first_line_ending_after_y(pos.y);
-        let mut y = document.line_y(line);
-        for element in document.elements(line, line + 1) {
-            match element {
-                document::Element::Line(false, line_ref) => {
-                    let mut byte = 0;
-                    let mut column = 0;
-                    for wrapped_element in line_ref.wrapped_elements() {
-                        match wrapped_element {
-                            line::WrappedElement::Token(false, token) => {
-                                for grapheme in token.text.graphemes() {
-                                    let next_byte = byte + grapheme.len();
+    fn pick(&self, session: &Session, point: DVec2) -> Option<(Point, Affinity)> {
+        let point = (point - self.viewport_rect.pos) / self.cell_size;
+        let mut line = session.find_first_line_ending_after_y(point.y);
+        let mut y = session.line(line, |line| line.y());
+        session.blocks(line, line + 1, |blocks| {
+            for block in blocks {
+                match block {
+                    Block::Line {
+                        is_inlay: false,
+                        line: line_ref,
+                    } => {
+                        let mut byte = 0;
+                        let mut column = 0;
+                        for wrapped in line_ref.wrappeds() {
+                            match wrapped {
+                                Wrapped::Text {
+                                    is_inlay: false,
+                                    text,
+                                } => {
+                                    for grapheme in text.graphemes() {
+                                        let next_byte = byte + grapheme.len();
+                                        let next_column = column
+                                            + grapheme
+                                                .column_count(session.settings().tab_column_count);
+                                        let next_y = y + line_ref.scale();
+                                        let x = line_ref.column_to_x(column);
+                                        let next_x = line_ref.column_to_x(next_column);
+                                        let mid_x = (x + next_x) / 2.0;
+                                        if (y..=next_y).contains(&point.y) {
+                                            if (x..=mid_x).contains(&point.x) {
+                                                return Some((
+                                                    Point { line, byte },
+                                                    Affinity::After,
+                                                ));
+                                            }
+                                            if (mid_x..=next_x).contains(&point.x) {
+                                                return Some((
+                                                    Point {
+                                                        line,
+                                                        byte: next_byte,
+                                                    },
+                                                    Affinity::Before,
+                                                ));
+                                            }
+                                        }
+                                        byte = next_byte;
+                                        column = next_column;
+                                    }
+                                }
+                                Wrapped::Text {
+                                    is_inlay: true,
+                                    text,
+                                } => {
                                     let next_column = column
-                                        + grapheme
-                                            .column_count(document.settings().tab_column_count);
+                                        + text.column_count(session.settings().tab_column_count);
                                     let next_y = y + line_ref.scale();
                                     let x = line_ref.column_to_x(column);
                                     let next_x = line_ref.column_to_x(next_column);
-                                    let mid_x = (x + next_x) / 2.0;
-                                    if (y..=next_y).contains(&pos.y) {
-                                        if (x..=mid_x).contains(&pos.x) {
-                                            return Some((
-                                                Position::new(line, byte),
-                                                Affinity::After,
-                                            ));
-                                        }
-                                        if (mid_x..=next_x).contains(&pos.x) {
-                                            return Some((
-                                                Position::new(line, next_byte),
-                                                Affinity::Before,
-                                            ));
-                                        }
+                                    if (y..=next_y).contains(&point.y)
+                                        && (x..=next_x).contains(&point.x)
+                                    {
+                                        return Some((Point { line, byte }, Affinity::Before));
                                     }
-                                    byte = next_byte;
                                     column = next_column;
                                 }
-                            }
-                            line::WrappedElement::Token(true, token) => {
-                                let next_column = column
-                                    + token
-                                        .text
-                                        .column_count(document.settings().tab_column_count);
-                                let x = line_ref.column_to_x(column);
-                                let next_x = line_ref.column_to_x(next_column);
-                                let next_y = y + line_ref.scale();
-                                if (y..=next_y).contains(&pos.y) && (x..=next_x).contains(&pos.x) {
-                                    return Some((Position::new(line, byte), Affinity::Before));
+                                Wrapped::Widget(widget) => {
+                                    column += widget.column_count;
                                 }
-                                column = next_column;
-                            }
-                            line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
-                            }
-                            line::WrappedElement::Wrap => {
-                                let next_y = y + line_ref.scale();
-                                if (y..=next_y).contains(&pos.y) {
-                                    return Some((Position::new(line, byte), Affinity::Before));
+                                Wrapped::Wrap => {
+                                    let next_y = y + line_ref.scale();
+                                    if (y..=next_y).contains(&point.y) {
+                                        return Some((Point { line, byte }, Affinity::Before));
+                                    }
+                                    column = line_ref.wrap_indent_column_count();
+                                    y = next_y;
                                 }
-                                y = next_y;
-                                column = line_ref.start_column_after_wrap();
                             }
                         }
+                        let next_y = y + line_ref.scale();
+                        if (y..=y + next_y).contains(&point.y) {
+                            return Some((Point { line, byte }, Affinity::After));
+                        }
+                        line += 1;
+                        y = next_y;
                     }
-                    let next_y = y + line_ref.scale();
-                    if (y..=next_y).contains(&pos.y) {
-                        return Some((Position::new(line, byte), Affinity::After));
+                    Block::Line {
+                        is_inlay: true,
+                        line: line_ref,
+                    } => {
+                        let next_y = y + line_ref.height();
+                        if (y..=next_y).contains(&point.y) {
+                            return Some((Point { line, byte: 0 }, Affinity::Before));
+                        }
+                        y = next_y;
                     }
-                    line += 1;
-                    y += next_y;
-                }
-                document::Element::Line(true, line_ref) => {
-                    let next_y = y + line_ref.height();
-                    if (y..=next_y).contains(&pos.y) {
-                        return Some((Position::new(line, 0), Affinity::Before));
+                    Block::Widget(widget) => {
+                        y += widget.height;
                     }
-                    y = next_y;
-                }
-                document::Element::Widget(_, widget) => {
-                    y += widget.height;
                 }
             }
-        }
-        None
+            None
+        })
     }
 }
 
-struct DrawSelectionsContext<'a> {
+struct DrawSelections<'a> {
     code_editor: &'a mut CodeEditor,
     active_selection: Option<ActiveSelection>,
-    selections: &'a [Selection],
+    selections: Iter<'a, Selection>,
 }
 
-impl<'a> DrawSelectionsContext<'a> {
-    fn draw_selections(&mut self, cx: &mut Cx2d<'_>, document: &Document<'_>) {
-        use crate::{document, line, str::StrExt};
-
+impl<'a> DrawSelections<'a> {
+    fn draw_selections(&mut self, cx: &mut Cx2d, session: &Session) {
         let mut line = self.code_editor.start_line;
-        let mut y = document.line_y(line);
-        for element in document.elements(self.code_editor.start_line, self.code_editor.end_line) {
-            match element {
-                document::Element::Line(false, line_ref) => {
-                    let mut byte = 0;
-                    let mut column = 0;
-                    self.handle_event(
-                        cx,
-                        line,
-                        byte,
-                        Affinity::Before,
-                        line_ref.column_to_x(column),
-                        y,
-                        line_ref.scale(),
-                    );
-                    for wrapped_element in line_ref.wrapped_elements() {
-                        match wrapped_element {
-                            line::WrappedElement::Token(false, token) => {
-                                for grapheme in token.text.graphemes() {
-                                    self.handle_event(
-                                        cx,
-                                        line,
-                                        byte,
-                                        Affinity::After,
-                                        line_ref.column_to_x(column),
-                                        y,
-                                        line_ref.scale(),
-                                    );
-                                    byte += grapheme.len();
-                                    column +=
-                                        grapheme.column_count(document.settings().tab_column_count);
-                                    self.handle_event(
-                                        cx,
-                                        line,
-                                        byte,
-                                        Affinity::Before,
-                                        line_ref.column_to_x(column),
-                                        y,
-                                        line_ref.scale(),
-                                    );
+        let mut y = session.line(line, |line| line.y());
+        session.blocks(
+            self.code_editor.start_line,
+            self.code_editor.end_line,
+            |blocks| {
+                for block in blocks {
+                    match block {
+                        Block::Line {
+                            is_inlay: false,
+                            line: line_ref,
+                        } => {
+                            let mut byte = 0;
+                            let mut column = 0;
+                            self.handle_event(
+                                cx,
+                                line,
+                                line_ref,
+                                byte,
+                                Affinity::Before,
+                                y,
+                                column,
+                            );
+                            for wrapped in line_ref.wrappeds() {
+                                match wrapped {
+                                    Wrapped::Text {
+                                        is_inlay: false,
+                                        text,
+                                    } => {
+                                        for grapheme in text.graphemes() {
+                                            self.handle_event(
+                                                cx,
+                                                line,
+                                                line_ref,
+                                                byte,
+                                                Affinity::After,
+                                                y,
+                                                column,
+                                            );
+                                            byte += grapheme.len();
+                                            column += grapheme
+                                                .column_count(session.settings().tab_column_count);
+                                            self.handle_event(
+                                                cx,
+                                                line,
+                                                line_ref,
+                                                byte,
+                                                Affinity::Before,
+                                                y,
+                                                column,
+                                            );
+                                        }
+                                    }
+                                    Wrapped::Text {
+                                        is_inlay: true,
+                                        text,
+                                    } => {
+                                        column +=
+                                            text.column_count(session.settings().tab_column_count);
+                                    }
+                                    Wrapped::Widget(widget) => {
+                                        column += widget.column_count;
+                                    }
+                                    Wrapped::Wrap => {
+                                        if self.active_selection.is_some() {
+                                            self.draw_selection(cx, line_ref, y, column);
+                                        }
+                                        column = line_ref.wrap_indent_column_count();
+                                        y += line_ref.scale();
+                                    }
                                 }
                             }
-                            line::WrappedElement::Token(true, token) => {
-                                column += token
-                                    .text
-                                    .column_count(document.settings().tab_column_count);
+                            self.handle_event(cx, line, line_ref, byte, Affinity::After, y, column);
+                            column += 1;
+                            if self.active_selection.is_some() {
+                                self.draw_selection(cx, line_ref, y, column);
                             }
-                            line::WrappedElement::Widget(_, widget) => {
-                                column += widget.column_count;
-                            }
-                            line::WrappedElement::Wrap => {
-                                column += 1;
-                                if self.active_selection.is_some() {
-                                    self.draw_selection(
-                                        cx,
-                                        line_ref.column_to_x(column),
-                                        y,
-                                        line_ref.scale(),
-                                    );
-                                }
-                                y += line_ref.scale();
-                                column = line_ref.start_column_after_wrap();
-                            }
+                            line += 1;
+                            y += line_ref.scale();
+                        }
+                        Block::Line {
+                            is_inlay: true,
+                            line: line_ref,
+                        } => {
+                            y += line_ref.height();
+                        }
+                        Block::Widget(widget) => {
+                            y += widget.height;
                         }
                     }
-                    self.handle_event(
-                        cx,
-                        line,
-                        byte,
-                        Affinity::After,
-                        line_ref.column_to_x(column),
-                        y,
-                        line_ref.scale(),
-                    );
-                    column += 1;
-                    if self.active_selection.is_some() {
-                        self.draw_selection(cx, line_ref.column_to_x(column), y, line_ref.scale());
-                    }
-                    line += 1;
-                    y += line_ref.scale();
                 }
-                document::Element::Line(true, line_ref) => {
-                    y += line_ref.height();
-                }
-                document::Element::Widget(_, widget) => {
-                    y += widget.height;
-                }
-            }
-        }
+            },
+        );
         if self.active_selection.is_some() {
             self.code_editor.draw_selection.end(cx);
         }
@@ -558,87 +684,103 @@ impl<'a> DrawSelectionsContext<'a> {
 
     fn handle_event(
         &mut self,
-        cx: &mut Cx2d<'_>,
+        cx: &mut Cx2d,
         line: usize,
+        line_ref: Line<'_>,
         byte: usize,
         affinity: Affinity,
-        x: f64,
         y: f64,
-        height: f64,
+        column: usize,
     ) {
-        let position = Position::new(line, byte);
+        let point = Point { line, byte };
         if self.active_selection.as_ref().map_or(false, |selection| {
-            selection.selection.end() == (position, affinity)
+            selection.selection.end() == point && selection.selection.end_affinity() == affinity
         }) {
-            self.draw_selection(cx, x, y, height);
+            self.draw_selection(cx, line_ref, y, column);
             self.code_editor.draw_selection.end(cx);
             let selection = self.active_selection.take().unwrap().selection;
-            if selection.cursor == (position, affinity) {
-                self.draw_cursor(cx, x, y, height);
+            if selection.cursor == point && selection.affinity == affinity {
+                self.draw_cursor(cx, line_ref, y, column);
             }
         }
         if self
             .selections
+            .as_slice()
             .first()
-            .map_or(false, |selection| selection.start() == (position, affinity))
+            .map_or(false, |selection| {
+                selection.start() == point && selection.start_affinity() == affinity
+            })
         {
-            let (selection, selections) = self.selections.split_first().unwrap();
-            self.selections = selections;
-            if selection.cursor == (position, affinity) {
-                self.draw_cursor(cx, x, y, height);
+            let selection = *self.selections.next().unwrap();
+            if selection.cursor == point && selection.affinity == affinity {
+                self.draw_cursor(cx, line_ref, y, column);
             }
             if !selection.is_empty() {
                 self.active_selection = Some(ActiveSelection {
-                    selection: *selection,
-                    start_x: x,
+                    selection,
+                    start_x: line_ref.column_to_x(column),
                 });
             }
             self.code_editor.draw_selection.begin();
         }
     }
 
-    fn draw_selection(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
-        use std::mem;
-
+    fn draw_selection(&mut self, cx: &mut Cx2d, line: Line<'_>, y: f64, column: usize) {
         let start_x = mem::take(&mut self.active_selection.as_mut().unwrap().start_x);
         self.code_editor.draw_selection.draw(
             cx,
             Rect {
                 pos: DVec2 { x: start_x, y } * self.code_editor.cell_size
-                    - self.code_editor.viewport_rect.pos,
+                    + self.code_editor.viewport_rect.pos,
                 size: DVec2 {
-                    x: x - start_x,
-                    y: height,
+                    x: line.column_to_x(column) - start_x,
+                    y: line.scale(),
                 } * self.code_editor.cell_size,
             },
         );
     }
 
-    fn draw_cursor(&mut self, cx: &mut Cx2d<'_>, x: f64, y: f64, height: f64) {
+    fn draw_cursor(&mut self, cx: &mut Cx2d<'_>, line: Line<'_>, y: f64, column: usize) {
         self.code_editor.draw_cursor.draw_abs(
             cx,
             Rect {
-                pos: DVec2 { x, y } * self.code_editor.cell_size
-                    - self.code_editor.viewport_rect.pos,
+                pos: DVec2 {
+                    x: line.column_to_x(column),
+                    y,
+                } * self.code_editor.cell_size
+                    + self.code_editor.viewport_rect.pos,
                 size: DVec2 {
                     x: 2.0,
-                    y: height * self.code_editor.cell_size.y,
+                    y: line.scale() * self.code_editor.cell_size.y,
                 },
             },
         );
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ActiveSelection {
     selection: Selection,
     start_x: f64,
 }
 
-impl ActiveSelection {
-    fn new(selection: Selection, start_x: f64) -> Self {
-        Self { selection, start_x }
-    }
+#[derive(Live, LiveHook)]
+struct TokenColors {
+    #[live]
+    unknown: Vec4,
+    #[live]
+    branch_keyword: Vec4,
+    #[live]
+    identifier: Vec4,
+    #[live]
+    loop_keyword: Vec4,
+    #[live]
+    number: Vec4,
+    #[live]
+    other_keyword: Vec4,
+    #[live]
+    punctuator: Vec4,
+    #[live]
+    whitespace: Vec4,
 }
 
 #[derive(Live, LiveHook)]
@@ -665,13 +807,13 @@ impl DrawSelection {
         debug_assert!(self.prev_rect.is_none());
     }
 
-    fn end(&mut self, cx: &mut Cx2d<'_>) {
+    fn end(&mut self, cx: &mut Cx2d) {
         self.draw_rect_internal(cx, None);
         self.prev_prev_rect = None;
         self.prev_rect = None;
     }
 
-    fn draw(&mut self, cx: &mut Cx2d<'_>, rect: Rect) {
+    fn draw(&mut self, cx: &mut Cx2d, rect: Rect) {
         self.draw_rect_internal(cx, Some(rect));
         self.prev_prev_rect = self.prev_rect;
         self.prev_rect = Some(rect);
@@ -696,24 +838,4 @@ impl DrawSelection {
             self.draw_abs(cx, prev_rect);
         }
     }
-}
-
-#[derive(Live, LiveHook)]
-pub struct TokenColors {
-    #[live]
-    unknown: Vec4,
-    #[live]
-    branch_keyword: Vec4,
-    #[live]
-    identifier: Vec4,
-    #[live]
-    loop_keyword: Vec4,
-    #[live]
-    number: Vec4,
-    #[live]
-    other_keyword: Vec4,
-    #[live]
-    punctuator: Vec4,
-    #[live]
-    whitespace: Vec4,
 }

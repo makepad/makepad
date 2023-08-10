@@ -1,15 +1,19 @@
 use {
-    makepad_code_editor::{code_editor, state::ViewId, CodeEditor},
+    makepad_code_editor::{
+        code_editor::*,
+        state::{Document, Session},
+    },
     makepad_widgets::*,
+    std::{cell::RefCell, rc::Rc},
 };
 
 live_design! {
     import makepad_widgets::desktop_window::DesktopWindow;
-    import makepad_widgets::hook_widget::HookWidget;
+    import makepad_code_editor::code_editor::CodeEditor;
 
     App = {{App}} {
         ui: <DesktopWindow> {
-            code_editor = <HookWidget> {}
+            code_editor = <CodeEditor> {}
         }
     }
 }
@@ -18,8 +22,6 @@ live_design! {
 pub struct App {
     #[live]
     ui: WidgetRef,
-    #[live]
-    code_editor: CodeEditor,
     #[rust]
     state: State,
 }
@@ -29,38 +31,36 @@ impl AppMain for App {
         if let Event::Draw(event) = event {
             let mut cx = Cx2d::new(cx, event);
             while let Some(next) = self.ui.draw_widget(&mut cx).hook_widget() {
-                if next == self.ui.get_widget(id!(code_editor)) {
-                    let mut context = self.state.code_editor.context(self.state.view_id);
-                    self.code_editor.draw(&mut cx, &mut context);
+                if let Some(mut code_editor) = next.as_code_editor().borrow_mut() {
+                    code_editor.draw(&mut cx, &mut self.state.session);
                 }
             }
             return;
         }
         self.ui.handle_widget_event(cx, event);
-        self.code_editor
-            .handle_event(cx, &mut self.state.code_editor, self.state.view_id, event)
+        if let Some(mut code_editor) = self.ui.get_code_editor(id!(code_editor)).borrow_mut() {
+            code_editor.handle_event(cx, event, &mut self.state.session);
+        }
     }
 }
 
 impl LiveHook for App {
     fn before_live_design(cx: &mut Cx) {
         makepad_widgets::live_design(cx);
-        code_editor::live_design(cx);
+        makepad_code_editor::code_editor::live_design(cx);
     }
 }
 
 struct State {
-    code_editor: makepad_code_editor::State,
-    view_id: ViewId,
+    session: Session,
 }
 
 impl Default for State {
     fn default() -> Self {
-        let mut code_editor = makepad_code_editor::State::new();
-        let view_id = code_editor.open_view("code_editor/test.rs").unwrap();
         Self {
-            code_editor,
-            view_id,
+            session: Session::new(Rc::new(RefCell::new(Document::new(
+                include_str!("test.rs").into(),
+            )))),
         }
     }
 }

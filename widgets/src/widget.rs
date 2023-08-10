@@ -19,7 +19,6 @@ pub enum WidgetCache {
 pub struct WidgetUid(pub u64);
 
 pub trait WidgetDesign{
-    
 }
 
 pub trait Widget: LiveApply {
@@ -76,6 +75,8 @@ pub trait Widget: LiveApply {
     fn draw_widget_all(&mut self, cx: &mut Cx2d) {
         while self.draw_widget(cx).is_hook() {};
     }
+    
+    
     /*
     fn create_child(
         &mut self,
@@ -192,7 +193,7 @@ pub struct WidgetRef(Rc<RefCell<Option<Box<dyn Widget >> >>);
 
 impl Debug for WidgetRef{
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
-        write!(f,"Unwrap error on draw_widget means you need to implement widget hooks")
+        write!(f, "WidgetRef {}", self.widget_uid().0)
     }
 }
 
@@ -468,8 +469,7 @@ impl WidgetRef {
     
     pub fn draw_walk_widget(&self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            let ret = inner.draw_walk_widget(cx, walk);
-            if let Some(nd) = ret.hook_widget() {
+            if let Some(nd) = inner.draw_walk_widget(cx, walk).hook_widget() {
                 if nd.is_empty() {
                     return WidgetDraw::hook(self.clone())
                 }
@@ -509,7 +509,12 @@ impl WidgetRef {
     
     pub fn draw_widget(&self, cx: &mut Cx2d) -> WidgetDraw {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
-            return inner.draw_widget(cx)
+            if let Some(nd) = inner.draw_widget(cx).hook_widget() {
+                if nd.is_empty() {
+                    return WidgetDraw::hook(self.clone())
+                }
+                return WidgetDraw::hook(nd);
+            }
         }
         WidgetDraw::done()
     }
@@ -684,9 +689,28 @@ impl<T: Clone> DrawStateWrap<T> {
             false
         }
     }
+
+    pub fn begin_with<F,S>(&mut self, cx: &Cx2d, v:&S, init: F) -> bool where F: FnOnce(&Cx2d, &S)-> T {
+        if self.redraw_id != cx.redraw_id() {
+            self.redraw_id = cx.redraw_id();
+            self.state = Some(init(cx, v));
+            true
+        }
+        else {
+            false
+        }
+    }
     
     pub fn get(&self) -> Option<T> {
         self.state.clone()
+    }
+    
+    pub fn as_ref(&self) -> Option<&T> {
+        self.state.as_ref()
+    }
+    
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        self.state.as_mut()
     }
     
     pub fn set(&mut self, value: T) {

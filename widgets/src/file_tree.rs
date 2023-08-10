@@ -310,8 +310,9 @@ impl LiveHook for FileTree {
 #[derive(Clone, WidgetAction)]
 pub enum FileTreeAction {
     None,
-    WasClicked(FileNodeId),
-    ShouldStartDragging(FileNodeId),
+    FileClicked(FileNodeId),
+    FolderClicked(FileNodeId),
+    ShouldFileStartDrag(FileNodeId),
 }
 
 pub enum FileTreeNodeAction {
@@ -319,7 +320,7 @@ pub enum FileTreeNodeAction {
     WasClicked,
     Opening,
     Closing,
-    ShouldStartDragging,
+    ShouldStartDrag
 }
 
 impl FileTreeNode {
@@ -401,7 +402,7 @@ impl FileTreeNode {
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
-                    dispatch_action(cx, FileTreeNodeAction::ShouldStartDragging);
+                    dispatch_action(cx, FileTreeNodeAction::ShouldStartDrag);
                 }
             }
             Hit::FingerDown(_) => {
@@ -536,6 +537,15 @@ impl FileTree {
         self.tree_nodes.remove(&file_node_id);
     }
     
+    pub fn is_folder(&mut self, file_node_id: FileNodeId)->bool {
+        if let Some((node,id)) = self.tree_nodes.get(&file_node_id){
+            node.is_folder
+        }
+        else{
+            false
+        }
+    }
+    
     pub fn set_folder_is_open(
         &mut self,
         cx: &mut Cx,
@@ -558,10 +568,10 @@ impl FileTree {
         &mut self,
         cx: &mut Cx,
         node_id: FileNodeId,
-        dragged_item: DraggedItem,
+        items: Vec<DragItem>,
     ) {
         self.dragging_node_id = Some(node_id);
-        cx.start_dragging(dragged_item);
+        cx.start_dragging(items);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {
@@ -604,11 +614,16 @@ impl FileTree {
                         }
                     }
                     self.selected_node_id = Some(node_id);
-                    dispatch_action(cx, FileTreeAction::WasClicked(node_id));
+                    if self.is_folder(node_id){
+                        dispatch_action(cx, FileTreeAction::FolderClicked(node_id));
+                    }
+                    else{
+                        dispatch_action(cx, FileTreeAction::FileClicked(node_id));
+                    }
                 }
-                FileTreeNodeAction::ShouldStartDragging => {
+                FileTreeNodeAction::ShouldStartDrag => {
                     if self.dragging_node_id.is_none() {
-                        dispatch_action(cx, FileTreeAction::ShouldStartDragging(node_id));
+                        dispatch_action(cx, FileTreeAction::ShouldFileStartDrag(node_id));
                     }
                 }
                 _ => ()
@@ -661,8 +676,33 @@ impl Widget for FileTree {
     }
 }
 
-#[derive(Clone, Default, PartialEq, WidgetRef)]
+#[derive(Debug, Clone, Default, PartialEq, WidgetRef)]
 pub struct FileTreeRef(WidgetRef);
+
+impl FileTreeRef{
+    pub fn should_file_start_drag(&self, actions: &WidgetActions) -> Option<FileNodeId> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FileTreeAction::ShouldFileStartDrag(file_id) = item.action() {
+                return Some(file_id)
+            }
+        }
+        None
+    }
+    
+    pub fn file_clicked(&self, actions: &WidgetActions) -> Option<FileNodeId> {
+        if let Some(item) = actions.find_single_action(self.widget_uid()) {
+            if let FileTreeAction::FileClicked(file_id) = item.action() {
+                return Some(file_id)
+            }
+        }
+        None
+    }
+    
+    
+    pub fn file_start_drag(&self, cx: &mut Cx, _file_id: FileNodeId, item: DragItem) {
+        cx.start_dragging(vec![item]);
+    }
+}
 
 #[derive(Clone, Default, WidgetSet)]
 pub struct FileTreeSet(WidgetSet);

@@ -16,6 +16,9 @@ macro_rules!app_main {
                 if let Event::Construct = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
                 }
+                if let Event::LiveEdit = event{
+                    app.borrow_mut().update_main(cx);
+                }
                 <AppMain>::handle_event(app.borrow_mut().as_mut().unwrap(), cx, event);
             }))));
             live_design(&mut *cx.borrow_mut());
@@ -30,6 +33,9 @@ macro_rules!app_main {
             let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
                 if let Event::Construct = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
+                }
+                if let Event::LiveEdit = event{
+                    app.borrow_mut().update_main(cx);
                 }
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
             })));
@@ -51,6 +57,9 @@ macro_rules!app_main {
             let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
                 if let Event::Construct = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
+                }
+                if let Event::LiveEdit = event{
+                    app.borrow_mut().update_main(cx);
                 }
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
             })));
