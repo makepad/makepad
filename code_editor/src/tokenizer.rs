@@ -183,7 +183,11 @@ impl InitialState {
                 | "extern" | "false" | "fn" | "impl" | "in" | "let" | "mod" | "move" | "mut"
                 | "pub" | "ref" | "self" | "static" | "struct" | "super" | "trait" | "true"
                 | "type" | "unsafe" | "use" | "where" => TokenKind::OtherKeyword,
-                _ => TokenKind::Identifier,
+                _ => if cursor.string[start..].chars().next().unwrap().is_uppercase() {
+                    TokenKind::Typename   
+                } else {
+                    TokenKind::Identifier
+                },
             },
         )
     }
