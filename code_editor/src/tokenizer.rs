@@ -64,6 +64,8 @@ impl Tokenizer {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum State {
     Initial(InitialState),
+    DoubleQuotedStringTail(DoubleQuotedStringTailState),
+    RawDoubleQuotedStringTail(RawDoubleQuotedStringTailState),
 }
 
 impl Default for State {
@@ -80,6 +82,8 @@ impl State {
         let start = cursor.index;
         let (next_state, kind) = match self {
             State::Initial(state) => state.next(cursor),
+            State::DoubleQuotedStringTail(state) => state.next(cursor),
+            State::RawDoubleQuotedStringTail(state) => state.next(cursor),
         };
         let end = cursor.index;
         assert!(start < end);
@@ -99,6 +103,10 @@ pub struct InitialState;
 impl InitialState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
         match (cursor.peek(0), cursor.peek(1), cursor.peek(2)) {
+            ('r', '#', '"') | ('r', '#', '#') => self.raw_string(cursor),
+            ('b', 'r', '"') | ('b', 'r', '#') => self.raw_byte_string(cursor),
+            ('b', '\'', _) => self.byte(cursor),
+            ('b', '"', _) => self.byte_string(cursor),
             ('!', '=', _)
             | ('%', '=', _)
             | ('&', '&', _)
@@ -122,6 +130,8 @@ impl InitialState {
                 cursor.skip(2);
                 (State::Initial(InitialState), TokenKind::Punctuator)
             }
+            ('\'', _, _) => self.char_or_lifetime(cursor),
+            ('"', _, _) => self.string(cursor),
             ('.', char, _) if char.is_digit(10) => self.number(cursor),
             ('!', _, _)
             | ('#', _, _)
@@ -232,11 +242,142 @@ impl InitialState {
         };
     }
 
+    fn char_or_lifetime(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        if cursor.peek(1).is_identifier_start() && cursor.peek(2) != '\'' {
+            debug_assert!(cursor.peek(0) == '\'');
+            cursor.skip(2);
+            while cursor.skip_if( | ch | ch.is_identifier_continue()) {}
+            if cursor.peek(0) == '\'' {
+                cursor.skip(1);
+                cursor.skip_suffix();
+                (State::Initial(InitialState), TokenKind::String)
+            } else {
+                (State::Initial(InitialState), TokenKind::String)
+            }
+        } else {
+            self.single_quoted_string(cursor)
+        }
+    }
+    
+    fn byte(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == 'b');
+        cursor.skip(1);
+        self.single_quoted_string(cursor)
+    }
+
+    fn string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        self.double_quoted_string(cursor)
+    }
+    
+    fn byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == 'b');
+        cursor.skip(1);
+        self.double_quoted_string(cursor)
+    }
+    
+    fn raw_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == 'r');
+        cursor.skip(1);
+        self.raw_double_quoted_string(cursor)
+    }
+    
+    fn raw_byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == 'b' && cursor.peek(1) == 'r');
+        cursor.skip(2);
+        self.raw_double_quoted_string(cursor)
+    }
+    
+    fn single_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == '\'');
+        cursor.skip(1);
+        loop {
+            match (cursor.peek(0), cursor.peek(1)) {
+                ('\'', _) => {
+                    cursor.skip(1);
+                    cursor.skip_suffix();
+                    break;
+                }
+                ('\0', _) => return (State::Initial(InitialState), TokenKind::Unknown),
+                ('\\', '\'') | ('\\', '\\') => cursor.skip(2),
+                _ => cursor.skip(1),
+            }
+        }
+        (State::Initial(InitialState), TokenKind::String)
+    }
+    
+    fn double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == '"');
+        cursor.skip(1);
+        DoubleQuotedStringTailState.next(cursor)
+    }
+    
+    fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        let mut start_hash_count = 0;
+        while cursor.skip_if( | ch | ch == '#') {
+            start_hash_count += 1;
+        }
+        RawDoubleQuotedStringTailState {start_hash_count}.next(cursor)
+    }
+
     fn whitespace(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0).is_whitespace());
         cursor.skip(1);
         while cursor.skip_if(|char| char.is_whitespace()) {}
         (State::Initial(InitialState), TokenKind::Whitespace)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DoubleQuotedStringTailState;
+
+impl DoubleQuotedStringTailState {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+        loop {
+            match (cursor.peek(0), cursor.peek(1)) {
+                ('"', _) => {
+                    cursor.skip(1);
+                    cursor.skip_suffix();
+                    break (State::Initial(InitialState), TokenKind::String);
+                }
+                ('\0', _) => {
+                    break (
+                        State::DoubleQuotedStringTail(DoubleQuotedStringTailState),
+                        TokenKind::String,
+                    );
+                }
+                ('\\', '"') => cursor.skip(2),
+                _ => cursor.skip(1),
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RawDoubleQuotedStringTailState {
+    start_hash_count: usize,
+}
+
+impl RawDoubleQuotedStringTailState {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+        loop {
+            match cursor.peek(0) {
+                '"' => {
+                    cursor.skip(1);
+                    let mut end_hash_count = 0;
+                    while end_hash_count < self.start_hash_count && cursor.skip_if( | ch | ch == '#') {
+                        end_hash_count += 1;
+                    }
+                    if end_hash_count == self.start_hash_count {
+                        cursor.skip_suffix();
+                        break (State::Initial(InitialState), TokenKind::String);
+                    }
+                }
+                '\0' => {
+                    break (State::RawDoubleQuotedStringTail(self), TokenKind::String);
+                }
+                _ => cursor.skip(1),
+            }
+        }
     }
 }
 
