@@ -162,12 +162,17 @@ impl FileServerConnection {
         Ok(FileTreeData {root_path: "".into(), root})
     }
     
-    // Handles an `OpenFile` request.
-    fn open_file(&self, unix_path: UnixPathBuf) -> Result<(UnixPathBuf, String), FileError> {
+    fn make_full_path(&self, unix_path:&UnixPathBuf)->PathBuf{
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
         let path_buf = PathBuf::from(OsString::from_vec(unix_path.clone().into_unix_string().into_vec()));
         let mut path = self.shared.read().unwrap().root_path.clone();
         path.push(path_buf);
+        path
+    }
+    
+    // Handles an `OpenFile` request.
+    fn open_file(&self, unix_path: UnixPathBuf) -> Result<(UnixPathBuf, String), FileError> {
+        let path = self.make_full_path(&unix_path);
         
         let bytes = fs::read(&path).map_err(
             | error | FileError::Unknown(error.to_string())
@@ -187,11 +192,16 @@ impl FileServerConnection {
     // Handles an `ApplyDelta` request.
     fn save_file(
         &self,
-        path: UnixPathBuf,
-        _content: String,
+        unix_path: UnixPathBuf,
+        content: String,
     ) -> Result<UnixPathBuf, FileError> {
+        let path = self.make_full_path(&unix_path);
         
-        Ok(path)
+        fs::write(&path, &content).map_err(
+            | error | FileError::Unknown(error.to_string())
+        ) ?;
+        
+        Ok(unix_path)
     }
 }
 
