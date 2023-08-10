@@ -398,7 +398,7 @@ impl Session {
             self.settings.use_soft_tabs,
             self.settings.tab_column_count,
             self.settings.indent_column_count,
-            |_, _, _| (Extent::zero(), Some(text.clone()), None),
+            |_, _, _| (Extent::zero(), false, Some(text.clone()), None),
         );
     }
 
@@ -420,6 +420,7 @@ impl Session {
                     } else {
                         Extent::zero()
                     },
+                    false,
                     Some(Text::newline()),
                     if line[..index]
                         .chars()
@@ -504,7 +505,7 @@ impl Session {
             self.settings.use_soft_tabs,
             self.settings.tab_column_count,
             self.settings.indent_column_count,
-            |_, _, _| (Extent::zero(), None, None),
+            |_, _, is_empty| (Extent::zero(), is_empty, None, None),
         );
     }
 
@@ -533,6 +534,7 @@ impl Session {
                     } else {
                         Extent::zero()
                     },
+                    false,
                     None,
                     None,
                 )
@@ -827,7 +829,7 @@ impl Document {
         use_soft_tabs: bool,
         tab_column_count: usize,
         indent_column_count: usize,
-        mut f: impl FnMut(&String, usize, bool) -> (Extent, Option<Text>, Option<Text>),
+        mut f: impl FnMut(&String, usize, bool) -> (Extent, bool, Option<Text>, Option<Text>),
     ) {
         let mut changes = Vec::new();
         let mut inverted_changes = Vec::new();
@@ -856,26 +858,45 @@ impl Document {
                 changes.push(change);
                 inverted_changes.push(inverted_change);
             }
-            let (delete_extent, insert_text_before, insert_text_after) = f(
+            let (delete_extent_before, delete_after, insert_text_before, insert_text_after) = f(
                 &self.text.as_lines()[point.line],
                 point.byte,
                 range.is_empty(),
             );
-            if delete_extent != Extent::zero() {
-                if delete_extent.line_count == 0 {
-                    point.byte -= delete_extent.byte_count;
+            if delete_extent_before != Extent::zero() {
+                if delete_extent_before.line_count == 0 {
+                    point.byte -= delete_extent_before.byte_count;
                 } else {
-                    point.line -= delete_extent.line_count;
-                    point.byte = self.text.as_lines()[point.line].len() - delete_extent.byte_count;
+                    point.line -= delete_extent_before.line_count;
+                    point.byte = self.text.as_lines()[point.line].len() - delete_extent_before.byte_count;
                 }
                 let change = Change {
                     drift: Drift::Before,
-                    kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent)),
+                    kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent_before)),
                 };
                 let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
                 changes.push(change);
                 inverted_changes.push(inverted_change);
+            }
+            if delete_after {
+                let delete_extent_after = if let Some(grapheme) = self.text.as_lines()[point.line][point.byte..].graphemes().next() {
+                    Some(Extent { line_count: 0, byte_count: grapheme.len() })
+                } else if point.line < self.text.as_lines().len() - 1 {
+                    Some(Extent { line_count: 1, byte_count: 0 })
+                } else {
+                    None
+                };
+                if let Some(delete_extent_after) = delete_extent_after {
+                    let change = Change {
+                        drift: Drift::Before,
+                        kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent_after)),
+                    };
+                    let inverted_change = change.clone().invert(&self.text);
+                    self.text.apply_change(change.clone());
+                    changes.push(change);
+                    inverted_changes.push(inverted_change);
+                }
             }
             if let Some(insert_text_before) = insert_text_before {
                 let line_count = insert_text_before.as_lines().len();
