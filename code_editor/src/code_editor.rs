@@ -176,9 +176,13 @@ impl CodeEditor {
         self.scroll_bars.begin(cx, walk, Layout::default());
         
         self.viewport_rect = cx.turtle().rect();
-
-        self.viewport_rect = cx.turtle().rect();
         let scroll_pos = self.scroll_bars.get_scroll_pos();
+        
+        let pad_left_top = dvec2(10.,10.);
+        
+        self.viewport_rect.pos += pad_left_top;
+        self.viewport_rect.size -= pad_left_top;
+        
         
         self.draw_bg.draw_abs(cx, cx.turtle().unscrolled_rect());
         
@@ -316,6 +320,9 @@ impl CodeEditor {
                 session.backspace();
                 cx.redraw_all();
                 dispatch_action(cx, CodeEditorAction::TextDidChange);
+            }
+            Hit::TextCopy(ce) => {
+                *ce.response.borrow_mut() = Some(session.copy());
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
