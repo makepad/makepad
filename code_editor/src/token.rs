@@ -8,6 +8,7 @@ pub struct Token {
 pub enum TokenKind {
     Unknown,
     BranchKeyword,
+    Constant,
     Identifier,
     LoopKeyword,
     OtherKeyword,

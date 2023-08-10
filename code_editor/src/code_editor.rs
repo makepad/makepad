@@ -18,6 +18,7 @@ live_design! {
     TokenColors = {{TokenColors}} {
         unknown: #808080,
         branch_keyword: #C485BE,
+        constant: #CC917B,
         identifier: #D4D4D4,
         loop_keyword: #FF8C00,
         number: #B6CEAA,
@@ -426,6 +427,7 @@ impl CodeEditor {
                                             TokenKind::BranchKeyword => {
                                                 self.token_colors.branch_keyword
                                             }
+                                            TokenKind::Constant => self.token_colors.constant,
                                             TokenKind::Identifier => self.token_colors.identifier,
                                             TokenKind::LoopKeyword => {
                                                 self.token_colors.loop_keyword
@@ -818,6 +820,8 @@ struct TokenColors {
     unknown: Vec4,
     #[live]
     branch_keyword: Vec4,
+    #[live]
+    constant: Vec4,
     #[live]
     identifier: Vec4,
     #[live]
