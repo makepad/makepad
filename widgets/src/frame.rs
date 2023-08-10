@@ -432,7 +432,9 @@ impl LiveHook for Frame {
     
     fn before_apply(&mut self,  _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if let ApplyFrom::UpdateFromDoc {..} = from{
+            //self.children.clear();
             self.draw_order.clear();
+            self.find_cache.clear();
         }
     }
     
@@ -518,14 +520,7 @@ impl LiveHook for Frame {
                 }
             }
             ApplyFrom::NewFromDoc {..} | ApplyFrom::UpdateFromDoc {..} => {
-                /*if !self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
-                    // lets store a pointer into our templates.
-                    let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
-                    self.templates.insert(id, (live_ptr, self.draw_order.len()));
-                    nodes.skip_node(index)
-                }
-                else */if nodes[index].origin.has_prop_type(LivePropType::Instance)
-                /*|| self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) */ {
+                if nodes[index].origin.has_prop_type(LivePropType::Instance) {
                     self.draw_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {WidgetRef::new(cx)})
                         .apply(cx, from, index, nodes);
