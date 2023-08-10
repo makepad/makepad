@@ -173,21 +173,27 @@ impl InitialState {
         cursor.skip(1);
         while cursor.skip_if(|char| char.is_identifier_continue()) {}
         let end = cursor.index;
-
+        let string = &cursor.string[start..end];
         (
             State::Initial(InitialState),
-            match &cursor.string[start..end] {
+            match string {
                 "else" | "if" | "match" | "return" => TokenKind::BranchKeyword,
                 "break" | "continue" | "for" | "loop" | "while" => TokenKind::LoopKeyword,
                 "Self" | "as" | "async" | "await" | "const" | "crate" | "dyn" | "enum"
                 | "extern" | "false" | "fn" | "impl" | "in" | "let" | "mod" | "move" | "mut"
                 | "pub" | "ref" | "self" | "static" | "struct" | "super" | "trait" | "true"
                 | "type" | "unsafe" | "use" | "where" => TokenKind::OtherKeyword,
-                _ => if cursor.string[start..].chars().next().unwrap().is_uppercase() {
-                    TokenKind::Typename   
-                } else {
-                    TokenKind::Identifier
-                },
+                _ => {
+                    let mut chars = string.chars();
+                    if chars.next().unwrap().is_uppercase() {
+                        match chars.next() {
+                            Some(char) if char.is_uppercase() => TokenKind::Constant,
+                            _ => TokenKind::Typename
+                        }
+                    } else {
+                        TokenKind::Identifier
+                    }
+                }
             },
         )
     }
