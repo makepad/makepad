@@ -329,6 +329,7 @@ impl CodeEditor {
                 }
             }
             Hit::FingerMove(FingerMoveEvent { abs, .. }) => {
+                cx.set_cursor(MouseCursor::Text);
                 if let Some((cursor, affinity)) = self.pick(session, abs) {
                     session.move_to(cursor, affinity);
                     cx.redraw_all();
