@@ -212,7 +212,7 @@ live_design!{
                         text_style: <TEXT_SUB> {},
                         color: (COLOR_META_TEXT)
                     }
-                    label: "@Here is your username · 13h"
+                    label: "@username · 13h"
                 }
                 text = <Label> {
                     walk: {width: Fill, height: Fit},
@@ -244,7 +244,7 @@ live_design!{
         hero = <Image> {
             image: (IMG_A),
             //image_scale: 1.0,
-            walk: {margin: 0, width: Fill, height: 250}
+            walk: {margin: 0, width: Fill, height: 200}
             layout: {padding: 0}
         }
         
@@ -337,9 +337,9 @@ impl AppMain for App {
                         };
                         let item = list.get_item(cx, item_id, template).unwrap();
                         let text = match item_id % 4 {
-                            0 => format!("This area is : {} Lorem ipsum dolor sit amet, consectetur adipiscing elit", item_id),
-                            1 => format!("Item: {} 欢迎来到, adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
-                            2 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
+                            1 => format!("TOPLEVEL {} Requires recompile", item_id),
+                            2 => format!("Item: {} 欢迎来到, adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqu", item_id),
+                            3 => format!("Item: {} Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor", item_id),
                             _ => format!("Item: {} Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea", item_id),
                         };
                         item.get_label(id!(content.text)).set_label(&text);
@@ -357,7 +357,7 @@ impl AppMain for App {
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             // check for actions inside the list item
             if item.get_button(id!(likes)).clicked(&actions) {
-                log!("Clicker on item {}", item_id);
+                log!("Live {}", item_id);
             }
         }
         

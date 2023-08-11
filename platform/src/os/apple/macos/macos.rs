@@ -31,8 +31,6 @@ use {
         thread::Signal,
         event::{
             MouseUpEvent,
-            WebSocket,
-            WebSocketAutoReconnect,
             Event,
             HttpResponseEvent,
             HttpRequestErrorEvent,
@@ -426,7 +424,18 @@ impl Cx {
                 CxOsOp::HttpRequest(request) => {
                     cocoa_app.make_http_request(request, self.os.networking_channel.sender.clone());
                 },
-                _ => ()
+                CxOsOp::ShowClipboardActions(_request) => {
+                    todo!()
+                }
+                CxOsOp::WebSocketOpen{socket_id:_, url:_, auto_reconnect:_}=>{
+                    todo!()
+                }
+                CxOsOp::WebSocketSendBinary{socket_id:_, data:_}=>{
+                    todo!()
+                }
+                CxOsOp::WebSocketSendString{socket_id:_, data:_}=>{
+                    todo!()
+                }
             }
         }
     }
@@ -443,14 +452,14 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
-    
+    /*
     fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()
     }
     
     fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
         todo!()
-    }
+    }*/
 }
 
 pub enum NetworkingMessage {
