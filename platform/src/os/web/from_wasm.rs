@@ -110,14 +110,16 @@ pub struct FromWasmHideTextIME {
 
 #[derive(FromWasm)]
 pub struct FromWasmWebSocketOpen {
-    pub web_socket_id: usize,
+    pub socket_id_lo: u32,
+    pub socket_id_hi: u32,
     pub auto_reconnect: bool,
     pub url: String
 }
 
 #[derive(FromWasm)]
 pub struct FromWasmWebSocketSend{
-    pub web_socket_id: usize,
+    pub socket_id_lo: u32,
+    pub socket_id_hi: u32,
     pub data: WasmDataU8
 }
 

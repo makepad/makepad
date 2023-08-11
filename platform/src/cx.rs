@@ -93,9 +93,6 @@ pub struct Cx {
     pub (crate) timer_id: u64,
     pub (crate) next_frame_id: u64,
     
-    #[allow(dead_code)]
-    pub (crate) web_socket_id: u64,
-    
     pub keyboard: CxKeyboard,
     pub fingers: CxFingers,
     pub (crate) drag_drop: CxDragDrop,
@@ -248,7 +245,6 @@ impl Cx {
             repaint_id: 1,
             timer_id: 1,
             next_frame_id: 1,
-            web_socket_id: 1,
             
             keyboard: Default::default(),
             fingers: Default::default(),

@@ -1,10 +1,11 @@
 use {
-    makepad_futures::executor::Spawner,
     std::{
         any::{TypeId, Any},
         rc::Rc,
     },
     crate::{
+        makepad_futures::executor::Spawner,
+        makepad_live_id::*,
         makepad_math::{DVec2, Rect},
         gpu_info::GpuInfo,
         cx::{Cx, CxRef, OsType, XrCapabilities},
@@ -12,8 +13,7 @@ use {
             DragItem, 
             Timer,
             Trigger,
-            WebSocketAutoReconnect,
-            WebSocket,
+            AutoReconnect,
             NextFrame,
         },
         draw_list::{
@@ -46,9 +46,9 @@ pub trait CxOsApi {
     fn init_cx_os(&mut self);
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
-    
+    /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
-    fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);
+    fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
 }
 
 #[derive(PartialEq)]
@@ -74,6 +74,9 @@ pub enum CxOsOp {
     UpdateMenu(Menu),
     ShowClipboardActions(String),
     HttpRequest(HttpRequest),
+    WebSocketOpen{socket_id: LiveId, url:String, auto_reconnect:AutoReconnect},
+    WebSocketSendString{socket_id: LiveId, data:String},
+    WebSocketSendBinary{socket_id: LiveId, data:Vec<u8>},
 }
 
 impl Cx { 
@@ -183,6 +186,9 @@ impl Cx {
         });
         Timer(self.timer_id)
     }
+    
+    
+    
     
     pub fn stop_timer(&mut self, timer: Timer) {
         if timer.0 != 0 {
@@ -388,6 +394,21 @@ impl Cx {
 
     pub fn http_request(&mut self, request: HttpRequest) {
         self.platform_ops.push(CxOsOp::HttpRequest(request));
+    }
+           
+    pub fn web_socket_open(&mut self, socket_id:LiveId,  url: String, auto_reconnect: AutoReconnect) {
+        self.platform_ops.push(CxOsOp::WebSocketOpen{
+            url,
+            socket_id,
+            auto_reconnect
+        });
+    }
+    
+    pub fn web_socket_send_binary(&mut self, socket_id: LiveId, data: Vec<u8>) {
+        self.platform_ops.push(CxOsOp::WebSocketSendBinary{
+            socket_id,
+            data,
+        });
     }
 }
 

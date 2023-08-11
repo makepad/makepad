@@ -68,8 +68,8 @@ pub enum Event {
     Drop(DropEvent),
     DragEnd,
     
-    WebSocketClose(WebSocket),
-    WebSocketOpen(WebSocket),
+    WebSocketClose(LiveId),
+    WebSocketOpen(LiveId),
     WebSocketError(WebSocketErrorEvent),
     WebSocketMessage(WebSocketMessageEvent),
     
@@ -202,23 +202,21 @@ pub struct Trigger{
 #[derive(Clone, Debug, PartialEq)]
 pub struct TriggerHitEvent(pub Vec<Trigger>);
 
-pub enum WebSocketAutoReconnect{
+#[derive(PartialEq)]
+pub enum AutoReconnect{
     Yes,
     No
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct WebSocket(pub u64);
-
 #[derive(Clone, Debug)]
 pub struct WebSocketErrorEvent {
-    pub web_socket: WebSocket,
+    pub socket_id: LiveId,
     pub error: String
 }
 
 #[derive(Clone, Debug)]
 pub struct WebSocketMessageEvent {
-    pub web_socket: WebSocket,
+    pub socket_id: LiveId,
     pub data: Vec<u8>
 }
 
