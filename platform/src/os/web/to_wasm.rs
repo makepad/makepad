@@ -630,23 +630,27 @@ pub struct ToWasmHttpUploadProgress {
 
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketClose {
-    pub web_socket_id: usize
+    pub socket_id_lo: u32,
+    pub socket_id_hi: u32,
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketOpen {
-    pub web_socket_id: usize
+    pub socket_id_lo: u32,
+    pub socket_id_hi: u32,
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketError {
-    pub web_socket_id: usize,
+    pub socket_id_lo: u32,
+    pub socket_id_hi: u32,
     pub error: String
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmWebSocketMessage {
-    pub web_socket_id: usize,
+    pub socket_id_lo: u32,
+    pub socket_id_hi: u32,
     pub data: WasmDataU8
 }
 
