@@ -51,6 +51,7 @@ pub use makepad_objc_sys;
 
 #[cfg(target_os = "windows")]
 pub use makepad_windows as windows_crate;
+pub use makepad_futures;
  
 pub use {
     makepad_shader_compiler,
@@ -148,8 +149,7 @@ pub use {
             DragHit,
             Trigger,
             //MidiInputListEvent,
-            WebSocket,
-            WebSocketAutoReconnect,
+            AutoReconnect,
             Timer,
             NextFrame,
             KeyModifiers,

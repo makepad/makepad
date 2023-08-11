@@ -51,7 +51,7 @@ live_design!{
     }
     
     App = {{App}} {
-        ui: <DesktopWindow> {
+        ui: <DesktopWindow> { 
             caption_bar = {visible: true, caption_label = {label = {label: "Makepad Studio"}}},
             dock = <Dock> {
                 walk: {height: Fill, width: Fill}
@@ -95,11 +95,6 @@ live_design!{
                     name: "app.rs"
                     kind: CodeEditor
                 }
-                /*
-                file3 = Tab {
-                    name: "File3"
-                    kind: Empty3
-                }*/
                 
                 file_tree = Tab {
                     name: "FileTree",
@@ -225,7 +220,7 @@ impl AppMain for App {
                 self.build_manager.file_change(cx);
             }
         }
-        
+          
         self.file_system.handle_event(cx, event, &self.ui, &mut self.build_manager);
         
         if let Some(mut run_view) = run_view.borrow_mut() {

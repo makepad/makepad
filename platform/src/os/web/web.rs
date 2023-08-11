@@ -19,10 +19,9 @@ use {
             HttpResponseEvent,
             HttpRequestErrorEvent,
             HttpProgressEvent,
-            WebSocket,
             WebSocketErrorEvent,
             WebSocketMessageEvent,
-            WebSocketAutoReconnect,
+            AutoReconnect,
             Event,
             XRInput,
             TextClipboardEvent,
@@ -83,7 +82,7 @@ impl Cx {
                     for dep_in in tw.deps {
                         if let Some(dep) = self.dependencies.get_mut(&dep_in.path) {
                             
-                            dep.data = Some(Ok(dep_in.data.into_vec_u8()))
+                            dep.data = Some(Ok(Rc::new(dep_in.data.into_vec_u8())))
                         }
                     }
                     self.os.window_geom = tw.window_info.into();
@@ -263,30 +262,30 @@ impl Cx {
                 
                 live_id!(ToWasmWebSocketClose) => {
                     let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
-                    let web_socket = WebSocket(tw.web_socket_id as u64);
-                    self.call_event_handler(&Event::WebSocketClose(web_socket));
+                    let socket_id = LiveId::from_lo_hi(tw.socket_id_lo, tw.socket_id_hi);
+                    self.call_event_handler(&Event::WebSocketClose(socket_id));
                 }
                 
                 live_id!(ToWasmWebSocketOpen) => {
                     let tw = ToWasmWebSocketOpen::read_to_wasm(&mut to_wasm);
-                    let web_socket = WebSocket(tw.web_socket_id as u64);
-                    self.call_event_handler(&Event::WebSocketOpen(web_socket));
+                    let socket_id = LiveId::from_lo_hi(tw.socket_id_lo, tw.socket_id_hi);
+                    self.call_event_handler(&Event::WebSocketOpen(socket_id));
                 }
                 
                 live_id!(ToWasmWebSocketError) => {
                     let tw = ToWasmWebSocketError::read_to_wasm(&mut to_wasm);
-                    let web_socket = WebSocket(tw.web_socket_id as u64);
+                    let socket_id = LiveId::from_lo_hi(tw.socket_id_lo, tw.socket_id_hi);
                     self.call_event_handler(&Event::WebSocketError(WebSocketErrorEvent {
-                        web_socket,
+                        socket_id,
                         error: tw.error,
                     }));
                 }
                 
                 live_id!(ToWasmWebSocketMessage) => {
                     let tw = ToWasmWebSocketMessage::read_to_wasm(&mut to_wasm);
-                    let web_socket = WebSocket(tw.web_socket_id as u64);
+                    let socket_id = LiveId::from_lo_hi(tw.socket_id_lo, tw.socket_id_hi);
                     self.call_event_handler(&Event::WebSocketMessage(WebSocketMessageEvent {
-                        web_socket,
+                        socket_id,
                         data: tw.data.into_vec_u8()
                     }));
                 }
@@ -436,10 +435,28 @@ impl Cx {
                         body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
                     });
                 },
+                CxOsOp::WebSocketOpen{socket_id, url, auto_reconnect}=>{
+                    self.os.from_wasm(FromWasmWebSocketOpen {
+                        url,
+                        socket_id_lo: socket_id.lo(),
+                        socket_id_hi: socket_id.hi(),
+                        auto_reconnect: if let AutoReconnect::Yes = auto_reconnect {true} else {false},
+                        
+                    });
+                }
+                CxOsOp::WebSocketSendBinary{socket_id, data}=>{
+                    self.os.from_wasm(FromWasmWebSocketSend {
+                        socket_id_lo: socket_id.lo(),
+                        socket_id_hi: socket_id.hi(),
+                        data: WasmDataU8::from_vec_u8(data)
+                    });
+                }
+                CxOsOp::WebSocketSendString{socket_id:_, data:_}=>{
+                    todo!()
+                }
             }
         }
     }
-    
 }
 
 
@@ -528,25 +545,6 @@ impl CxOsApi for Cx {
         self.os.from_wasm(FromWasmCreateThread {context_ptr: context_ptr as u32});
     }
     
-    fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket {
-        let web_socket_id = self.web_socket_id;
-        self.web_socket_id += 1;
-        
-        self.os.from_wasm(FromWasmWebSocketOpen {
-            url,
-            web_socket_id: web_socket_id as usize,
-            auto_reconnect: if let WebSocketAutoReconnect::Yes = rec {true} else {false},
-            
-        });
-        WebSocket(web_socket_id)
-    }
-    
-    fn web_socket_send(&mut self, websocket: WebSocket, data: Vec<u8>) {
-        self.os.from_wasm(FromWasmWebSocketSend {
-            web_socket_id: websocket.0 as usize,
-            data: WasmDataU8::from_vec_u8(data)
-        });
-    }
     /*
     fn start_midi_input(&mut self) {
         self.platform.from_wasm(FromWasmStartMidiInput {
