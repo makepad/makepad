@@ -100,7 +100,7 @@ impl FileSystem {
                         }
                     }
                     FileResponse::SaveFile(result)=>match result{
-                        Ok((path, old, new))=>{
+                        Ok((_path, old, new))=>{
                             for i in 0..old.len().min(new.len()){
                                 if old.as_bytes()[i] != new.as_bytes()[i]{
                                     if i > 10300{ // 
@@ -188,7 +188,7 @@ impl FileSystem {
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
         ) -> FileNodeId {
-            let file_node_id = file_node_id.unwrap_or(file_nodes.alloc_key());
+            let file_node_id = file_node_id.unwrap_or(LiveId::unique().into());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
                 | edge | edge.name.to_string_lossy().to_string(),
