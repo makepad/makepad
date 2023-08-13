@@ -286,7 +286,7 @@ live_design!{
             news_feed = <ListView> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
-                TopSpace = <Frame> {walk: {height: 60}}
+                TopSpace = <Frame> {walk: {height: 80}}
                 Post = <Post> {}
                 PostImage = <PostImage> {}
                 BottomSpace = <Frame> {walk: {height: 100}}
