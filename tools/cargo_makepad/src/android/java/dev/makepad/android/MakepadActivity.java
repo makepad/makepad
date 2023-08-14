@@ -48,6 +48,16 @@ import android.bluetooth.BluetoothDevice;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
+
+import java.nio.ByteBuffer;
+
+import android.media.MediaDataSource;
+import java.io.IOException;
+
 public class MakepadActivity extends Activity implements 
 MidiManager.OnDeviceOpenedListener,
 View.OnCreateContextMenuListener,
@@ -379,6 +389,98 @@ Makepad.Callback{
 
             return null;
         }
+    }
+
+    public void decodeVideo(byte[] video) {
+        MediaExtractor extractor = new MediaExtractor();
+        try {
+            ByteArrayMediaDataSource dataSource = new ByteArrayMediaDataSource(video);
+
+            extractor.setDataSource(dataSource);
+
+            int trackIndex = selectTrack(extractor);
+            if (trackIndex < 0) {
+                throw new RuntimeException("No video track found in video");
+            }
+            extractor.selectTrack(trackIndex);
+            MediaFormat format = extractor.getTrackFormat(trackIndex);
+
+            int frameRate = 30;
+            if (format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                frameRate = format.getInteger(MediaFormat.KEY_FRAME_RATE);
+                Log.e("Makepad", "FRAME RATE:" + frameRate);
+            }
+
+            String mime = format.getString(MediaFormat.KEY_MIME);
+            MediaCodec codec = MediaCodec.createDecoderByType(mime);
+            // format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar);
+            codec.configure(format, null, null, 0);
+            codec.start();
+
+            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            int videoWidth = format.getInteger(MediaFormat.KEY_WIDTH);
+            int videoHeight = format.getInteger(MediaFormat.KEY_HEIGHT);
+
+            boolean inputEos = false;
+            boolean outputEos = false;
+
+            while (!outputEos) {
+                if (!inputEos) {
+                    int inputBufferIndex = codec.dequeueInputBuffer(2000);
+                    if (inputBufferIndex >= 0) {
+                        ByteBuffer inputBuffer = codec.getInputBuffer(inputBufferIndex);
+                        int sampleSize = extractor.readSampleData(inputBuffer, 0);
+                        if (sampleSize < 0) {
+                            codec.queueInputBuffer(inputBufferIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            inputEos = true;
+                        } else {
+                            long presentationTimeUs = extractor.getSampleTime();
+                            codec.queueInputBuffer(inputBufferIndex, 0, sampleSize, presentationTimeUs, 0);
+                            extractor.advance();
+                        }
+                    }
+                }
+
+                int outputBufferIndex = codec.dequeueOutputBuffer(info, 2000); 
+                if (outputBufferIndex >= 0) {
+                    ByteBuffer outputBuffer = codec.getOutputBuffer(outputBufferIndex);
+                    byte[] pixelData = new byte[info.size];
+                    outputBuffer.get(pixelData);
+                    codec.releaseOutputBuffer(outputBufferIndex, false);
+
+                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        outputEos = true;
+                    }
+
+                    // TODO: Send color format to rust 
+                    // MediaFormat outputFormat = codec.getOutputFormat();
+                    // int actualColorFormat = outputFormat.getInteger(MediaFormat.KEY_COLOR_FORMAT);
+
+                    Makepad.onVideoDecoded(mCx, pixelData, videoWidth, videoHeight, frameRate, info.presentationTimeUs, (Makepad.Callback)mView.getContext());
+                    // break;
+                }
+            }
+
+            codec.stop();
+            codec.release();
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            extractor.release();
+        }
+    }
+
+    private int selectTrack(MediaExtractor extractor) {
+        int numTracks = extractor.getTrackCount();
+        for (int i = 0; i < numTracks; i++) {
+            MediaFormat format = extractor.getTrackFormat(i);
+            String mime = format.getString(MediaFormat.KEY_MIME);
+            if (mime.startsWith("video/")) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     Handler mHandler;

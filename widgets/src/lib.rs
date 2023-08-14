@@ -32,6 +32,7 @@ pub mod list_view;
 pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
+pub mod video;
 
 pub mod swipe_list;
 
@@ -63,6 +64,7 @@ pub use crate::{
     slider::*,
     check_box::*,
     drop_down::*,
+    video::*,
     radio_button::*,
     swipe_list::*,
     text_input::*,
@@ -123,6 +125,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::designer::live_design(cx);
     crate::hook_widget::live_design(cx);
     crate::list_view::live_design(cx);
+    crate::video::live_design(cx);
     //#[cfg(ide_widgets)]{
         crate::tab::live_design(cx);
         crate::tab_bar::live_design(cx);

@@ -235,6 +235,7 @@ fn compile_java(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> 
             (makepad_java_classes_dir.join("MakepadSurfaceView.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("MakepadNetwork.java").to_str().unwrap()),
             (makepad_java_classes_dir.join("HttpResponse.java").to_str().unwrap()),
+            (makepad_java_classes_dir.join("ByteArrayMediaDataSource.java").to_str().unwrap()),
             (build_paths.java_file.to_str().unwrap())
         ]   
     ) ?; 
@@ -266,6 +267,7 @@ fn build_dex(sdk_dir: &Path, build_paths: &BuildPaths) -> Result<(), String> {
             (compiled_java_classes_dir.join("MakepadSurfaceView.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("MakepadNetwork.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("HttpResponse.class").to_str().unwrap()),
+            (compiled_java_classes_dir.join("ByteArrayMediaDataSource.class").to_str().unwrap()),
             (compiled_java_classes_dir.join("Makepad$Callback.class").to_str().unwrap()),
             (build_paths.java_class.to_str().unwrap()),
         ]
