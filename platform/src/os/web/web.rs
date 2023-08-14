@@ -435,9 +435,13 @@ impl Cx {
                         body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
                     });
                 },
-                CxOsOp::WebSocketOpen{socket_id, url, auto_reconnect}=>{
+                CxOsOp::WebSocketOpen{socket_id, request, auto_reconnect}=>{
+                    let headers = request.get_headers_string();
                     self.os.from_wasm(FromWasmWebSocketOpen {
-                        url,
+                        url: request.url,
+                        method: request.method.to_string().into(),
+                        headers: headers,
+                        body: WasmDataU8::from_vec_u8(request.body.unwrap_or(Vec::new())),
                         socket_id_lo: socket_id.lo(),
                         socket_id_hi: socket_id.hi(),
                         auto_reconnect: if let AutoReconnect::Yes = auto_reconnect {true} else {false},

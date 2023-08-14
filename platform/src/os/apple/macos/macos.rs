@@ -427,8 +427,8 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(_request) => {
                     todo!()
                 }
-                CxOsOp::WebSocketOpen{socket_id:_, url:_, auto_reconnect:_}=>{
-                    
+                CxOsOp::WebSocketOpen{socket_id, request, auto_reconnect}=>{
+                    cocoa_app.web_socket_open(socket_id.0, request,auto_reconnect, self.os.networking_channel.sender.clone());
                     todo!()
                 }
                 CxOsOp::WebSocketSendBinary{socket_id:_, data:_}=>{

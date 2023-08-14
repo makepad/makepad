@@ -74,7 +74,7 @@ pub enum CxOsOp {
     UpdateMenu(Menu),
     ShowClipboardActions(String),
     HttpRequest(HttpRequest),
-    WebSocketOpen{socket_id: LiveId, url:String, auto_reconnect:AutoReconnect},
+    WebSocketOpen{socket_id: LiveId, request:HttpRequest, auto_reconnect:AutoReconnect},
     WebSocketSendString{socket_id: LiveId, data:String},
     WebSocketSendBinary{socket_id: LiveId, data:Vec<u8>},
 }
@@ -396,9 +396,9 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HttpRequest(request));
     }
            
-    pub fn web_socket_open(&mut self, socket_id:LiveId,  url: String, auto_reconnect: AutoReconnect) {
+    pub fn web_socket_open(&mut self, socket_id:LiveId, request: HttpRequest, auto_reconnect: AutoReconnect) {
         self.platform_ops.push(CxOsOp::WebSocketOpen{
-            url,
+            request,
             socket_id,
             auto_reconnect
         });

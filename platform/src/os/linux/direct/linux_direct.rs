@@ -313,15 +313,7 @@ impl CxOsApi for Cx {
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
     }
-    
-    fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
-        todo!()
-    }
-    
-    fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
-        todo!()
-    }
-}
+ }
 
 #[derive(Default)]
 pub struct CxOs {
