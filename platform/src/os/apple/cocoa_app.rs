@@ -187,31 +187,34 @@ impl CocoaApp {
     }
     
     
-    pub fn web_socket_open(&mut self, _socket_id: u64, _request:HttpRequest, _auto_reconnect:AutoReconnect, _networking_sender: Sender<NetworkingMessage>) {
+    unsafe fn make_ns_request(request:&HttpRequest)->ObjcId{
+        // Prepare the NSMutableURLRequest instance
+        let url: ObjcId =
+        msg_send![class!(NSURL), URLWithString: str_to_nsstring(&request.url)];
         
-        /*
+        let mut ns_request: ObjcId = msg_send![class!(NSMutableURLRequest), alloc];
+        ns_request = msg_send![ns_request, initWithURL: url];
+        //let () = msg_send![ns_request, setHTTPMethod: str_to_nsstring(&request.method.to_string())];
+        
+        for (key, values) in request.headers.iter() {
+            for value in values {
+                let () = msg_send![ns_request, addValue: str_to_nsstring(value) forHTTPHeaderField: str_to_nsstring(key)];
+            }
+        }
+        
+        if let Some(body) = request.body.as_ref() {
+            let nsdata: ObjcId = msg_send![class!(NSData), dataWithBytes: body.as_ptr() length: body.len()];
+            let () = msg_send![ns_request, setHTTPBody: nsdata];
+        }
+        ns_request
+    }
+        
+    pub fn web_socket_open(&mut self, _socket_id: u64, request:HttpRequest, _auto_reconnect:AutoReconnect, _networking_sender: Sender<NetworkingMessage>) {
+        
         unsafe {
-            
-            // Prepare the NSMutableURLRequest instance
-            let url: ObjcId =
-            msg_send![class!(NSURL), URLWithString: str_to_nsstring(&url)];
-            
-            let mut ns_request: ObjcId = msg_send![class!(NSMutableURLRequest), alloc];
-            ns_request = msg_send![ns_request, initWithURL: url];
-            //let () = msg_send![ns_request, setHTTPMethod: str_to_nsstring(&request.method.to_string())];
-            
-            for (key, values) in request.headers.iter() {
-                for value in values {
-                    let () = msg_send![ns_request, addValue: str_to_nsstring(value) forHTTPHeaderField: str_to_nsstring(key)];
-                }
-            }
-            
-            if let Some(body) = request.body.as_ref() {
-                let nsdata: ObjcId = msg_send![class!(NSData), dataWithBytes: body.as_ptr() length: body.len()];
-                let () = msg_send![ns_request, setHTTPBody: nsdata];
-            }
-            
+            let ns_request = Self::make_ns_request(&request);
             // Build the NSURLSessionDataTask instance
+            /*
             let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, error: ObjcId | {
                 if error != ptr::null_mut() {
                     let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
@@ -250,37 +253,20 @@ impl CocoaApp {
                 let message = NetworkingMessage::HttpResponse(HttpResponseEvent {response});
                 networking_sender.send(message).unwrap();
             });
-            
+            */
             let session: ObjcId = msg_send![class!(NSURLSession), sharedSession];
-            
-            let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request completionHandler: &response_handler];
-            
+            /*
+            let data_task: ObjcId = msg_send![session, webSocketTaskWithRequest: ns_request completionHandler: &response_handler];
+            */
             // Run the request task
-            let () = msg_send![data_task, resume];
-        }*/
+            //et () = msg_send![data_task, resume];
+        }
     }
     
     pub fn make_http_request(&mut self, request: HttpRequest, networking_sender: Sender<NetworkingMessage>) {
         unsafe {
-            // Prepare the NSMutableURLRequest instance
-            let url: ObjcId =
-            msg_send![class!(NSURL), URLWithString: str_to_nsstring(&request.url)];
-            
-            let mut ns_request: ObjcId = msg_send![class!(NSMutableURLRequest), alloc];
-            ns_request = msg_send![ns_request, initWithURL: url];
-            let () = msg_send![ns_request, setHTTPMethod: str_to_nsstring(&request.method.to_string())];
-            
-            for (key, values) in request.headers.iter() {
-                for value in values {
-                    let () = msg_send![ns_request, addValue: str_to_nsstring(value) forHTTPHeaderField: str_to_nsstring(key)];
-                }
-            }
-            
-            if let Some(body) = request.body.as_ref() {
-                let nsdata: ObjcId = msg_send![class!(NSData), dataWithBytes: body.as_ptr() length: body.len()];
-                let () = msg_send![ns_request, setHTTPBody: nsdata];
-            }
-            
+            let ns_request = Self::make_ns_request(&request);
+
             // Build the NSURLSessionDataTask instance
             let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, error: ObjcId | {
                 if error != ptr::null_mut() {

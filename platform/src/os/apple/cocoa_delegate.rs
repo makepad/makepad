@@ -218,6 +218,29 @@ pub fn define_cocoa_timer_delegate() -> *const Class {
     return decl.register();
 }
 
+
+pub fn define_web_socket_delegate() -> *const Class {
+    
+    extern fn did_open_with_protocol(_this: &Object, _: Sel, _web_socket_task: ObjcId, _open_with_protocol: ObjcId) {
+    }
+    
+    extern fn did_close_with_code(_this: &Object, _: Sel, _web_socket_task: ObjcId, _code: usize, _reason: ObjcId) {
+    }
+    
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("NSURLSessionWebSocketDelegate", superclass).unwrap();
+    
+    // Add callback methods
+    unsafe {
+        decl.add_method(sel!(receivedTimer:), did_open_with_protocol as extern fn(&Object, Sel, ObjcId, ObjcId));
+        decl.add_method(sel!(receivedLiveResize:), did_close_with_code as extern fn(&Object, Sel, ObjcId, usize, ObjcId));
+    }
+    // Store internal state as user data
+    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
+    
+    return decl.register();
+}
+
 pub fn define_app_delegate() -> *const Class {
     
     let superclass = class!(NSObject);
