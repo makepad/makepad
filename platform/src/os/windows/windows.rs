@@ -304,7 +304,7 @@ impl Cx {
                 CxOsOp::HttpRequest(_) => {
                     //todo!()
                 },
-                CxOsOp::WebSocketOpen{socket_id:_, url:_, auto_reconnect:_}=>{
+                CxOsOp::WebSocketOpen{socket_id:_, request:_, auto_reconnect:_}=>{
                     todo!()
                 }
                 CxOsOp::WebSocketSendBinary{socket_id:_, data:_}=>{
