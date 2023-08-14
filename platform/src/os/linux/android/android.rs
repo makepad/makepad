@@ -34,6 +34,7 @@ use {
             WindowGeom,
             HttpResponseEvent,
             HttpRequestErrorEvent,
+            VideoDecodedEvent,
         },
         window::CxWindowPool,
         pass::CxPassParent,
@@ -376,6 +377,21 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
+    pub fn from_java_on_video_decoded(&mut self, pixel_data: Vec<u8>, video_width: u32, video_height: u32, original_frame_rate: usize, timestamp: u64, to_java: AndroidToJava) {
+        let e = Event::VideoDecoded(
+            VideoDecodedEvent { 
+                pixel_data,
+                video_width,
+                video_height,
+                original_frame_rate,
+                timestamp 
+            }
+        );
+        self.call_event_handler(&e);
+        self.redraw_all();
+        self.after_every_event(&to_java);
+    }
+
     pub fn draw_pass_to_fullscreen(
         &mut self,
         pass_id: PassId,
@@ -499,7 +515,7 @@ impl Cx {
                 },
                 CxOsOp::StartTimer {timer_id, interval, repeats: _} => {
                     //android_app.start_timer(timer_id, interval, repeats);
-                    to_java.schedule_timeout(timer_id as i64, (interval / 1000.0) as i64);
+                    to_java.schedule_timeout(timer_id as i64, interval as i64);
                 },
                 CxOsOp::StopTimer(timer_id) => {
                     to_java.cancel_timeout(timer_id as i64);
@@ -518,6 +534,9 @@ impl Cx {
                 },
                 CxOsOp::HttpRequest(request) => {
                     to_java.http_request(request)
+                },
+                CxOsOp::DecodeVideo(video) => { // TODO: ADD TODO FOR OTHER PLATFORMS
+                    to_java.decode_video(video);
                 },
                 _ => ()
             }
