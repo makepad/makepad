@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use {
+    std::rc::Rc,
     self::super::{
         jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
     },
@@ -297,6 +298,38 @@ impl<'a> AndroidToJava<'a> {
             );
         }
     }
+
+    pub fn decode_video(&self, video: Rc<Vec<u8>>) {
+        unsafe {
+            let video_data = &*video;
+    
+            let java_body = (**self.env).NewByteArray.unwrap()(self.env, video_data.len() as i32);
+            (**self.env).SetByteArrayRegion.unwrap()(
+                self.env,
+                java_body,
+                0,
+                video_data.len() as i32,
+                video_data.as_ptr() as *const jbyte,
+            );
+            
+            let name = CString::new("decodeVideo").unwrap();
+            let signature = CString::new("([B)V").unwrap();
+            let method_id = (**self.env).GetMethodID.unwrap()(
+                self.env,
+                (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
+            
+            (**self.env).CallVoidMethod.unwrap()(
+                self.env,
+                self.callback,
+                method_id,
+                java_body as jobject,
+            );
+        }
+    }
+    
 }
 
 // The functions here correspond to the static functions on the `Makepad` class in Java.
@@ -755,6 +788,32 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpRequestError(
     (*(cx as *mut Cx)).from_java_on_http_request_error(
         request_id as u64,
         jstring_to_string(env, exception),
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoDecoded(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    pixel_data: jobject,
+    video_width: jint,
+    video_height: jint,
+    frame_rate: jint,
+    timestamp: jlong,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_video_decoded(
+        java_byte_array_to_vec(env, pixel_data),
+        video_width as u32,
+        video_height as u32,
+        frame_rate as usize,
+        timestamp as u64,
         AndroidToJava {
             env,
             callback,
