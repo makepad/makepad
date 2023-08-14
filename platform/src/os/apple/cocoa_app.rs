@@ -39,6 +39,7 @@ use {
         //    Rect
         //},
         event::{
+            AutoReconnect,
             KeyCode,
             KeyEvent,
             TextInputEvent,
@@ -186,7 +187,8 @@ impl CocoaApp {
     }
     
     
-    pub fn web_socket_open(&mut self, _socket_id: u64, _url:String, _auto_reconnect:bool) {
+    pub fn web_socket_open(&mut self, _socket_id: u64, _request:HttpRequest, _auto_reconnect:AutoReconnect, _networking_sender: Sender<NetworkingMessage>) {
+        
         /*
         unsafe {
             
