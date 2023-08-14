@@ -286,7 +286,7 @@ impl Cx {
             executor: Some(executor),
             spawner,
             
-            image_cache: ImageCache::new(10),
+            image_cache: ImageCache::new(100),
 
             self_ref: None
         }
