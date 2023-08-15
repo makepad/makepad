@@ -14,10 +14,8 @@ impl Change {
                 ChangeKind::Insert(point, text) => {
                     ChangeKind::Delete(Range::from_start_and_extent(point, text.extent()))
                 }
-                ChangeKind::Delete(range) => {
-                    ChangeKind::Insert(range.start(), text.slice(range))
-                }
-            }
+                ChangeKind::Delete(range) => ChangeKind::Insert(range.start(), text.slice(range)),
+            },
         }
     }
 }

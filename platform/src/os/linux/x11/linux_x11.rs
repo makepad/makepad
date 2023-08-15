@@ -15,8 +15,6 @@ use {
         makepad_live_id::*,
         thread::Signal,
         event::{
-            WebSocket,
-            WebSocketAutoReconnect, 
             Event,
         },
         pass::CxPassParent,
@@ -307,6 +305,15 @@ impl Cx {
                 CxOsOp::HttpRequest(_) => {
                     //todo!()
                 }
+                CxOsOp::WebSocketOpen{socket_id:_, request:_, auto_reconnect:_}=>{
+                    todo!()
+                }
+                CxOsOp::WebSocketSendBinary{socket_id:_, data:_}=>{
+                    todo!()
+                }
+                CxOsOp::WebSocketSendString{socket_id:_, data:_}=>{
+                    todo!()
+                }
             }
         }
         ret
@@ -322,14 +329,6 @@ impl CxOsApi for Cx {
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
-    }
-    
-    fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
-        todo!()
-    }
-    
-    fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
-        todo!()
     }
 }
 

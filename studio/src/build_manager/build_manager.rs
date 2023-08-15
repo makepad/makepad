@@ -264,7 +264,7 @@ impl BuildManager {
     pub fn file_change(&mut self, _cx: &mut Cx) {
         for wrap in &mut self.clients {
             if let Some(process) = wrap.processes.get_mut(WHAT_TO_BUILD) {
-                
+                self.messages.clear();
                 process.cmd_id = wrap.client.send_cmd(BuildCmd::CargoRun {
                     what: WHAT_TO_BUILD.into(),
                 });
@@ -272,12 +272,17 @@ impl BuildManager {
         }
     }
     
+    pub fn start_recompile_timer(&mut self, cx:&mut Cx){
+        cx.stop_timer(self.recompile_timer);
+        self.recompile_timer = cx.start_timeout(self.recompile_timeout);
+    }
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<BuildManagerAction> {
         let mut actions = Vec::new();
         self.handle_event_with(cx, event, &mut | _, action | actions.push(action));
         actions
     }
-    
+    /*
     pub fn handle_file_response(
         &mut self,
         cx: &mut Cx,
@@ -294,7 +299,7 @@ impl BuildManager {
             }
             _ => {}
         }
-    }
+    }*/
     
     pub fn handle_event_with(&mut self, cx: &mut Cx, event: &Event, dispatch_event: &mut dyn FnMut(&mut Cx, BuildManagerAction)) {
         if self.recompile_timer.is_event(event) {

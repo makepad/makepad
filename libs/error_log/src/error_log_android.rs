@@ -1,5 +1,5 @@
 use std::panic;
-use std::ffi::{c_int};
+use std::ffi::c_int;
     
 #[macro_export]
 macro_rules!log {
@@ -38,4 +38,3 @@ pub fn init_panic_hook() {
     }
     panic::set_hook(Box::new(panic_hook));
 }
-

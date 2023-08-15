@@ -10,6 +10,7 @@ use {
         makepad_widgets::file_tree::*,
         makepad_widgets::dock::*,
         file_system::FileClient,
+        build_manager::build_manager::BuildManager,
         makepad_file_protocol::{
             FileRequest,
             FileError,
@@ -71,7 +72,7 @@ impl FileSystem {
         None
     }
     
-    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef){
+    pub fn handle_event(&mut self, cx:&mut Cx, event:&Event, ui:&WidgetRef, build_manager:&mut BuildManager){
         for action in self.file_client.handle_event(cx, event) {
             match action {
                 FileClientAction::Response(response) => match response {
@@ -98,9 +99,21 @@ impl FileSystem {
                             // ignore
                         }
                     }
-                    _response => {
-                        //self.build_manager.handle_file_response(cx, &response);
-                        // self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
+                    FileResponse::SaveFile(result)=>match result{
+                        Ok((_path, old, new))=>{
+                            for i in 0..old.len().min(new.len()){
+                                if old.as_bytes()[i] != new.as_bytes()[i]{
+                                    if i > 10300{ // 
+                                        build_manager.start_recompile_timer(cx);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_)=>{}
+                        // ok we saved a file, we should check however what changed
+                        // to see if we need a recompile
+                        
                     }
                 },
                 FileClientAction::Notification(_notification) => {
@@ -118,6 +131,18 @@ impl FileSystem {
             self.open_documents.insert(path.clone(), None);
             self.file_client.send_request(FileRequest::OpenFile(path));
         }
+    }
+    
+    
+    pub fn request_save_file(&mut self, tab_id:LiveId){
+        // ok lets see if we have a document
+        // ifnot, we create a new one
+        if let Some(path) = self.tab_id_to_path.get(&tab_id){
+            if let Some(Some(doc)) = self.open_documents.get(path){
+                let text = doc.borrow().text().to_string();
+                self.file_client.send_request(FileRequest::SaveFile(path.clone(), text));
+            }
+        };
     }
     
     pub fn draw_file_node(&self, cx: &mut Cx2d, file_node_id: FileNodeId, file_tree: &mut FileTree) {
@@ -163,7 +188,7 @@ impl FileSystem {
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
         ) -> FileNodeId {
-            let file_node_id = file_node_id.unwrap_or(file_nodes.alloc_key());
+            let file_node_id = file_node_id.unwrap_or(LiveId::unique().into());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
                 | edge | edge.name.to_string_lossy().to_string(),
