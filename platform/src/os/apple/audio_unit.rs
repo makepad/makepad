@@ -8,13 +8,89 @@ use {
         audio::*,
         midi::*,
         os::apple::apple_sys::*,
-        os::apple::cocoa_delegate::*,
         os::apple::cocoa_app::*,
         os::apple::apple_util::*,
         makepad_objc_sys::objc_block,
         makepad_objc_sys::objc_block_invoke,
     },
 };
+
+
+pub struct KeyValueObserver {
+    _callback: Box<Box<dyn Fn() >>,
+    observer: RcObjcId
+}
+unsafe impl Send for KeyValueObserver {}
+unsafe impl Sync for KeyValueObserver {}
+
+impl Drop for KeyValueObserver {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.observer.as_id()).set_ivar("callback", 0 as *mut c_void);
+        }
+    }
+}
+
+impl KeyValueObserver {
+    pub fn new(target: ObjcId, name: ObjcId, callback: Box<dyn Fn()>) -> Self {
+        unsafe {
+            let double_box = Box::new(callback);
+            //let cocoa_app = get_cocoa_app_global();
+            let observer = RcObjcId::from_owned(msg_send![get_cocoa_class_global().key_value_observing_delegate, alloc]);
+            
+            (*observer.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
+            
+            let () = msg_send![
+                target,
+                addObserver: observer.as_id()
+                forKeyPath: name
+                options: 15u64 // if its not 1+2+4+8 it does nothing
+                context: nil
+            ];
+            Self {
+                _callback: double_box,
+                observer
+            }
+        }
+        
+    }
+}
+
+pub fn define_key_value_observing_delegate() -> *const Class {
+    
+    extern fn observe_value_for_key_path(
+        this: &Object,
+        _: Sel,
+        _key_path: ObjcId,
+        _of_object: ObjcId,
+        _change: ObjcId,
+        _data: *mut std::ffi::c_void
+    ) {
+        unsafe {
+            let ptr: *const c_void = *this.get_ivar("key_value_observer_callback");
+            if ptr == 0 as *const c_void { // owner gone
+                return
+            }
+            (*(ptr as *const Box<dyn Fn()>))();
+        }
+    }
+    
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("KeyValueObservingDelegate", superclass).unwrap();
+    
+    // Add callback methods
+    unsafe {
+        decl.add_method(
+            sel!(observeValueForKeyPath: ofObject: change: context:),
+            observe_value_for_key_path as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId, *mut std::ffi::c_void)
+        );
+    }
+    // Store internal state as user data
+    decl.add_ivar::<*mut c_void>("key_value_observer_callback");
+    
+    return decl.register();
+}
+
 
 #[derive(Default)]
 pub struct AudioUnitAccess {
