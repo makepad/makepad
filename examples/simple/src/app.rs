@@ -12,7 +12,8 @@ live_design!{
     import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
-    import makepad_widgets::frame::Image;
+    import makepad_widgets::image::Image;
+    import makepad_widgets::frame::Frame;
     import makepad_widgets::text_input::TextInput;
     
     // The `{{App}}` syntax is used to inherit a DSL object from a Rust struct. This tells the
@@ -92,7 +93,7 @@ live_design!{
             }
             input1 = <TextInput> {
                 walk: {width: 100, height: 30},
-                label: "Click to count"
+                text: "Click to count"
             }
             
             // A label to display the counter.

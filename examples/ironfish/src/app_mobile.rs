@@ -5,6 +5,7 @@ live_design!{
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
     
+    import makepad_widgets::image::Image;
     import makepad_widgets::label::Label;
     import makepad_widgets::drop_down::DropDown;
     import makepad_widgets::button::Button;
@@ -601,7 +602,7 @@ live_design!{
             <FillerX> {}
 
             <Image> {
-                image: dep("crate://self/resources/tinrs_mobile.png"),
+                source: dep("crate://self/resources/tinrs_mobile.png"),
                 walk: {width: (178 * 0.175), height: (121 * 0.175), margin: { top: 0.0, right: 0.0, bottom: 0.0, left: 10.0 } }
                 layout: {padding: 0}
             }
