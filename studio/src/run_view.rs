@@ -151,8 +151,8 @@ impl RunView {
                     self.last_size = new_size;
                     process.texture.set_desc(cx, TextureDesc {
                         format: TextureFormat::SharedBGRA(0),
-                        width: Some(new_size.0),
-                        height: Some(new_size.1),
+                        width: Some(new_size.0.max(1)),
+                        height: Some(new_size.1.max(1)),
                     });
                     
                     manager.send_host_to_stdin(Some(process.cmd_id), HostToStdin::WindowSize(StdinWindowSize {

@@ -25,7 +25,7 @@ impl History {
     ) {
         if self
             .current_edit
-            .map_or(false, |current_edit| current_edit == (origin_id, kind))
+            .map_or(false, |(current_origin_id, current_kind)| current_origin_id == origin_id && current_kind.can_merge(kind))
         {
             self.undos.last_mut().unwrap().1.extend(inverted_changes);
         } else {
@@ -45,6 +45,7 @@ impl History {
                 text.apply_change(inverted_change);
                 changes.push(change);
             }
+            changes.reverse();
             self.redos.push((selections.clone(), changes.clone()));
             Some((selections, inverted_changes))
         } else {
@@ -55,10 +56,12 @@ impl History {
     pub fn redo(&mut self, text: &mut Text) -> Option<(Vec<Selection>, Vec<Change>)> {
         if let Some((selections, changes)) = self.redos.pop() {
             self.current_edit = None;
+            let mut inverted_changes = Vec::new();
             for change in changes.iter().cloned() {
+                inverted_changes.push(change.clone().invert(&text));
                 text.apply_change(change);
             }
-            self.undos.push((selections.clone(), changes.clone()));
+            self.undos.push((selections.clone(), inverted_changes));
             Some((selections, changes))
         } else {
             None
@@ -72,6 +75,17 @@ pub enum EditKind {
     Delete,
     Indent,
     Outdent,
+    Space,
+    Other
+}
+
+impl EditKind {
+    fn can_merge(self, other: Self) -> bool {
+        if self == Self::Other {
+            return false;
+        }
+        self == other
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
