@@ -62,6 +62,7 @@ pub use {
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
     makepad_shader_compiler::makepad_error_log,
+    makepad_image_formats::image,
     makepad_derive_live::*,
     makepad_error_log::*,
     makepad_math::*,

@@ -8,6 +8,7 @@ pub use makepad_derive_widget::*;
 
 pub mod button;
 pub mod label;
+pub mod image;
 pub mod link_label;
 pub mod drop_down;
 pub mod popup_menu;
@@ -51,11 +52,13 @@ pub mod widget;
 pub mod data_binding;
 
 mod theme;
+mod image_loading_widget;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
     button::*,
     frame::*,
+    image::*,
     label::*,
     slider::*,
     check_box::*,
@@ -99,6 +102,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::slider::live_design(cx);
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
+    crate::image::live_design(cx);
     crate::frame::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);
