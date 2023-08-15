@@ -4,7 +4,9 @@ use {
         makepad_live_id::*,
         thread::Signal,
         video::*,
-        os::apple::cocoa_delegate::AvVideoCaptureCallback,
+        cocoa_app::{
+            get_cocoa_class_global,
+        },
         os::apple::apple_util::*,
         os::apple::apple_sys::*,
         makepad_objc_sys::objc_block,
@@ -323,3 +325,75 @@ impl AvCaptureAccess {
     }
     
 }
+
+pub struct AvVideoCaptureCallback {
+    _callback: Box<Box<dyn Fn(CMSampleBufferRef) + Send + 'static >>,
+    pub delegate: RcObjcId,
+}
+
+impl AvVideoCaptureCallback {
+    pub fn new(callback: Box<dyn Fn(CMSampleBufferRef) + Send + 'static>) -> Self {
+        unsafe {
+            let double_box = Box::new(callback);
+            //let cocoa_app = get_cocoa_app_global();
+            let delegate = RcObjcId::from_owned(msg_send![get_cocoa_class_global().video_callback_delegate, alloc]);
+            (*delegate.as_id()).set_ivar("callback", &*double_box as *const _ as *const c_void);
+            Self {
+                _callback: double_box,
+                delegate
+            }
+        }
+        
+    }
+}
+
+pub fn define_av_video_callback_delegate() -> *const Class {
+    
+    extern fn capture_output_did_output_sample_buffer(
+        this: &Object,
+        _: Sel,
+        _: ObjcId,
+        sample_buffer: CMSampleBufferRef,
+        _: ObjcId,
+    ) {
+        unsafe {
+            let ptr: *const c_void = *this.get_ivar("callback");
+            if ptr == 0 as *const c_void { // owner gone
+                return
+            }
+            (*(ptr as *const Box<dyn Fn(CMSampleBufferRef)>))(sample_buffer);
+        }
+    }
+    extern "C" fn capture_output_did_drop_sample_buffer(
+        _: &Object,
+        _: Sel,
+        _: ObjcId,
+        _: ObjcId,
+        _: ObjcId,
+    ) {
+        crate::log!("DROP!");
+    }
+    
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("AvVideoCaptureCallback", superclass).unwrap();
+    
+    // Add callback methods
+    unsafe {
+        decl.add_method(
+            sel!(captureOutput: didOutputSampleBuffer: fromConnection:),
+            capture_output_did_output_sample_buffer as extern fn(&Object, Sel, ObjcId, CMSampleBufferRef, ObjcId)
+        );
+        decl.add_method(
+            sel!(captureOutput: didDropSampleBuffer: fromConnection:),
+            capture_output_did_drop_sample_buffer as extern fn(&Object, Sel, ObjcId, ObjcId, ObjcId)
+        );
+        decl.add_protocol(
+            Protocol::get("AVCaptureVideoDataOutputSampleBufferDelegate").unwrap(),
+        );
+    }
+    // Store internal state as user data
+    decl.add_ivar::<*mut c_void>("callback");
+    
+    return decl.register();
+}
+

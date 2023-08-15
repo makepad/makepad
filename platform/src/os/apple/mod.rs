@@ -2,6 +2,7 @@
 pub mod apple_util;
 pub mod cocoa_delegate;
 pub mod cocoa_app;
+pub mod cocoa_app_nw;
 pub mod cocoa_window;
 pub mod apple_sys;
 pub mod metal;
