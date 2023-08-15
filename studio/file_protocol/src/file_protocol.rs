@@ -63,7 +63,7 @@ pub enum FileResponse {
     OpenFile(Result<(UnixPathBuf, String), FileError>),
     /// The result of requesting the collab server to apply a delta to a revision of the file with
     /// the given id.
-    SaveFile(Result<UnixPathBuf, FileError>),
+    SaveFile(Result<(UnixPathBuf,String,String), FileError>),
 }
 
 /// A type for representing data about a file tree.

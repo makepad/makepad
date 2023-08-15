@@ -12,7 +12,7 @@ live_design!{
     FONT_DATA = {
         font_size: 9.4,
         font: {
-            path: dep("crate://self/resources/IBMPlexSans-Text.ttf")
+            path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
     
@@ -20,7 +20,7 @@ live_design!{
         font_size: 9.4,
         top_drop: 1.2,
         font: {
-            path: dep("crate://self/resources/IBMPlexSans-Text.ttf")
+            path: dep("crate://self/resources/GoNotoKurrent-Regular.ttf")
         }
     }
     
