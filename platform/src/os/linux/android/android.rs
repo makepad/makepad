@@ -30,8 +30,6 @@ use {
             KeyEvent,
             KeyModifiers,
             KeyCode,
-            WebSocket,
-            WebSocketAutoReconnect,
             Event,
             WindowGeom,
             HttpResponseEvent,
@@ -126,7 +124,7 @@ impl Cx {
     pub fn android_load_dependencies(&mut self, to_java: &AndroidToJava) {
         for (path, dep) in &mut self.dependencies {
             if let Some(data) = to_java.read_asset(path) {
-                dep.data = Some(Ok(data))
+                dep.data = Some(Ok(Rc::new(data)))
             }
             else {
                 let message = format!("cannot load dependency {}", path);
@@ -537,14 +535,6 @@ impl CxOsApi for Cx {
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
         std::thread::spawn(f);
-    }
-    
-    fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
-        todo!()
-    }
-    
-    fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
-        todo!()
     }
 }
 

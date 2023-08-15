@@ -19,7 +19,8 @@ use {
         cell::RefCell,
         cmp,
         collections::{HashMap, HashSet},
-        iter, mem,
+        fmt::Write,
+        iter, mem, ops,
         rc::Rc,
         slice::Iter,
         sync::{
@@ -130,8 +131,7 @@ impl Session {
     }
 
     pub fn find_first_line_ending_after_y(&self, y: f64) -> usize {
-        match self
-            .y[..self.y.len( ) - 1]
+        match self.y[..self.y.len() - 1]
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
             Ok(line) => line,
@@ -140,8 +140,7 @@ impl Session {
     }
 
     pub fn find_first_line_starting_after_y(&self, y: f64) -> usize {
-        match self
-            .y[..self.y.len( ) - 1]
+        match self.y[..self.y.len() - 1]
             .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
         {
             Ok(line) => line + 1,
@@ -393,18 +392,29 @@ impl Session {
     }
 
     pub fn insert(&mut self, text: Text) {
-        self.document
-            .borrow_mut()
-            .edit(self.id, EditKind::Insert, &self.selections, |_, _, _| {
-                (Extent::zero(), Some(text.clone()), None)
-            });
+        self.document.borrow_mut().edit(
+            self.id,
+            if text.as_lines().len() == 1 && &text.as_lines()[0] == " " {
+                EditKind::Space
+            } else {
+                EditKind::Insert
+            },
+            &self.selections,
+            self.settings.use_soft_tabs,
+            self.settings.tab_column_count,
+            self.settings.indent_column_count,
+            |_, _, _| (Extent::zero(), false, Some(text.clone()), None),
+        );
     }
 
     pub fn enter(&mut self) {
         self.document.borrow_mut().edit(
             self.id,
-            EditKind::Insert,
+            EditKind::Other,
             &self.selections,
+            self.settings.use_soft_tabs,
+            self.settings.tab_column_count,
+            self.settings.indent_column_count,
             |line, index, _| {
                 (
                     if line[..index].chars().all(|char| char.is_whitespace()) {
@@ -415,6 +425,7 @@ impl Session {
                     } else {
                         Extent::zero()
                     },
+                    false,
                     Some(Text::newline()),
                     if line[..index]
                         .chars()
@@ -492,11 +503,15 @@ impl Session {
     }
 
     pub fn delete(&mut self) {
-        self.document
-            .borrow_mut()
-            .edit(self.id, EditKind::Delete, &self.selections, |_, _, _| {
-                (Extent::zero(), None, None)
-            });
+        self.document.borrow_mut().edit(
+            self.id,
+            EditKind::Delete,
+            &self.selections,
+            self.settings.use_soft_tabs,
+            self.settings.tab_column_count,
+            self.settings.indent_column_count,
+            |_, _, is_empty| (Extent::zero(), is_empty, None, None),
+        );
     }
 
     pub fn backspace(&mut self) {
@@ -504,6 +519,9 @@ impl Session {
             self.id,
             EditKind::Delete,
             &self.selections,
+            self.settings.use_soft_tabs,
+            self.settings.tab_column_count,
+            self.settings.indent_column_count,
             |line, index, is_empty| {
                 (
                     if is_empty {
@@ -515,12 +533,13 @@ impl Session {
                         } else {
                             Extent {
                                 line_count: 0,
-                                byte_count: line.graphemes().next_back().unwrap().len(),
+                                byte_count: line[..index].graphemes().next_back().unwrap().len(),
                             }
                         }
                     } else {
                         Extent::zero()
                     },
+                    false,
                     None,
                     None,
                 )
@@ -528,12 +547,30 @@ impl Session {
         );
     }
 
-    pub fn undo(&mut self) {
-        self.document.borrow_mut().undo(self.id);
+    pub fn copy(&self) -> String {
+        let mut string = String::new();
+        for range in self.selections
+            .iter()
+            .copied()
+            .merge(
+                |selection_0, selection_1| match selection_0.merge(selection_1) {
+                    Some(selection) => Ok(selection),
+                    None => Err((selection_0, selection_1)),
+                },
+            )
+            .map(|selection| selection.range())
+        {
+            write!(&mut string, "{}", self.document.borrow().text().slice(range)).unwrap();
+        }
+        string
     }
 
-    pub fn redo(&mut self) {
-        self.document.borrow_mut().redo(self.id);
+    pub fn undo(&mut self) -> bool {
+        self.document.borrow_mut().undo(self.id)
+    }
+
+    pub fn redo(&mut self) -> bool {
+        self.document.borrow_mut().redo(self.id)
     }
 
     fn update_y(&mut self) {
@@ -580,8 +617,7 @@ impl Session {
             for wrapped in line.wrappeds() {
                 match wrapped {
                     Wrapped::Text { text, .. } => {
-                        column += text
-                            .column_count(self.settings.tab_column_count);
+                        column += text.column_count(self.settings.tab_column_count);
                     }
                     Wrapped::Widget(widget) => {
                         column += widget.column_count;
@@ -792,21 +828,7 @@ impl Document {
         let mut document = Self {
             text,
             tokens,
-            inline_inlays: (0..line_count)
-                .map(|line| {
-                    if line % 5 == 0 {
-                        [
-                            (20, InlineInlay::Text("XXX".into())),
-                            (40, InlineInlay::Text("XXX".into())),
-                            (60, InlineInlay::Text("XXX".into())),
-                            (80, InlineInlay::Text("XXX".into())),
-                        ]
-                        .into()
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect(),
+            inline_inlays: (0..line_count).map(|_| Vec::new()).collect(),
             block_inlays: Vec::new(),
             history: History::new(),
             tokenizer: Tokenizer::new(line_count),
@@ -827,10 +849,14 @@ impl Document {
         origin_id: SessionId,
         kind: EditKind,
         selections: &[Selection],
-        mut f: impl FnMut(&String, usize, bool) -> (Extent, Option<Text>, Option<Text>),
+        use_soft_tabs: bool,
+        tab_column_count: usize,
+        indent_column_count: usize,
+        mut f: impl FnMut(&String, usize, bool) -> (Extent, bool, Option<Text>, Option<Text>),
     ) {
         let mut changes = Vec::new();
         let mut inverted_changes = Vec::new();
+        let mut line_ranges = Vec::new();
         let mut point = Point::zero();
         let mut prev_range_end = Point::zero();
         for range in selections
@@ -855,56 +881,197 @@ impl Document {
                 changes.push(change);
                 inverted_changes.push(inverted_change);
             }
-            let (delete_extent, insert_text_before, insert_text_after) = f(
+            let (delete_extent_before, delete_after, insert_text_before, insert_text_after) = f(
                 &self.text.as_lines()[point.line],
                 point.byte,
                 range.is_empty(),
             );
-            if delete_extent != Extent::zero() {
-                if delete_extent.line_count == 0 {
-                    point.byte -= delete_extent.byte_count;
+            if delete_extent_before != Extent::zero() {
+                if delete_extent_before.line_count == 0 {
+                    point.byte -= delete_extent_before.byte_count;
                 } else {
-                    point.line -= delete_extent.line_count;
-                    point.byte = self.text.as_lines()[point.line].len() - delete_extent.byte_count;
+                    point.line -= delete_extent_before.line_count;
+                    point.byte = self.text.as_lines()[point.line].len() - delete_extent_before.byte_count;
                 }
                 let change = Change {
                     drift: Drift::Before,
-                    kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent)),
+                    kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent_before)),
                 };
                 let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
                 changes.push(change);
                 inverted_changes.push(inverted_change);
             }
+            if delete_after {
+                let delete_extent_after = if let Some(grapheme) = self.text.as_lines()[point.line][point.byte..].graphemes().next() {
+                    Some(Extent { line_count: 0, byte_count: grapheme.len() })
+                } else if point.line < self.text.as_lines().len() - 1 {
+                    Some(Extent { line_count: 1, byte_count: 0 })
+                } else {
+                    None
+                };
+                if let Some(delete_extent_after) = delete_extent_after {
+                    let change = Change {
+                        drift: Drift::Before,
+                        kind: ChangeKind::Delete(Range::from_start_and_extent(point, delete_extent_after)),
+                    };
+                    let inverted_change = change.clone().invert(&self.text);
+                    self.text.apply_change(change.clone());
+                    changes.push(change);
+                    inverted_changes.push(inverted_change);
+                }
+            }
             if let Some(insert_text_before) = insert_text_before {
+                let line_count = insert_text_before.as_lines().len();
+                if line_count > 1 {
+                    line_ranges.push(
+                        (if self.text.as_lines()[point.line][..point.byte]
+                            .chars()
+                            .all(|char| char.is_whitespace())
+                        {
+                            point.line
+                        } else {
+                            point.line + 1
+                        })..point.line + line_count,
+                    );
+                }
                 let extent = insert_text_before.extent();
                 let change = Change {
                     drift: Drift::Before,
                     kind: ChangeKind::Insert(point, insert_text_before),
                 };
-                let inverted_change = change.clone().invert(&self.text);
                 point += extent;
+                let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
                 changes.push(change);
                 inverted_changes.push(inverted_change);
             }
             if let Some(insert_text_after) = insert_text_after {
+                let line_count = insert_text_after.as_lines().len();
+                if line_count > 1 {
+                    line_ranges.push(
+                        (if self.text.as_lines()[point.line][..point.byte]
+                            .chars()
+                            .all(|char| char.is_whitespace())
+                        {
+                            point.line
+                        } else {
+                            point.line + 1
+                        })..point.line + line_count,
+                    );
+                }
                 let extent = insert_text_after.extent();
                 let change = Change {
                     drift: Drift::After,
                     kind: ChangeKind::Insert(point, insert_text_after),
                 };
-                let inverted_change = change.clone().invert(&self.text);
                 point += extent;
+                let inverted_change = change.clone().invert(&self.text);
                 self.text.apply_change(change.clone());
                 changes.push(change);
                 inverted_changes.push(inverted_change);
             }
             prev_range_end = range.end();
         }
+        self.autoindent(
+            &line_ranges,
+            use_soft_tabs,
+            tab_column_count,
+            indent_column_count,
+            &mut changes,
+            &mut inverted_changes,
+        );
         self.history
             .edit(origin_id, kind, selections, inverted_changes);
         self.apply_changes(origin_id, None, &changes);
+    }
+
+    fn autoindent(
+        &mut self,
+        line_ranges: &[ops::Range<usize>],
+        use_soft_tabs: bool,
+        tab_column_count: usize,
+        indent_column_count: usize,
+        changes: &mut Vec<Change>,
+        inverted_changes: &mut Vec<Change>,
+    ) {
+        fn next_line_indentation_column_count(
+            line: &str,
+            tab_column_count: usize,
+            indent_column_count: usize,
+        ) -> Option<usize> {
+            if let Some(indentation) = line.indentation() {
+                let mut indentation_column_count = indentation.column_count(tab_column_count);
+                if line
+                    .chars()
+                    .rev()
+                    .find_map(|char| {
+                        if char.is_opening_delimiter() {
+                            return Some(true);
+                        }
+                        if char.is_closing_delimiter() {
+                            return Some(false);
+                        }
+                        None
+                    })
+                    .unwrap_or(false)
+                {
+                    indentation_column_count += indent_column_count;
+                };
+                Some(indentation_column_count)
+            } else {
+                None
+            }
+        }
+
+        for line_range in line_ranges
+            .iter()
+            .cloned()
+            .merge(|line_range_0, line_range_1| {
+                if line_range_0.end >= line_range_1.start {
+                    Ok(line_range_0.start..line_range_1.end)
+                } else {
+                    Err((line_range_0, line_range_1))
+                }
+            })
+        {
+            let mut desired_indentation_column_count = self.text.as_lines()[..line_range.start]
+                .iter()
+                .rev()
+                .find_map(|line| {
+                    next_line_indentation_column_count(line, tab_column_count, indent_column_count)
+                })
+                .unwrap_or(0);
+            for line in line_range {
+                if self.text.as_lines()[line]
+                    .chars()
+                    .find_map(|char| {
+                        if char.is_closing_delimiter() {
+                            return Some(true);
+                        }
+                        if !char.is_whitespace() {
+                            return Some(false);
+                        }
+                        None
+                    })
+                    .unwrap_or(false)
+                {
+                    desired_indentation_column_count -= 4;
+                }
+                self.edit_lines_internal(line, changes, inverted_changes, |line| {
+                    reindent(line, use_soft_tabs, tab_column_count, |_| {
+                        desired_indentation_column_count
+                    })
+                });
+                if let Some(next_line_indentation_column_count) = next_line_indentation_column_count(
+                    &self.text.as_lines()[line],
+                    tab_column_count,
+                    indent_column_count,
+                ) {
+                    desired_indentation_column_count = next_line_indentation_column_count;
+                }
+            }
+        }
     }
 
     fn edit_lines(
@@ -977,15 +1144,21 @@ impl Document {
         self.history.force_new_edit_group()
     }
 
-    fn undo(&mut self, origin_id: SessionId) {
+    fn undo(&mut self, origin_id: SessionId) -> bool {
         if let Some((selections, changes)) = self.history.undo(&mut self.text) {
             self.apply_changes(origin_id, Some(selections), &changes);
+            true
+        } else {
+            false
         }
     }
 
-    fn redo(&mut self, origin_id: SessionId) {
+    fn redo(&mut self, origin_id: SessionId) -> bool {
         if let Some((selections, changes)) = self.history.redo(&mut self.text) {
             self.apply_changes(origin_id, Some(selections), &changes);
+            true
+        } else {
+            false
         }
     }
 

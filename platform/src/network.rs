@@ -1,14 +1,14 @@
 use crate::makepad_micro_serde::*;
 use crate::makepad_live_id::*;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::str;
 #[derive(PartialEq, Debug)]
 pub struct HttpRequest {
     pub id: LiveId,
     pub url: String,
     pub method: Method,
-    pub headers: HashMap<String, Vec<String>>,
+    pub headers: BTreeMap<String, Vec<String>>,
     pub body: Option<Vec<u8>>,
 }
 
@@ -18,7 +18,7 @@ impl HttpRequest {
             id,
             url,
             method,
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
             body: None
         }
     }
@@ -55,7 +55,7 @@ impl HttpRequest {
 pub struct HttpResponse {
     pub id: LiveId,
     pub status_code: u16,
-    pub headers: HashMap<String, Vec<String>>,
+    pub headers: BTreeMap<String, Vec<String>>,
     pub body: Option<Vec<u8>>,
 }
 
@@ -99,8 +99,8 @@ impl HttpResponse {
         }
     }
 
-    fn parse_headers(headers_string: String) -> HashMap<String, Vec<String>> {
-        let mut headers = HashMap::new();
+    fn parse_headers(headers_string: String) -> BTreeMap<String, Vec<String>> {
+        let mut headers = BTreeMap::new();
         for line in headers_string.lines() {
             let mut split = line.split(":");
             let key = split.next().unwrap();
