@@ -2,10 +2,9 @@ use {
     std::collections::hash_map::HashMap,
     crate::{
         makepad_derive_widget::*,
-        makepad_image_formats::jpeg,
-        makepad_image_formats::png,
         makepad_draw::*,
         widget::*,
+        image_loading_widget::*,
         scroll_bars::ScrollBars,
     },
 };
@@ -298,8 +297,9 @@ live_design!{
             return Pal::premul(self.get_color())
         }
     }}
-    
-    Image = <Frame> {show_bg: true, draw_bg: {
+
+    // Legacy Image widget that is being replaced with the new Image widget
+    ImageFrame = <Frame> {show_bg: true, draw_bg: {
         texture image: texture2d
         instance image_scale: vec2(1.0, 1.0)
         instance image_pan: vec2(0.0, 0.0)
@@ -425,6 +425,20 @@ struct FrameTextureCache {
     color_texture: Texture,
 }
 
+impl ImageLoadingWidget for Frame {
+    fn image_filename(&self) -> &LiveDependency {
+        &self.image
+    }
+
+    fn get_texture(&self) -> &Option<Texture> {
+        &self.image_texture
+    }
+
+    fn set_texture(&mut self, texture: Option<Texture>) {
+        self.image_texture = texture;
+    }
+}
+
 impl LiveHook for Frame {
     fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, Frame)
@@ -438,7 +452,7 @@ impl LiveHook for Frame {
         }
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
@@ -447,58 +461,18 @@ impl LiveHook for Frame {
                 self.scroll_bars_obj = Some(Box::new(ScrollBars::new_from_ptr(cx, self.scroll_bars)));
             }
         }
-        // lets load the image resource
-        let image_path = self.image.as_str();
-        if image_path.len()>0 {
-            let mut image_buffer = None;
-            match cx.get_dependency(image_path) {
-                Ok(data) => {
-                    if image_path.ends_with(".jpg") {
-                        match jpeg::decode(&data) {
-                            Ok(image) => {
-                                if self.image_scale != 0.0 {
-                                    self.walk = Walk::fixed_size(DVec2 {x: image.width as f64 * self.image_scale, y: image.height as f64 * self.image_scale});
-                                }
-                                image_buffer = Some(image);
-                            }
-                            Err(err) => {
-                                cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
-                            }
-                        }
+
+        self.after_apply_for_image_loading_widget(cx, from, index, nodes);
+
+        if let Some(image_texture) = &mut self.image_texture {
+            if self.image_scale != 0.0 {
+                let texture_desc = image_texture.get_desc(cx);
+                self.walk = Walk::fixed_size(
+                    DVec2 {
+                        x: texture_desc.width.unwrap() as f64 * self.image_scale,
+                        y: texture_desc.height.unwrap() as f64 * self.image_scale
                     }
-                    else if image_path.ends_with(".png") {
-                        match png::decode(&data) {
-                            Ok(image) => {
-                                if self.image_scale != 0.0 {
-                                    self.walk = Walk::fixed_size(DVec2 {x: image.width as f64 * self.image_scale, y: image.height as f64 * self.image_scale});
-                                }
-                                image_buffer = Some(image);
-                            }
-                            Err(err) => {
-                                cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
-                            }
-                        }
-                    }
-                    else {
-                        cx.apply_image_type_not_supported(live_error_origin!(), index, nodes, image_path);
-                    }
-                }
-                Err(err) => {
-                    cx.apply_resource_not_loaded(live_error_origin!(), index, nodes, image_path, &err);
-                }
-            }
-            if let Some(mut image_buffer) = image_buffer.take() {
-                if self.image_texture.is_none() {
-                    self.image_texture = Some(Texture::new(cx));
-                }
-                if let Some(image_texture) = &mut self.image_texture {
-                    image_texture.set_desc(cx, TextureDesc {
-                        format: TextureFormat::ImageBGRA,
-                        width: Some(image_buffer.width),
-                        height: Some(image_buffer.height),
-                    });
-                    image_texture.swap_image_u32(cx, &mut image_buffer.data);
-                }
+                );
             }
         }
     }
@@ -553,18 +527,6 @@ pub enum FrameAction {
 }
 
 impl FrameRef {
-    /*
-    pub fn handle_event(&self, cx: &mut Cx, event: &Event) -> WidgetActions {
-        self.0.handle_widget_event(cx, event)
-    }
-    
-    pub fn draw(&self, cx: &mut Cx2d,) -> WidgetDraw {
-        if let Some(mut inner) = self.inner_mut() {
-            return inner.draw(cx)
-        }
-        WidgetDraw::done()
-    }*/
-    
     pub fn cut_state(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.cut_state(cx, state);
@@ -824,10 +786,6 @@ impl Frame {
     
     pub fn area(&self) -> Area {
         self.area
-    }
-    
-    pub fn draw(&mut self, cx: &mut Cx2d,) -> WidgetDraw {
-        self.draw_walk(cx, self.get_walk())
     }
     
     pub fn walk_from_previous_size(&self, walk: Walk) -> Walk {

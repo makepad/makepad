@@ -15,12 +15,14 @@ use {
         makepad_live_id::*,
         cx::Cx,
         os::{CxOsTexture},
-        live_traits::*
-    }
+        live_traits::*,
+    },
+    std::rc::Rc,
 };
 
 
-pub struct Texture(PoolId);
+#[derive(Clone)]
+pub struct Texture(Rc<PoolId>);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct TextureId(pub (crate) usize, u64);
@@ -33,7 +35,7 @@ impl Texture {
 pub struct CxTexturePool(pub (crate) IdPool<CxTexture>);
 impl CxTexturePool {
     pub fn alloc(&mut self) -> Texture {
-        Texture(self.0.alloc())
+        Texture(Rc::new(self.0.alloc()))
     }
 }
 
