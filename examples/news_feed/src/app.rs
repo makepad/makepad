@@ -243,7 +243,7 @@ live_design!{
         layout: {flow: Down, padding: 0.0, spacing: 0.0}
         
         hero = <Image> {
-            image: (IMG_A),
+            source: (IMG_A),
             //image_scale: 1.0,
             walk: {margin: 0, width: Fill, height: 200}
             layout: {padding: 0}
@@ -358,7 +358,7 @@ impl AppMain for App {
         for (item_id, item) in news_feeds.items_with_actions(&actions) {
             // check for actions inside the list item
             if item.get_button(id!(likes)).clicked(&actions) {
-                log!("Live {}", item_id);
+                //log!("Live {}", item_id);
             }
         }
         
