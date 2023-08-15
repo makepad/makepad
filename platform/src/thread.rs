@@ -61,7 +61,7 @@ impl<T> Clone for ToUISender<T> {
     }
 }
 
-unsafe impl<T> Send for ToUISender<T> {}
+unsafe impl<T: Send> Send for ToUISender<T> {}
 
 impl<T> Default for ToUIReceiver<T> {
     fn default() -> Self {
@@ -124,7 +124,7 @@ pub struct FromUISender<T> {
     sender: Sender<T>,
 }
 
-unsafe impl<T> Send for FromUIReceiver<T> {}
+unsafe impl<T: Send> Send for FromUIReceiver<T> {}
 
 impl<T> Default for FromUISender<T> {
     fn default() -> Self {
