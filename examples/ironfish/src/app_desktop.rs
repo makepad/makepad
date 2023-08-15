@@ -5,6 +5,7 @@ live_design!{
     import makepad_widgets::frame::*;
     import makepad_draw::shader::std::*;
     
+    import makepad_widgets::image::Image;
     import makepad_widgets::scroll_bars::ScrollBars;
     import makepad_widgets::label::Label;
     import makepad_widgets::link_label::LinkLabel;
@@ -1846,10 +1847,11 @@ live_design!{
                 }
                 
                 <Image> {
-                    image: dep("crate://self/resources/tinrs.png"),
+                    source: dep("crate://self/resources/tinrs.png"),
                     walk: {width: (1000 * 0.175), height: (175 * 0.175), margin: 0}
                     layout: {padding: 0}
                 }
+
             }
             
             <FillerV> {}
