@@ -1,4 +1,4 @@
-use crate::{network::*, makepad_live_id::*};
+use crate::{makepad_live_id::*};
 use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::fs;
@@ -80,7 +80,7 @@ impl App {
     // The response will be received and processed by AppMain's handle_event.
     fn send_prompt(&self, cx: &mut Cx, text_input: String) {
         let url = format!("http://{}/prompt", COMFYUI_BASE_URL);
-        let mut request = HttpRequest::new(url, Method::POST);
+        let mut request = HttpRequest::new(url, HttpMethod::POST);
         
         request.set_header("Content-Type".to_string(), "application/json".to_string());
         
@@ -97,8 +97,8 @@ impl App {
     
     fn open_web_socket(&self, cx: &mut Cx) {
         let url = format!("ws://{}/ws?clientId={}", COMFYUI_BASE_URL, CLIENT_ID);
-        let request = HttpRequest::new(url, Method::GET);
-        cx.web_socket_open(live_id!(Socket), request, AutoReconnect::Yes);
+        let request = HttpRequest::new(url, HttpMethod::GET);
+        cx.web_socket_open(live_id!(Socket), request);
     }
 }
 
