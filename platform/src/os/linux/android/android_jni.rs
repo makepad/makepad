@@ -3,7 +3,7 @@
 use {
     std::rc::Rc,
     self::super::{
-        jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
+        jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, jboolean, JNIEnv, JNI_ABORT},
     },
     crate::{
         area::Area,
@@ -797,7 +797,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpRequestError(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoDecoded(
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoStream(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
@@ -806,14 +806,16 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoDecoded(
     video_height: jint,
     frame_rate: jint,
     timestamp: jlong,
+    is_eos: jboolean,
     callback: jobject,
 ) {
-    (*(cx as *mut Cx)).from_java_on_video_decoded(
+    (*(cx as *mut Cx)).from_java_on_video_stream(
         java_byte_array_to_vec(env, pixel_data),
         video_width as u32,
         video_height as u32,
         frame_rate as usize,
         timestamp as u64,
+        is_eos != 0,
         AndroidToJava {
             env,
             callback,

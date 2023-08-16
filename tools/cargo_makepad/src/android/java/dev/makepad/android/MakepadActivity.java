@@ -405,15 +405,17 @@ Makepad.Callback{
             extractor.selectTrack(trackIndex);
             MediaFormat format = extractor.getTrackFormat(trackIndex);
 
-            int frameRate = 30;
-            if (format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
-                frameRate = format.getInteger(MediaFormat.KEY_FRAME_RATE);
-                Log.e("Makepad", "FRAME RATE:" + frameRate);
-            }
+            long duration = format.getLong(MediaFormat.KEY_DURATION); // in microseconds
+            int frameRate = format.containsKey(MediaFormat.KEY_FRAME_RATE) 
+                ? format.getInteger(MediaFormat.KEY_FRAME_RATE) 
+                : 30; // defaulting to 30 fps
+            long totalFrames = (duration / 1_000_000) * frameRate;
+
+            // Assuming you have a method to send the estimated total number of frames to Rust:
+            // Makepad.sendTotalFramesEstimation(mCx, totalFrames);
 
             String mime = format.getString(MediaFormat.KEY_MIME);
             MediaCodec codec = MediaCodec.createDecoderByType(mime);
-            // format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar);
             codec.configure(format, null, null, 0);
             codec.start();
 
@@ -441,7 +443,7 @@ Makepad.Callback{
                     }
                 }
 
-                int outputBufferIndex = codec.dequeueOutputBuffer(info, 2000); 
+                int outputBufferIndex = codec.dequeueOutputBuffer(info, 2000);
                 if (outputBufferIndex >= 0) {
                     ByteBuffer outputBuffer = codec.getOutputBuffer(outputBufferIndex);
                     byte[] pixelData = new byte[info.size];
@@ -456,8 +458,15 @@ Makepad.Callback{
                     // MediaFormat outputFormat = codec.getOutputFormat();
                     // int actualColorFormat = outputFormat.getInteger(MediaFormat.KEY_COLOR_FORMAT);
 
-                    Makepad.onVideoDecoded(mCx, pixelData, videoWidth, videoHeight, frameRate, info.presentationTimeUs, (Makepad.Callback)mView.getContext());
-                    // break;
+                    Makepad.onVideoStream(mCx, 
+                        pixelData, 
+                        videoWidth, 
+                        videoHeight, 
+                        frameRate, 
+                        info.presentationTimeUs, 
+                        (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0,
+                        (Makepad.Callback)mView.getContext()
+                    );
                 }
             }
 
