@@ -464,7 +464,7 @@ Makepad.Callback{
                         videoHeight, 
                         frameRate, 
                         info.presentationTimeUs, 
-                        (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0,
+                        outputEos,
                         (Makepad.Callback)mView.getContext()
                     );
                 }
@@ -472,7 +472,6 @@ Makepad.Callback{
 
             codec.stop();
             codec.release();
-
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
