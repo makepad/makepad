@@ -224,8 +224,8 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmWebSocketOpen(args) {
-        let auto_reconnect = args.auto_reconnect;
-        let web_socket_id = args.web_socket_id;
+        let id_lo = args.id_lo;
+        let id_hi = args.id_hi;
         let url = args.url;
         let web_socket = new WebSocket(args.url);
         web_socket.binaryType = "arraybuffer";
@@ -235,24 +235,25 @@ export class WasmWebBrowser extends WasmBridge {
             console.log("Auto reconnecting websocket");
             this.to_wasm.ToWasmWebSocketClose({web_socket_id})
             this.do_wasm_pump();
-            if (auto_reconnect) {
-                this.FromWasmWebSocketOpen({
-                    web_socket_id,
-                    auto_reconnect,
-                    url
-                });
-            }
         }
         web_socket.onerror = e => {
             console.error("Websocket error", e);
-            this.to_wasm.ToWasmWebSocketError({web_socket_id, error: "" + e})
+            this.to_wasm.ToWasmWebSocketError({id_lo,id_hi, error: "" + e})
             this.do_wasm_pump();
         }
         web_socket.onmessage = e => {
-            this.to_wasm.ToWasmWebSocketMessage({
-                web_socket_id,
-                data: e.data
-            })
+            if(typeof e.data == "string"){
+                this.to_wasm.ToWasmWebSocketString({
+                    id_lo,id_hi,
+                    data: e.data
+                })
+            }
+            else{
+                this.to_wasm.ToWasmWebSocketBinary({
+                    id_lo,id_hi,
+                    data: e.data
+                })
+            }
             this.do_wasm_pump();
         }
         web_socket.onopen = e => {
@@ -260,7 +261,7 @@ export class WasmWebBrowser extends WasmBridge {
                 web_socket.send(item);
             }
             web_socket._queue.length = 0;
-            this.to_wasm.ToWasmWebSocketOpen({web_socket_id});
+            this.to_wasm.ToWasmWebSocketOpen({id_lo,id_hi});
             this.do_wasm_pump();
         }
         web_socket._queue = []

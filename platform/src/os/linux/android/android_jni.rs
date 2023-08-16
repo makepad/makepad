@@ -5,11 +5,11 @@ use {
         jni_sys::{jclass, jsize, jint, jbyte, jlong, jstring, jfloat, jobject, JNIEnv, JNI_ABORT},
     },
     crate::{
+        makepad_live_id::*,
         area::Area,
         makepad_math::*,
         event::*,
         cx::{Cx, AndroidParams},
-        network::*,
     },
     std::{
         cell::Cell,
@@ -249,7 +249,7 @@ impl<'a> AndroidToJava<'a> {
         }
     }
     
-    pub fn http_request(&self, request: HttpRequest) {
+    pub fn http_request(&self, id:LiveId, request: HttpRequest) {
         unsafe {
             let url = CString::new(request.url.clone()).unwrap();
             let url = ((**self.env).NewStringUTF.unwrap())(self.env, url.as_ptr());
@@ -289,7 +289,7 @@ impl<'a> AndroidToJava<'a> {
                 self.env,
                 self.callback,
                 method_id,
-                request.id.get_value() as jlong,
+                id.get_value() as jlong,
                 url,
                 method,
                 headers,

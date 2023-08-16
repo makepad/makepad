@@ -15,12 +15,14 @@ use {
         //libc_sys,
     },
     crate::{
-        network::*,
         cx_api::{CxOsOp, CxOsApi},
         makepad_math::*,
         thread::Signal,
         live_id::LiveId,
         event::{
+            NetworkResponseEvent,
+            NetworkResponse,
+            HttpResponse,
             TouchPoint,
             TouchUpdateEvent,
             WindowGeomChangeEvent,
@@ -32,8 +34,6 @@ use {
             KeyCode,
             Event,
             WindowGeom,
-            HttpResponseEvent,
-            HttpRequestErrorEvent,
         },
         window::CxWindowPool,
         pass::CxPassParent,
@@ -353,25 +353,27 @@ impl Cx {
     }
 
     pub fn from_java_on_http_response(&mut self, id: u64, status_code: u16, headers: String, body: Vec<u8>, to_java: AndroidToJava) {
-        let e = Event::HttpResponse(
-            HttpResponseEvent { response: HttpResponse::new(
-                LiveId(id),
-                status_code,
-                headers,
-                Some(body)
-            ) }
-        );
+        let e = Event::NetworkResponses(vec![
+            NetworkResponseEvent{
+                id: LiveId(id),
+                response: NetworkResponse::HttpResponse(HttpResponse::new(
+                    status_code,
+                    headers,
+                    Some(body)
+                ))
+            }
+        ]);
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
 
     pub fn from_java_on_http_request_error(&mut self, id: u64, error: String, to_java: AndroidToJava) {
-        let e = Event::HttpRequestError(
-            HttpRequestErrorEvent { 
+        let e = Event::NetworkResponses(vec![
+            NetworkResponseEvent{
                 id: LiveId(id),
-                error
+                response: NetworkResponse::HttpRequestError(error)
             }
-        );
+        ]);
         self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
@@ -516,8 +518,8 @@ impl Cx {
                 CxOsOp::ShowClipboardActions(selected) => {
                     to_java.show_clipboard_actions(selected.as_str());
                 },
-                CxOsOp::HttpRequest(request) => {
-                    to_java.http_request(request)
+                CxOsOp::HttpRequest{id, request} => {
+                    to_java.http_request(id, request)
                 },
                 _ => ()
             }

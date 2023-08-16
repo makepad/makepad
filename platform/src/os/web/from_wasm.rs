@@ -110,9 +110,8 @@ pub struct FromWasmHideTextIME {
 
 #[derive(FromWasm)]
 pub struct FromWasmWebSocketOpen {
-    pub socket_id_lo: u32,
-    pub socket_id_hi: u32,
-    pub auto_reconnect: bool,
+    pub id_lo: u32,
+    pub id_hi: u32,
     pub url: String,
     pub method: String,
     pub headers: String,
@@ -120,10 +119,17 @@ pub struct FromWasmWebSocketOpen {
 }
 
 #[derive(FromWasm)]
-pub struct FromWasmWebSocketSend{
-    pub socket_id_lo: u32,
-    pub socket_id_hi: u32,
+pub struct FromWasmWebSocketSendBinary{
+    pub id_lo: u32,
+    pub id_hi: u32,
     pub data: WasmDataU8
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmWebSocketSendString{
+    pub id_lo: u32,
+    pub id_hi: u32,
+    pub data: String
 }
 
 #[derive(FromWasm)]
@@ -148,7 +154,8 @@ pub struct FromWasmCreateThread {
 
 #[derive(FromWasm)]
 pub struct FromWasmHTTPRequest {
-    pub id: String,
+    pub id_lo: u32,
+    pub id_hi: u32,
     pub url: String,
     pub method: String,
     pub headers: String,

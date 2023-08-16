@@ -13,8 +13,8 @@ use {
             DragItem, 
             Timer,
             Trigger,
-            AutoReconnect,
             NextFrame,
+            HttpRequest,
         },
         draw_list::{
             DrawListId
@@ -37,7 +37,6 @@ use {
             CxPassRect,
             CxPassParent
         },
-        network::HttpRequest,
     }
 };
 
@@ -73,10 +72,10 @@ pub enum CxOsOp {
     StartDragging(Vec<DragItem>),
     UpdateMenu(Menu),
     ShowClipboardActions(String),
-    HttpRequest(HttpRequest),
-    WebSocketOpen{socket_id: LiveId, request:HttpRequest, auto_reconnect:AutoReconnect},
-    WebSocketSendString{socket_id: LiveId, data:String},
-    WebSocketSendBinary{socket_id: LiveId, data:Vec<u8>},
+    HttpRequest{id:LiveId,request:HttpRequest},
+    WebSocketOpen{id: LiveId, request:HttpRequest},
+    WebSocketSendString{id: LiveId, data:String},
+    WebSocketSendBinary{id: LiveId, data:Vec<u8>},
 }
 
 impl Cx { 
@@ -392,21 +391,20 @@ impl Cx {
         &self.spawner
     }
 
-    pub fn http_request(&mut self, request: HttpRequest) {
-        self.platform_ops.push(CxOsOp::HttpRequest(request));
+    pub fn http_request(&mut self, id:LiveId, request: HttpRequest) {
+        self.platform_ops.push(CxOsOp::HttpRequest{id, request});
     }
            
-    pub fn web_socket_open(&mut self, socket_id:LiveId, request: HttpRequest, auto_reconnect: AutoReconnect) {
+    pub fn web_socket_open(&mut self, id:LiveId, request: HttpRequest) {
         self.platform_ops.push(CxOsOp::WebSocketOpen{
             request,
-            socket_id,
-            auto_reconnect
+            id,
         });
     }
     
-    pub fn web_socket_send_binary(&mut self, socket_id: LiveId, data: Vec<u8>) {
+    pub fn web_socket_send_binary(&mut self, id: LiveId, data: Vec<u8>) {
         self.platform_ops.push(CxOsOp::WebSocketSendBinary{
-            socket_id,
+            id,
             data,
         });
     }
