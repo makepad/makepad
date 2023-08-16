@@ -21,6 +21,7 @@ use {
             av_capture::define_av_video_callback_delegate,
             audio_unit::define_key_value_observing_delegate,
             cocoa_window::CocoaWindow,
+            cocoa_app_nw::define_web_socket_delegate,
             apple_util::{
                 nsstring_to_string,
                 str_to_nsstring,
@@ -99,6 +100,7 @@ pub struct CocoaClasses {
     pub view: *const Class,
     pub key_value_observing_delegate: *const Class,
     pub video_callback_delegate: *const Class,
+    pub web_socket_delegate: *const Class,
     pub const_attributes_for_marked_text: ObjcId,
     pub const_empty_string: RcObjcId,
 }
@@ -114,6 +116,7 @@ impl CocoaClasses {
             window_delegate: define_cocoa_window_delegate(),
             //post_delegate: define_cocoa_post_delegate(),
             timer_delegate: define_cocoa_timer_delegate(),
+            web_socket_delegate: define_web_socket_delegate(),
             menu_delegate: define_menu_delegate(),
             app_delegate: define_app_delegate(),
             menu_target: define_menu_target_class(),
@@ -143,6 +146,7 @@ pub struct CocoaApp {
     startup_focus_hack_ran: bool,
     event_callback: Option<Box<dyn FnMut(&mut CocoaApp, CocoaEvent) -> EventFlow >>,
     event_flow: EventFlow,
+    
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
     //current_ns_event: Option<ObjcId>,
