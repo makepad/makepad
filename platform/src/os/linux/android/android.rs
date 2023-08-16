@@ -34,7 +34,7 @@ use {
             WindowGeom,
             HttpResponseEvent,
             HttpRequestErrorEvent,
-            VideoDecodedEvent,
+            VideoStreamEvent ,
         },
         window::CxWindowPool,
         pass::CxPassParent,
@@ -377,13 +377,15 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_on_video_decoded(&mut self, pixel_data: Vec<u8>, video_width: u32, video_height: u32, original_frame_rate: usize, timestamp: u64, to_java: AndroidToJava) {
-        let e = Event::VideoDecoded(
-            VideoDecodedEvent { 
+    pub fn from_java_on_video_stream(&mut self, pixel_data: Vec<u8>, video_width: u32, video_height: u32, 
+        original_frame_rate: usize, timestamp: u64, is_eos: bool, to_java: AndroidToJava) {
+        let e = Event::VideoStream(
+        VideoStreamEvent  { 
                 pixel_data,
                 video_width,
                 video_height,
                 original_frame_rate,
+                is_eos,
                 timestamp 
             }
         );

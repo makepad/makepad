@@ -83,7 +83,7 @@ pub enum Event {
     HttpResponseProgress(HttpProgressEvent),
     HttpUploadProgress(HttpProgressEvent),
 
-    VideoDecoded(VideoDecodedEvent),
+    VideoStream(VideoStreamEvent ),
     
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
