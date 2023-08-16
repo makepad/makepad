@@ -106,10 +106,10 @@ impl LiveHook for Video {
     }
 
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.start_decoding(cx);
-        self.decoding_state = DecodingState::Decoding;
         // TODO: using start_timeout because start_interval doesn't repeat on android
         self.tick = cx.start_timeout(DEFAULT_FPS_INTERVAL); 
+        self.start_decoding(cx);
+        self.decoding_state = DecodingState::Decoding;
     }
 }
 
@@ -154,7 +154,6 @@ impl Video {
         if self.tick.is_event(event) {
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
             if self.frames.len() > 0 {
-                makepad_error_log::log!("draw tick");
                 self.draw(cx);
             }
         }
@@ -174,13 +173,14 @@ impl Video {
                         pixel_data: rgba_pixel_data,
                         timestamp: event.timestamp as f64 / 1_000_000.0, // Convert to seconds
                     });
-                } else if event.is_eos {
-                    makepad_error_log::log!(
-                        "DECODING FINISHED, total: {} frame",
-                        self.frames.len()
-                    );
-                    self.decoding_state = DecodingState::Finished;
-                }
+                } 
+            }
+            if event.is_eos {
+                makepad_error_log::log!(
+                    "DECODING FINISHED, total: {} frames",
+                    self.frames.len()
+                );
+                self.decoding_state = DecodingState::Finished;
             }
         }
     }
@@ -207,7 +207,8 @@ impl Video {
                 self.draw_bg
                     .draw_vars
                     .set_texture(0, self.texture.as_ref().unwrap());
-                self.draw_bg.redraw(cx);
+
+                self.redraw(cx);
 
                 // Check if we're at the last frame
                 if self.current_frame == self.frames.len() - 1 {
@@ -224,21 +225,7 @@ impl Video {
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
-        // TODO: just make draw_bg draw empty the first time
-        if let DecodingState::Decoding = self.decoding_state {
-            let mut frame = self.frames[self.current_frame].clone();
-            self.update_texture(cx, &mut frame.pixel_data);
-            self.draw_bg
-                .draw_vars
-                .set_texture(0, self.texture.as_ref().unwrap());
-            self.draw_bg.draw_walk(cx, walk);
-
-            self.current_frame = if self.current_frame < self.frames.len() - 1 {
-                self.current_frame + 1
-            } else {
-                0
-            };
-        }
+        self.draw_bg.draw_walk(cx, walk);
         WidgetDraw::done()
     }
 
