@@ -154,11 +154,12 @@ impl Video {
         if self.tick.is_event(event) {
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
             if self.frames.len() > 0 {
+                makepad_error_log::log!("draw tick");
                 self.draw(cx);
             }
         }
 
-        if let Event::VideoDecoded(event) = event {
+        if let Event::VideoStream(event) = event {
             // just limiting amount of frames for debugging
             if self.frames.len() <= 300 {
                 if event.pixel_data.len() != 0 {
@@ -173,9 +174,9 @@ impl Video {
                         pixel_data: rgba_pixel_data,
                         timestamp: event.timestamp as f64 / 1_000_000.0, // Convert to seconds
                     });
-                } else if self.frames.len() > 0 {
+                } else if event.is_eos {
                     makepad_error_log::log!(
-                        "Finished decoding video frames, len: {}",
+                        "DECODING FINISHED, total: {} frame",
                         self.frames.len()
                     );
                     self.decoding_state = DecodingState::Finished;
@@ -263,7 +264,7 @@ impl Video {
         match cx.get_dependency(self.source.as_str()) {
             Ok(data) => {
                 cx.decode_video(data);
-                makepad_error_log::log!("Decoding started");
+                makepad_error_log::log!("DECODING BEGAN");
             }
             Err(_e) => {
                 todo!()
