@@ -22,9 +22,16 @@ live_design!{
     }
 }
 
+enum DragState {
+    None,
+    // Swipe gesture recorded by a very short amount of time, determining the flick scroll direction and speed
+    SwipeDrag {last_abs: f64, delta: f64, initial_time: f64},
+    // If it is a longer tap, it is considered a normal drag
+    NormalDrag {last_abs: f64, delta: f64}
+}
+
 enum ScrollState {
     Stopped,
-    Drag {last_abs: f64, delta: f64},
     Flick {delta: f64, next_frame: NextFrame}
 }
 
@@ -39,13 +46,14 @@ pub struct ListView {
     #[rust(10u64)] view_window: u64,
     #[live(0.1)] flick_scroll_minimum: f64,
     #[live(0.98)] flick_scroll_decay: f64,
+    #[live(0.2)] swipe_drag_duration: f64,
     #[rust] top_id: u64,
     #[rust] top_scroll: f64,
     #[live] scroll_bar: ScrollBar,
-    //    #[live] scroll_bars: ScrollBars,
     #[rust] draw_state: DrawStateWrap<ListDrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] items: ComponentMap<(u64, LiveId), WidgetRef>,
+    #[rust(DragState::None)] drag_state: DragState,
     #[rust(ScrollState::Stopped)] scroll_state: ScrollState
 }
 
@@ -89,7 +97,6 @@ impl ListView {
     
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         cx.begin_turtle(walk, self.layout);
-        // self.draw_phase = Some(DrawPhase::Begin)
     }
     
     fn end(&mut self, cx: &mut Cx2d) {
@@ -303,6 +310,8 @@ impl Widget for ListView {
                     self.delta_top_scroll(cx, delta);
                     dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
                     self.area.redraw(cx);
+                } else {
+                    self.scroll_state = ScrollState::Stopped;
                 }
             }
         }
@@ -315,24 +324,46 @@ impl Widget for ListView {
             },
             Hit::FingerDown(e) => {
                 // ok so fingerdown eh.
-                self.scroll_state = ScrollState::Drag {
+                self.drag_state = DragState::SwipeDrag {
                     last_abs: e.abs.y,
-                    delta: 0.0
+                    delta: 0.0,
+                    initial_time: e.time
                 };
             }
             Hit::FingerMove(e) => {
                 // ok we kinda have to set the scroll pos to our abs position
-                if let ScrollState::Drag {last_abs, delta} = &mut self.scroll_state {
-                    let new_delta = e.abs.y - *last_abs;
-                    *delta = new_delta;
-                    *last_abs = e.abs.y;
-                    self.delta_top_scroll(cx, new_delta);
-                    dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
-                    self.area.redraw(cx);
+                match &mut self.drag_state {
+                    DragState::SwipeDrag {last_abs, delta, initial_time} => {
+                        let new_delta = e.abs.y - *last_abs;
+                        if e.time - *initial_time < self.swipe_drag_duration {
+                            *delta = new_delta;
+                            *last_abs = e.abs.y;
+                        }
+                        else {
+                            // After a short span of time, the flick motion is considered a normal drag
+                            self.scroll_state = ScrollState::Stopped;
+                            self.drag_state = DragState::NormalDrag {
+                                last_abs: e.abs.y,
+                                delta: new_delta
+                            };
+                        }
+                        self.delta_top_scroll(cx, new_delta);
+                        dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                        self.area.redraw(cx);
+                    },
+                    DragState::NormalDrag {last_abs, delta} => {
+                        let new_delta = e.abs.y - *last_abs;
+                        *delta = new_delta;
+                        *last_abs = e.abs.y;
+                        self.delta_top_scroll(cx, new_delta);
+                        dispatch_action(cx, InfiniteListAction::Scroll.into_action(uid));
+                        self.area.redraw(cx);
+                    },
+                    DragState::None => {}
                 }
             }
             Hit::FingerUp(_) => {
-                if let ScrollState::Drag {delta, ..} = &mut self.scroll_state {
+                if let DragState::SwipeDrag {delta, ..} = &mut self.drag_state {
                     if delta.abs()>self.flick_scroll_minimum {
                         self.scroll_state = ScrollState::Flick {
                             delta: *delta,
@@ -340,6 +371,7 @@ impl Widget for ListView {
                         };
                     }
                 }
+                self.drag_state = DragState::None;
                 // ok so. lets check our gap from 'drag'
                 // here we kinda have to take our last delta and animate it
             }
