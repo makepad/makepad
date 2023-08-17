@@ -219,7 +219,7 @@ impl ListView {
         }
     }
     
-    pub fn get_item(&mut self, cx: &mut Cx2d, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+    pub fn get_item(&mut self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
         if let Some(ptr) = self.templates.get(&template) {
             let entry = self.items.get_or_insert(cx, (entry_id, template), | cx | {
                 WidgetRef::new_from_ptr(cx, Some(*ptr))
@@ -371,6 +371,15 @@ impl Widget for ListView {
 pub struct ListViewRef(WidgetRef);
 
 impl ListViewRef {
+    pub fn get_item(&self, cx: &mut Cx, entry_id: u64, template: LiveId) -> Option<WidgetRef> {
+        if let Some(mut inner) = self.borrow_mut(){
+            inner.get_item(cx, entry_id, template)
+        }
+        else{
+            None
+        }
+    }
+    
     pub fn items_with_actions(&self, actions: &WidgetActions) -> Vec<(u64, WidgetRef)> {
         let mut set = Vec::new();
         self.items_with_actions_vec(actions, &mut set);

@@ -11,7 +11,7 @@ metadata.makepad-auto-version = "7NALupLM0-i77IS85n9Q24oxdlU="
 
 [dependencies]
 makepad-platform = { path = "../platform", version = "0.3.0" }
-makepad-image-formats = { path = "./image_formats", version = "0.3.0" }
+#makepad-image-formats = { path = "./image_formats", version = "0.3.0" }
 makepad-vector = { path = "./vector", version = "0.3.0" }
 # HACK(eddyb) only a git dep until https://github.com/RazrFalcon/rustybuzz/pull/71
 # ends up being published in a release (only affects build times, not behavior).
