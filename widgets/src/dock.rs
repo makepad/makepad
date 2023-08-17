@@ -392,6 +392,9 @@ impl Dock {
             });
             return Some(entry.clone())
         }
+        else{
+            log!("ListView template not found {}", template);
+        }
         None
     }
     

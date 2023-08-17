@@ -3,65 +3,93 @@ use makepad_micro_serde::*;
 use makepad_widgets::*;
 use std::fs;
 
-const COMFYUI_BASE_URL: &str = "192.168.1.59:8188";
-
 live_design!{
     import makepad_widgets::button::Button;
     import makepad_widgets::desktop_window::DesktopWindow;
     import makepad_widgets::label::Label;
     import makepad_widgets::image::Image;
     import makepad_widgets::text_input::TextInput;
+    import makepad_widgets::image::Image;
+    import makepad_widgets::list_view::ListView;
+    import makepad_widgets::frame::*;
     
     App = {{App}} {
         ui: <DesktopWindow> {
-            
+            window: {inner_size: vec2(1024, 1024)},
             show_bg: true
             layout: {
-                flow: Down,
-                spacing: 20,
-                align: {
-                    x: 0.5,
-                    y: 0.5
-                }
+                flow: Overlay,
             },
             walk: {
                 width: Fill,
                 height: Fill
             },
             draw_bg: {
-                
                 fn pixel(self) -> vec4 {
                     return mix(#3, #1, self.geom_pos.y);
                 }
             }
-            message_label = <Label> {
-                walk: {width: 300, height: Fit},
-                draw_label: {
-                    color: #f
-                },
-                label: "hi! how may I assist you today?",
-            }
-            message_input = <TextInput> {
-                text: "Hi!"
-                walk: {width: 300, height: Fit},
-                draw_bg: {
-                    color: #1
+            
+            <Frame> {
+                walk: {height: Fill, width: Fill}
+                layout: {flow: Down}
+                message_input = <TextInput> {
+                    text: "Purple tomatoes"
+                    walk: {width: Fill, height: Fit, margin: {top: 30, left: 20, right: 20, bottom: 20}},
+                    draw_bg: {
+                        color: #1
+                    }
+                }
+                image_list = <ListView> {
+                    walk: {height: Fill, width: Fill}
+                    layout: {flow: Down}
+                    Image = <Image> {
+                        walk: {width: 1024, height: 1024}
+                    }
                 }
             }
-            send_button = <Button> {
-                icon_walk: {margin: {left: 10}, width: 16, height: Fit}
-                label: "send"
+            <Frame> {
+                layout: {
+                    align: {
+                        x: 0.5,
+                        y: 1.0
+                    }
+                },
+                message_label = <Label> {
+                    walk: {width: Fit, margin: {bottom: 20}},
+                    draw_label: {
+                        color: #f
+                    },
+                    label: "Progress",
+                }
             }
+            
         }
     }
 }
 
 app_main!(App);
 
-#[derive(Live)]
+struct Machine {
+    ip: String,
+    id: LiveId,
+}
+impl Machine {
+    fn new(ip: &str, id: LiveId) -> Self {Self {ip: ip.to_string(), id}}
+}
 
+#[derive(Live)]
 pub struct App {
     #[live] ui: WidgetRef,
+    #[rust(vec![
+        Machine::new("192.168.1.59:8188", live_id!(m1)),
+        Machine::new("192.168.1.62:8188", live_id!(m2)),
+        Machine::new("192.168.1.204:8188", live_id!(m3)),
+        Machine::new("192.168.1.154:8188", live_id!(m4)),
+        Machine::new("192.168.1.144:8188", live_id!(m5))
+    ])] machines: Vec<Machine>,
+    #[rust] num_images: u64,
+    #[rust] last_seed: u64,
 }
 
 impl LiveHook for App {
@@ -76,94 +104,162 @@ impl LiveHook for App {
 const CLIENT_ID: &'static str = "1234";
 
 impl App {
-    // This performs and event-based http request: it has no relationship with the response.
-    // The response will be received and processed by AppMain's handle_event.
-    fn send_prompt(&self, cx: &mut Cx, text_input: String) {
-        let url = format!("http://{}/prompt", COMFYUI_BASE_URL);
-        let mut request = HttpRequest::new(url, HttpMethod::POST);
-        
-        request.set_header("Content-Type".to_string(), "application/json".to_string());
-        
-        let ws = fs::read_to_string("examples/comfyui/workspace1.json").unwrap();
-        let ws = ws.replace("CLIENT_ID", CLIENT_ID);
-        let ws = ws.replace("TEXT_INPUT", &text_input);
-        let ws = ws.replace("KEYWORD_INPUT", "");
-        let ws = ws.replace("NEGATIVE_INPUT", "");
-        
-        request.set_body(ws.as_bytes().to_vec());
-        
-        cx.http_request(live_id!(SendPrompt), request);
+    fn send_prompt(&mut self, cx: &mut Cx, text_input: String) {
+        for machine in &self.machines {
+            let url = format!("http://{}/prompt", machine.ip);
+            let mut request = HttpRequest::new(url, HttpMethod::POST);
+            
+            request.set_header("Content-Type".to_string(), "application/json".to_string());
+            
+            let ws = fs::read_to_string("examples/comfyui/workspace_2048.json").unwrap();
+            let ws = ws.replace("CLIENT_ID", CLIENT_ID);
+            let ws = ws.replace("TEXT_INPUT", &text_input);
+            let ws = ws.replace("KEYWORD_INPUT", "");
+            let ws = ws.replace("NEGATIVE_INPUT", "");
+            let ws = ws.replace("11223344", &format!("{}", self.last_seed));
+            self.last_seed += 1;
+            request.set_body(ws.as_bytes().to_vec());
+            
+            cx.http_request(machine.id, request);
+        }
+    }
+    
+    fn fetch_image(&self, cx: &mut Cx, machine_id: LiveId, image_name: &str) {
+        let machine = self.machines.iter().find( | v | v.id == machine_id).unwrap();
+        let url = format!("http://{}/view?filename={}&subfolder=&type=output", machine.ip, image_name);
+        let request = HttpRequest::new(url, HttpMethod::GET);
+        cx.http_request(live_id!(fetch_image), request);
     }
     
     fn open_web_socket(&self, cx: &mut Cx) {
-        let url = format!("ws://{}/ws?clientId={}", COMFYUI_BASE_URL, CLIENT_ID);
-        let request = HttpRequest::new(url, HttpMethod::GET);
-        cx.web_socket_open(live_id!(Socket), request);
+        for machine in &self.machines {
+            let url = format!("ws://{}/ws?clientId={}", machine.ip, CLIENT_ID);
+            let request = HttpRequest::new(url, HttpMethod::GET);
+            cx.web_socket_open(machine.id, request);
+        }
+    }
+    
+    fn set_progress(&mut self, cx: &mut Cx, value: &str) {
+        let label = self.ui.get_label(id!(message_label));
+        label.set_label(value);
+        label.redraw(cx);
     }
 }
 
 impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let image_list = self.ui.get_list_view_set(ids!(image_list));
         if let Event::Draw(event) = event {
-            return self.ui.draw_widget_all(&mut Cx2d::new(cx, event));
+            let cx = &mut Cx2d::new(cx, event);
+            while let Some(next) = self.ui.draw_widget(cx).hook_widget() {
+                if let Some(mut list) = image_list.has_widget(&next).borrow_mut() {
+                    list.set_item_range(0, self.num_images, 1);
+                    while let Some(item_id) = list.next_visible_item(cx) {
+                        if item_id >= self.num_images {
+                            continue;
+                        }
+                        let item = list.get_item(cx, item_id, live_id!(Image)).unwrap();
+                        item.draw_widget_all(cx);
+                    }
+                }
+            }
+            return
         }
         
-        for event in event.network_responses(){
-            match &event.response{
-                NetworkResponse::WebSocketString(s) => {
-                    log!("Got String {}", s);
+        if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, ..}) = event {
+            let user_prompt = self.ui.get_text_input(id!(message_input)).get_text();
+            self.send_prompt(cx, user_prompt);
+            self.set_progress(cx, "Starting query");
+        }
+        
+        for event in event.network_responses() {
+            match &event.response {
+                NetworkResponse::WebSocketString(s) => match ComfyUIMessage::deserialize_json(&s) {
+                    Ok(data) => {
+                        if data._type == "executed" {
+                            if let Some(output) = &data.data.output {
+                                if let Some(image) = output.images.first() {
+                                    log!("Fetching {}", image.filename);
+                                    self.fetch_image(cx, event.id, &image.filename);
+                                }
+                            }
+                        }
+                        if data._type == "progress" {
+                            // draw the progress bar / progress somewhere
+                            self.set_progress(cx, &format!("Step {}/{}", data.data.value.unwrap_or(0), data.data.max.unwrap_or(0)))
+                        }
+                    }
+                    Err(err) => {
+                        log!("Error parsing JSON {:?} {:?}", err, s);
+                    }
                 }
                 NetworkResponse::WebSocketBinary(bin) => {
                     log!("Got Binary {}", bin.len());
                 }
+                NetworkResponse::HttpResponse(res) => if let Some(data) = res.get_body() {
+                    if event.id == live_id!(fetch_image) {
+                        // alright we got a png. lets decode it and stuff it in our image viewer
+                        let image_list = self.ui.get_list_view(id!(image_list));
+                        let image_id = self.num_images;
+                        self.num_images += 1;
+                        let item = image_list.get_item(cx, image_id, live_id!(Image)).unwrap().as_image();
+                        item.load_png_from_data(cx, data);
+                        
+                        self.ui.redraw(cx);
+                    }
+                }
                 e => {
-                    log!("{:?}", e)
+                    log!("{} {:?}", event.id, e)
                 }
             }
         }
         
-        let actions = self.ui.handle_widget_event(cx, event);
-        
-        if self.ui.get_button(id!(send_button)).clicked(&actions) {
-            let user_prompt = self.ui.get_text_input(id!(message_input)).get_text();
-            self.send_prompt(cx, user_prompt);
-        }
+        let _actions = self.ui.handle_widget_event(cx, event);
     }
 }
 
-#[derive(SerJson, DeJson)]
-struct ChatPrompt {
-    pub messages: Vec<Message>,
-    pub model: String,
-    pub max_tokens: i32
+#[allow(dead_code)]
+#[derive(DeJson, Debug)]
+struct ComfyUIMessage {
+    pub _type: String,
+    pub data: ComfyUIData
+}
+#[allow(dead_code)]
+#[derive(DeJson, Debug)]
+struct ComfyUIData {
+    pub value: Option<u32>,
+    pub max: Option<u32>,
+    pub node: Option<String>,
+    pub prompt_id: Option<String>,
+    pub nodes: Option<Vec<String >>,
+    pub status: Option<ComfyUIStatus>,
+    pub sid: Option<String>,
+    pub output: Option<ComfyUIOutput>
 }
 
-#[derive(SerJson, DeJson)]
-struct Message {
-    pub content: String,
-    pub role: String
+#[allow(dead_code)]
+#[derive(DeJson, Debug)]
+struct ComfyUIStatus {
+    pub exec_info: ComfyUIExecInfo,
 }
 
-#[derive(SerJson, DeJson)]
-struct ChatResponse {
-    pub id: String,
-    pub object: String,
-    pub created: i32,
-    pub model: String,
-    pub usage: Usage,
-    pub choices: Vec<Choice>,
+#[allow(dead_code)]
+#[derive(DeJson, Debug)]
+struct ComfyUIOutput {
+    pub images: Vec<ComfyUIImage>,
 }
 
-#[derive(SerJson, DeJson)]
-pub struct Usage {
-    prompt_tokens: i32,
-    completion_tokens: i32,
-    total_tokens: i32,
+#[allow(dead_code)]
+#[derive(DeJson, Debug)]
+struct ComfyUIImage {
+    pub filename: String,
+    pub subfolder: String,
+    pub _type: String
 }
 
-#[derive(SerJson, DeJson)]
-struct Choice {
-    message: Message,
-    finish_reason: String,
-    index: i32,
+#[allow(dead_code)]
+#[derive(DeJson, Debug)]
+struct ComfyUIExecInfo {
+    pub queue_remaining: u32
 }
+

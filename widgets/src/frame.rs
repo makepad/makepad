@@ -4,7 +4,6 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         widget::*,
-        image_loading_widget::*,
         scroll_bars::ScrollBars,
     },
 };
@@ -297,7 +296,7 @@ live_design!{
             return Pal::premul(self.get_color())
         }
     }}
-
+/*
     // Legacy Image widget that is being replaced with the new Image widget
     ImageFrame = <Frame> {show_bg: true, draw_bg: {
         texture image: texture2d
@@ -312,10 +311,7 @@ live_design!{
             let color = self.get_color();
             return Pal::premul(vec4(color.xyz, color.w * self.image_alpha))
         }
-        
-        shape: Solid,
-        fill: Image
-    }}
+    }}*/
     
     CachedFrame = <Frame> {
         optimize: Texture,
@@ -335,9 +331,6 @@ live_design!{
             fn pixel(self) -> vec4 {
                 return sample2d_rt(self.image, self.pos * self.scale + self.shift) + vec4(self.marked, 0.0, 0.0, 0.0);
             }
-            
-            shape: Solid,
-            fill: Image
         }
     }
     CachedScrollXY = <CachedFrame> {
@@ -386,10 +379,6 @@ pub struct Frame { // draw info per UI element
     
     #[live] walk: Walk,
     
-    #[live] image: LiveDependency,
-    #[live] image_texture: Option<Texture>,
-    #[live] image_scale: f64,
-    
     //#[live] use_cache: bool,
     #[live] dpi_factor: Option<f64>,
     
@@ -425,20 +414,6 @@ struct FrameTextureCache {
     color_texture: Texture,
 }
 
-impl ImageLoadingWidget for Frame {
-    fn image_filename(&self) -> &LiveDependency {
-        &self.image
-    }
-
-    fn get_texture(&self) -> &Option<Texture> {
-        &self.image_texture
-    }
-
-    fn set_texture(&mut self, texture: Option<Texture>) {
-        self.image_texture = texture;
-    }
-}
-
 impl LiveHook for Frame {
     fn before_live_design(cx: &mut Cx) {
         register_widget!(cx, Frame)
@@ -452,7 +427,7 @@ impl LiveHook for Frame {
         }
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
@@ -461,9 +436,7 @@ impl LiveHook for Frame {
                 self.scroll_bars_obj = Some(Box::new(ScrollBars::new_from_ptr(cx, self.scroll_bars)));
             }
         }
-
-        self.after_apply_for_image_loading_widget(cx, from, index, nodes);
-
+/*
         if let Some(image_texture) = &mut self.image_texture {
             if self.image_scale != 0.0 {
                 let texture_desc = image_texture.get_desc(cx);
@@ -474,7 +447,7 @@ impl LiveHook for Frame {
                     }
                 );
             }
-        }
+        */
     }
     
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
@@ -659,7 +632,7 @@ impl Widget for Frame {
             }
         }
         
-        for id in &self.draw_order {
+        for id in self.draw_order.iter().rev() {
             if let Some(child) = self.children.get_mut(id) {
                 if child.is_visible() || !event.requires_visibility() {
                     child.handle_widget_event_with(cx, event, dispatch_action);
@@ -859,9 +832,9 @@ impl Frame {
             };
             
             if self.show_bg {
-                if let Some(image_texture) = &self.image_texture {
+                /*if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
-                }
+                }*/
                 self.draw_bg.begin(cx, walk, self.layout.with_scroll(scroll).with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
             else {
