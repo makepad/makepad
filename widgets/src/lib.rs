@@ -1,5 +1,4 @@
 pub use makepad_draw::makepad_platform;
-pub use makepad_draw::makepad_image_formats;
 pub use makepad_draw;
 
 pub use makepad_derive_widget;
@@ -32,6 +31,7 @@ pub mod list_view;
 pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
+pub mod rotated_image;
 
 pub mod swipe_list;
 
@@ -52,7 +52,7 @@ pub mod widget;
 pub mod data_binding;
 
 mod theme;
-mod image_loading_widget;
+pub mod image_cache;
 
 pub use crate::{
     data_binding::{DataBindingStore, DataBindingMap},
@@ -103,6 +103,7 @@ pub fn live_design(cx: &mut Cx) {
     crate::label::live_design(cx);
     crate::nav_control::live_design(cx);
     crate::image::live_design(cx);
+    crate::rotated_image::live_design(cx);
     crate::frame::live_design(cx);
     crate::fold_button::live_design(cx);
     crate::text_input::live_design(cx);

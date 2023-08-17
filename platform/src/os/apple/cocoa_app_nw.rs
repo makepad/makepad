@@ -143,7 +143,6 @@ impl CocoaApp {
             // Build the NSURLSessionDataTask instance
             let response_handler = objc_block!(move | data: ObjcId, response: ObjcId, error: ObjcId | {
                 if error != ptr::null_mut() {
-                    crate::log!("WE GOT HERE");
                     let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
                     let message = NetworkResponseEvent {
                         id,
@@ -158,7 +157,6 @@ impl CocoaApp {
                 let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
                 let response_code: u16 = msg_send![response, statusCode];
                 let headers: ObjcId = msg_send![response, allHeaderFields];
-                
                 let mut response = HttpResponse::new(
                     response_code,
                     "".to_string(),

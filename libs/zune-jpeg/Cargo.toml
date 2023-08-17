@@ -1,0 +1,29 @@
+[package]
+name = "makepad-zune-jpeg"
+version = "0.3.17"
+authors = ["caleb <etemesicaleb@gmail.com>"]
+edition = "2021"
+repository = "https://github.com/etemesi254/zune-image/tree/dev/zune-jpeg"
+license = "MIT OR Apache-2.0 OR Zlib"
+keywords = ["jpeg", "jpeg-decoder", "decoder"]
+categories = ["multimedia::images"]
+exclude = ["/benches/images/*", "/tests/*", "/.idea/*", "/.gradle/*", "/test-images/*", "fuzz/*"]
+description = "A fast, correct and safe jpeg decoder"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+x86 = []
+neon = []
+std = ["makepad-zune-core/std"]
+default = ["x86", "neon", "std"]
+
+
+[dependencies]
+#log = "0.4.11" # logging facilities
+makepad-zune-core = { path = "../zune-core", version = "0.2" }
+
+
+#[dev-dependencies]
+#zune-ppm = { path = "../zune-ppm" }
