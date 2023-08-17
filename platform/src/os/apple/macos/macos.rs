@@ -417,7 +417,7 @@ impl Cx {
                     cocoa_app.make_http_request(id, request, self.os.network_response.sender.clone());
                 },
                 CxOsOp::ShowClipboardActions(_request) => {
-                    todo!()
+                    crate::log!("Show clipboard actions not supported yet");
                 }
                 CxOsOp::WebSocketOpen{id, request}=>{
                     cocoa_app.web_socket_open(id, request, self.os.network_response.sender.clone());
