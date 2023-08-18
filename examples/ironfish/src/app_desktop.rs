@@ -1849,7 +1849,6 @@ live_design!{
                 <Image> {
                     source: dep("crate://self/resources/tinrs.png"),
                     walk: {width: (1000 * 0.175), height: (175 * 0.175), margin: 0}
-                    layout: {padding: 0}
                 }
 
             }

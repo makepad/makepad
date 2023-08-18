@@ -44,7 +44,7 @@ live_design!{
                     walk: {height: Fill, width: Fill}
                     layout: {flow: Down}
                     Image = <Image> {
-                        walk: {width: 1024, height: 1024}
+                        walk: {width: 1920, height: 1080}
                     }
                 }
             }
@@ -89,7 +89,7 @@ pub struct App {
         Machine::new("192.168.1.144:8188", live_id!(m5))
     ])] machines: Vec<Machine>,
     #[rust] num_images: u64,
-    #[rust] last_seed: u64,
+    #[rust(10000u64)] last_seed: u64,
 }
 
 impl LiveHook for App {
@@ -111,7 +111,7 @@ impl App {
             
             request.set_header("Content-Type".to_string(), "application/json".to_string());
             
-            let ws = fs::read_to_string("examples/comfyui/workspace_2048.json").unwrap();
+            let ws = fs::read_to_string("examples/comfyui/workspace_3840.json").unwrap();
             let ws = ws.replace("CLIENT_ID", CLIENT_ID);
             let ws = ws.replace("TEXT_INPUT", &text_input);
             let ws = ws.replace("KEYWORD_INPUT", "");
