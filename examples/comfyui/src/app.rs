@@ -12,6 +12,7 @@ live_design!{
     import makepad_widgets::image::Image;
     import makepad_widgets::list_view::ListView;
     import makepad_widgets::frame::*;
+    import makepad_draw::shader::std::*;
     
     App = {{App}} {
         ui: <DesktopWindow> {
@@ -26,7 +27,7 @@ live_design!{
             },
             draw_bg: {
                 fn pixel(self) -> vec4 {
-                    return mix(#3, #1, self.geom_pos.y);
+                    return mix(#3, #1, self.geom_pos.y + Math::random_2d(self.pos.xy) * 0.04);
                 }
             }
             
@@ -49,6 +50,7 @@ live_design!{
                 }
             }
             <Frame> {
+                draw_bg:{color:#f00}
                 layout: {
                     align: {
                         x: 0.5,
@@ -56,8 +58,9 @@ live_design!{
                     }
                 },
                 message_label = <Label> {
-                    walk: {width: Fit, margin: {bottom: 20}},
+                    walk: {width: Fit, height:Fit, margin: {bottom: 20}},
                     draw_label: {
+                        wrap: Word
                         color: #f
                     },
                     label: "Progress",
