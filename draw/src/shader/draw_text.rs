@@ -206,10 +206,10 @@ impl<'a> WordIterator<'a> {
                 self.word_width += adv;
             }
             self.char_iter = None;
-
+            
             let mut buffer = [0; 4];
             let char_bytes_len = self.last_char.encode_utf8(&mut buffer).len();
-
+            
             return Some(WordIteratorItem {
                 start: self.word_start,
                 end: self.last_index + char_bytes_len,
@@ -591,9 +591,14 @@ impl DrawText {
         let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
+        
+        let in_many = self.many_instances.is_some();
         // lets compute the geom
         if text.len() == 0 {
             return
+        }
+        if !in_many {
+            self.begin_many_instances_internal(cx, fonts_atlas);
         }
         if let Some(geom) = self.compute_geom_inner(cx, walk, text, fonts_atlas) {
             let height = if walk.height.is_fit() {
@@ -680,6 +685,9 @@ impl DrawText {
                     
                 }
             }
+            if !in_many {
+                self.end_many_instances(cx)
+            }
         }
     }
     
@@ -693,7 +701,7 @@ impl DrawText {
         //let debug = cx.debug.clone();
         //let scroll_pos = area.get_scroll_pos(cx);
         //let pos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
-        
+        let line_spacing = self.get_line_spacing() ;
         let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
         let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
         let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
@@ -707,9 +715,9 @@ impl DrawText {
             //let fs = font_size.buffer[index];
             let index = rect_pos.stride * i;
             let x = rect_pos.buffer[index + 0] as f64 - delta.buffer[index + 0] as f64;
-            //let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
             let advance = advance.buffer[index + 0] as f64;
-            if pos.x < x + advance * 0.5 {
+            if pos.x < x + advance * 0.5 && pos.y < y as f64 + line_spacing as f64{
                 return Some(i)
             }
         }
@@ -739,7 +747,6 @@ impl DrawText {
         if rect_pos.repeat == 0 {
             return None
         }
-        
         if index >= rect_pos.repeat {
             // lets get the last one and advance
             let index = (rect_pos.repeat - 1) * rect_pos.stride;
@@ -753,6 +760,14 @@ impl DrawText {
             let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
             Some(dvec2(x as f64, y as f64))
         }
+    }
+    
+    pub fn get_line_spacing(&self) -> f64 {
+        self.text_style.font_size * self.text_style.height_factor * self.font_scale * self.text_style.line_spacing
+    }
+    
+    pub fn get_font_size(&self) -> f64 {
+        self.text_style.font_size * self.font_scale
     }
     
     pub fn get_monospace_base(&self, cx: &Cx2d) -> DVec2 {
