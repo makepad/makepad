@@ -11,6 +11,7 @@ use {
         event::*,
         cx::{Cx, AndroidParams},
         network::*,
+        makepad_live_id::LiveId
     },
     std::{
         cell::Cell,
@@ -299,7 +300,7 @@ impl<'a> AndroidToJava<'a> {
         }
     }
 
-    pub fn decode_video(&self, video: Rc<Vec<u8>>) {
+    pub fn initialize_video_decoding(&self, video_id: LiveId, video: Rc<Vec<u8>>, chunk_size: usize) {
         unsafe {
             let video_data = &*video;
     
@@ -312,24 +313,66 @@ impl<'a> AndroidToJava<'a> {
                 video_data.as_ptr() as *const jbyte,
             );
             
-            let name = CString::new("decodeVideo").unwrap();
-            let signature = CString::new("([B)V").unwrap();
+            let name = CString::new("initializeVideoDecoding").unwrap();
+            let signature = CString::new("(J[BI)V").unwrap();
             let method_id = (**self.env).GetMethodID.unwrap()(
                 self.env,
                 (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
                 name.as_ptr(),
                 signature.as_ptr(),
             );
-            
+
             (**self.env).CallVoidMethod.unwrap()(
                 self.env,
                 self.callback,
                 method_id,
+                video_id.get_value() as jlong,
                 java_body as jobject,
+                chunk_size,
+            );
+            (**self.env).DeleteLocalRef.unwrap()(self.env, java_body);
+        }
+    }
+
+    pub fn decode_next_chunk(&self, video_id: LiveId) {
+        unsafe {
+            let name = CString::new("decodeNextChunk").unwrap();
+            let signature = CString::new("(J)V").unwrap();
+            let method_id = (**self.env).GetMethodID.unwrap()(
+                self.env,
+                (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
+
+            (**self.env).CallVoidMethod.unwrap()(
+                self.env,
+                self.callback,
+                method_id,
+                video_id.get_value() as jlong,
             );
         }
     }
+
+    pub fn cleanup_decoder(&self, video_id: i64) {
+        unsafe {
+            let name = CString::new("cleanupDecoder").unwrap();
+            let signature = CString::new("(J)V").unwrap();
+            let method_id = (**self.env).GetMethodID.unwrap()(
+                self.env,
+                (**self.env).GetObjectClass.unwrap()(self.env, self.callback),
+                name.as_ptr(),
+                signature.as_ptr(),
+            );
     
+            (**self.env).CallVoidMethod.unwrap()(
+                self.env,
+                self.callback,
+                method_id,
+                video_id,
+            );
+        }
+    }    
 }
 
 // The functions here correspond to the static functions on the `Makepad` class in Java.
@@ -797,23 +840,47 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onHttpRequestError(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoDecodingInitialized(
+    env: *mut JNIEnv,
+    _: jclass,
+    cx: jlong,
+    video_id: jlong,
+    frame_rate: jint,
+    video_width: jint,
+    video_height: jint,
+    color: jint,
+    duration: jlong,
+    callback: jobject,
+) {
+    (*(cx as *mut Cx)).from_java_on_video_decoding_initialized(
+        video_id as u64,
+        frame_rate as usize,
+        video_width as u32,
+        video_height as u32,
+        color as usize,
+        duration as u64,
+        AndroidToJava {
+            env,
+            callback,
+            phantom: PhantomData,
+        },
+    );
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoStream(
     env: *mut JNIEnv,
     _: jclass,
     cx: jlong,
+    video_id: jlong,
     pixel_data: jobject,
-    video_width: jint,
-    video_height: jint,
-    frame_rate: jint,
     timestamp: jlong,
     is_eos: jboolean,
     callback: jobject,
 ) {
     (*(cx as *mut Cx)).from_java_on_video_stream(
+        video_id as u64,
         java_byte_array_to_vec(env, pixel_data),
-        video_width as u32,
-        video_height as u32,
-        frame_rate as usize,
         timestamp as u64,
         is_eos != 0,
         AndroidToJava {
@@ -822,6 +889,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoStream(
             phantom: PhantomData,
         },
     );
+    (**env).DeleteLocalRef.unwrap()(env, pixel_data);
 }
 
 #[no_mangle]

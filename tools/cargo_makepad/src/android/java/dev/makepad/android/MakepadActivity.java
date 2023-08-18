@@ -19,6 +19,7 @@ import android.util.Log;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 
 import java.util.HashMap;
@@ -84,6 +85,11 @@ Makepad.Callback{
         mHandler = new Handler(Looper.getMainLooper());
         mRunnables = new HashMap<Long, Runnable>();
 
+        HandlerThread handlerThread = new HandlerThread("VideoDecoderThread");
+        handlerThread.start(); // TODO: only start this if its needed.
+        mDecoderHandler = new Handler(handlerThread.getLooper());
+        mDecoderRunnables = new HashMap<Long, VideoDecoderRunnable>();
+        
         String cache_path = this.getCacheDir().getAbsolutePath();
         float density = getResources().getDisplayMetrics().density;
 
@@ -391,108 +397,33 @@ Makepad.Callback{
         }
     }
 
-    public void decodeVideo(byte[] video) {
-        MediaExtractor extractor = new MediaExtractor();
-        try {
-            ByteArrayMediaDataSource dataSource = new ByteArrayMediaDataSource(video);
-
-            extractor.setDataSource(dataSource);
-
-            int trackIndex = selectTrack(extractor);
-            if (trackIndex < 0) {
-                throw new RuntimeException("No video track found in video");
-            }
-            extractor.selectTrack(trackIndex);
-            MediaFormat format = extractor.getTrackFormat(trackIndex);
-
-            long duration = format.getLong(MediaFormat.KEY_DURATION); // in microseconds
-            int frameRate = format.containsKey(MediaFormat.KEY_FRAME_RATE) 
-                ? format.getInteger(MediaFormat.KEY_FRAME_RATE) 
-                : 30; // defaulting to 30 fps
-            long totalFrames = (duration / 1_000_000) * frameRate;
-
-            // Assuming you have a method to send the estimated total number of frames to Rust:
-            // Makepad.sendTotalFramesEstimation(mCx, totalFrames);
-
-            String mime = format.getString(MediaFormat.KEY_MIME);
-            MediaCodec codec = MediaCodec.createDecoderByType(mime);
-            codec.configure(format, null, null, 0);
-            codec.start();
-
-            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-            int videoWidth = format.getInteger(MediaFormat.KEY_WIDTH);
-            int videoHeight = format.getInteger(MediaFormat.KEY_HEIGHT);
-
-            boolean inputEos = false;
-            boolean outputEos = false;
-
-            while (!outputEos) {
-                if (!inputEos) {
-                    int inputBufferIndex = codec.dequeueInputBuffer(2000);
-                    if (inputBufferIndex >= 0) {
-                        ByteBuffer inputBuffer = codec.getInputBuffer(inputBufferIndex);
-                        int sampleSize = extractor.readSampleData(inputBuffer, 0);
-                        if (sampleSize < 0) {
-                            codec.queueInputBuffer(inputBufferIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                            inputEos = true;
-                        } else {
-                            long presentationTimeUs = extractor.getSampleTime();
-                            codec.queueInputBuffer(inputBufferIndex, 0, sampleSize, presentationTimeUs, 0);
-                            extractor.advance();
-                        }
-                    }
-                }
-
-                int outputBufferIndex = codec.dequeueOutputBuffer(info, 2000);
-                if (outputBufferIndex >= 0) {
-                    ByteBuffer outputBuffer = codec.getOutputBuffer(outputBufferIndex);
-                    byte[] pixelData = new byte[info.size];
-                    outputBuffer.get(pixelData);
-                    codec.releaseOutputBuffer(outputBufferIndex, false);
-
-                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        outputEos = true;
-                    }
-
-                    // TODO: Send color format to rust 
-                    // MediaFormat outputFormat = codec.getOutputFormat();
-                    // int actualColorFormat = outputFormat.getInteger(MediaFormat.KEY_COLOR_FORMAT);
-
-                    Makepad.onVideoStream(mCx, 
-                        pixelData, 
-                        videoWidth, 
-                        videoHeight, 
-                        frameRate, 
-                        info.presentationTimeUs, 
-                        outputEos,
-                        (Makepad.Callback)mView.getContext()
-                    );
-                }
-            }
-
-            codec.stop();
-            codec.release();
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            extractor.release();
-        }
+    public void initializeVideoDecoding(long videoId, byte[] videoData, int chunkSize) {
+        VideoDecoder videoDecoder = new VideoDecoder(mCx, mView, videoId, this);
+        VideoDecoderRunnable runnable = new VideoDecoderRunnable(videoData, chunkSize, videoDecoder);
+        mDecoderRunnables.put(videoId, runnable);
+        mDecoderHandler.post(runnable);
     }
 
-    private int selectTrack(MediaExtractor extractor) {
-        int numTracks = extractor.getTrackCount();
-        for (int i = 0; i < numTracks; i++) {
-            MediaFormat format = extractor.getTrackFormat(i);
-            String mime = format.getString(MediaFormat.KEY_MIME);
-            if (mime.startsWith("video/")) {
-                return i;
-            }
+    public void decodeNextChunk(long videoId) {
+        VideoDecoderRunnable runnable = mDecoderRunnables.get(videoId);
+        if(runnable == null) {
+            throw new IllegalStateException("No runnable initialized with ID: " + videoId);
         }
-        return -1;
+        mDecoderHandler.post(runnable);
+    }
+
+    public void cleanupDecoder(long videoId) {
+        VideoDecoderRunnable runnable = mDecoderRunnables.remove(videoId);
+        if(runnable != null) {
+            runnable.cleanup();
+        }
     }
 
     Handler mHandler;
     HashMap<Long, Runnable> mRunnables;
+    Handler mDecoderHandler;
+    HashMap<Long, VideoDecoderRunnable> mDecoderRunnables;
+    
     MakepadSurfaceView mView;
     long mCx;
     String mSelectedText;

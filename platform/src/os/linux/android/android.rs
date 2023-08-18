@@ -34,7 +34,8 @@ use {
             WindowGeom,
             HttpResponseEvent,
             HttpRequestErrorEvent,
-            VideoStreamEvent ,
+            VideoDecodingInitializedEvent,
+            VideoStreamEvent,
         },
         window::CxWindowPool,
         pass::CxPassParent,
@@ -377,20 +378,32 @@ impl Cx {
         self.after_every_event(&to_java);
     }
 
-    pub fn from_java_on_video_stream(&mut self, pixel_data: Vec<u8>, video_width: u32, video_height: u32, 
-        original_frame_rate: usize, timestamp: u64, is_eos: bool, to_java: AndroidToJava) {
-        let e = Event::VideoStream(
-        VideoStreamEvent  { 
-                pixel_data,
+    pub fn from_java_on_video_decoding_initialized(&mut self, video_id: u64, frame_rate: usize, video_width: u32, video_height: u32, 
+        color_format: usize, duration: u64, to_java: AndroidToJava) {
+        let e = Event::VideoDecodingInitialized(
+            VideoDecodingInitializedEvent { 
+                video_id: LiveId(video_id),
+                frame_rate,
                 video_width,
                 video_height,
-                original_frame_rate,
-                is_eos,
-                timestamp 
+                color_format,
+                duration,
             }
         );
         self.call_event_handler(&e);
-        self.redraw_all();
+        self.after_every_event(&to_java);
+    }
+
+    pub fn from_java_on_video_stream(&mut self, video_id: u64, pixel_data: Vec<u8>, timestamp: u64, is_eos: bool, to_java: AndroidToJava) {
+        let e = Event::VideoStream(
+        VideoStreamEvent  { 
+                video_id: LiveId(video_id),
+                pixel_data,
+                timestamp,
+                is_eos,
+            }
+        );
+        self.call_event_handler(&e);
         self.after_every_event(&to_java);
     }
 
@@ -537,8 +550,11 @@ impl Cx {
                 CxOsOp::HttpRequest(request) => {
                     to_java.http_request(request)
                 },
-                CxOsOp::DecodeVideo(video) => { // TODO: ADD TODO FOR OTHER PLATFORMS
-                    to_java.decode_video(video);
+                CxOsOp::InitializeVideoDecoding(video_id, video, chunk_size) => { // TODO: ADD TODO FOR OTHER PLATFORMS
+                    to_java.initialize_video_decoding(video_id, video, chunk_size);
+                },
+                CxOsOp::DecodeNextChunk(video_id) => {
+                    to_java.decode_next_chunk(video_id);
                 },
                 _ => ()
             }
