@@ -34,7 +34,7 @@ live_design!{
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
                 message_input = <TextInput> {
-                    text: "Purple tomatoes"
+                    text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes"
                     walk: {width: Fill, height: Fit, margin: {top: 30, left: 20, right: 20, bottom: 20}},
                     draw_bg: {
                         color: #1
