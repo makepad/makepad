@@ -276,14 +276,23 @@ impl DrawText {
     
     pub fn draw(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
         self.draw_inner(cx, pos, val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
+        if self.many_instances.is_some() {
+            self.end_many_instances(cx)
+        }
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
         self.draw_inner(cx, pos + cx.turtle().origin(), val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
+        if self.many_instances.is_some() {
+            self.end_many_instances(cx)
+        }
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, val: &str) {
         self.draw_inner(cx, pos, val, &mut *cx.fonts_atlas_rc.clone().0.borrow_mut());
+        if self.many_instances.is_some() {
+            self.end_many_instances(cx)
+        }
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
@@ -315,7 +324,7 @@ impl DrawText {
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
     
-    pub fn draw_inner(&mut self, cx: &mut Cx2d, pos: DVec2, chunk: &str, fonts_atlas: &mut CxFontsAtlas) {
+    fn draw_inner(&mut self, cx: &mut Cx2d, pos: DVec2, chunk: &str, fonts_atlas: &mut CxFontsAtlas) {
         if !self.draw_vars.can_instance()
             || pos.x.is_nan()
             || pos.y.is_nan()
@@ -323,15 +332,11 @@ impl DrawText {
             return
         }
         //self.draw_clip = cx.turtle().draw_clip().into();
-        let in_many = self.many_instances.is_some();
+        //let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
         
         if fonts_atlas.fonts[font_id].is_none() {
             return
-        }
-        
-        if !in_many {
-            self.begin_many_instances_internal(cx, fonts_atlas);
         }
         
         //cx.debug.rect_r(Rect{pos:dvec2(1.0,2.0), size:dvec2(200.0,300.0)});
@@ -340,6 +345,10 @@ impl DrawText {
             return
         }
         //let mut char_offset = char_offset;
+        
+        if !self.many_instances.is_some() {
+            self.begin_many_instances_internal(cx, fonts_atlas);
+        }
         
         let cxfont = fonts_atlas.fonts[font_id].as_mut().unwrap();
         let dpi_factor = cx.current_dpi_factor();
@@ -459,9 +468,6 @@ impl DrawText {
             }
         }
         
-        if !in_many {
-            self.end_many_instances(cx)
-        }
     }
     pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str) -> Option<TextGeom> {
         self.compute_geom_inner(cx, walk, text, &mut *cx.fonts_atlas_rc.0.borrow_mut())
@@ -592,14 +598,14 @@ impl DrawText {
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
         
-        let in_many = self.many_instances.is_some();
+        //let in_many = self.many_instances.is_some();
         // lets compute the geom
         if text.len() == 0 {
             return
         }
-        if !in_many {
-            self.begin_many_instances_internal(cx, fonts_atlas);
-        }
+        //if !in_many {
+        //    self.begin_many_instances_internal(cx, fonts_atlas);
+        //}
         if let Some(geom) = self.compute_geom_inner(cx, walk, text, fonts_atlas) {
             let height = if walk.height.is_fit() {
                 geom.measured_height
@@ -685,10 +691,10 @@ impl DrawText {
                     
                 }
             }
-            if !in_many {
-                self.end_many_instances(cx)
-            }
         }
+        if self.many_instances.is_some() {
+            self.end_many_instances(cx)
+        }        
     }
     
     // looks up text with the behavior of a text selection mouse cursor

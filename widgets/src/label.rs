@@ -25,8 +25,6 @@ live_design!{
 pub struct Label {
     #[live] draw_label: DrawText,
     #[live] walk: Walk,
-    
-//  #[live] overflow: Overflow,
     #[live] align: Align,
 
     //margin: Margin,
