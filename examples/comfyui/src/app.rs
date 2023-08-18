@@ -85,11 +85,11 @@ impl Machine {
 pub struct App {
     #[live] ui: WidgetRef,
     #[rust(vec![
-        /*Machine::new("192.168.1.59:8188", live_id!(m1)),
+        Machine::new("192.168.1.59:8188", live_id!(m1)),
         Machine::new("192.168.1.62:8188", live_id!(m2)),
         Machine::new("192.168.1.204:8188", live_id!(m3)),
         Machine::new("192.168.1.154:8188", live_id!(m4)),
-        Machine::new("192.168.1.144:8188", live_id!(m5))*/
+        Machine::new("192.168.1.144:8188", live_id!(m5))
     ])] machines: Vec<Machine>,
     #[rust] num_images: u64,
     #[rust(10000u64)] last_seed: u64,
