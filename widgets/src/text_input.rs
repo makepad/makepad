@@ -732,7 +732,8 @@ impl TextInput {
             });
         }
         
-        // draw selection rect
+        // draw selection rects
+        
         if self.cursor_head != self.cursor_tail {
             let tail_x = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_tail)
                 .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
