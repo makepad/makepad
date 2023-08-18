@@ -323,12 +323,34 @@ impl Widget for ListView {
                 self.area.redraw(cx);
             },
             Hit::FingerDown(e) => {
+                cx.set_key_focus(self.area);
                 // ok so fingerdown eh.
                 self.drag_state = DragState::SwipeDrag {
                     last_abs: e.abs.y,
                     delta: 0.0,
                     initial_time: e.time
                 };
+            }
+            Hit::KeyDown(ke) => match ke.key_code {
+                KeyCode::ArrowDown => {
+                    self.top_id += 1;
+                    if self.top_id > self.range_end{
+                        self.top_id = self.range_end;
+                    }
+                    self.top_scroll = 0.0;
+                    self.area.redraw(cx);
+                },
+                KeyCode::ArrowUp => {
+                    if self.top_id > 0{
+                        self.top_id -= 1;
+                        if self.top_id < self.range_start{
+                            self.top_id = self.range_start;
+                        }
+                        self.top_scroll = 0.0;
+                        self.area.redraw(cx);
+                    }
+                },
+                _=>()
             }
             Hit::FingerMove(e) => {
                 cx.set_cursor(MouseCursor::Default);
