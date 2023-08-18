@@ -697,7 +697,6 @@ impl DrawText {
         }        
     }
     
-    // looks up text with the behavior of a text selection mouse cursor
     pub fn closest_offset(&self, cx: &Cx, pos: DVec2) -> Option<usize> {
         let area = &self.draw_vars.area;
         
@@ -728,6 +727,7 @@ impl DrawText {
             }
         }
         return Some(rect_pos.repeat);
+        
     }
     
     pub fn get_char_count(&self, cx: &Cx) -> usize {

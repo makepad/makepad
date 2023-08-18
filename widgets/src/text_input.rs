@@ -557,6 +557,49 @@ impl TextInput {
                     }
                     self.draw_bg.redraw(cx);
                 }
+                KeyCode::ArrowDown => {
+                    self.undo_id += 1;
+                    // we need to figure out what is below our current cursor
+                    if let Some(pos) = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head){
+                        if let Some(pos) = self.draw_label.closest_offset(cx, dvec2(pos.x, pos.y + self.draw_label.get_line_spacing()*1.5)){
+                            self.cursor_head = pos;
+                            if !ke.modifiers.shift {
+                                self.cursor_tail = self.cursor_head;
+                            }
+                            self.draw_bg.redraw(cx);
+                        }
+                    }
+                },
+                KeyCode::ArrowUp => {
+                    self.undo_id += 1;
+                    // we need to figure out what is below our current cursor
+                    if let Some(pos) = self.draw_label.get_cursor_pos(cx, 0.0, self.cursor_head){
+                        if let Some(pos) = self.draw_label.closest_offset(cx, dvec2(pos.x, pos.y - self.draw_label.get_line_spacing()*0.5)){
+                            self.cursor_head = pos;
+                            if !ke.modifiers.shift {
+                                self.cursor_tail = self.cursor_head;
+                            }
+                            self.draw_bg.redraw(cx);
+                        }
+                    }
+                },
+                KeyCode::Home => {
+                    self.undo_id += 1;
+                    self.cursor_head = 0;
+                    if !ke.modifiers.shift {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.draw_bg.redraw(cx);
+                }
+                KeyCode::End => {
+                    self.undo_id += 1;
+                    self.cursor_head = self.text.chars().count();
+                    
+                    if !ke.modifiers.shift {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.draw_bg.redraw(cx);
+                }
                 KeyCode::Backspace => {
                     self.create_undo(UndoGroup::Backspace(self.undo_id));
                     if self.cursor_head == self.cursor_tail {
