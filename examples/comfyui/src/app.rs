@@ -1,7 +1,7 @@
 use crate::{makepad_live_id::*};
 use makepad_micro_serde::*;
 use makepad_widgets::*;
-use std::fs; 
+use std::fs;
 
 live_design!{
     import makepad_widgets::button::Button;
@@ -34,13 +34,27 @@ live_design!{
             <Frame> {
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
-                message_input = <TextInput> {
+                text_input = <TextInput> {
                     text: "Purple tomatoes"
-                    walk: {width: Fill, height: Fit, margin: {top: 30, left: 20, right: 20, bottom: 20}},
+                    walk: {width: Fill, height: Fit, margin: {top: 30, left: 20, right: 20}},
                     draw_bg: {
                         color: #1
                     }
                 }
+                keyword_input = <TextInput> {
+                    text: "Photographic"
+                    walk: {width: Fill, height: Fit, margin: { left: 20, right: 20,}},
+                    draw_bg: {
+                        color: #1
+                    }
+                }
+                negative_input = <TextInput> {
+                    text: "text, watermark, cartoon"
+                    walk: {width: Fill, height: Fit, margin: {left: 20, right: 20}},
+                    draw_bg: {
+                        color: #1
+                    }
+                } 
                 image_list = <ListView> {
                     walk: {height: Fill, width: Fill}
                     layout: {flow: Down}
@@ -50,7 +64,7 @@ live_design!{
                 }
             }
             <Frame> {
-                draw_bg:{color:#f00}
+                draw_bg: {color: #f00}
                 layout: {
                     align: {
                         x: 0.5,
@@ -58,7 +72,7 @@ live_design!{
                     }
                 },
                 message_label = <Label> {
-                    walk: {width: Fit, height:Fit, margin: {bottom: 20}},
+                    walk: {width: Fit, height: Fit, margin: {bottom: 20}},
                     draw_label: {
                         wrap: Word
                         color: #f
@@ -107,7 +121,7 @@ impl LiveHook for App {
 const CLIENT_ID: &'static str = "1234";
 
 impl App {
-    fn send_prompt(&mut self, cx: &mut Cx, text_input: String) {
+    fn send_prompt(&mut self, cx: &mut Cx, text_input: String, keyword_input: String, negative_input:String) {
         for machine in &self.machines {
             let url = format!("http://{}/prompt", machine.ip);
             let mut request = HttpRequest::new(url, HttpMethod::POST);
@@ -117,8 +131,8 @@ impl App {
             let ws = fs::read_to_string("examples/comfyui/workspace_3000.json").unwrap();
             let ws = ws.replace("CLIENT_ID", CLIENT_ID);
             let ws = ws.replace("TEXT_INPUT", &text_input);
-            let ws = ws.replace("KEYWORD_INPUT", "");
-            let ws = ws.replace("NEGATIVE_INPUT", "");
+            let ws = ws.replace("KEYWORD_INPUT", &keyword_input);
+            let ws = ws.replace("NEGATIVE_INPUT", &negative_input);
             let ws = ws.replace("11223344", &format!("{}", self.last_seed));
             self.last_seed += 1;
             request.set_body(ws.as_bytes().to_vec());
@@ -170,8 +184,10 @@ impl AppMain for App {
         }
         
         if let Event::KeyDown(KeyEvent {is_repeat: false, key_code: KeyCode::ReturnKey, ..}) = event {
-            let user_prompt = self.ui.get_text_input(id!(message_input)).get_text();
-            self.send_prompt(cx, user_prompt);
+            let text_input = self.ui.get_text_input(id!(text_input)).get_text();
+            let keyword_input = self.ui.get_text_input(id!(text_input)).get_text();
+            let negative_input = self.ui.get_text_input(id!(negative_input)).get_text();
+            self.send_prompt(cx, text_input, keyword_input, negative_input);
             self.set_progress(cx, "Starting query");
         }
         
