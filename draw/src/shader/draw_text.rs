@@ -730,6 +730,39 @@ impl DrawText {
         
     }
     
+    pub fn get_selection_vec(&self, cx: &Cx, pos: f32, start: usize, end:usize) -> Vec<Rect> {
+        let area = &self.draw_vars.area;
+        let mut ret = Vec::new();
+        if !area.is_valid(cx) {
+            return ret
+        }
+        
+        let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
+        let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
+        let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
+        
+        if rect_pos.repeat == 0 {
+            return ret
+        }
+        // alright now we go and walk from start to end and collect our selection rects
+        
+        /*if index >= rect_pos.repeat {
+            // lets get the last one and advance
+            let index = (rect_pos.repeat - 1) * rect_pos.stride;
+            let x = rect_pos.buffer[index + 0] - delta.buffer[index + 0] + advance.buffer[index + 0];
+            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            //Some(dvec2(x as f64, y as f64))
+        }
+        else {
+            let index = index * rect_pos.stride;
+            let x = rect_pos.buffer[index + 0] - delta.buffer[index + 0] + advance.buffer[index + 0] * pos;
+            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            //Some(dvec2(x as f64, y as f64))
+        }*/
+        ret
+    }
+
+    
     pub fn get_char_count(&self, cx: &Cx) -> usize {
         let area = &self.draw_vars.area;
         if !area.is_valid(cx) {
@@ -739,7 +772,7 @@ impl DrawText {
         rect_pos.repeat
     }
     
-    pub fn get_cursor_pos(&self, cx: &Cx, pos: f32, index: usize) -> Option<DVec2> {
+    pub fn get_cursor_pos(&self, cx: &Cx, pos:f32, index: usize) -> Option<DVec2> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
