@@ -15,7 +15,7 @@ use {
             xr::*,
             drag_drop::*,
             network::*,
-            decoding::*,
+            video_decoding::*,
         },
         audio::AudioDevicesEvent,
         midi::MidiPortsEvent,
@@ -84,6 +84,7 @@ pub enum Event {
     HttpUploadProgress(HttpProgressEvent),
 
     VideoStream(VideoStreamEvent ),
+    VideoDecodingInitialized(VideoDecodingInitializedEvent),
     
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
