@@ -331,6 +331,7 @@ impl Widget for ListView {
                 };
             }
             Hit::FingerMove(e) => {
+                cx.set_cursor(MouseCursor::Default);
                 // ok we kinda have to set the scroll pos to our abs position
                 match &mut self.drag_state {
                     DragState::SwipeDrag {last_abs, delta, initial_time} => {

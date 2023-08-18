@@ -17,6 +17,7 @@ live_design!{
     App = {{App}} {
         ui: <DesktopWindow> {
             window: {inner_size: vec2(1024, 1024)},
+            
             show_bg: true
             layout: {
                 flow: Overlay,
@@ -30,40 +31,41 @@ live_design!{
                     return mix(#3, #1, self.geom_pos.y + Math::random_2d(self.pos.xy) * 0.04);
                 }
             }
-            
+            image_list = <ListView> {
+                walk: {height: Fill, width: Fill}
+                layout: {flow: Down}
+                Image = <Image> {
+                    walk: {width: 1920, height: 1080}
+                }
+            }            
             <Frame> {
+                
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
                 text_input = <TextInput> {
                     text: "Purple tomatoes"
                     walk: {width: Fill, height: Fit, margin: {top: 30, left: 20, right: 20}},
                     draw_bg: {
-                        color: #1
+                        color: #1113
                     }
                 }
                 keyword_input = <TextInput> {
                     text: "Photographic"
                     walk: {width: Fill, height: Fit, margin: { left: 20, right: 20,}},
                     draw_bg: {
-                        color: #1
+                        color: #1113
                     }
                 }
                 negative_input = <TextInput> {
                     text: "text, watermark, cartoon"
                     walk: {width: Fill, height: Fit, margin: {left: 20, right: 20}},
                     draw_bg: {
-                        color: #1
+                        color: #1113
                     }
                 } 
-                image_list = <ListView> {
-                    walk: {height: Fill, width: Fill}
-                    layout: {flow: Down}
-                    Image = <Image> {
-                        walk: {width: 1920, height: 1080}
-                    }
-                }
             }
             <Frame> {
+                
                 draw_bg: {color: #f00}
                 layout: {
                     align: {
@@ -80,7 +82,6 @@ live_design!{
                     label: "Progress",
                 }
             }
-            
         }
     }
 }
