@@ -9,6 +9,8 @@ Sebastian Michailidis: @SebMichailidis on twitter
 Our discord channel for Makepad:
 https://discord.gg/adqBRq7Ece
 
+Most recent talk about makepad: https://www.youtube.com/watch?v=rC4FCS-oMpg
+
 # Makepad
 
 ## Overview
@@ -32,8 +34,6 @@ Demo links:
 [makepad-example-numbers](https://makepad.nl/makepad/examples/numbers/src/index.html)
 
 ### Prerequisites
-
-NOTE: At the moment, we only support Mac and web. We however have most of the code for Windows and Linux already there and it will be supported in the near future.
 
 To build the Makepad crates you first need to install Rust.
 [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
@@ -68,13 +68,13 @@ To build and run the native version of Ironfish, run the following command from 
 
 To build the web version of Ironfish, run the following command from the root directory of the repository:
 
-```./tools/wasm/build_wasm_simd.sh makepad-example-ironfish```
+```./tools/wasm/build_wasm_thread.sh makepad-example-ironfish```
 
 After the build is complete, run the following command to start our web server:
 
 ```cargo run -p makepad-web-server --release```
 
 After starting the web server, the web build of Ironfish should be available here:
-https://127.0.0.1:8080/makepad/examples/ironfish/src/index.html
+https://127.0.0.1:61234/makepad/examples/ironfish/src/index.html
 
 
