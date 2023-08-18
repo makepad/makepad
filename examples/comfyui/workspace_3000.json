@@ -30,7 +30,7 @@
         },
         "10": {
             "inputs": {
-                "ckpt_name": "sd_xl_base_1.0.safetensors"
+                "ckpt_name": "dreamshaperXL10_alpha2Xl10.safetensors"
             },
             "class_type": "CheckpointLoaderSimple"
         },
@@ -2285,7 +2285,7 @@
                             "Node name for S&R": "CheckpointLoaderSimple"
                         },
                         "widgets_values": [
-                            "sd_xl_base_1.0.safetensors"
+                            "dreamshaperXL10_alpha2Xl10.safetensors"
                         ],
                         "color": "#432",
                         "bgcolor": "#653"
