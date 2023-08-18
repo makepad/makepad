@@ -330,7 +330,6 @@ impl<'a> AndroidToJava<'a> {
                 java_body as jobject,
                 chunk_size,
             );
-            (**self.env).DeleteLocalRef.unwrap()(self.env, java_body);
         }
     }
 
@@ -889,7 +888,6 @@ pub unsafe extern "C" fn Java_dev_makepad_android_Makepad_onVideoStream(
             phantom: PhantomData,
         },
     );
-    (**env).DeleteLocalRef.unwrap()(env, pixel_data);
 }
 
 #[no_mangle]
