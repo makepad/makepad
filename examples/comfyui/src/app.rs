@@ -35,7 +35,7 @@ live_design!{
                 walk: {height: Fill, width: Fill}
                 layout: {flow: Down}
                 message_input = <TextInput> {
-                    text: "Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes Purple tomatoes"
+                    text: "Purple tomatoes"
                     walk: {width: Fill, height: Fit, margin: {top: 30, left: 20, right: 20, bottom: 20}},
                     draw_bg: {
                         color: #1
@@ -114,7 +114,7 @@ impl App {
             
             request.set_header("Content-Type".to_string(), "application/json".to_string());
             
-            let ws = fs::read_to_string("examples/comfyui/workspace_3840.json").unwrap();
+            let ws = fs::read_to_string("examples/comfyui/workspace_3000.json").unwrap();
             let ws = ws.replace("CLIENT_ID", CLIENT_ID);
             let ws = ws.replace("TEXT_INPUT", &text_input);
             let ws = ws.replace("KEYWORD_INPUT", "");
