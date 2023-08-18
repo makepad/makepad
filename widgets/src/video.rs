@@ -1,5 +1,5 @@
-use std::time::Instant;
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use std::time::Instant;
 
 const DEFAULT_FPS_INTERVAL: f64 = 33.0;
 
@@ -50,6 +50,8 @@ pub struct Video {
     width: usize,
     #[rust]
     height: usize,
+    #[rust]
+    total_duration: u64,
 
     #[rust]
     texture: Option<Texture>,
@@ -57,7 +59,7 @@ pub struct Video {
     // TODO:
     // Implement a ring buffer
     #[rust]
-    frames: Vec<VideoFrame>,
+    frames: RingBuffer,
     #[live]
     current_frame: usize,
     #[rust]
@@ -74,7 +76,10 @@ pub struct Video {
     original_frame_rate: usize,
 
     #[rust]
-    id: LiveId
+    last_decode_request: MyInstant,
+
+    #[rust]
+    id: LiveId,
 }
 
 #[derive(Clone)]
@@ -86,7 +91,7 @@ struct VideoFrame {
 #[derive(Clone, Default, PartialEq, WidgetRef)]
 pub struct VideoRef(WidgetRef);
 
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 enum DecodingState {
     #[default]
     NotStarted,
@@ -111,7 +116,7 @@ impl LiveHook for Video {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.id = LiveId::new(cx);
         // TODO: using start_timeout because start_interval doesn't repeat on android
-        // self.tick = cx.start_timeout(DEFAULT_FPS_INTERVAL); 
+        // self.tick = cx.start_timeout(DEFAULT_FPS_INTERVAL);
         self.start_decoding(cx);
         self.decoding_state = DecodingState::Decoding;
     }
@@ -122,10 +127,10 @@ pub enum VideoAction {
     None,
 }
 
-// TODO: 
-// - update platform ops: add decode next chunk
-//   call it here
-// - implement a ring buffer
+// TODO:
+// - implement buffering
+//  - play on a loop, use total duration and frame timestamp to determine next decodes and loop 
+//  - determine buffer size based on memory usage: minimal amount of frames to keep in memory for smooth playback considering their size
 // - implement a pause/play
 
 impl Widget for Video {
@@ -163,8 +168,19 @@ impl Video {
     ) {
         if self.tick.is_event(event) {
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
-            if self.frames.len() > 10 {
+            if self.frames.data.len() > 20 {
                 self.draw(cx);
+            }
+
+            let remaining_frames = RING_BUFFER_SIZE - self.current_frame;
+            if remaining_frames <= 10 && self.decoding_state != DecodingState::Finished {
+
+                let now = Instant::now();
+                let elapsed = now.duration_since(self.last_decode_request.0).as_secs_f64();
+                if elapsed >= 2.0 {
+                    cx.decode_next_chunk(self.id);
+                }
+                self.last_decode_request = MyInstant(now);
             }
         }
 
@@ -172,70 +188,85 @@ impl Video {
             self.width = event.video_width as usize;
             self.height = event.video_height as usize;
             self.original_frame_rate = event.frame_rate;
-            makepad_error_log::log!("video_decoding_initialized: {}x{}px, FPS: {}", self.width, self.height, self.original_frame_rate);
+            self.total_duration = event.duration;
+
+            makepad_error_log::log!(
+                "video_decoding_initialized: {}x{}px, FPS: {}",
+                self.width,
+                self.height,
+                self.original_frame_rate
+            );
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
 
             cx.decode_next_chunk(self.id);
         }
 
         if let Event::VideoStream(event) = event {
-            // just limiting amount of frames for debugging
-            if self.frames.len() <= 300 {
+            if self.frames.data.len() < RING_BUFFER_SIZE {
                 if event.pixel_data.len() != 0 {
                     let rgba_pixel_data =
                         convert_nv12_to_rgba(&event.pixel_data, self.width, self.height);
-
                     self.frames.push(VideoFrame {
                         pixel_data: rgba_pixel_data,
-                        timestamp: event.timestamp as f64 / 1_000_000.0, // Convert to seconds
+                        timestamp: event.timestamp as f64 / 1_000_000.0,
                     });
                 }
             }
             if event.is_eos {
                 makepad_error_log::log!(
                     "DECODING FINISHED, total: {} frames",
-                    self.frames.len()
+                    self.frames.data.len()
                 );
                 self.decoding_state = DecodingState::Finished;
+
+                // self.current_frame = 0; // Reset to the beginning of the buffer
+                // cx.decode_next_chunk(self.id); // Start decoding from the beginning
             }
         }
     }
 
-    fn draw(&mut self, cx: &mut Cx) { // TODO rename
+    fn draw(&mut self, cx: &mut Cx) { 
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update.0).as_secs_f64();
         self.accumulated_time += elapsed;
+    
+        let frame_timestamp = self.frames.get(self.current_frame).map(|f| f.timestamp).unwrap_or(0.0); 
+
+        let mut cloned_pixel_data;
+        match self.frames.get(self.current_frame).map(|f| f.pixel_data.clone()) {
+            Some(pixel_data) => {
+                cloned_pixel_data = pixel_data;
+            },
+            None => {
+                makepad_error_log::log!("No pixel data for frame {}", self.current_frame);
+                return;
+            }
+        }
 
         // Iterate as long as the accumulated time exceeds the timestamp of the current frame
         // This helps in catching up in case some frames were skipped due to longer `elapsed` times.
         // this used to be a while instead of if, we'll see if needed
-        if self.accumulated_time >= self.frames[self.current_frame].timestamp {
-            let frame = &self.frames[self.current_frame];
-
-            makepad_error_log::log!(
-                "Drawing frame: {} of {}",
-                self.current_frame,
-                self.frames.len()
-            );
-
+        if self.accumulated_time >= frame_timestamp {
+            // makepad_error_log::log!(
+            //     "Drawing frame: {} of {}",
+            //     self.current_frame,
+            //     self.frames.data.len()
+            // );
+    
             // Update the texture and redraw
-            self.update_texture(cx, &mut frame.pixel_data.clone());
-            self.draw_bg
-                .draw_vars
-                .set_texture(0, self.texture.as_ref().unwrap());
-
+            self.update_texture(cx, &mut cloned_pixel_data); 
+            self.draw_bg.draw_vars.set_texture(0, self.texture.as_ref().unwrap());
             self.redraw(cx);
-
+    
             // Check if we're at the last frame
-            if self.current_frame == self.frames.len() - 1 {
-                // Adjust accumulated time and reset current frame
-                self.accumulated_time -= self.frames[self.current_frame].timestamp;
+            if self.current_frame == self.frames.data.len() - 1 {
+                self.accumulated_time -= frame_timestamp;
                 self.current_frame = 0;
             } else {
                 self.current_frame += 1;
             }
         }
-
+    
         self.last_update = MyInstant(now);
     }
 
@@ -321,7 +352,6 @@ fn convert_nv12_to_rgba(data: &[u8], width: usize, height: usize) -> Vec<u32> {
 
             let (r, g, b) = yuv_to_rgb(y_value, u_value, v_value);
 
-            // Convert RGB to RGBA and store as BGRA. TODO WHY DOES THIS WORK?
             rgba_data.push(0xFF << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32);
         }
     }
@@ -329,35 +359,45 @@ fn convert_nv12_to_rgba(data: &[u8], width: usize, height: usize) -> Vec<u32> {
     rgba_data
 }
 
+const RING_BUFFER_SIZE: usize = 100;
 
-// const RING_BUFFER_SIZE: usize = 200;
+struct RingBuffer {
+    data: Vec<Option<VideoFrame>>,
+    start: usize,
+    end: usize,
+}
 
-// struct RingBuffer {
-//     data: [Option<VideoFrame>; RING_BUFFER_SIZE],
-//     start: usize,
-//     end: usize,
-// }
+impl RingBuffer {
+    fn push(&mut self, frame: VideoFrame) {
+        if self.data.len() < RING_BUFFER_SIZE {
+            self.data.push(Some(frame));
+            self.end += 1;
+        } else {
+            self.data[self.end] = Some(frame);
+            self.end = (self.end + 1) % RING_BUFFER_SIZE;
+            
+            // If end has caught up to start, move start to the next oldest item
+            if self.end == self.start {
+                self.start = (self.start + 1) % RING_BUFFER_SIZE;
+            }
+        }
+    }
+    
 
-// impl RingBuffer {
-//     fn new() -> Self {
-//         RingBuffer {
-//             data: Default::default(), // Initialize all elements to None
-//             start: 0,
-//             end: 0,
-//         }
-//     }
+    fn get(&self, index: usize) -> Option<&VideoFrame> {
+        self.data.get(index).and_then(|item| item.as_ref())
+    }
+}
 
-//     fn push(&mut self, frame: VideoFrame) {
-//         self.data[self.end] = Some(frame);
-//         self.end = (self.end + 1) % RING_BUFFER_SIZE;
+impl Default for RingBuffer {
+    fn default() -> Self {
+        let mut data = Vec::with_capacity(RING_BUFFER_SIZE);
+        // data.resize(RING_BUFFER_SIZE, None);
+        Self {
+            data,
+            start: 0,
+            end: 0,
+        }
+    }
+}
 
-//         // If end has caught up to start, move start to the next oldest item
-//         if self.end == self.start {
-//             self.start = (self.start + 1) % RING_BUFFER_SIZE;
-//         }
-//     }
-
-//     fn get(&self, index: usize) -> Option<&VideoFrame> {
-//         self.data.get(index).and_then(|item| item.as_ref())
-//     }
-// }
