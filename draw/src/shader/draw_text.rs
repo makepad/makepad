@@ -730,16 +730,16 @@ impl DrawText {
         
     }
     
-    pub fn get_selection_vec(&self, cx: &Cx, pos: f32, start: usize, end:usize) -> Vec<Rect> {
+    pub fn get_selection_vec(&self, cx: &Cx, _pos: f32, _start: usize, _end:usize) -> Vec<Rect> {
         let area = &self.draw_vars.area;
-        let mut ret = Vec::new();
+        let  ret = Vec::new();
         if !area.is_valid(cx) {
             return ret
         }
         
         let rect_pos = area.get_read_ref(cx, live_id!(rect_pos), ShaderTy::Vec2).unwrap();
-        let delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
-        let advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
+        let _delta = area.get_read_ref(cx, live_id!(delta), ShaderTy::Vec2).unwrap();
+        let _advance = area.get_read_ref(cx, live_id!(advance), ShaderTy::Float).unwrap();
         
         if rect_pos.repeat == 0 {
             return ret
