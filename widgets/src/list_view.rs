@@ -334,8 +334,8 @@ impl Widget for ListView {
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::ArrowDown => {
                     self.top_id += 1;
-                    if self.top_id > self.range_end{
-                        self.top_id = self.range_end;
+                    if self.top_id >= self.range_end.max(1){
+                        self.top_id = self.range_end -1;
                     }
                     self.top_scroll = 0.0;
                     self.area.redraw(cx);
