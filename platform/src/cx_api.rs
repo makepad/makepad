@@ -77,7 +77,8 @@ pub enum CxOsOp {
     WebSocketOpen{socket_id: LiveId, request:HttpRequest, auto_reconnect:AutoReconnect},
     WebSocketSendString{socket_id: LiveId, data:String},
     WebSocketSendBinary{socket_id: LiveId, data:Vec<u8>},
-    DecodeVideo(Rc<Vec<u8>>),
+    InitializeVideoDecoding(LiveId, Rc<Vec<u8>>, usize),
+    DecodeNextChunk(LiveId),
 }
 
 impl Cx { 
@@ -412,8 +413,12 @@ impl Cx {
         });
     }
 
-    pub fn decode_video(&mut self, video: Rc<Vec<u8>>) {
-        self.platform_ops.push(CxOsOp::DecodeVideo(video));
+    pub fn initialize_video_decoding(&mut self, video_id: LiveId, video: Rc<Vec<u8>>, chunk_size: usize) {
+        self.platform_ops.push(CxOsOp::InitializeVideoDecoding(video_id, video, chunk_size));
+    }
+
+    pub fn decode_next_chunk(&mut self, video_id: LiveId) {
+        self.platform_ops.push(CxOsOp::DecodeNextChunk(video_id));
     }
 }
 

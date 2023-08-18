@@ -72,6 +72,9 @@ pub struct Video {
     accumulated_time: f64,
     #[rust]
     original_frame_rate: usize,
+
+    #[rust]
+    id: LiveId
 }
 
 #[derive(Clone)]
@@ -106,8 +109,9 @@ impl LiveHook for Video {
     }
 
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        self.id = LiveId::new(cx);
         // TODO: using start_timeout because start_interval doesn't repeat on android
-        self.tick = cx.start_timeout(DEFAULT_FPS_INTERVAL); 
+        // self.tick = cx.start_timeout(DEFAULT_FPS_INTERVAL); 
         self.start_decoding(cx);
         self.decoding_state = DecodingState::Decoding;
     }
@@ -117,6 +121,12 @@ impl LiveHook for Video {
 pub enum VideoAction {
     None,
 }
+
+// TODO: 
+// - update platform ops: add decode next chunk
+//   call it here
+// - implement a ring buffer
+// - implement a pause/play
 
 impl Widget for Video {
     fn redraw(&mut self, cx: &mut Cx) {
@@ -153,19 +163,25 @@ impl Video {
     ) {
         if self.tick.is_event(event) {
             self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
-            if self.frames.len() > 0 {
+            if self.frames.len() > 10 {
                 self.draw(cx);
             }
+        }
+
+        if let Event::VideoDecodingInitialized(event) = event {
+            self.width = event.video_width as usize;
+            self.height = event.video_height as usize;
+            self.original_frame_rate = event.frame_rate;
+            makepad_error_log::log!("video_decoding_initialized: {}x{}px, FPS: {}", self.width, self.height, self.original_frame_rate);
+            self.tick = cx.start_timeout((1.0 / self.original_frame_rate as f64 / 2.0) * 1000.0);
+
+            cx.decode_next_chunk(self.id);
         }
 
         if let Event::VideoStream(event) = event {
             // just limiting amount of frames for debugging
             if self.frames.len() <= 300 {
                 if event.pixel_data.len() != 0 {
-                    self.width = event.video_width as usize;
-                    self.height = event.video_height as usize;
-                    self.original_frame_rate = event.original_frame_rate;
-
                     let rgba_pixel_data =
                         convert_nv12_to_rgba(&event.pixel_data, self.width, self.height);
 
@@ -173,7 +189,7 @@ impl Video {
                         pixel_data: rgba_pixel_data,
                         timestamp: event.timestamp as f64 / 1_000_000.0, // Convert to seconds
                     });
-                } 
+                }
             }
             if event.is_eos {
                 makepad_error_log::log!(
@@ -185,43 +201,42 @@ impl Video {
         }
     }
 
-    fn draw(&mut self, cx: &mut Cx) {
-        if self.frames.len() > 0 {
-            let now = Instant::now();
-            let elapsed = now.duration_since(self.last_update.0).as_secs_f64();
-            self.accumulated_time += elapsed;
+    fn draw(&mut self, cx: &mut Cx) { // TODO rename
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_update.0).as_secs_f64();
+        self.accumulated_time += elapsed;
 
-            // Iterate as long as the accumulated time exceeds the timestamp of the current frame
-            // This helps in catching up in case some frames were skipped due to longer `elapsed` times.
-            while self.accumulated_time >= self.frames[self.current_frame].timestamp {
-                let frame = &self.frames[self.current_frame];
+        // Iterate as long as the accumulated time exceeds the timestamp of the current frame
+        // This helps in catching up in case some frames were skipped due to longer `elapsed` times.
+        // this used to be a while instead of if, we'll see if needed
+        if self.accumulated_time >= self.frames[self.current_frame].timestamp {
+            let frame = &self.frames[self.current_frame];
 
-                // makepad_error_log::log!(
-                //     "Drawing frame: {} of {}",
-                //     self.current_frame,
-                //     self.frames.len()
-                // );
+            makepad_error_log::log!(
+                "Drawing frame: {} of {}",
+                self.current_frame,
+                self.frames.len()
+            );
 
-                // Update the texture and redraw
-                self.update_texture(cx, &mut frame.pixel_data.clone());
-                self.draw_bg
-                    .draw_vars
-                    .set_texture(0, self.texture.as_ref().unwrap());
+            // Update the texture and redraw
+            self.update_texture(cx, &mut frame.pixel_data.clone());
+            self.draw_bg
+                .draw_vars
+                .set_texture(0, self.texture.as_ref().unwrap());
 
-                self.redraw(cx);
+            self.redraw(cx);
 
-                // Check if we're at the last frame
-                if self.current_frame == self.frames.len() - 1 {
-                    // Adjust accumulated time and reset current frame
-                    self.accumulated_time -= self.frames[self.current_frame].timestamp;
-                    self.current_frame = 0;
-                } else {
-                    self.current_frame += 1;
-                }
+            // Check if we're at the last frame
+            if self.current_frame == self.frames.len() - 1 {
+                // Adjust accumulated time and reset current frame
+                self.accumulated_time -= self.frames[self.current_frame].timestamp;
+                self.current_frame = 0;
+            } else {
+                self.current_frame += 1;
             }
-
-            self.last_update = MyInstant(now);
         }
+
+        self.last_update = MyInstant(now);
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> WidgetDraw {
@@ -250,7 +265,7 @@ impl Video {
     fn start_decoding(&self, cx: &mut Cx) {
         match cx.get_dependency(self.source.as_str()) {
             Ok(data) => {
-                cx.decode_video(data);
+                cx.initialize_video_decoding(self.id, data, 100);
                 makepad_error_log::log!("DECODING BEGAN");
             }
             Err(_e) => {
@@ -313,3 +328,36 @@ fn convert_nv12_to_rgba(data: &[u8], width: usize, height: usize) -> Vec<u32> {
 
     rgba_data
 }
+
+
+// const RING_BUFFER_SIZE: usize = 200;
+
+// struct RingBuffer {
+//     data: [Option<VideoFrame>; RING_BUFFER_SIZE],
+//     start: usize,
+//     end: usize,
+// }
+
+// impl RingBuffer {
+//     fn new() -> Self {
+//         RingBuffer {
+//             data: Default::default(), // Initialize all elements to None
+//             start: 0,
+//             end: 0,
+//         }
+//     }
+
+//     fn push(&mut self, frame: VideoFrame) {
+//         self.data[self.end] = Some(frame);
+//         self.end = (self.end + 1) % RING_BUFFER_SIZE;
+
+//         // If end has caught up to start, move start to the next oldest item
+//         if self.end == self.start {
+//             self.start = (self.start + 1) % RING_BUFFER_SIZE;
+//         }
+//     }
+
+//     fn get(&self, index: usize) -> Option<&VideoFrame> {
+//         self.data.get(index).and_then(|item| item.as_ref())
+//     }
+// }
