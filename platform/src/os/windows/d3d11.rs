@@ -61,6 +61,10 @@ use {
                 D3D11_INPUT_ELEMENT_DESC,
                 D3D11_INPUT_PER_VERTEX_DATA,
                 D3D11_INPUT_PER_INSTANCE_DATA,
+                D3D11_MAPPED_SUBRESOURCE,
+                D3D11_USAGE_DYNAMIC,
+                D3D11_CPU_ACCESS_WRITE,
+                D3D11_MAP_WRITE_DISCARD,
                 ID3D11Device,
                 ID3D11DeviceContext,
                 ID3D11RenderTargetView,
@@ -628,12 +632,29 @@ pub struct D3d11Buffer {
 }
 
 impl D3d11Buffer {
+    fn create_buffer_or_update(&mut self, d3d11_cx: &D3d11Cx, buffer_desc: &D3D11_BUFFER_DESC, sub_data: &D3D11_SUBRESOURCE_DATA, len_slots: usize, data: *const std::ffi::c_void) {
+        if self.last_size == len_slots {
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            let p_mapped : *mut _ = &mut mapped;
+            unsafe {
+                d3d11_cx.context.Map(self.buffer.as_ref().unwrap(),
+                        0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped)).unwrap();
+
+                std::ptr::copy_nonoverlapping(data, mapped.pData, len_slots * 4);
+                d3d11_cx.context.Unmap(self.buffer.as_ref().unwrap(), 0);
+            }
+        } else {
+            self.last_size = len_slots;
+            unsafe { d3d11_cx.device.CreateBuffer(buffer_desc, Some(sub_data), Some(&mut self.buffer)).unwrap() }
+        }
+    }
+
     pub fn update_with_data(&mut self, d3d11_cx: &D3d11Cx, bind_flags: D3D11_BIND_FLAG, len_slots: usize, data: *const std::ffi::c_void) {
         let buffer_desc = D3D11_BUFFER_DESC {
-            Usage: D3D11_USAGE_DEFAULT,
+            Usage: D3D11_USAGE_DYNAMIC,
             ByteWidth: (len_slots * 4) as u32,
             BindFlags: bind_flags,
-            CPUAccessFlags: D3D11_CPU_ACCESS_FLAG(0),
+            CPUAccessFlags: D3D11_CPU_ACCESS_WRITE,
             MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
             StructureByteStride: 0
         };
@@ -643,9 +664,7 @@ impl D3d11Buffer {
             SysMemPitch: 0,
             SysMemSlicePitch: 0
         };
-        
-        
-        unsafe {d3d11_cx.device.CreateBuffer(&buffer_desc, Some(&sub_data), Some(&mut self.buffer)).unwrap()}
+        self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, data);
     }
     
     pub fn update_with_u32_index_data(&mut self, d3d11_cx: &D3d11Cx, data: &[u32]) {
@@ -676,14 +695,15 @@ impl D3d11Buffer {
         let len_slots = data.len();
         
         let buffer_desc = D3D11_BUFFER_DESC {
-            Usage: D3D11_USAGE_DEFAULT,
+            Usage: D3D11_USAGE_DYNAMIC,
             ByteWidth: (len_slots * 4) as u32,
             BindFlags: D3D11_BIND_CONSTANT_BUFFER,
-            CPUAccessFlags: D3D11_CPU_ACCESS_FLAG(0),
+            CPUAccessFlags: D3D11_CPU_ACCESS_WRITE,
             MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
             StructureByteStride: 0
         };
-        unsafe {d3d11_cx.device.CreateBuffer(&buffer_desc, Some(&sub_data), Some(&mut self.buffer)).unwrap()}
+        let data = unsafe { core::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of::<f32>() * data.len()).as_ptr() as *const _ };
+        self.create_buffer_or_update(d3d11_cx, &buffer_desc, &sub_data, len_slots, data);
     }
 }
 
